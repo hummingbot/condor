@@ -5,6 +5,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes, PicklePersis
 
 from auth import restricted
 from config import TELEGRAM_TOKEN
+from conversation_handlers.create_bot.create_bot import (
+    get_create_bot_conversation_handler,
+)
 
 # Enable logging
 logging.basicConfig(
@@ -24,7 +27,7 @@ Manage your trading bots efficiently and monitor their performance\.
 
 🔸 `/create_bot`: Launch a new trading bot instance with customized settings\.
 🔸 `/bots_status`: View the current status and performance of all your active bots\.
-🔸 `/control_bot`: Manage your bot's activities, such as starting or stopping trading strategies\.
+🔸 `/create_bot`: Manage your bot's activities, such as starting or stopping trading strategies\.
 🔸 `/add_config`: Add or modify configuration settings for your trading bots\.
 
 🔍 **Need help?** Type `/help` for assistance\.
@@ -55,7 +58,7 @@ Here's a detailed guide on how to use each command:
      \- **PNL**: Profit and loss information\.
      \- **Volume Traded**: The trading volume handled by the bot\.
 
-🔹 `/control_bot`: Manage an active bot\.
+🔹 `/create_bot`: Manage an active bot\.
    \- Choose a bot to:
      \- **Start**: Begin the bot's trading operations\.
      \- **Stop**: Pause the bot's trading operations\.
@@ -87,6 +90,7 @@ def main() -> None:
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help))
+    application.add_handler(get_create_bot_conversation_handler())
 
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
