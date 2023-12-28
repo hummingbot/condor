@@ -1,0 +1,16 @@
+name: condor
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - pip
+  - pip:
+      - python-telegram-bot[job-queue]
+      - langchain
+      - python-dotenv
+      - pytest
+      - pre-commit
+      - black
+      - isort
+      - PyYAML
