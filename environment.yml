@@ -13,3 +13,4 @@ dependencies:
       - pre-commit
       - black
       - isort
+      - PyYAML
