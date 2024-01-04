@@ -3,11 +3,11 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, PicklePersistence
 
-from auth import restricted
-from config import TELEGRAM_TOKEN
 from conversation_handlers.create_bot.create_bot import (
     get_create_bot_conversation_handler,
 )
+from utils.auth import restricted
+from utils.config import TELEGRAM_TOKEN
 
 # Enable logging
 logging.basicConfig(
