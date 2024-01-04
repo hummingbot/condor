@@ -80,7 +80,7 @@ For further assistance or more information, feel free to ask\!
 def main() -> None:
     """Run the bot."""
     # Persistent storage to save bot's conversations
-    persistence = PicklePersistence(filepath="condorbot_persistence")
+    persistence = PicklePersistence(filepath="data/condorbot_persistence")
 
     # Create the Application and pass it your bot's token
     application = (
