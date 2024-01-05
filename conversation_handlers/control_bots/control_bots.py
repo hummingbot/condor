@@ -40,7 +40,11 @@ async def bot_selected(update: Update, context: CallbackContext) -> int:
         return await cancel(update, context)
 
     context.user_data["selected_bot"] = query.data
+    await show_bot_actions(update, context)
+    return SELECT_ACTION
 
+
+async def show_bot_actions(update: Update, context: CallbackContext):
     # Actions split into two rows
     actions_row_1 = ["Start", "Stop", "Status"]
     actions_row_2 = ["History", "Remove"]
@@ -60,11 +64,10 @@ async def bot_selected(update: Update, context: CallbackContext) -> int:
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(
+    await update.callback_query.message.reply_text(
         text=f'Selected bot: {context.user_data["selected_bot"]}. Choose an action:',
         reply_markup=reply_markup,
     )
-    return SELECT_ACTION
 
 
 async def execute_bot_action(update: Update, context: CallbackContext) -> int:
@@ -92,10 +95,9 @@ async def execute_bot_action(update: Update, context: CallbackContext) -> int:
             )
             return ConversationHandler.END
         elif response["status"] == "success":
-            await update.callback_query.message.reply_text(
-                f"Bot {selected_bot} successfully stopped..."
-            )
-            await bot_selected(update, context)
+            await query.edit_message_text(f"Bot {selected_bot} successfully stopped...")
+            await show_bot_actions(update, context)
+            return SELECT_ACTION
     elif selected_action == "status":
         bot_status = await backend_api_client.async_get_bot_status(
             bot_name=selected_bot
