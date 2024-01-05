@@ -101,10 +101,10 @@ class BackendAPIClient:
         )
 
     async def async_start_bot(self, action: StartBotAction):
-        return await self._async_request("POST", "/start-bot", json=action.dict())
+        return await self._async_request("POST", "/start-bot", json=action.model_dump())
 
     async def async_stop_bot(self, action: StopBotAction):
-        return await self._async_request("POST", "/stop-bot", json=action.dict())
+        return await self._async_request("POST", "/stop-bot", json=action.model_dump())
 
     async def async_get_bot_status(self, bot_name):
         return await self._async_request("GET", f"/get-bot-status/{bot_name}")
