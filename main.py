@@ -1,8 +1,18 @@
+import asyncio
+import datetime
 import logging
+import os
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, PicklePersistence
+from telegram.ext import (
+    Application,
+    CallbackContext,
+    CommandHandler,
+    ContextTypes,
+    PicklePersistence,
+)
 
+from backend_api_manager.client import BackendAPIClient
 from conversation_handlers.create_bot.create_bot import (
     get_create_bot_conversation_handler,
 )
@@ -77,15 +87,38 @@ For further assistance or more information, feel free to ask\!
     await update.message.reply_text(help_text, parse_mode="MarkdownV2")
 
 
+async def initialize_backend_api(context: CallbackContext):
+    backend_api_client = BackendAPIClient.get_instance(
+        base_url=os.environ.get("BACKEND_API_URL", "http://localhost:8000")
+    )
+
+    # Retrieve the list of images from environment variable
+    all_images = os.environ.get("ALL_HUMMINGBOT_IMAGES", "").split(",")
+
+    # Create a list of tasks for pulling each image
+    pull_tasks = [
+        backend_api_client.async_pull_image(image_name=image.strip())
+        for image in all_images
+        if image.strip()
+    ]
+
+    # Pull images concurrently
+    if pull_tasks:
+        logging.info(f"Pulling images: {datetime.datetime.now()}")
+        await asyncio.gather(*pull_tasks)
+    else:
+        logging.warning("No images to pull.")
+
+
 def main() -> None:
     """Run the bot."""
     # Persistent storage to save bot's conversations
-    persistence = PicklePersistence(filepath="data/condorbot_persistence")
-
+    persistence = PicklePersistence(
+        filepath="data/condorbot_persistence"
+    )  # TODO: evaluate usage of PicklePersistence
     # Create the Application and pass it your bot's token
-    application = (
-        Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build()
-    )
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.job_queue.run_once(initialize_backend_api, when=1)
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
