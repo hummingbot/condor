@@ -13,6 +13,9 @@ from telegram.ext import (
 )
 
 from backend_api_manager.client import BackendAPIClient
+from conversation_handlers.control_bots.control_bots import (
+    get_control_bots_conversation_handler,
+)
 from conversation_handlers.create_bot.create_bot import (
     get_create_bot_conversation_handler,
 )
@@ -124,6 +127,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help))
     application.add_handler(get_create_bot_conversation_handler())
+    application.add_handler(get_control_bots_conversation_handler())
 
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
