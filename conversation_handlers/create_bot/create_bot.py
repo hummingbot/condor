@@ -142,10 +142,10 @@ def find_next_bot_name(active_containers, exited_containers):
 
     # Extract numbers from container names and find the maximum
     max_number = 0
-    for name in all_container_names:
-        if name.startswith("hummingbot-"):
+    for container in all_container_names:
+        if container["name"].startswith("hummingbot-"):
             try:
-                number = int(name.split("-")[1])
+                number = int(container["name"].split("-")[1])
                 max_number = max(max_number, number)
             except ValueError:
                 # Handle cases where the split part is not a number
