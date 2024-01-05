@@ -82,40 +82,61 @@ async def execute_bot_action(update: Update, context: CallbackContext) -> int:
 
     backend_api_client = BackendAPIClient.get_instance()
     if selected_action == "start":
-        await backend_api_client.async_start_bot(
-            action=StartBotAction(bot_name=selected_bot)
+        # Implement start bot logic
+        response = await backend_api_client.async_start_bot(
+            StartBotAction(bot_name=selected_bot, async_backend=True)
         )
+        await query.edit_message_text(text=f"Bot successfully started: {response}")
     elif selected_action == "stop":
+        # Implement stop bot logic
         response = await backend_api_client.async_stop_bot(
-            action=StopBotAction(bot_name=selected_bot)
+            StopBotAction(bot_name=selected_bot)
         )
-        if response["status"] == "error":
-            await query.edit_message_text(
-                text=f"Error stopping bot {selected_bot}: {response['response']}"
-            )
-            return ConversationHandler.END
-        elif response["status"] == "success":
-            await query.edit_message_text(f"Bot {selected_bot} successfully stopped...")
-            await show_bot_actions(update, context)
-            return SELECT_ACTION
+        await query.edit_message_text(text=f"Bot successfully stopped: {response}")
     elif selected_action == "status":
+        # Implement status logic
         bot_status = await backend_api_client.async_get_bot_status(
             bot_name=selected_bot
         )
-        await query.edit_message_text(text=f"Bot status: {bot_status}")
+        await query.edit_message_text(
+            text=f"Bot status for {selected_bot}: {bot_status}"
+        )
     elif selected_action == "history":
-        bot_history = await backend_api_client.async_get_bot_history(selected_bot)
-        await query.edit_message_text(text=f"Bot history: {bot_history}")
+        # Implement history logic
+        bot_history = await backend_api_client.async_get_bot_history(
+            bot_name=selected_bot
+        )
+        await query.edit_message_text(
+            text=f"Bot history for {selected_bot}: {bot_history}"
+        )
+
     elif selected_action == "remove":
-        await backend_api_client.async_stop_bot(selected_bot)
-        await query.edit_message_text(text=f"Stopping bot {selected_bot}...")
-        while (
-            "No strategy is currently running"
-            not in backend_api_client.get_bot_status(selected_bot)
-        ):
+        # Implement remove bot logic
+        stop_report = await backend_api_client.async_stop_bot(
+            StopBotAction(bot_name=selected_bot)
+        )
+        while stop_report["status"] == "error":
             await asyncio.sleep(1)
-        await backend_api_client.async_remove_container(selected_bot)
-    return ConversationHandler.END
+            stop_report = await backend_api_client.async_stop_bot(
+                StopBotAction(bot_name=selected_bot)
+            )
+        response = await backend_api_client.async_remove_container(
+            container_name=selected_bot
+        )
+        await query.edit_message_text(text=f"Bot successfully removed: {response}")
+        return ConversationHandler.END
+    await show_bot_actions(update, context)
+    return SELECT_ACTION
+
+
+async def handle_action_response(query, response, selected_bot, update, context):
+    if response["status"] == "error":
+        await query.edit_message_text(text=f"Error: {response['response']}")
+    else:
+        await query.edit_message_text(
+            text=f"Action successfully executed for {selected_bot}."
+        )
+        await show_bot_actions(update, context)
 
 
 async def cancel(update: Update, context: CallbackContext) -> int:
