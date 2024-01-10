@@ -120,7 +120,7 @@ async def script_chosen(update: Update, context: CallbackContext) -> int:
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.message.reply_text(
-        "Do you want to autostart the script with a config?", reply_markup=reply_markup
+        "Select the config to use:", reply_markup=reply_markup
     )
     return ASKING_CONFIG
 
@@ -178,7 +178,7 @@ async def summarize_and_end(update: Update, context: CallbackContext) -> int:
 
     reply_text = (
         "Bot Creation Summary:\n"
-        f"- Bot Name: {bot_name}\n"
+        f"- Bot Name: hummingbot-{bot_name}\n"
         f"- Docker Image: {image}\n"
         f"- Autostart with script: {script or 'N/A'}\n"
         f"- Autostart script with config: {config or 'N/A'}\n"
