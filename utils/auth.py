@@ -3,7 +3,7 @@ from functools import wraps
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import AUTHORIZED_USERS
+from utils.config import AUTHORIZED_USERS
 
 
 def restricted(func):
