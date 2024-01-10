@@ -10,7 +10,7 @@ read -p "User IDs: " user_ids
 
 # Prompt for extra Hummingbot images
 echo "Enter extra Hummingbot images to download, separated by a comma."
-echo "Example: image1:tag1,image2:tag2"
+echo "Example: hummingbot:development,hummingbot:configurable"
 read -p "Extra Hummingbot Images: " extra_hummingbot_images
 
 # Remove spaces and ensure comma separation
