@@ -9,8 +9,7 @@ from telegram.ext import (
     filters,
 )
 
-from backend_api_manager.client import BackendAPIClient
-from backend_api_manager.models import StartBotAction, StopBotAction
+from services.backend_api_client import BackendAPIClient
 
 # Define states
 SELECT_BOT, SELECT_ACTION = range(2)

@@ -10,8 +10,7 @@ from telegram.ext import (
     filters,
 )
 
-from backend_api_manager.client import BackendAPIClient
-from backend_api_manager.models import HummingbotInstanceConfig
+from services.backend_api_client import BackendAPIClient
 
 # Define states
 (
@@ -27,16 +26,16 @@ from backend_api_manager.models import HummingbotInstanceConfig
 async def ask_image(update: Update, context: CallbackContext) -> int:
     backend_api_client = BackendAPIClient.get_instance()
     context.user_data["available_hummingbot_images"] = asyncio.create_task(
-        backend_api_client.async_get_image_tags(image_name="hummingbot")
+        backend_api_client.get_available_images(image_name="hummingbot")
     )
     context.user_data["available_scripts"] = asyncio.create_task(
-        backend_api_client.async_list_scripts()
+        backend_api_client.get_all_scripts()
     )
     context.user_data["available_scripts_configs"] = asyncio.create_task(
-        backend_api_client.async_list_scripts_configs()
+        backend_api_client.get_all_scripts_config()
     )
     context.user_data["available_credentials"] = asyncio.create_task(
-        backend_api_client.async_list_credentials()
+        backend_api_client.get_credentials(account_name="master_account")
     )
     available_images = await context.user_data["available_hummingbot_images"]
     keyboard = [

@@ -12,13 +12,13 @@ from telegram.ext import (
     PicklePersistence,
 )
 
-from backend_api_manager.client import BackendAPIClient
 from conversation_handlers.control_bots.control_bots import (
     get_control_bots_conversation_handler,
 )
 from conversation_handlers.create_bot.create_bot import (
     get_create_bot_conversation_handler,
 )
+from services.backend_api_client import BackendAPIClient
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
 
@@ -92,7 +92,10 @@ For further assistance or more information, feel free to ask\!
 
 async def initialize_backend_api(context: CallbackContext):
     backend_api_client = BackendAPIClient.get_instance(
-        base_url=os.environ.get("BACKEND_API_URL", "http://localhost:8000")
+        host=os.environ.get("BACKEND_API_HOST", "localhost"),
+        port=os.environ.get("BACKEND_API_PORT", 8000),
+        username=os.environ.get("BACKEND_API_USERNAME", "admin"),
+        password=os.environ.get("BACKEND_API_PASSWORD", "admin"),
     )
 
     # Retrieve the list of images from environment variable
@@ -100,7 +103,7 @@ async def initialize_backend_api(context: CallbackContext):
 
     # Create a list of tasks for pulling each image
     pull_tasks = [
-        backend_api_client.async_pull_image(image_name=image.strip())
+        backend_api_client.pull_image(image_name=image.strip())
         for image in all_images
         if image.strip()
     ]
