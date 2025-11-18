@@ -85,11 +85,9 @@ python main.py
 /trade Should I buy SOL right now?
 ```
 
-### Bot Management
+### Future Features
 
-**`/create_bot`** - Launch a new trading bot instance
-
-**`/control_bots`** - Manage existing bots (start/stop/logs)
+Bot deployment and management features are planned for future releases. Currently, you can monitor existing bots via the `/bots` command.
 
 ## Architecture
 
@@ -119,17 +117,21 @@ See [TOOLS_USAGE_GUIDE.md](TOOLS_USAGE_GUIDE.md) for detailed documentation.
 ```
 condor/
 ├── handlers/                    # Command handlers
+│   ├── __init__.py
 │   ├── portfolio.py            # /portfolio command
 │   ├── bots.py                 # /bots command
 │   └── trade_ai.py             # /trade command (AI)
-├── utils/
-│   ├── telegram_formatters.py  # Message formatting
-│   └── auth.py                 # Authentication
-├── conversation_handlers/       # Legacy interactive handlers
+├── utils/                       # Utilities
+│   ├── auth.py                 # Authentication
+│   ├── config.py               # Configuration
+│   └── telegram_formatters.py  # Message formatting
 ├── hummingbot_api_client/      # Direct API client package
 ├── hummingbot_mcp/             # MCP AI-powered tools
 ├── main.py                     # Main bot entry point
-└── environment.yml             # Conda environment
+├── environment.yml             # Conda environment
+├── TOOLS_USAGE_GUIDE.md        # Comprehensive tools guide
+├── IMPLEMENTATION_SUMMARY.md   # Implementation details
+└── README.md                   # This file
 ```
 
 ## Examples
@@ -273,12 +275,17 @@ python main.py
 
 ## Roadmap
 
-- [ ] Advanced AI trading strategies
-- [ ] Multi-language support
-- [ ] Web dashboard
+### Planned Features
+- [ ] Bot deployment via Telegram (`/deploy` command)
+- [ ] Bot management (start/stop/archive via Telegram)
+- [ ] Advanced AI trading strategies with execution
+- [ ] AI-powered controller configuration
+- [ ] Natural language strategy creation
 - [ ] Advanced analytics and reporting
+- [ ] Web dashboard integration
+- [ ] Multi-language support
 - [ ] Automated strategy optimization
-- [ ] Risk management tools
+- [ ] Risk management tools and alerts
 
 ---
 
