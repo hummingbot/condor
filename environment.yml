@@ -7,10 +7,12 @@ dependencies:
   - pip
   - pip:
       - python-telegram-bot[job-queue]
-      - langchain
+      - hummingbot-api-client
       - python-dotenv
       - pytest
       - pre-commit
       - black
       - isort
       - PyYAML
+      - pydantic-ai
+      - pydantic-ai-slim[openai]
