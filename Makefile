@@ -4,7 +4,7 @@
 
 
 uninstall:
-	conda env remove -n condor
+	conda env remove -n condor -y
 
 install:
 	conda env create -f environment.yml
