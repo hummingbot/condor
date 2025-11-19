@@ -158,7 +158,10 @@ class ServerManager:
         server = self.servers[name]
         base_url = f"http://{server['host']}:{server['port']}"
 
+        logger.debug(f"Checking status for '{name}' at {base_url} with username '{server['username']}'")
+
         # Create a temporary client for testing (don't cache it)
+        # Important: Do NOT use cached clients to ensure we test current credentials
         client = HummingbotAPIClient(
             base_url=base_url,
             username=server['username'],
@@ -169,12 +172,13 @@ class ServerManager:
         try:
             await client.init()
             # Use protected endpoint to verify both connectivity and authentication
+            # This will raise 401 error if credentials are wrong
             await client.accounts.list_accounts()
-            await client.close()
+            logger.info(f"Status check succeeded for '{name}' - server is online")
             return {"status": "online", "message": "Connected and authenticated"}
         except Exception as e:
-            await client.close()
             error_msg = str(e)
+            logger.warning(f"Status check failed for '{name}': {error_msg}")
 
             # Categorize the error
             if "401" in error_msg or "Incorrect username or password" in error_msg:
@@ -185,6 +189,12 @@ class ServerManager:
                 return {"status": "offline", "message": "Connection timeout"}
             else:
                 return {"status": "error", "message": f"Error: {error_msg[:50]}"}
+        finally:
+            # Always close the client
+            try:
+                await client.close()
+            except:
+                pass
 
     async def get_default_client(self) -> HummingbotAPIClient:
         """Get the API client for the default server"""
@@ -256,9 +266,13 @@ class ServerManager:
             except Exception as e:
                 logger.warning(f"Failed to initialize '{name}': {e}")
 
-    def reload_config(self):
-        """Reload configuration from file"""
+    async def reload_config(self):
+        """Reload configuration from file and clear cached clients"""
+        # Close all existing clients since config may have changed
+        await self.close_all()
+        # Reload the configuration
         self._load_config()
+        logger.info("Configuration reloaded from file")
 
 
 # Global server manager instance
