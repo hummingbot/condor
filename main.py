@@ -115,7 +115,8 @@ async def post_init(application: Application) -> None:
     """Register bot commands after initialization."""
     commands = [
         BotCommand("start", "Welcome message and quick commands overview"),
-        # BotCommand("portfolio", "View your portfolio summary and holdings"),
+        BotCommand("portfolio", "View detailed portfolio breakdown by account and connector"),
+        BotCommand("bots", "Check status of all active trading bots"),
         # BotCommand("trade", "AI-powered trading assistant"),
         BotCommand("config", "Configure API servers and credentials"),
         BotCommand("reload", "Reload handlers without restarting"),
