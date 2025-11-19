@@ -58,6 +58,9 @@ def reload_handlers():
         'handlers.bots',
         'handlers.trade_ai',
         'handlers.config',
+        'handlers.config.servers',
+        'handlers.config.api_keys',
+        'handlers.config.gateway',
         'utils.auth',
         'utils.telegram_formatters',
     ]
