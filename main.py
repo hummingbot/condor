@@ -1,6 +1,10 @@
 import logging
+import importlib
+import sys
+import asyncio
+from pathlib import Path
 
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -10,6 +14,8 @@ from telegram.ext import (
 from handlers.portfolio import portfolio_command
 from handlers.bots import bots_command
 from handlers.trade_ai import trade_command
+from handlers.config import config_command, get_config_callback_handler
+from handlers.status import status_command
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
 
@@ -17,6 +23,7 @@ from utils.config import TELEGRAM_TOKEN
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 
 @restricted
@@ -32,6 +39,8 @@ Manage your trading bots efficiently and monitor their performance\.
 📊 `/portfolio` \\- View your portfolio summary and holdings
 🤖 `/bots` \\- Check status of all active trading bots
 💹 `/trade` \\- AI\\-powered trading assistant
+⚙️ `/config` \\- Configure API servers and credentials
+📡 `/status` \\- Check API server connection status
 
 
 🔍 *Need help?* Type `/help` for detailed command information\.
@@ -41,50 +50,111 @@ Get started on your automated trading journey with ease and precision\!
     await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
 
 
-async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Provide help information for each command."""
-    help_text = """
-📖 *Help & Information*
+def reload_handlers():
+    """Reload all handler modules."""
+    modules_to_reload = [
+        'handlers.portfolio',
+        'handlers.bots',
+        'handlers.trade_ai',
+        'handlers.config',
+        'handlers.status',
+        'utils.auth',
+        'utils.telegram_formatters',
+    ]
 
-Here's a detailed guide on how to use each command:
-
-*📊 Portfolio Commands*
-
-🔹 `/portfolio` \\- View your portfolio summary
-   • `/portfolio` \\- Show summary with total value and top holdings
-   • `/portfolio detailed` \\- Show detailed breakdown by account
-
-🔹 `/bots` \\- View active bots status
-   • `/bots` \\- Show all active bots with PnL and metrics
-   • `/bots <name>` \\- Show detailed status for a specific bot
-
-🔹 `/trade` \\- AI\\-powered trading assistant
-   • Natural language trading queries
-   • Market data analysis
-   • Price checks and order book analysis
-   • Examples:
-     • `/trade What's the price of BTC?`
-     • `/trade Show my portfolio`
-     • `/trade Analyze ETH order book`
-
-For further assistance or more information, feel free to ask\!
-    """
-    await update.message.reply_text(help_text, parse_mode="MarkdownV2")
+    for module_name in modules_to_reload:
+        if module_name in sys.modules:
+            importlib.reload(sys.modules[module_name])
+            logger.info(f"Reloaded module: {module_name}")
 
 
+def register_handlers(application: Application) -> None:
+    """Register all command handlers."""
+    # Import fresh versions after reload
+    from handlers.portfolio import portfolio_command
+    from handlers.bots import bots_command
+    from handlers.trade_ai import trade_command
+    from handlers.config import config_command, get_config_callback_handler
+    from handlers.status import status_command
+
+    # Clear existing handlers
+    application.handlers.clear()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("portfolio", portfolio_command))
+    application.add_handler(CommandHandler("bots", bots_command))
+    application.add_handler(CommandHandler("trade", trade_command))
+    application.add_handler(CommandHandler("config", config_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("reload", reload_command))
+
+    # Add callback query handler for config menu
+    application.add_handler(get_config_callback_handler())
+
+    logger.info("Handlers registered successfully")
+
+
+@restricted
+async def reload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reload all handlers without restarting the bot."""
+    try:
+        await update.message.reply_text("🔄 Reloading handlers...")
+        reload_handlers()
+        register_handlers(context.application)
+        await update.message.reply_text("✅ Handlers reloaded successfully!")
+        logger.info("Handlers reloaded via /reload command")
+    except Exception as e:
+        error_msg = f"❌ Reload failed: {str(e)}"
+        await update.message.reply_text(error_msg)
+        logger.error(f"Reload failed: {e}", exc_info=True)
+
+
+async def post_init(application: Application) -> None:
+    """Register bot commands after initialization."""
+    commands = [
+        BotCommand("start", "Welcome message and quick commands overview"),
+        # BotCommand("portfolio", "View your portfolio summary and holdings"),
+        # BotCommand("bots", "Check status of all active trading bots"),
+        # BotCommand("trade", "AI-powered trading assistant"),
+        BotCommand("config", "Configure API servers and credentials"),
+        BotCommand("status", "Check API server connection status"),
+        BotCommand("reload", "Reload handlers without restarting"),
+    ]
+    await application.bot.set_my_commands(commands)
+
+    # Start file watcher
+    asyncio.create_task(watch_and_reload(application))
+
+
+async def watch_and_reload(application: Application) -> None:
+    """Watch for file changes and reload handlers automatically."""
+    try:
+        from watchfiles import awatch
+    except ImportError:
+        logger.warning("watchfiles not installed. Auto-reload disabled. Install with: pip install watchfiles")
+        return
+
+    watch_path = Path(__file__).parent / "handlers"
+    logger.info(f"👀 Watching for changes in: {watch_path}")
+
+    async for changes in awatch(watch_path):
+        logger.info(f"📝 Detected changes: {changes}")
+        try:
+            reload_handlers()
+            register_handlers(application)
+            logger.info("✅ Auto-reloaded handlers successfully")
+        except Exception as e:
+            logger.error(f"❌ Auto-reload failed: {e}", exc_info=True)
 
 
 def main() -> None:
     """Run the bot."""
     # Create the Application and pass it your bot's token
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
-    # Add command handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help))
-    application.add_handler(CommandHandler("portfolio", portfolio_command))
-    application.add_handler(CommandHandler("bots", bots_command))
-    application.add_handler(CommandHandler("trade", trade_command))
+    # Register all handlers
+    register_handlers(application)
 
     # Run the bot
     application.run_polling(allowed_updates=Update.ALL_TYPES)
