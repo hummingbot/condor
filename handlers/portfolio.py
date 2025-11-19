@@ -100,11 +100,32 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
         if action == "distribution":
             # Generate and send distribution graph
             distribution = await client.portfolio.get_distribution()
+            logger.info(f"Distribution data: {distribution}")
             graph_bytes = generate_distribution_graph(distribution)
+
+            # Remove buttons from current message
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception as e:
+                logger.debug(f"Could not remove buttons: {e}")
+
+            # Send new message with graph and buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Distribution", callback_data="portfolio:distribution"),
+                    InlineKeyboardButton("📈 Evolution", callback_data="portfolio:evolution")
+                ],
+                [
+                    InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
 
             await query.message.reply_photo(
                 photo=graph_bytes,
-                caption="📊 Portfolio Distribution by Token"
+                caption="📊 Portfolio Distribution by Token",
+                reply_markup=reply_markup
             )
 
         elif action == "evolution":
@@ -112,21 +133,63 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             import time
             week_ago = int(time.time()) - (7 * 24 * 60 * 60)
             history = await client.portfolio.get_history(start_time=week_ago, limit=100)
+            logger.info(f"History data: {history}")
             graph_bytes = generate_evolution_graph(history)
+
+            # Remove buttons from current message
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception as e:
+                logger.debug(f"Could not remove buttons: {e}")
+
+            # Send new message with graph and buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Distribution", callback_data="portfolio:distribution"),
+                    InlineKeyboardButton("📈 Evolution", callback_data="portfolio:evolution")
+                ],
+                [
+                    InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
 
             await query.message.reply_photo(
                 photo=graph_bytes,
-                caption="📈 Portfolio Evolution (Last 7 Days)"
+                caption="📈 Portfolio Evolution (Last 7 Days)",
+                reply_markup=reply_markup
             )
 
         elif action == "accounts":
             # Show accounts distribution
             accounts_dist = await client.portfolio.get_accounts_distribution()
+            logger.info(f"Accounts distribution data: {accounts_dist}")
             graph_bytes = generate_distribution_graph(accounts_dist, by_account=True)
+
+            # Remove buttons from current message
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception as e:
+                logger.debug(f"Could not remove buttons: {e}")
+
+            # Send new message with graph and buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Distribution", callback_data="portfolio:distribution"),
+                    InlineKeyboardButton("📈 Evolution", callback_data="portfolio:evolution")
+                ],
+                [
+                    InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
 
             await query.message.reply_photo(
                 photo=graph_bytes,
-                caption="🏦 Portfolio Distribution by Account"
+                caption="🏦 Portfolio Distribution by Account",
+                reply_markup=reply_markup
             )
 
         elif action == "refresh":
@@ -146,7 +209,14 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await query.edit_message_text(
+            # Remove buttons from current message
+            try:
+                await query.message.edit_reply_markup(reply_markup=None)
+            except Exception as e:
+                logger.debug(f"Could not remove buttons: {e}")
+
+            # Send new text message with portfolio state
+            await query.message.reply_text(
                 message,
                 parse_mode="MarkdownV2",
                 reply_markup=reply_markup
