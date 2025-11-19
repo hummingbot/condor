@@ -18,3 +18,5 @@ dependencies:
       - pydantic-ai-slim[openai]
       - aiohttp
       - watchfiles
+      - kaleido
+      - plotly
