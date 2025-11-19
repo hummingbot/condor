@@ -47,11 +47,11 @@ def _get_config_menu_markup_and_text():
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     message_text = (
-        "⚙️ *Configuration Menu*\n\n"
-        "Select a configuration category:\n\n"
-        "🔌 *API Servers* \- Manage Hummingbot API instances\n"
-        "🔑 *API Keys* \- Manage exchange credentials\n"
-        "🌐 *Gateway* \- Manage Gateway container and DEX configuration"
+        r"⚙️ *Configuration Menu*" + "\n\n"
+        r"Select a configuration category:" + "\n\n"
+        r"🔌 *API Servers* \- Manage Hummingbot API instances" + "\n"
+        r"🔑 *API Keys* \- Manage exchange credentials" + "\n"
+        r"🌐 *Gateway* \- Manage Gateway container and DEX configuration"
     )
 
     return reply_markup, message_text
