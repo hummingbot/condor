@@ -1,6 +1,9 @@
 # Hummingbot API Servers Configuration
 # Each server must have a unique name and connection details
 
+# Default server name (used when no server is specified)
+default_server: remote
+
 servers:
   remote:
     host: 212.85.15.60

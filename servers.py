@@ -23,6 +23,7 @@ class ServerManager:
         self.config_path = Path(config_path)
         self.servers: Dict[str, dict] = {}
         self.clients: Dict[str, HummingbotAPIClient] = {}
+        self.default_server: Optional[str] = None
         self._load_config()
 
     def _load_config(self):
@@ -30,21 +31,34 @@ class ServerManager:
         if not self.config_path.exists():
             logger.warning(f"Config file not found: {self.config_path}")
             self.servers = {}
+            self.default_server = None
             return
 
         try:
             with open(self.config_path, 'r') as f:
                 config = yaml.safe_load(f)
                 self.servers = config.get('servers', {})
+                self.default_server = config.get('default_server', None)
+
+                # Validate default server exists
+                if self.default_server and self.default_server not in self.servers:
+                    logger.warning(f"Default server '{self.default_server}' not found in servers list")
+                    self.default_server = None
+
                 logger.info(f"Loaded {len(self.servers)} servers from {self.config_path}")
+                if self.default_server:
+                    logger.info(f"Default server: {self.default_server}")
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
             self.servers = {}
+            self.default_server = None
 
     def _save_config(self):
         """Save servers configuration to YAML file"""
         try:
             config = {'servers': self.servers}
+            if self.default_server:
+                config['default_server'] = self.default_server
             with open(self.config_path, 'w') as f:
                 yaml.dump(config, f, default_flow_style=False, sort_keys=False)
             logger.info(f"Saved configuration to {self.config_path}")
@@ -118,8 +132,76 @@ class ServerManager:
         """Get a specific server configuration"""
         return self.servers.get(name)
 
-    async def get_client(self, name: str) -> HummingbotAPIClient:
-        """Get or create API client for a server"""
+    def set_default_server(self, name: str) -> bool:
+        """Set the default server"""
+        if name not in self.servers:
+            logger.error(f"Server '{name}' not found")
+            return False
+
+        self.default_server = name
+        self._save_config()
+        logger.info(f"Set default server to '{name}'")
+        return True
+
+    def get_default_server(self) -> Optional[str]:
+        """Get the default server name"""
+        return self.default_server
+
+    async def check_server_status(self, name: str) -> dict:
+        """
+        Check if a server is online and responding using protected endpoint
+        Returns detailed status including authentication errors
+        """
+        if name not in self.servers:
+            return {"status": "error", "message": "Server not found"}
+
+        server = self.servers[name]
+        base_url = f"http://{server['host']}:{server['port']}"
+
+        # Create a temporary client for testing (don't cache it)
+        client = HummingbotAPIClient(
+            base_url=base_url,
+            username=server['username'],
+            password=server['password'],
+            timeout=ClientTimeout(10)  # Shorter timeout for status check
+        )
+
+        try:
+            await client.init()
+            # Use protected endpoint to verify both connectivity and authentication
+            await client.accounts.list_accounts()
+            await client.close()
+            return {"status": "online", "message": "Connected and authenticated"}
+        except Exception as e:
+            await client.close()
+            error_msg = str(e)
+
+            # Categorize the error
+            if "401" in error_msg or "Incorrect username or password" in error_msg:
+                return {"status": "auth_error", "message": "Invalid credentials"}
+            elif "Connection" in error_msg or "Cannot connect" in error_msg:
+                return {"status": "offline", "message": "Cannot reach server"}
+            elif "timeout" in error_msg.lower():
+                return {"status": "offline", "message": "Connection timeout"}
+            else:
+                return {"status": "error", "message": f"Error: {error_msg[:50]}"}
+
+    async def get_default_client(self) -> HummingbotAPIClient:
+        """Get the API client for the default server"""
+        if not self.default_server:
+            # If no default server, try to use the first available server
+            if not self.servers:
+                raise ValueError("No servers configured")
+            self.default_server = list(self.servers.keys())[0]
+            logger.info(f"No default server set, using '{self.default_server}'")
+
+        return await self.get_client(self.default_server)
+
+    async def get_client(self, name: Optional[str] = None) -> HummingbotAPIClient:
+        """Get or create API client for a server. If name is None, uses default server."""
+        if name is None:
+            return await self.get_default_client()
+
         if name not in self.servers:
             raise ValueError(f"Server '{name}' not found")
 
