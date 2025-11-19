@@ -14,8 +14,7 @@ from telegram.ext import (
 from handlers.portfolio import portfolio_command
 from handlers.bots import bots_command
 from handlers.trade_ai import trade_command
-from handlers.config import config_command, get_config_callback_handler
-from handlers.status import status_command
+from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
 
@@ -29,6 +28,9 @@ logger = logging.getLogger(__name__)
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the conversation and display the main menu."""
+    # Clear any config state to prevent interference
+    clear_config_state(context)
+
     reply_text = """
 🚀 *Welcome to Condor\!* 🦅
 
@@ -40,7 +42,6 @@ Manage your trading bots efficiently and monitor their performance\.
 🤖 `/bots` \\- Check status of all active trading bots
 💹 `/trade` \\- AI\\-powered trading assistant
 ⚙️ `/config` \\- Configure API servers and credentials
-📡 `/status` \\- Check API server connection status
 
 
 🔍 *Need help?* Type `/help` for detailed command information\.
@@ -57,7 +58,6 @@ def reload_handlers():
         'handlers.bots',
         'handlers.trade_ai',
         'handlers.config',
-        'handlers.status',
         'utils.auth',
         'utils.telegram_formatters',
     ]
@@ -74,8 +74,7 @@ def register_handlers(application: Application) -> None:
     from handlers.portfolio import portfolio_command
     from handlers.bots import bots_command
     from handlers.trade_ai import trade_command
-    from handlers.config import config_command, get_config_callback_handler
-    from handlers.status import status_command
+    from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
 
     # Clear existing handlers
     application.handlers.clear()
@@ -86,11 +85,13 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("bots", bots_command))
     application.add_handler(CommandHandler("trade", trade_command))
     application.add_handler(CommandHandler("config", config_command))
-    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("reload", reload_command))
 
     # Add callback query handler for config menu
     application.add_handler(get_config_callback_handler())
+
+    # Add message handler for server modification text input
+    application.add_handler(get_modify_value_handler())
 
     logger.info("Handlers registered successfully")
 
@@ -115,10 +116,8 @@ async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "Welcome message and quick commands overview"),
         # BotCommand("portfolio", "View your portfolio summary and holdings"),
-        # BotCommand("bots", "Check status of all active trading bots"),
         # BotCommand("trade", "AI-powered trading assistant"),
         BotCommand("config", "Configure API servers and credentials"),
-        BotCommand("status", "Check API server connection status"),
         BotCommand("reload", "Reload handlers without restarting"),
     ]
     await application.bot.set_my_commands(commands)
