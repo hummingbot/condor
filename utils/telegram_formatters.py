@@ -102,7 +102,7 @@ def format_portfolio_state(state: Dict[str, Any]) -> str:
 
         for connector_name, balances in account_data.items():
             if balances:
-                message += f"  🔗 *{escape_markdown_v2(connector_name)}*\n"
+                message += f"  🔗 {escape_markdown_v2(connector_name)}\n"
 
                 for balance in balances:
                     token = balance.get("token", "???")
@@ -115,11 +115,12 @@ def format_portfolio_state(state: Dict[str, Any]) -> str:
                         value_str = format_number(value)
                         message += f"    • {escape_markdown_v2(token)}: "
                         message += f"{escape_markdown_v2(amount_str)} "
-                        message += f"_{escape_markdown_v2(value_str)}_\n"
+                        message += f"{escape_markdown_v2(value_str)}\n"
 
-        message += "\n"
+                # Add spacing between connectors
+                message += "\n"
 
-    message += f"*💵 Total:* {escape_markdown_v2(format_number(total_value))}\n"
+    message += f"💵 *Total:* {escape_markdown_v2(format_number(total_value))}\n"
 
     return message
 
