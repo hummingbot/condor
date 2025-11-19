@@ -26,6 +26,25 @@ def format_number(value: float, decimals: int = 2) -> str:
         return f"${value:.{decimals}f}"
 
 
+def format_amount(value: float, decimals: int = 4) -> str:
+    """
+    Format token amounts with appropriate precision
+    Uses scientific notation for very small numbers, otherwise uses fixed decimals
+    """
+    if value == 0:
+        return "0"
+    elif abs(value) < 0.0001:
+        # Use scientific notation for very small numbers
+        return f"{value:.2e}"
+    elif abs(value) < 1:
+        # Show more decimals for small amounts
+        return f"{value:.6f}".rstrip('0').rstrip('.')
+    else:
+        # Use specified decimals for normal amounts
+        formatted = f"{value:.{decimals}f}".rstrip('0').rstrip('.')
+        return formatted if '.' in f"{value:.{decimals}f}" else f"{value:.0f}"
+
+
 def format_portfolio_summary(summary: Dict[str, Any]) -> str:
     """
     Format portfolio summary for Telegram MarkdownV2
@@ -83,7 +102,7 @@ def format_portfolio_state(state: Dict[str, Any]) -> str:
 
         for connector_name, balances in account_data.items():
             if balances:
-                message += f"  📡 _{escape_markdown_v2(connector_name)}_\n"
+                message += f"  🔗 *{escape_markdown_v2(connector_name)}*\n"
 
                 for balance in balances:
                     token = balance.get("token", "???")
@@ -92,9 +111,11 @@ def format_portfolio_state(state: Dict[str, Any]) -> str:
                     total_value += value
 
                     if value > 1:  # Only show balances > $1
+                        amount_str = format_amount(units)
+                        value_str = format_number(value)
                         message += f"    • {escape_markdown_v2(token)}: "
-                        message += f"{escape_markdown_v2(f'{units:.6f}')} "
-                        message += f"_{escape_markdown_v2(format_number(value))}_\n"
+                        message += f"{escape_markdown_v2(amount_str)} "
+                        message += f"_{escape_markdown_v2(value_str)}_\n"
 
         message += "\n"
 
