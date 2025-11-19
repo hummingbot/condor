@@ -16,3 +16,5 @@ dependencies:
       - PyYAML
       - pydantic-ai
       - pydantic-ai-slim[openai]
+      - aiohttp
+      - watchfiles
