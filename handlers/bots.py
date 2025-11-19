@@ -3,13 +3,12 @@ Bots command handler using hummingbot_api_client
 """
 
 import logging
-import os
 from telegram import Update
 from telegram.ext import ContextTypes
-from hummingbot_api_client import HummingbotAPIClient
 
 from utils.auth import restricted
 from utils.telegram_formatters import format_active_bots, format_bot_status, format_error_message
+from handlers.config import clear_config_state
 
 logger = logging.getLogger(__name__)
 
@@ -23,28 +22,38 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         /bots - Show all active bots with their status
         /bots <bot_name> - Show detailed status for a specific bot
     """
+    # Clear any config state to prevent interference
+    clear_config_state(context)
+
     # Send "typing" status
     await update.message.reply_chat_action("typing")
 
     try:
-        # Initialize API client
-        async with HummingbotAPIClient(
-            base_url=f"http://{os.environ.get('BACKEND_API_HOST', 'localhost')}:{os.environ.get('BACKEND_API_PORT', '8000')}",
-            username=os.environ.get("BACKEND_API_USERNAME", "admin"),
-            password=os.environ.get("BACKEND_API_PASSWORD", "admin"),
-        ) as client:
+        from servers import server_manager
 
-            if len(context.args) > 0:
-                # Get specific bot status
-                bot_name = context.args[0]
-                bot_status = await client.bot_orchestration.get_bot_status(bot_name)
-                message = format_bot_status(bot_status)
-            else:
-                # Get all active bots
-                bots_data = await client.bot_orchestration.get_active_bots_status()
-                message = format_active_bots(bots_data)
+        # Get first enabled server
+        servers = server_manager.list_servers()
+        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
 
-            await update.message.reply_text(message, parse_mode="MarkdownV2")
+        if not enabled_servers:
+            error_message = format_error_message("No enabled API servers. Edit servers.yml to enable a server.")
+            await update.message.reply_text(error_message, parse_mode="MarkdownV2")
+            return
+
+        # Get client from first enabled server
+        client = await server_manager.get_client(enabled_servers[0])
+
+        if len(context.args) > 0:
+            # Get specific bot status
+            bot_name = context.args[0]
+            bot_status = await client.bot_orchestration.get_bot_status(bot_name)
+            message = format_bot_status(bot_status)
+        else:
+            # Get all active bots
+            bots_data = await client.bot_orchestration.get_active_bots_status()
+            message = format_active_bots(bots_data)
+
+        await update.message.reply_text(message, parse_mode="MarkdownV2")
 
     except Exception as e:
         logger.error(f"Error fetching bots status: {e}", exc_info=True)
