@@ -15,6 +15,7 @@ from telegram.ext import (
 from handlers.portfolio import portfolio_command, portfolio_callback_handler
 from handlers.bots import bots_command
 from handlers.trade_ai import trade_command
+from handlers.trading import trading_command, trading_callback_handler, get_trading_message_handler
 from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
@@ -41,7 +42,7 @@ Manage your trading bots efficiently and monitor their performance\.
 
 📊 `/portfolio` \- View your portfolio summary and holdings
 🤖 `/bots` \- Check status of all active trading bots
-💹 `/trade` \- AI\-powered trading assistant
+💹 `/trading` \- Unified trading interface \(CLOB, DEX, CLMM\)
 ⚙️ `/config` \- Configure API servers and credentials
 
 
@@ -58,6 +59,7 @@ def reload_handlers():
         'handlers.portfolio',
         'handlers.bots',
         'handlers.trade_ai',
+        'handlers.trading',
         'handlers.config',
         'handlers.config.servers',
         'handlers.config.api_keys',
@@ -78,6 +80,7 @@ def register_handlers(application: Application) -> None:
     from handlers.portfolio import portfolio_command, portfolio_callback_handler
     from handlers.bots import bots_command
     from handlers.trade_ai import trade_command
+    from handlers.trading import trading_command, trading_callback_handler, get_trading_message_handler
     from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
 
     # Clear existing handlers
@@ -88,16 +91,23 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("bots", bots_command))
     application.add_handler(CommandHandler("trade", trade_command))
+    application.add_handler(CommandHandler("trading", trading_command))
     application.add_handler(CommandHandler("config", config_command))
 
     # Add callback query handler for portfolio views
     application.add_handler(CallbackQueryHandler(portfolio_callback_handler, pattern="^portfolio:"))
+
+    # Add callback query handler for trading operations
+    application.add_handler(CallbackQueryHandler(trading_callback_handler, pattern="^trading:"))
 
     # Add callback query handler for config menu
     application.add_handler(get_config_callback_handler())
 
     # Add message handler for server modification text input
     application.add_handler(get_modify_value_handler())
+
+    # Add message handler for trading text input
+    application.add_handler(get_trading_message_handler())
 
     logger.info("Handlers registered successfully")
 
@@ -108,6 +118,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Welcome message and quick commands overview"),
         BotCommand("portfolio", "View detailed portfolio breakdown by account and connector"),
         BotCommand("bots", "Check status of all active trading bots"),
+        BotCommand("trading", "Unified trading interface for CLOB, DEX swaps, and CLMM"),
         # BotCommand("trade", "AI-powered trading assistant"),
         BotCommand("config", "Configure API servers and credentials"),
     ]
