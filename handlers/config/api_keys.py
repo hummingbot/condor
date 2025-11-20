@@ -8,6 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2
+from .server_context import build_config_message_header, format_server_selection_needed
 
 logger = logging.getLogger(__name__)
 
@@ -19,74 +20,82 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         from servers import server_manager
 
-        # Get default server
         servers = server_manager.list_servers()
 
         if not servers:
-            message_text = (
-                "🔑 *API Keys*\n\n"
-                "No API servers configured\\.\n\n"
-                "_Add servers in API Servers first\\._"
-            )
+            message_text = format_server_selection_needed()
             keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
         else:
-            # Get client from default server
-            client = await server_manager.get_default_client()
-            accounts = await client.accounts.list_accounts()
+            # Build header with server context
+            header, server_online, _ = await build_config_message_header(
+                "🔑 API Keys",
+                include_gateway=False
+            )
 
-            if not accounts:
+            if not server_online:
                 message_text = (
-                    "🔑 *API Keys*\n\n"
-                    "No accounts configured\\.\n\n"
-                    "_Create accounts in Hummingbot first\\._"
+                    header +
+                    "⚠️ _Server is offline\\. Cannot manage API keys\\._"
                 )
                 keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
             else:
-                # Build account list with credentials info
-                account_lines = []
-                for account in accounts:
-                    account_name = str(account)
-                    # Get credentials for this account
-                    try:
-                        credentials = await client.accounts.list_account_credentials(account_name=account_name)
-                        cred_count = len(credentials) if credentials else 0
+                # Get client from default server
+                client = await server_manager.get_default_client()
+                accounts = await client.accounts.list_accounts()
 
-                        account_escaped = escape_markdown_v2(account_name)
-                        if cred_count > 0:
-                            creds_text = escape_markdown_v2(", ".join(credentials))
-                            account_lines.append(f"• *{account_escaped}* \\({cred_count} connected\\)\n  _{creds_text}_")
-                        else:
-                            account_lines.append(f"• *{account_escaped}* \\(no credentials\\)")
-                    except Exception as e:
-                        logger.warning(f"Failed to get credentials for {account_name}: {e}")
-                        account_escaped = escape_markdown_v2(account_name)
-                        account_lines.append(f"• *{account_escaped}*")
+                if not accounts:
+                    message_text = (
+                        header +
+                        "No accounts configured\\.\n\n"
+                        "_Create accounts in Hummingbot first\\._"
+                    )
+                    keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+                else:
+                    # Build account list with credentials info
+                    account_lines = []
+                    for account in accounts:
+                        account_name = str(account)
+                        # Get credentials for this account
+                        try:
+                            credentials = await client.accounts.list_account_credentials(account_name=account_name)
+                            cred_count = len(credentials) if credentials else 0
 
-                message_text = (
-                    "🔑 *API Keys*\n\n"
-                    + "\n".join(account_lines) + "\n\n"
-                    "_Select an account to manage exchange credentials:_"
-                )
+                            account_escaped = escape_markdown_v2(account_name)
+                            if cred_count > 0:
+                                creds_text = escape_markdown_v2(", ".join(credentials))
+                                account_lines.append(f"• *{account_escaped}* \\({cred_count} connected\\)\n  _{creds_text}_")
+                            else:
+                                account_lines.append(f"• *{account_escaped}* \\(no credentials\\)")
+                        except Exception as e:
+                            logger.warning(f"Failed to get credentials for {account_name}: {e}")
+                            account_escaped = escape_markdown_v2(account_name)
+                            account_lines.append(f"• *{account_escaped}*")
 
-                # Create account buttons in grid of 4 per row
-                # Use base64 encoding to avoid issues with special characters in account names
-                account_buttons = []
-                for account in accounts:
-                    account_name = str(account)
-                    # Encode account name to avoid issues with underscores and special chars
-                    encoded_name = base64.b64encode(account_name.encode()).decode()
-                    account_buttons.append(
-                        InlineKeyboardButton(account_name, callback_data=f"api_key_account:{encoded_name}")
+                    message_text = (
+                        header +
+                        "\n".join(account_lines) + "\n\n"
+                        "_Select an account to manage exchange credentials:_"
                     )
 
-                # Organize into rows of max 4 columns
-                account_button_rows = []
-                for i in range(0, len(account_buttons), 4):
-                    account_button_rows.append(account_buttons[i:i+4])
+                    # Create account buttons in grid of 4 per row
+                    # Use base64 encoding to avoid issues with special characters in account names
+                    account_buttons = []
+                    for account in accounts:
+                        account_name = str(account)
+                        # Encode account name to avoid issues with underscores and special chars
+                        encoded_name = base64.b64encode(account_name.encode()).decode()
+                        account_buttons.append(
+                            InlineKeyboardButton(account_name, callback_data=f"api_key_account:{encoded_name}")
+                        )
 
-                keyboard = account_button_rows + [
-                    [InlineKeyboardButton("« Back", callback_data="config_back")]
-                ]
+                    # Organize into rows of max 4 columns
+                    account_button_rows = []
+                    for i in range(0, len(account_buttons), 4):
+                        account_button_rows.append(account_buttons[i:i+4])
+
+                    keyboard = account_button_rows + [
+                        [InlineKeyboardButton("« Back", callback_data="config_back")]
+                    ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -233,6 +242,12 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
     try:
         from servers import server_manager
 
+        # Build header with server context
+        header, server_online, _ = await build_config_message_header(
+            f"🔑 API Keys",
+            include_gateway=False
+        )
+
         client = await server_manager.get_default_client()
 
         # Get list of connected credentials for this account
@@ -245,8 +260,9 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
 
         if not credentials:
             message_text = (
-                f"🔑 *API Keys \\- {account_escaped}*\n\n\n\n"
-                "No exchange credentials connected\\.\n\n\n\n"
+                header +
+                f"*Account:* `{account_escaped}`\n\n"
+                "No exchange credentials connected\\.\n\n"
                 "Select an exchange below to add credentials:\n\n"
             )
             keyboard = []
@@ -263,9 +279,10 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
                 ])
 
             message_text = (
-                f"🔑 *API Keys \\- {account_escaped}*\n\n\n"
+                header +
+                f"*Account:* `{account_escaped}`\n\n"
                 "*Connected Exchanges:*\n"
-                + "\n".join(cred_lines) + "\n\n\n\n"
+                + "\n".join(cred_lines) + "\n\n"
                 "Select an exchange below to configure or delete:\n\n"
             )
             keyboard = credential_buttons
