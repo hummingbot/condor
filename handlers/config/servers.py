@@ -7,6 +7,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 from utils.telegram_formatters import escape_markdown_v2
+from .server_context import build_config_message_header
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +100,9 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     InlineKeyboardButton(button_text, callback_data=f"api_server_view_{server_name}")
                 )
 
+            server_count = escape_markdown_v2(str(len(servers)))
             message_text = (
-                "🔌 *API Servers*\n\n"
+                f"🔌 *API Servers* \\({server_count} configured\\)\n\n"
                 + "\n\n".join(server_lines) + "\n\n"
                 "_Click on a server name to view details and modify settings\\._"
             )
@@ -817,6 +819,8 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
     modify_message_id = context.user_data.get('modify_message_id')
     modify_chat_id = context.user_data.get('modify_chat_id')
 
+    logger.info(f"Handling modify input: server={server_name}, field={field}, msg_id={modify_message_id}, chat_id={modify_chat_id}")
+
     try:
         await update.message.delete()
     except:
@@ -854,42 +858,64 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
         kwargs = {field: new_value}
         success = server_manager.modify_server(server_name, **kwargs)
 
+        # Clear modification state
         context.user_data.pop('modifying_server', None)
         context.user_data.pop('modifying_field', None)
         context.user_data.pop('awaiting_modify_input', None)
-        context.user_data.pop('modify_message_id', None)
-        context.user_data.pop('modify_chat_id', None)
 
         if success:
-            class FakeQuery:
-                def __init__(self, msg_id, ch_id, bot):
-                    async def edit_text_wrapper(text, parse_mode=None, reply_markup=None):
-                        return await bot.edit_message_text(
-                            chat_id=ch_id,
-                            message_id=msg_id,
+            logger.info(f"Successfully modified {field} for server {server_name}")
+            if modify_message_id and modify_chat_id:
+                logger.info(f"Attempting to show server details for message {modify_message_id}")
+
+                # Create a fake message object
+                class FakeMessage:
+                    def __init__(self, msg_id, ch_id, bot):
+                        self.message_id = msg_id
+                        self.chat_id = ch_id
+                        self._bot = bot
+
+                    async def edit_text(self, text, parse_mode=None, reply_markup=None):
+                        logger.info(f"FakeMessage.edit_text called for msg_id={self.message_id}")
+                        return await self._bot.edit_message_text(
+                            chat_id=self.chat_id,
+                            message_id=self.message_id,
                             text=text,
                             parse_mode=parse_mode,
                             reply_markup=reply_markup
                         )
 
-                    self.message = type('obj', (object,), {
-                        'message_id': msg_id,
-                        'chat_id': ch_id,
-                        'edit_text': edit_text_wrapper
-                    })()
+                # Create a fake query object
+                class FakeQuery:
+                    def __init__(self, msg_id, ch_id, bot):
+                        self.message = FakeMessage(msg_id, ch_id, bot)
 
-                async def answer(self, text=""):
-                    pass
+                    async def answer(self, text=""):
+                        pass
 
-            if modify_message_id and modify_chat_id:
                 fake_query = FakeQuery(modify_message_id, modify_chat_id, context.bot)
-                await show_server_details(fake_query, context, server_name)
+
+                # Clear these after creating FakeQuery but before calling show_server_details
+                context.user_data.pop('modify_message_id', None)
+                context.user_data.pop('modify_chat_id', None)
+
+                try:
+                    await show_server_details(fake_query, context, server_name)
+                    logger.info("Successfully showed server details")
+                except Exception as e:
+                    logger.error(f"Error showing server details: {e}", exc_info=True)
             else:
+                context.user_data.pop('modify_message_id', None)
+                context.user_data.pop('modify_chat_id', None)
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"✅ Successfully updated {field} for server '{server_name}'"
                 )
         else:
+            # Clean up state even on failure
+            context.user_data.pop('modify_message_id', None)
+            context.user_data.pop('modify_chat_id', None)
+
             if modify_message_id and modify_chat_id:
                 await context.bot.edit_message_text(
                     chat_id=modify_chat_id,
@@ -905,6 +931,10 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
 
     except Exception as e:
         logger.error(f"Error handling value input: {e}", exc_info=True)
+        # Clean up state on exception
+        context.user_data.pop('awaiting_modify_input', None)
+        context.user_data.pop('modify_message_id', None)
+        context.user_data.pop('modify_chat_id', None)
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -912,7 +942,6 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
             )
         except:
             pass
-        context.user_data.pop('awaiting_modify_input', None)
 
 
 # Entry point for text input routing
