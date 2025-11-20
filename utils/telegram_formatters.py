@@ -466,3 +466,409 @@ def format_success_message(
         msg += f"\n\n{separator} _Server: {escape_markdown_v2(server_name)} {status_emoji}_"
 
     return msg
+
+def format_perpetual_positions(positions_data: Dict[str, Any]) -> str:
+    """
+    Format perpetual positions for Telegram display
+
+    Args:
+        positions_data: Dictionary with 'positions' list and 'total' count
+
+    Returns:
+        Formatted string section for perpetual positions
+    """
+    positions = positions_data.get('positions', [])
+    total = positions_data.get('total', 0)
+
+    if not positions or total == 0:
+        return "📊 *Perpetual Positions*\n_No open positions_\n"
+
+    message = f"📊 *Perpetual Positions* \\({escape_markdown_v2(str(total))}\\)\n\n"
+
+    # Group by account
+    from collections import defaultdict
+    by_account = defaultdict(list)
+
+    for pos in positions:
+        account_name = pos.get('account_name', 'Unknown')
+        by_account[account_name].append(pos)
+
+    # Format each account's positions
+    for account_name, account_positions in by_account.items():
+        message += f"*Account:* {escape_markdown_v2(account_name)}\n"
+
+        # Create table
+        table_content = "```\n"
+        table_content += f"{'Connector':<12} {'Pair':<12} {'Side':<6} {'Size':<12} {'PnL':>10}\n"
+        table_content += f"{'─'*12} {'─'*12} {'─'*6} {'─'*12} {'─'*10}\n"
+
+        for pos in account_positions:
+            connector = pos.get('connector_name', 'N/A')[:10]
+            pair = pos.get('trading_pair', 'N/A')[:11]
+            side = pos.get('position_side', 'N/A')[:5]
+            amount = pos.get('amount', 0)
+            unrealized_pnl = pos.get('unrealized_pnl', 0)
+
+            # Format values
+            size_str = format_amount(amount)[:11]
+            pnl_str = format_number(unrealized_pnl).replace('$', '')[:9]
+
+            table_content += f"{connector:<12} {pair:<12} {side:<6} {size_str:<12} {pnl_str:>10}\n"
+
+        table_content += "```\n\n"
+        message += table_content
+
+    return message
+
+
+def format_lp_positions(positions_data: Dict[str, Any]) -> str:
+    """
+    Format LP (CLMM) positions for Telegram display
+
+    Args:
+        positions_data: Dictionary with 'positions' list and 'total' count
+
+    Returns:
+        Formatted string section for LP positions
+    """
+    positions = positions_data.get('positions', [])
+    total = positions_data.get('total', 0)
+
+    if not positions or total == 0:
+        return "🏊 *LP Positions \\(CLMM\\)*\n_No active LP positions_\n"
+
+    message = f"🏊 *LP Positions \\(CLMM\\)* \\({escape_markdown_v2(str(total))}\\)\n\n"
+
+    # Create table
+    table_content = "```\n"
+    table_content += f"{'Connector':<12} {'Network':<10} {'Pair':<12} {'Range':<18}\n"
+    table_content += f"{'─'*12} {'─'*10} {'─'*12} {'─'*18}\n"
+
+    for pos in positions[:10]:  # Show max 10 positions
+        connector = pos.get('connector', 'N/A')[:11]
+        network = pos.get('network', 'N/A')[:9]
+        trading_pair = pos.get('trading_pair', 'N/A')[:11]
+        lower_price = pos.get('lower_price', 0)
+        upper_price = pos.get('upper_price', 0)
+
+        # Format price range
+        if lower_price and upper_price:
+            try:
+                range_str = f"{float(lower_price):.2f}-{float(upper_price):.2f}"[:17]
+            except:
+                range_str = "N/A"
+        else:
+            range_str = "N/A"
+
+        table_content += f"{connector:<12} {network:<10} {trading_pair:<12} {range_str:<18}\n"
+
+    if total > 10:
+        table_content += f"\n... and {total - 10} more positions\n"
+
+    table_content += "```\n\n"
+    message += table_content
+
+    return message
+
+
+def format_active_orders(orders_data: Dict[str, Any]) -> str:
+    """
+    Format active orders for Telegram display
+
+    Args:
+        orders_data: Dictionary with 'orders' list and 'total' count
+
+    Returns:
+        Formatted string section for active orders
+    """
+    orders = orders_data.get('orders', [])
+    total = orders_data.get('total', 0)
+
+    if not orders or total == 0:
+        return "📋 *Active Orders*\n_No active orders_\n"
+
+    message = f"📋 *Active Orders* \\({escape_markdown_v2(str(total))}\\)\n\n"
+
+    # Group by account
+    from collections import defaultdict
+    by_account = defaultdict(list)
+
+    for order in orders:
+        account_name = order.get('account_name', 'Unknown')
+        by_account[account_name].append(order)
+
+    # Format each account's orders
+    for account_name, account_orders in by_account.items():
+        message += f"*Account:* {escape_markdown_v2(account_name)}\n"
+
+        # Create table
+        table_content = "```\n"
+        table_content += f"{'Connector':<12} {'Pair':<12} {'Side':<5} {'Type':<7} {'Amount':<12}\n"
+        table_content += f"{'─'*12} {'─'*12} {'─'*5} {'─'*7} {'─'*12}\n"
+
+        for order in account_orders[:10]:  # Show max 10 orders per account
+            connector = order.get('connector_name', 'N/A')[:11]
+            pair = order.get('trading_pair', 'N/A')[:11]
+            side = order.get('trade_type', 'N/A')[:4]
+            order_type = order.get('order_type', 'N/A')[:6]
+            amount = order.get('amount', 0)
+
+            # Format amount
+            amount_str = format_amount(amount)[:11]
+
+            table_content += f"{connector:<12} {pair:<12} {side:<5} {order_type:<7} {amount_str:<12}\n"
+
+        if len(account_orders) > 10:
+            table_content += f"\n... and {len(account_orders) - 10} more orders\n"
+
+        table_content += "```\n\n"
+        message += table_content
+
+    return message
+
+
+def format_portfolio_overview(
+    overview_data: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
+    """
+    Format complete portfolio overview with all sections
+
+    Args:
+        overview_data: Dictionary from get_portfolio_overview() containing:
+            - balances: Portfolio state
+            - perp_positions: Perpetual positions data
+            - lp_positions: LP positions data
+            - active_orders: Active orders data
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
+
+    Returns:
+        Formatted Telegram message with all portfolio sections
+    """
+    # Build header
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message = f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
+    else:
+        message = "💼 *Portfolio Details*\n\n"
+
+    # ============================================
+    # SECTION 1: BALANCES - Detailed tables by account and connector
+    # ============================================
+    balances = overview_data.get('balances')
+    if balances:
+        total_value = 0.0
+        all_balances = []
+
+        # Collect all balances with metadata
+        for account_name, account_data in balances.items():
+            for connector_name, connector_balances in account_data.items():
+                if connector_balances:
+                    for balance in connector_balances:
+                        token = balance.get("token", "???")
+                        units = balance.get("units", 0)
+                        value = balance.get("value", 0)
+
+                        if value > 1:  # Only show balances > $1
+                            all_balances.append({
+                                "account": account_name,
+                                "connector": connector_name,
+                                "token": token,
+                                "units": units,
+                                "value": value
+                            })
+                            total_value += value
+
+        # Calculate percentages
+        for balance in all_balances:
+            balance["percentage"] = (balance["value"] / total_value * 100) if total_value > 0 else 0
+
+        # Group by account and connector
+        from collections import defaultdict
+        grouped = defaultdict(lambda: defaultdict(list))
+
+        for balance in all_balances:
+            account = balance["account"]
+            connector = balance["connector"]
+            grouped[account][connector].append(balance)
+
+        # Sort each group by value
+        for account in grouped:
+            for connector in grouped[account]:
+                grouped[account][connector].sort(key=lambda x: x["value"], reverse=True)
+
+        # Build the balances section by iterating through accounts and connectors
+        for account, connectors in grouped.items():
+            message += f"*Account:* {escape_markdown_v2(account)}\n"
+
+            for connector, balances_list in connectors.items():
+                # Calculate total value for this connector
+                connector_total = sum(balance["value"] for balance in balances_list)
+                connector_total_str = format_number(connector_total)
+
+                message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
+
+                # Start table
+                table_content = "```\n"
+                table_content += f"{'Token':<12} {'Amount':<15} {'Value':<12} {'%':>6}\n"
+                table_content += f"{'─'*12} {'─'*15} {'─'*12} {'─'*6}\n"
+
+                for balance in balances_list:
+                    token = balance["token"]
+                    units = balance["units"]
+                    value = balance["value"]
+                    percentage = balance["percentage"]
+
+                    # Format values - remove $ signs from amounts in table
+                    amount_str = format_amount(units)
+                    value_str = format_number(value).replace('$', '')
+
+                    # Truncate long token names
+                    token_display = token[:10] if len(token) > 10 else token
+
+                    # Add row to table
+                    table_content += f"{token_display:<12} {amount_str:<15} {value_str:<12} {percentage:>5.1f}%\n"
+
+                # Close table
+                table_content += "```\n\n"
+                message += table_content
+
+        # Show total
+        if total_value > 0:
+            message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2(format_number(total_value))}`\n\n"
+        else:
+            message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2('$0.00')}`\n\n"
+
+    # ============================================
+    # SECTION 2: PERPETUAL POSITIONS
+    # ============================================
+    perp_positions = overview_data.get('perp_positions', {"positions": [], "total": 0})
+    message += format_perpetual_positions(perp_positions)
+
+    # ============================================
+    # SECTION 3: LP POSITIONS
+    # ============================================
+    lp_positions = overview_data.get('lp_positions', {"positions": [], "total": 0})
+    message += format_lp_positions(lp_positions)
+
+    # ============================================
+    # SECTION 4: ACTIVE ORDERS
+    # ============================================
+    active_orders = overview_data.get('active_orders', {"orders": [], "total": 0})
+    message += format_active_orders(active_orders)
+
+    return message
+
+
+# ============================================
+# TRADING FORMATTERS
+# ============================================
+
+def format_orders_table(orders: List[Dict[str, Any]]) -> str:
+    """
+    Format orders as a simple text table for Telegram
+
+    Args:
+        orders: List of order dictionaries
+
+    Returns:
+        Formatted table string
+    """
+    if not orders:
+        return "No orders found"
+
+    # Build simple table
+    lines = []
+    lines.append("Pair | Side | Amount | Type | Status")
+    lines.append("-" * 50)
+
+    for order in orders[:10]:  # Limit to 10 for Telegram
+        pair = order.get('trading_pair', 'N/A')
+        side = order.get('trade_type', 'N/A')
+        amount = order.get('amount', 0)
+        order_type = order.get('order_type', 'N/A')
+        status = order.get('status', 'N/A')
+
+        # Format amount
+        try:
+            amount_str = f"{float(amount):.4f}"
+        except (ValueError, TypeError):
+            amount_str = str(amount)
+
+        line = f"{pair} | {side} | {amount_str} | {order_type} | {status}"
+        lines.append(line)
+
+    if len(orders) > 10:
+        lines.append(f"\n... and {len(orders) - 10} more orders")
+
+    return "\n".join(lines)
+
+
+def format_positions_table(positions: List[Dict[str, Any]]) -> str:
+    """
+    Format positions as a simple text table for Telegram
+
+    Args:
+        positions: List of position dictionaries
+
+    Returns:
+        Formatted table string
+    """
+    if not positions:
+        return "No positions found"
+
+    # Build simple table
+    lines = []
+    lines.append("Pair | Side | Size | Entry | Current | PnL")
+    lines.append("-" * 60)
+
+    for pos in positions[:10]:  # Limit to 10 for Telegram
+        pair = pos.get('trading_pair', 'N/A')
+        side = pos.get('position_side', 'N/A')
+        size = pos.get('amount', 0)
+        entry = pos.get('entry_price', 0)
+        current = pos.get('current_price', 0)
+        pnl = pos.get('unrealized_pnl', 0)
+
+        # Format numbers
+        try:
+            size_str = f"{float(size):.4f}"
+        except (ValueError, TypeError):
+            size_str = str(size)
+
+        try:
+            entry_str = f"{float(entry):.2f}"
+        except (ValueError, TypeError):
+            entry_str = str(entry)
+
+        try:
+            current_str = f"{float(current):.2f}"
+        except (ValueError, TypeError):
+            current_str = str(current)
+
+        try:
+            pnl_float = float(pnl)
+            pnl_str = f"{pnl_float:+.2f}"
+            if pnl_float > 0:
+                pnl_str = "+" + f"{pnl_float:.2f}"
+            else:
+                pnl_str = f"{pnl_float:.2f}"
+        except (ValueError, TypeError):
+            pnl_str = str(pnl)
+
+        line = f"{pair} | {side} | {size_str} | {entry_str} | {current_str} | {pnl_str}"
+        lines.append(line)
+
+    if len(positions) > 10:
+        lines.append(f"\n... and {len(positions) - 10} more positions")
+
+    return "\n".join(lines)
