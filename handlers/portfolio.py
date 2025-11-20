@@ -7,9 +7,16 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
 from utils.auth import restricted
-from utils.telegram_formatters import format_portfolio_summary, format_portfolio_state, format_error_message, escape_markdown_v2
+from utils.telegram_formatters import (
+    format_portfolio_summary,
+    format_portfolio_state,
+    format_portfolio_overview,
+    format_error_message,
+    escape_markdown_v2
+)
 from handlers.config import clear_config_state
 from utils.portfolio_graphs import generate_distribution_graph, generate_evolution_graph
+from utils.trading_data import get_portfolio_overview
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +64,24 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         server_status_info = await server_manager.check_server_status(server_name)
         server_status = server_status_info.get("status", "online")
 
-        # Get detailed portfolio state
-        state = await client.portfolio.get_state()
-        message = format_portfolio_state(
-            state,
+        # Get complete portfolio overview (balances + positions + orders)
+        overview_data = await get_portfolio_overview(
+            client,
+            account_names=None,  # Get all accounts
+            include_balances=True,
+            include_perp_positions=True,
+            include_lp_positions=True,
+            include_active_orders=True
+        )
+
+        # Format the complete overview
+        message = format_portfolio_overview(
+            overview_data,
             server_name=server_name,
             server_status=server_status
         )
 
-        # Create inline keyboard with portfolio options
+        # Create inline keyboard with portfolio options (graphs only)
         keyboard = [
             [
                 InlineKeyboardButton("📊 Distribution", callback_data="portfolio:distribution"),
@@ -73,15 +89,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             ],
             [
                 InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
-                InlineKeyboardButton("📋 Summary", callback_data="portfolio:refresh")
+                InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
             ]
         ]
-
-        # Add server switch button if multiple servers available
-        if len(enabled_servers) > 1:
-            keyboard.append([
-                InlineKeyboardButton("🔄 Switch Server", callback_data="portfolio:switch_server")
-            ])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -166,13 +176,22 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
                 server_name = selected_server
                 client = await server_manager.get_client(server_name)
 
-            # Refresh portfolio with new server
+            # Refresh portfolio with new server - show complete overview
             server_status_info = await server_manager.check_server_status(server_name)
             server_status = server_status_info.get("status", "online")
 
-            state = await client.portfolio.get_state()
-            message = format_portfolio_state(
-                state,
+            # Get complete portfolio overview
+            overview_data = await get_portfolio_overview(
+                client,
+                account_names=None,
+                include_balances=True,
+                include_perp_positions=True,
+                include_lp_positions=True,
+                include_active_orders=True
+            )
+
+            message = format_portfolio_overview(
+                overview_data,
                 server_name=server_name,
                 server_status=server_status
             )
@@ -184,14 +203,9 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
                 ],
                 [
                     InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
-                    InlineKeyboardButton("📋 Summary", callback_data="portfolio:refresh")
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
                 ]
             ]
-
-            if len(enabled_servers) > 1:
-                keyboard.append([
-                    InlineKeyboardButton("🔄 Switch Server", callback_data="portfolio:switch_server")
-                ])
 
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -205,7 +219,6 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
         elif action == "distribution":
             # Generate and send distribution graph
             distribution = await client.portfolio.get_distribution()
-            logger.info(f"Distribution data: {distribution}")
             graph_bytes = generate_distribution_graph(distribution)
 
             # Remove buttons from current message
@@ -222,7 +235,7 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
                 ],
                 [
                     InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
-                    InlineKeyboardButton("📋 Summary", callback_data="portfolio:refresh")
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -235,71 +248,19 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
 
         elif action == "evolution":
             # Generate and send evolution graph
-            import time
-            from datetime import datetime, timezone
+            # Fetch historical data with 1-hour interval resampling for 7-day view
+            # This gives us ~168 data points (7 days * 24 hours) which is perfect for visualization
+            # Note: Not using start_time/end_time as the API doesn't filter correctly with those params
+            history = await client.portfolio.get_history(
+                limit=168,  # 7 days * 24 hours = 168 hours
+                interval="1h"
+            )
 
-            now = int(time.time())
-            week_ago = now - (7 * 24 * 60 * 60)
+            logger.debug(f"Fetched {len(history.get('data', []))} history data points with 1h interval")
+            if not history.get('data'):
+                logger.warning("No data points in history response!")
 
-            # Fetch all historical data with pagination
-            all_data = []
-            cursor = None
-            max_pages = 50  # Safety limit to prevent infinite loops
-            pages_fetched = 0
-
-            while pages_fetched < max_pages:
-                if cursor:
-                    history = await client.portfolio.get_history(
-                        start_time=week_ago,
-                        end_time=now,
-                        limit=100,
-                        cursor=cursor
-                    )
-                else:
-                    history = await client.portfolio.get_history(
-                        start_time=week_ago,
-                        end_time=now,
-                        limit=100
-                    )
-
-                data_points = history.get("data", [])
-                all_data.extend(data_points)
-                pages_fetched += 1
-
-                # Check if there's more data
-                pagination = history.get("pagination", {})
-                has_more = pagination.get("has_more", False)
-                cursor = pagination.get("next_cursor")
-
-                if not has_more or not cursor:
-                    break
-
-            logger.info(f"Fetched {len(all_data)} history data points across {pages_fetched} pages (before filtering)")
-
-            # Filter data to ensure we only have data within the last 7 days
-            # Some APIs might return data outside the range
-            filtered_data = []
-            week_ago_dt = datetime.fromtimestamp(week_ago, tz=timezone.utc)
-            now_dt = datetime.fromtimestamp(now, tz=timezone.utc)
-
-            for point in all_data:
-                timestamp_str = point.get("timestamp", "")
-                if isinstance(timestamp_str, str):
-                    try:
-                        timestamp_dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                        # Only include if within the 7-day window
-                        if week_ago_dt <= timestamp_dt <= now_dt:
-                            filtered_data.append(point)
-                        else:
-                            logger.debug(f"Filtering out timestamp {timestamp_str} outside 7-day window")
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"Invalid timestamp format during filtering: {timestamp_str} - {e}")
-
-            logger.info(f"After filtering: {len(filtered_data)} data points within last 7 days")
-
-            # Create combined history object
-            combined_history = {"data": filtered_data}
-            graph_bytes = generate_evolution_graph(combined_history)
+            graph_bytes = generate_evolution_graph(history)
 
             # Remove buttons from current message
             try:
@@ -315,7 +276,7 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
                 ],
                 [
                     InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
-                    InlineKeyboardButton("📋 Summary", callback_data="portfolio:refresh")
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -329,7 +290,6 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
         elif action == "accounts":
             # Show accounts distribution
             accounts_dist = await client.portfolio.get_accounts_distribution()
-            logger.info(f"Accounts distribution data: {accounts_dist}")
             graph_bytes = generate_distribution_graph(accounts_dist, by_account=True)
 
             # Remove buttons from current message
@@ -346,7 +306,7 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
                 ],
                 [
                     InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
-                    InlineKeyboardButton("📋 Summary", callback_data="portfolio:refresh")
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -358,13 +318,22 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             )
 
         elif action == "refresh":
-            # Refresh portfolio state
+            # Refresh complete portfolio overview
             server_status_info = await server_manager.check_server_status(server_name)
             server_status = server_status_info.get("status", "online")
 
-            state = await client.portfolio.get_state()
-            message = format_portfolio_state(
-                state,
+            # Get complete portfolio overview
+            overview_data = await get_portfolio_overview(
+                client,
+                account_names=None,
+                include_balances=True,
+                include_perp_positions=True,
+                include_lp_positions=True,
+                include_active_orders=True
+            )
+
+            message = format_portfolio_overview(
+                overview_data,
                 server_name=server_name,
                 server_status=server_status
             )
@@ -376,14 +345,9 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
                 ],
                 [
                     InlineKeyboardButton("🏦 By Account", callback_data="portfolio:accounts"),
-                    InlineKeyboardButton("📋 Summary", callback_data="portfolio:refresh")
+                    InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")
                 ]
             ]
-
-            if len(enabled_servers) > 1:
-                keyboard.append([
-                    InlineKeyboardButton("🔄 Switch Server", callback_data="portfolio:switch_server")
-                ])
 
             reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -393,7 +357,7 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             except Exception as e:
                 logger.debug(f"Could not remove buttons: {e}")
 
-            # Send new text message with portfolio state
+            # Send new text message with complete portfolio overview
             await query.message.reply_text(
                 message,
                 parse_mode="MarkdownV2",
