@@ -141,7 +141,12 @@ def get_modify_value_handler():
             await handle_server_input(update, context)
         elif context.user_data.get('awaiting_api_key_input'):
             await handle_api_key_input(update, context)
-        elif context.user_data.get('awaiting_gateway_input') or context.user_data.get('awaiting_wallet_input') or context.user_data.get('awaiting_connector_input'):
+        elif (context.user_data.get('awaiting_gateway_input') or
+              context.user_data.get('awaiting_wallet_input') or
+              context.user_data.get('awaiting_connector_input') or
+              context.user_data.get('awaiting_network_input') or
+              context.user_data.get('awaiting_token_input') or
+              context.user_data.get('awaiting_pool_input')):
             await handle_gateway_input(update, context)
 
     return MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_config_input)
