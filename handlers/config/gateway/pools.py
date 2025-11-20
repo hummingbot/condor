@@ -517,13 +517,15 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
             try:
                 client = await server_manager.get_default_client()
+
+                logger.info(f"Adding pool: connector={connector_name}, network={network}, "
+                           f"pool_type={pool_type}, base={base}, quote={quote}, address={address}")
+
                 await client.gateway.add_pool(
                     connector_name=connector_name,
-                    pool_type=pool_type,
                     network=network,
-                    base=base,
-                    quote=quote,
-                    address=address
+                    pool_id=address,
+                    trading_pair=f"{base}-{quote}"
                 )
 
                 success_text = (
