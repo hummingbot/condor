@@ -2,7 +2,7 @@
 Telegram message formatters for Hummingbot data
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import re
 
 
@@ -14,6 +14,60 @@ def escape_markdown_v2(text: str) -> str:
     """
     special_chars = r'_*[]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(special_chars)}])', r'\\\1', str(text))
+
+
+def format_header_with_server(
+    title: str,
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None,
+    max_width: int = 40
+) -> str:
+    """
+    Format a header with title on the left and server info on the right
+
+    Args:
+        title: Main title text (e.g., "💼 Portfolio Details")
+        server_name: Name of the server (e.g., "remote")
+        server_status: Status of server - "online", "offline", "auth_error", "error"
+        max_width: Maximum character width for alignment (default: 40 for Telegram mobile)
+
+    Returns:
+        Formatted header string with proper alignment
+
+    Example:
+        "💼 Portfolio Details\nServer: remote 🟢"
+    """
+    if not server_name:
+        return title
+
+    # Determine status emoji
+    status_emoji = "🟢"  # Default to online
+    if server_status == "offline":
+        status_emoji = "🔴"
+    elif server_status == "auth_error":
+        status_emoji = "🟠"
+    elif server_status == "error":
+        status_emoji = "⚠️"
+
+    # Build server text - now showing "Server: name emoji"
+    server_text = f"Server: {server_name} {status_emoji}"
+
+    # Return title and server on same line, separated by spaces
+    # Calculate spacing for alignment
+    title_emojis = len([c for c in title if ord(c) > 0x1F300])
+    title_display_len = len(title) + title_emojis
+
+    server_emojis = len([c for c in server_text if ord(c) > 0x1F300])
+    server_display_len = len(server_text) + server_emojis
+
+    spaces_needed = max_width - title_display_len - server_display_len
+
+    if spaces_needed < 1:
+        spaces_needed = 1
+
+    spaces = " " * spaces_needed
+
+    return f"{title}{spaces}{server_text}"
 
 
 def format_number(value: float, decimals: int = 2) -> str:
@@ -83,59 +137,138 @@ def format_portfolio_summary(summary: Dict[str, Any]) -> str:
     return message
 
 
-def format_portfolio_state(state: Dict[str, Any]) -> str:
+def format_portfolio_state(
+    state: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
     """
-    Format detailed portfolio state for Telegram
+    Format detailed portfolio state for Telegram with table format
 
     Args:
         state: Portfolio state from client.portfolio.get_state()
+        server_name: Name of the server/exchange being queried
+        server_status: Status of the server ("online", "offline", "auth_error", "error")
 
     Returns:
         Formatted Telegram message
     """
-    message = "💼 *Portfolio Details*\n\n"
+    # Build header with server info on same line
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message = f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
+    else:
+        message = "💼 *Portfolio Details*\n\n"
 
     total_value = 0.0
+    all_balances = []
 
+    # Collect all balances with metadata
     for account_name, account_data in state.items():
-        message += f"*Account:* {escape_markdown_v2(account_name)}\n"
-
         for connector_name, balances in account_data.items():
             if balances:
-                message += f"  🔗 {escape_markdown_v2(connector_name)}\n"
-
                 for balance in balances:
                     token = balance.get("token", "???")
                     units = balance.get("units", 0)
                     value = balance.get("value", 0)
-                    total_value += value
 
                     if value > 1:  # Only show balances > $1
-                        amount_str = format_amount(units)
-                        value_str = format_number(value)
-                        message += f"    • {escape_markdown_v2(token)}: "
-                        message += f"{escape_markdown_v2(amount_str)} "
-                        message += f"{escape_markdown_v2(value_str)}\n"
+                        all_balances.append({
+                            "account": account_name,
+                            "connector": connector_name,
+                            "token": token,
+                            "units": units,
+                            "value": value
+                        })
+                        total_value += value
 
-                # Add spacing between connectors
-                message += "\n"
+    # Calculate percentages
+    for balance in all_balances:
+        balance["percentage"] = (balance["value"] / total_value * 100) if total_value > 0 else 0
 
-    message += f"💵 *Total:* {escape_markdown_v2(format_number(total_value))}\n"
+    # Group by account and connector first, then sort within each group
+    from collections import defaultdict
+    grouped = defaultdict(lambda: defaultdict(list))
+
+    for balance in all_balances:
+        account = balance["account"]
+        connector = balance["connector"]
+        grouped[account][connector].append(balance)
+
+    # Sort each group by value
+    for account in grouped:
+        for connector in grouped[account]:
+            grouped[account][connector].sort(key=lambda x: x["value"], reverse=True)
+
+    # Build the message by iterating through accounts and connectors
+    for account, connectors in grouped.items():
+        message += f"*Account:* {escape_markdown_v2(account)}\n"
+
+        for connector, balances in connectors.items():
+            # Calculate total value for this connector
+            connector_total = sum(balance["value"] for balance in balances)
+            connector_total_str = format_number(connector_total)
+
+            message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
+
+            # Start table
+            table_content = "```\n"
+            table_content += f"{'Token':<12} {'Amount':<15} {'Value':<12} {'%':>6}\n"
+            table_content += f"{'─'*12} {'─'*15} {'─'*12} {'─'*6}\n"
+
+            for balance in balances:
+                token = balance["token"]
+                units = balance["units"]
+                value = balance["value"]
+                percentage = balance["percentage"]
+
+                # Format values - remove $ signs from amounts in table
+                amount_str = format_amount(units)
+                value_str = format_number(value).replace('$', '')
+
+                # Truncate long token names
+                token_display = token[:10] if len(token) > 10 else token
+
+                # Add row to table
+                table_content += f"{token_display:<12} {amount_str:<15} {value_str:<12} {percentage:>5.1f}%\n"
+
+            # Close table
+            table_content += "```\n\n"
+            message += table_content
+
+    # Show total
+    if total_value > 0:
+        message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2(format_number(total_value))}`\n"
+    else:
+        message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2('$0.00')}`\n"
 
     return message
 
 
-def format_active_bots(bots_data: Dict[str, Any]) -> str:
+def format_active_bots(
+    bots_data: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
     """
     Format active bots status for Telegram
 
     Args:
         bots_data: Active bots data from client.bot_orchestration.get_active_bots_status()
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
 
     Returns:
         Formatted Telegram message
     """
-    message = "🤖 *Active Bots Status*\n\n"
+    message = "🤖 *Active Bots*\n\n"
 
     bots = bots_data.get("data", [])
 
@@ -187,28 +320,52 @@ def format_active_bots(bots_data: Dict[str, Any]) -> str:
 
     message += f"*Total Active Bots:* {escape_markdown_v2(str(len(bots)))}\n"
 
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message += f"\n{'⎯' * 30}\n"
+        message += f"{' ' * 15}_Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
     return message
 
 
-def format_bot_status(bot_status: Dict[str, Any]) -> str:
+def format_bot_status(
+    bot_status: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
     """
     Format individual bot status for Telegram
 
     Args:
         bot_status: Bot status from client.bot_orchestration.get_bot_status()
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
 
     Returns:
         Formatted Telegram message
     """
     if bot_status.get("status") != "success":
-        return f"❌ *Error:* {escape_markdown_v2(bot_status.get('message', 'Unknown error'))}"
+        return format_error_message(
+            bot_status.get('message', 'Unknown error'),
+            server_name=server_name,
+            server_status=server_status
+        )
 
     data = bot_status.get("data", {})
     bot_name = data.get("name", "Unknown")
     is_running = data.get("is_running", False)
 
-    status_emoji = "🟢" if is_running else "🔴"
-    message = f"{status_emoji} *Bot:* {escape_markdown_v2(bot_name)}\n\n"
+    # Format header
+    bot_status_emoji = "🟢" if is_running else "🔴"
+    message = f"{bot_status_emoji} *Bot:* {escape_markdown_v2(bot_name)}\n\n"
 
     # Performance
     performance = data.get("performance", {})
@@ -227,30 +384,85 @@ def format_bot_status(bot_status: Dict[str, Any]) -> str:
             ctrl_type = ctrl.get("controller_type", "unknown")
             message += f"  • {escape_markdown_v2(ctrl_name)} _{escape_markdown_v2(f'({ctrl_type})')}_\n"
 
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message += f"\n{'⎯' * 30}\n"
+        message += f"{' ' * 15}_Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
     return message
 
 
-def format_error_message(error: str) -> str:
+def format_error_message(
+    error: str,
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
     """
     Format error message for Telegram
 
     Args:
         error: Error message
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
 
     Returns:
         Formatted error message
     """
-    return f"❌ *Error*\n\n{escape_markdown_v2(error)}"
+    msg = f"❌ *Error*\n\n{escape_markdown_v2(error)}"
+
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        separator = '⎯' * 15
+        msg += f"\n\n{separator} _Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
+    return msg
 
 
-def format_success_message(message: str) -> str:
+def format_success_message(
+    message: str,
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
     """
     Format success message for Telegram
 
     Args:
         message: Success message
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
 
     Returns:
         Formatted success message
     """
-    return f"✅ *Success*\n\n{escape_markdown_v2(message)}"
+    msg = f"✅ *Success*\n\n{escape_markdown_v2(message)}"
+
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        separator = '⎯' * 15
+        msg += f"\n\n{separator} _Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
+    return msg
