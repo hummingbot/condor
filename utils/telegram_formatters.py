@@ -775,21 +775,21 @@ def format_portfolio_overview(
 
 def format_orders_table(orders: List[Dict[str, Any]]) -> str:
     """
-    Format orders as a simple text table for Telegram
+    Format orders as a monospace table for Telegram
 
     Args:
         orders: List of order dictionaries
 
     Returns:
-        Formatted table string
+        Formatted table string in code block
     """
     if not orders:
         return "No orders found"
 
-    # Build simple table
-    lines = []
-    lines.append("Pair | Side | Amount | Type | Status")
-    lines.append("-" * 50)
+    # Build monospace table
+    table_content = ""
+    table_content += f"{'Pair':<12} {'Side':<5} {'Amount':<12} {'Type':<8} {'Status':<8}\n"
+    table_content += f"{'─'*12} {'─'*5} {'─'*12} {'─'*8} {'─'*8}\n"
 
     for order in orders[:10]:  # Limit to 10 for Telegram
         pair = order.get('trading_pair', 'N/A')
@@ -798,77 +798,81 @@ def format_orders_table(orders: List[Dict[str, Any]]) -> str:
         order_type = order.get('order_type', 'N/A')
         status = order.get('status', 'N/A')
 
+        # Truncate long values
+        pair_display = pair[:11] if len(pair) > 11 else pair
+        side_display = side[:4] if len(side) > 4 else side
+        type_display = order_type[:7] if len(order_type) > 7 else order_type
+        status_display = status[:7] if len(status) > 7 else status
+
         # Format amount
         try:
-            amount_str = f"{float(amount):.4f}"
+            amount_str = format_amount(float(amount))[:11]
         except (ValueError, TypeError):
-            amount_str = str(amount)
+            amount_str = str(amount)[:11]
 
-        line = f"{pair} | {side} | {amount_str} | {order_type} | {status}"
-        lines.append(line)
+        table_content += f"{pair_display:<12} {side_display:<5} {amount_str:<12} {type_display:<8} {status_display:<8}\n"
 
     if len(orders) > 10:
-        lines.append(f"\n... and {len(orders) - 10} more orders")
+        table_content += f"\n... and {len(orders) - 10} more orders\n"
 
-    return "\n".join(lines)
+    return table_content
 
 
 def format_positions_table(positions: List[Dict[str, Any]]) -> str:
     """
-    Format positions as a simple text table for Telegram
+    Format positions as a monospace table for Telegram
 
     Args:
         positions: List of position dictionaries
 
     Returns:
-        Formatted table string
+        Formatted table string in code block
     """
     if not positions:
         return "No positions found"
 
-    # Build simple table
-    lines = []
-    lines.append("Pair | Side | Size | Entry | Current | PnL")
-    lines.append("-" * 60)
+    # Build monospace table - optimized for mobile width
+    table_content = ""
+    table_content += f"{'Pair':<13} {'Side':<5} {'Size':<8} {'Entry':<10} {'PnL':>8}\n"
+    table_content += f"{'─'*13} {'─'*5} {'─'*8} {'─'*10} {'─'*8}\n"
 
     for pos in positions[:10]:  # Limit to 10 for Telegram
         pair = pos.get('trading_pair', 'N/A')
-        side = pos.get('position_side', 'N/A')
+        # Try multiple field names for side
+        side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
         size = pos.get('amount', 0)
         entry = pos.get('entry_price', 0)
-        current = pos.get('current_price', 0)
         pnl = pos.get('unrealized_pnl', 0)
+
+        # Truncate pair name if too long
+        pair_display = pair[:12] if len(pair) > 12 else pair
+
+        # Truncate side if too long
+        side_display = side[:4] if len(side) > 4 else side
 
         # Format numbers
         try:
-            size_str = f"{float(size):.4f}"
+            size_str = format_amount(float(size))[:7]
         except (ValueError, TypeError):
-            size_str = str(size)
+            size_str = str(size)[:7]
 
         try:
-            entry_str = f"{float(entry):.2f}"
+            entry_str = f"{float(entry):.2f}"[:9]
         except (ValueError, TypeError):
-            entry_str = str(entry)
-
-        try:
-            current_str = f"{float(current):.2f}"
-        except (ValueError, TypeError):
-            current_str = str(current)
+            entry_str = str(entry)[:9]
 
         try:
             pnl_float = float(pnl)
-            pnl_str = f"{pnl_float:+.2f}"
-            if pnl_float > 0:
-                pnl_str = "+" + f"{pnl_float:.2f}"
+            if pnl_float >= 0:
+                pnl_str = f"+{pnl_float:.2f}"[:7]
             else:
-                pnl_str = f"{pnl_float:.2f}"
+                pnl_str = f"{pnl_float:.2f}"[:7]
         except (ValueError, TypeError):
-            pnl_str = str(pnl)
+            pnl_str = str(pnl)[:7]
 
-        line = f"{pair} | {side} | {size_str} | {entry_str} | {current_str} | {pnl_str}"
-        lines.append(line)
+        table_content += f"{pair_display:<13} {side_display:<5} {size_str:<8} {entry_str:<10} {pnl_str:>8}\n"
 
     if len(positions) > 10:
-        lines.append(f"\n... and {len(positions) - 10} more positions")
+        table_content += f"\n... and {len(positions) - 10} more positions\n"
 
-    return "\n".join(lines)
+    return table_content
