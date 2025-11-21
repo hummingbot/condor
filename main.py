@@ -10,12 +10,14 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    PicklePersistence,
 )
 
 from handlers.portfolio import portfolio_command, portfolio_callback_handler
 from handlers.bots import bots_command
 from handlers.trade_ai import trade_command
-from handlers.trading import trading_command, trading_callback_handler, get_trading_message_handler
+from handlers.clob_trading import clob_trading_command, clob_callback_handler, get_clob_message_handler
+from handlers.dex_trading import dex_trading_command, dex_callback_handler, get_dex_message_handler
 from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
@@ -42,7 +44,8 @@ Manage your trading bots efficiently and monitor their performance\.
 
 📊 `/portfolio` \- View your portfolio summary and holdings
 🤖 `/bots` \- Check status of all active trading bots
-💹 `/trading` \- Unified trading interface \(CLOB, DEX, CLMM\)
+🏦 `/clob_trading` \- CLOB trading \(Spot & Perpetual\)
+🔄 `/dex_trading` \- DEX trading \(Swaps & CLMM\)
 ⚙️ `/config` \- Configure API servers and credentials
 
 
@@ -59,11 +62,13 @@ def reload_handlers():
         'handlers.portfolio',
         'handlers.bots',
         'handlers.trade_ai',
-        'handlers.trading',
+        'handlers.clob_trading',
+        'handlers.dex_trading',
         'handlers.config',
         'handlers.config.servers',
         'handlers.config.api_keys',
         'handlers.config.gateway',
+        'handlers.config.trading_context',
         'utils.auth',
         'utils.telegram_formatters',
     ]
@@ -80,7 +85,8 @@ def register_handlers(application: Application) -> None:
     from handlers.portfolio import portfolio_command, portfolio_callback_handler
     from handlers.bots import bots_command
     from handlers.trade_ai import trade_command
-    from handlers.trading import trading_command, trading_callback_handler, get_trading_message_handler
+    from handlers.clob_trading import clob_trading_command, clob_callback_handler, get_clob_message_handler
+    from handlers.dex_trading import dex_trading_command, dex_callback_handler, get_dex_message_handler
     from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
 
     # Clear existing handlers
@@ -91,23 +97,28 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("bots", bots_command))
     application.add_handler(CommandHandler("trade", trade_command))
-    application.add_handler(CommandHandler("trading", trading_command))
+    application.add_handler(CommandHandler("clob_trading", clob_trading_command))
+    application.add_handler(CommandHandler("dex_trading", dex_trading_command))
     application.add_handler(CommandHandler("config", config_command))
 
     # Add callback query handler for portfolio views
     application.add_handler(CallbackQueryHandler(portfolio_callback_handler, pattern="^portfolio:"))
 
-    # Add callback query handler for trading operations
-    application.add_handler(CallbackQueryHandler(trading_callback_handler, pattern="^trading:"))
+    # Add callback query handlers for trading operations
+    application.add_handler(CallbackQueryHandler(clob_callback_handler, pattern="^clob:"))
+    application.add_handler(CallbackQueryHandler(dex_callback_handler, pattern="^dex:"))
 
     # Add callback query handler for config menu
     application.add_handler(get_config_callback_handler())
 
-    # Add message handler for server modification text input
-    application.add_handler(get_modify_value_handler())
+    # Add message handlers for trading text input (MUST come before config handler)
+    # Trading handlers check specific states and should have priority
+    application.add_handler(get_clob_message_handler())
+    application.add_handler(get_dex_message_handler())
 
-    # Add message handler for trading text input
-    application.add_handler(get_trading_message_handler())
+    # Add message handler for server modification text input
+    # This comes last as a catch-all for config operations
+    application.add_handler(get_modify_value_handler())
 
     logger.info("Handlers registered successfully")
 
@@ -118,7 +129,8 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Welcome message and quick commands overview"),
         BotCommand("portfolio", "View detailed portfolio breakdown by account and connector"),
         BotCommand("bots", "Check status of all active trading bots"),
-        BotCommand("trading", "Unified trading interface for CLOB, DEX swaps, and CLMM"),
+        BotCommand("clob_trading", "CLOB trading (Spot & Perpetual) with quick actions"),
+        BotCommand("dex_trading", "DEX trading (Swaps & CLMM) via Gateway"),
         # BotCommand("trade", "AI-powered trading assistant"),
         BotCommand("config", "Configure API servers and credentials"),
     ]
@@ -151,8 +163,18 @@ async def watch_and_reload(application: Application) -> None:
 
 def main() -> None:
     """Run the bot."""
-    # Create the Application and pass it your bot's token
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    # Setup persistence to save user data, chat data, and bot data
+    # This will save trading context, last used parameters, etc.
+    persistence = PicklePersistence(filepath="condor_bot_data.pickle")
+
+    # Create the Application with persistence enabled
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .persistence(persistence)
+        .post_init(post_init)
+        .build()
+    )
 
     # Register all handlers
     register_handlers(application)
