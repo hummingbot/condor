@@ -1,0 +1,251 @@
+"""
+CLOB Trading - Positions management
+"""
+
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+
+from utils.telegram_formatters import format_error_message, escape_markdown_v2
+from handlers.config.user_preferences import get_clob_account
+
+logger = logging.getLogger(__name__)
+
+
+async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle get positions operation"""
+    try:
+        from servers import server_manager
+
+        servers = server_manager.list_servers()
+        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+
+        if not enabled_servers:
+            error_message = format_error_message("No enabled API servers available")
+            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+            return
+
+        server_name = enabled_servers[0]
+        client = await server_manager.get_client(server_name)
+
+        # Get all positions
+        result = await client.trading.get_positions(limit=100)
+
+        positions = result.get("data", [])
+
+        if not positions:
+            message = r"📊 *Open Positions*" + "\n\n" + r"No positions found\."
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Refresh", callback_data="clob:positions"),
+                    InlineKeyboardButton("« Back", callback_data="clob:main_menu")
+                ]
+            ]
+        else:
+            from utils.telegram_formatters import format_positions_table
+            positions_table = format_positions_table(positions)
+            message = r"📊 *Open Positions* \(" + escape_markdown_v2(str(len(positions))) + r" found\)" + "\n\n" + r"```" + "\n" + positions_table + "\n" + r"```"
+
+            # Store positions data in context for later use
+            context.user_data["current_positions"] = positions
+
+            # Build keyboard with close buttons for each position
+            keyboard = []
+
+            # Add close position buttons (max 5 positions shown)
+            for i, pos in enumerate(positions[:5]):
+                pair = pos.get('trading_pair', 'N/A')
+                side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'LONG')
+
+                # Format button label
+                button_label = f"❌ Close {pair} {side}"
+                callback_data = f"clob:close_position:{i}"
+
+                keyboard.append([InlineKeyboardButton(button_label, callback_data=callback_data)])
+
+            if len(positions) > 5:
+                keyboard.append([InlineKeyboardButton("⋯ Show More Positions", callback_data="clob:positions_list")])
+
+            # Add refresh and back buttons
+            keyboard.append([
+                InlineKeyboardButton("🔄 Refresh", callback_data="clob:positions"),
+                InlineKeyboardButton("« Back", callback_data="clob:main_menu")
+            ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.callback_query.message.reply_text(
+            message,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting positions: {e}", exc_info=True)
+        error_message = format_error_message(f"Failed to get positions: {str(e)}")
+        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+
+
+async def handle_trade_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
+    """Handle quick trade for a specific position - opens place order menu with position details pre-filled"""
+    from .place_order import show_place_order_menu
+
+    try:
+        positions = context.user_data.get("current_positions", [])
+
+        if position_index >= len(positions):
+            error_message = format_error_message("Position not found. Please refresh positions.")
+            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+            return
+
+        position = positions[position_index]
+
+        # Extract position details
+        connector_name = position.get('connector_name', 'binance_perpetual')
+        trading_pair = position.get('trading_pair', 'BTC-USDT')
+        amount = position.get('amount', 0)
+        side = position.get('position_side') or position.get('side') or position.get('trade_type', 'LONG')
+        entry_price = position.get('entry_price', 0)
+
+        # Determine the opposite side for closing
+        opposite_side = "SELL" if side in ["LONG", "BUY"] else "BUY"
+
+        # Pre-fill order parameters with position details
+        # Default to closing the position (opposite side)
+        context.user_data["place_order_params"] = {
+            "connector": connector_name,
+            "trading_pair": trading_pair,
+            "side": opposite_side,  # Default to close side
+            "order_type": "MARKET",
+            "position_mode": "CLOSE",
+            "amount": str(amount),
+            "price": str(entry_price),
+        }
+
+        # Set state to allow text input for direct order placement
+        context.user_data["clob_state"] = "place_order"
+
+        # Show the place order menu with pre-filled parameters
+        await show_place_order_menu(update, context, send_new=True)
+
+    except Exception as e:
+        logger.error(f"Error preparing trade for position: {e}", exc_info=True)
+        error_message = format_error_message(f"Failed to prepare trade: {str(e)}")
+        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+
+
+async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
+    """Handle closing a specific position"""
+    try:
+        positions = context.user_data.get("current_positions", [])
+
+        if position_index >= len(positions):
+            error_message = format_error_message("Position not found. Please refresh positions.")
+            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+            return
+
+        position = positions[position_index]
+
+        # Extract position details
+        connector_name = position.get('connector_name', 'N/A')
+        trading_pair = position.get('trading_pair', 'N/A')
+        amount = position.get('amount', 0)
+        side = position.get('position_side') or position.get('side') or position.get('trade_type', 'LONG')
+
+        # Determine the opposite side to close the position
+        close_side = "SELL" if side in ["LONG", "BUY"] else "BUY"
+
+        # Confirm with user
+        confirm_message = (
+            r"⚠️ *Confirm Close Position*" + "\n\n"
+            f"Pair: `{escape_markdown_v2(trading_pair)}`\n"
+            f"Side: `{escape_markdown_v2(side)}`\n"
+            f"Size: `{escape_markdown_v2(str(amount))}`\n"
+            f"Connector: `{escape_markdown_v2(connector_name)}`\n\n"
+            f"This will place a {close_side} market order to close the position\\."
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirm Close", callback_data=f"clob:confirm_close:{position_index}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="clob:positions")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.callback_query.message.reply_text(
+            confirm_message,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error preparing to close position: {e}", exc_info=True)
+        error_message = format_error_message(f"Failed to close position: {str(e)}")
+        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+
+
+async def handle_confirm_close_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
+    """Confirm and execute closing a position"""
+    try:
+        positions = context.user_data.get("current_positions", [])
+
+        if position_index >= len(positions):
+            error_message = format_error_message("Position not found. Please refresh positions.")
+            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+            return
+
+        position = positions[position_index]
+        account = get_clob_account(context.user_data)
+
+        # Extract position details
+        connector_name = position.get('connector_name', 'N/A')
+        trading_pair = position.get('trading_pair', 'N/A')
+        amount = position.get('amount', 0)
+        side = position.get('position_side') or position.get('side') or position.get('trade_type', 'LONG')
+
+        # Determine the opposite side to close the position
+        close_side = "SELL" if side in ["LONG", "BUY"] else "BUY"
+
+        from servers import server_manager
+        servers = server_manager.list_servers()
+        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+
+        if not enabled_servers:
+            raise ValueError("No enabled API servers available")
+
+        server_name = enabled_servers[0]
+        client = await server_manager.get_client(server_name)
+
+        # Place market order to close position
+        result = await client.trading.place_order(
+            account_name=account,
+            connector_name=connector_name,
+            trading_pair=trading_pair,
+            trade_type=close_side,
+            amount=float(amount),
+            order_type="MARKET",
+            price=None,
+            position_action="CLOSE",
+        )
+
+        success_msg = escape_markdown_v2(
+            f"✅ Position closed successfully!\n\n"
+            f"Pair: {trading_pair}\n"
+            f"Side: {side}\n"
+            f"Size: {amount}\n"
+            f"Close Order: {close_side} MARKET"
+        )
+
+        if "order_id" in result:
+            success_msg += escape_markdown_v2(f"\nOrder ID: {result['order_id']}")
+
+        await update.callback_query.message.reply_text(success_msg, parse_mode="MarkdownV2")
+
+        # Return to positions view
+        await handle_positions(update, context)
+
+    except Exception as e:
+        logger.error(f"Error closing position: {e}", exc_info=True)
+        error_message = format_error_message(f"Failed to close position: {str(e)}")
+        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
