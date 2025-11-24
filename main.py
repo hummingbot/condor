@@ -88,7 +88,7 @@ def reload_handlers():
         'handlers.config.servers',
         'handlers.config.api_keys',
         'handlers.config.gateway',
-        'handlers.config.trading_context',
+        'handlers.config.user_preferences',
         'handlers.chatid',
         'utils.auth',
         'utils.telegram_formatters',
