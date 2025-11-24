@@ -50,7 +50,7 @@ def format_header_with_server(
         status_emoji = "⚠️"
 
     # Build server text - now showing "Server: name emoji"
-    server_text = f"Server: {server_name} {status_emoji}"
+    server_text = f"Server: {server_name} {status_emoji}                                    "
 
     # Return title and server on same line, separated by spaces
     # Calculate spacing for alignment
@@ -497,23 +497,46 @@ def format_perpetual_positions(positions_data: Dict[str, Any]) -> str:
     for account_name, account_positions in by_account.items():
         message += f"*Account:* {escape_markdown_v2(account_name)}\n"
 
-        # Create table
+        # Create table - optimized for mobile width with minimal spacing
         table_content = "```\n"
-        table_content += f"{'Connector':<12} {'Pair':<12} {'Side':<6} {'Size':<12} {'PnL':>10}\n"
-        table_content += f"{'─'*12} {'─'*12} {'─'*6} {'─'*12} {'─'*10}\n"
+        table_content += f"{'Connector':<11} {'Pair':<9} {'Side':<5} {'Value':<7} {'PnL':>6}\n"
+        table_content += f"{'─'*11} {'─'*9} {'─'*5} {'─'*7} {'─'*6}\n"
 
         for pos in account_positions:
-            connector = pos.get('connector_name', 'N/A')[:10]
-            pair = pos.get('trading_pair', 'N/A')[:11]
-            side = pos.get('position_side', 'N/A')[:5]
+            connector = pos.get('connector_name', 'N/A')
+            pair = pos.get('trading_pair', 'N/A')
+            # Try multiple field names for side (same as clob_trading)
+            side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
             amount = pos.get('amount', 0)
+            entry_price = pos.get('entry_price', 0)
             unrealized_pnl = pos.get('unrealized_pnl', 0)
 
-            # Format values
-            size_str = format_amount(amount)[:11]
-            pnl_str = format_number(unrealized_pnl).replace('$', '')[:9]
+            # Truncate connector name if too long
+            connector_display = connector[:10] if len(connector) > 10 else connector
 
-            table_content += f"{connector:<12} {pair:<12} {side:<6} {size_str:<12} {pnl_str:>10}\n"
+            # Truncate pair name if too long
+            pair_display = pair[:8] if len(pair) > 8 else pair
+
+            # Truncate side if too long
+            side_display = side[:4] if len(side) > 4 else side
+
+            # Calculate position value (Size * Entry Price)
+            try:
+                position_value = float(amount) * float(entry_price)
+                value_str = format_number(position_value).replace('$', '')[:6]
+            except (ValueError, TypeError):
+                value_str = "N/A"
+
+            try:
+                pnl_float = float(unrealized_pnl)
+                if pnl_float >= 0:
+                    pnl_str = f"+{pnl_float:.1f}"[:5]
+                else:
+                    pnl_str = f"{pnl_float:.1f}"[:5]
+            except (ValueError, TypeError):
+                pnl_str = str(unrealized_pnl)[:5]
+
+            table_content += f"{connector_display:<11} {pair_display:<9} {side_display:<5} {value_str:<7} {pnl_str:>6}\n"
 
         table_content += "```\n\n"
         message += table_content
@@ -601,22 +624,35 @@ def format_active_orders(orders_data: Dict[str, Any]) -> str:
     for account_name, account_orders in by_account.items():
         message += f"*Account:* {escape_markdown_v2(account_name)}\n"
 
-        # Create table
+        # Create table - optimized widths for mobile
         table_content = "```\n"
-        table_content += f"{'Connector':<12} {'Pair':<12} {'Side':<5} {'Type':<7} {'Amount':<12}\n"
-        table_content += f"{'─'*12} {'─'*12} {'─'*5} {'─'*7} {'─'*12}\n"
+        table_content += f"{'Exch':<11} {'Pair':<9} {'Side':<5} {'Type':<6} {'Amt':<8} {'Price':<8}\n"
+        table_content += f"{'─'*11} {'─'*9} {'─'*5} {'─'*6} {'─'*8} {'─'*8}\n"
 
         for order in account_orders[:10]:  # Show max 10 orders per account
-            connector = order.get('connector_name', 'N/A')[:11]
-            pair = order.get('trading_pair', 'N/A')[:11]
+            connector = order.get('connector_name', 'N/A')[:10]
+            pair = order.get('trading_pair', 'N/A')[:8]
             side = order.get('trade_type', 'N/A')[:4]
-            order_type = order.get('order_type', 'N/A')[:6]
+            order_type = order.get('order_type', 'N/A')[:5]
             amount = order.get('amount', 0)
+            price = order.get('price', 0)
 
             # Format amount
-            amount_str = format_amount(amount)[:11]
+            amount_str = format_amount(amount)[:7]
 
-            table_content += f"{connector:<12} {pair:<12} {side:<5} {order_type:<7} {amount_str:<12}\n"
+            # Format price
+            try:
+                price_float = float(price)
+                if price_float >= 1000:
+                    price_str = f"{price_float:.0f}"[:7]
+                elif price_float >= 1:
+                    price_str = f"{price_float:.2f}"[:7]
+                else:
+                    price_str = f"{price_float:.4f}"[:7]
+            except (ValueError, TypeError):
+                price_str = str(price)[:7]
+
+            table_content += f"{connector:<11} {pair:<9} {side:<5} {order_type:<6} {amount_str:<8} {price_str:<8}\n"
 
         if len(account_orders) > 10:
             table_content += f"\n... and {len(account_orders) - 10} more orders\n"
@@ -833,10 +869,11 @@ def format_positions_table(positions: List[Dict[str, Any]]) -> str:
 
     # Build monospace table - optimized for mobile width
     table_content = ""
-    table_content += f"{'Pair':<13} {'Side':<5} {'Size':<8} {'Entry':<10} {'PnL':>8}\n"
-    table_content += f"{'─'*13} {'─'*5} {'─'*8} {'─'*10} {'─'*8}\n"
+    table_content += f"{'Exchange':<13} {'Pair':<10} {'Side':<5} {'Size':<7} {'Entry':<8} {'PnL':>7}\n"
+    table_content += f"{'─'*13} {'─'*10} {'─'*5} {'─'*7} {'─'*8} {'─'*7}\n"
 
     for pos in positions[:10]:  # Limit to 10 for Telegram
+        connector = pos.get('connector_name', 'N/A')
         pair = pos.get('trading_pair', 'N/A')
         # Try multiple field names for side
         side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
@@ -844,33 +881,36 @@ def format_positions_table(positions: List[Dict[str, Any]]) -> str:
         entry = pos.get('entry_price', 0)
         pnl = pos.get('unrealized_pnl', 0)
 
+        # Truncate connector name if too long
+        connector_display = connector[:12] if len(connector) > 12 else connector
+
         # Truncate pair name if too long
-        pair_display = pair[:12] if len(pair) > 12 else pair
+        pair_display = pair[:9] if len(pair) > 9 else pair
 
         # Truncate side if too long
         side_display = side[:4] if len(side) > 4 else side
 
         # Format numbers
         try:
-            size_str = format_amount(float(size))[:7]
+            size_str = format_amount(float(size))[:6]
         except (ValueError, TypeError):
-            size_str = str(size)[:7]
+            size_str = str(size)[:6]
 
         try:
-            entry_str = f"{float(entry):.2f}"[:9]
+            entry_str = f"{float(entry):.2f}"[:7]
         except (ValueError, TypeError):
-            entry_str = str(entry)[:9]
+            entry_str = str(entry)[:7]
 
         try:
             pnl_float = float(pnl)
             if pnl_float >= 0:
-                pnl_str = f"+{pnl_float:.2f}"[:7]
+                pnl_str = f"+{pnl_float:.2f}"[:6]
             else:
-                pnl_str = f"{pnl_float:.2f}"[:7]
+                pnl_str = f"{pnl_float:.2f}"[:6]
         except (ValueError, TypeError):
-            pnl_str = str(pnl)[:7]
+            pnl_str = str(pnl)[:6]
 
-        table_content += f"{pair_display:<13} {side_display:<5} {size_str:<8} {entry_str:<10} {pnl_str:>8}\n"
+        table_content += f"{connector_display:<13} {pair_display:<10} {side_display:<5} {size_str:<7} {entry_str:<8} {pnl_str:>7}\n"
 
     if len(positions) > 10:
         table_content += f"\n... and {len(positions) - 10} more positions\n"
