@@ -1,29 +1,62 @@
 """
 Trading context configuration and session management
 
-Manages:
-- Default trading account
-- Last used trading parameters for quick trading
-- Trading session state
+DEPRECATED: This module is maintained for backward compatibility only.
+New code should use handlers.config.user_preferences directly.
 
-Uses telegram-python-bot's persistence via context.user_data
-Data is automatically saved to pickle file and persists across bot restarts
+This module now acts as a thin wrapper around the new centralized
+user_preferences module, forwarding all calls to maintain compatibility
+with existing code.
 """
 
 import logging
-from typing import Dict, Any, Optional
-from telegram.ext import ContextTypes
+from typing import Dict, Any
+
+# Import from new centralized preferences module
+from .user_preferences import (
+    # Portfolio
+    get_portfolio_prefs as _get_portfolio_prefs,
+    get_portfolio_days as _get_portfolio_days,
+    get_portfolio_interval as _get_portfolio_interval,
+    set_portfolio_days as _set_portfolio_days,
+    set_portfolio_interval as _set_portfolio_interval,
+    PORTFOLIO_DAYS_OPTIONS,
+    PORTFOLIO_INTERVAL_OPTIONS,
+    DEFAULT_PORTFOLIO_DAYS,
+    DEFAULT_PORTFOLIO_INTERVAL,
+
+    # CLOB
+    get_clob_account,
+    set_clob_account,
+    get_clob_last_order,
+    set_clob_last_order,
+    DEFAULT_CLOB_ACCOUNT,
+
+    # DEX
+    get_dex_last_swap,
+    set_dex_last_swap,
+    get_dex_last_pool,
+    set_dex_last_pool,
+    get_dex_connector,
+    DEFAULT_DEX_NETWORK,
+)
 
 logger = logging.getLogger(__name__)
 
-# Default trading account (can be overridden per user)
-DEFAULT_TRADING_ACCOUNT = "master_account"
+# Re-export constants for backward compatibility
+DEFAULT_TRADING_ACCOUNT = DEFAULT_CLOB_ACCOUNT
+TRADING_CONTEXT_KEY = "trading_context"  # Deprecated, kept for reference
+PORTFOLIO_CONFIG_KEY = "portfolio_config"  # Deprecated, kept for reference
 
-# Default DEX settings
-DEFAULT_DEX_NETWORK = "solana-mainnet-beta"
 
-# Key names for persistence
-TRADING_CONTEXT_KEY = "trading_context"
+# ============================================
+# BACKWARD COMPATIBLE FUNCTIONS
+# These wrap the new user_preferences module
+# ============================================
+
+def get_default_account() -> str:
+    """Get the default trading account name"""
+    return DEFAULT_TRADING_ACCOUNT
 
 
 def get_default_dex_connector(network: str = DEFAULT_DEX_NETWORK) -> str:
@@ -41,144 +74,110 @@ def get_default_dex_connector(network: str = DEFAULT_DEX_NETWORK) -> str:
     elif network.startswith("ethereum"):
         return "uniswap"
     else:
-        # Default fallback
         return "jupiter"
-
-
-def get_default_account() -> str:
-    """Get the default trading account name"""
-    return DEFAULT_TRADING_ACCOUNT
-
-
-def _ensure_trading_context(user_data: Dict) -> None:
-    """Ensure trading context exists in user_data"""
-    if TRADING_CONTEXT_KEY not in user_data:
-        user_data[TRADING_CONTEXT_KEY] = {
-            "account": DEFAULT_TRADING_ACCOUNT,
-            "last_clob": {},
-            "last_dex_swap": {},
-            "last_dex_pool": {},
-        }
 
 
 def get_trading_context(user_data: Dict) -> Dict[str, Any]:
     """
-    Get trading context from user_data (persisted automatically)
+    DEPRECATED: Use user_preferences module directly.
 
-    Args:
-        user_data: context.user_data from telegram update
-
-    Returns:
-        Dictionary with user's trading context
+    Get trading context - reconstructs old format from new preferences
     """
-    _ensure_trading_context(user_data)
-    return user_data[TRADING_CONTEXT_KEY]
+    return {
+        "account": get_clob_account(user_data),
+        "last_clob": get_clob_last_order(user_data),
+        "last_dex_swap": get_dex_last_swap(user_data),
+        "last_dex_pool": get_dex_last_pool(user_data),
+    }
 
 
 def update_trading_context(user_data: Dict, context_type: str, data: Dict[str, Any]) -> None:
     """
-    Update trading context in user_data (persisted automatically)
+    DEPRECATED: Use specific set functions from user_preferences.
 
-    Args:
-        user_data: context.user_data from telegram update
-        context_type: Type of context ("last_clob", "last_dex_swap", "last_dex_pool", "account")
-        data: Data to update
+    Update trading context
     """
-    _ensure_trading_context(user_data)
-    context = user_data[TRADING_CONTEXT_KEY]
-
     if context_type == "account":
-        context["account"] = data.get("account", DEFAULT_TRADING_ACCOUNT)
-    elif context_type in ["last_clob", "last_dex_swap", "last_dex_pool"]:
-        context[context_type].update(data)
-
-    # Update is automatic with persistence
-    logger.info(f"Updated {context_type} context (persisted automatically)")
+        set_clob_account(user_data, data.get("account", DEFAULT_TRADING_ACCOUNT))
+    elif context_type == "last_clob":
+        set_clob_last_order(user_data, data)
+    elif context_type == "last_dex_swap":
+        set_dex_last_swap(user_data, data)
+    elif context_type == "last_dex_pool":
+        set_dex_last_pool(user_data, data)
 
 
 def get_last_clob_params(user_data: Dict) -> Dict[str, Any]:
-    """
-    Get last used CLOB trading parameters
-
-    Args:
-        user_data: context.user_data from telegram update
-
-    Returns:
-        Dictionary with last CLOB parameters:
-        - connector: Last used connector
-        - trading_pair: Last used trading pair
-        - side: Last used side (BUY/SELL)
-        - amount: Last used amount
-        - order_type: Last used order type (MARKET/LIMIT)
-    """
-    context = get_trading_context(user_data)
-    return context.get("last_clob", {})
+    """Get last used CLOB trading parameters"""
+    return get_clob_last_order(user_data)
 
 
 def get_last_dex_swap_params(user_data: Dict) -> Dict[str, Any]:
-    """
-    Get last used DEX swap parameters
-
-    Args:
-        user_data: context.user_data from telegram update
-
-    Returns:
-        Dictionary with last DEX swap parameters:
-        - connector: Last used connector (jupiter, 0x)
-        - network: Last used network
-        - trading_pair: Last used trading pair
-        - side: Last used side
-        - slippage: Last used slippage
-    """
-    context = get_trading_context(user_data)
-    return context.get("last_dex_swap", {})
+    """Get last used DEX swap parameters"""
+    return get_dex_last_swap(user_data)
 
 
 def get_last_dex_pool_params(user_data: Dict) -> Dict[str, Any]:
-    """
-    Get last used DEX pool parameters
-
-    Args:
-        user_data: context.user_data from telegram update
-
-    Returns:
-        Dictionary with last DEX pool parameters:
-        - connector: Last used connector
-        - network: Last used network
-        - pool_address: Last used pool address
-    """
-    context = get_trading_context(user_data)
-    return context.get("last_dex_pool", {})
+    """Get last used DEX pool parameters"""
+    return get_dex_last_pool(user_data)
 
 
 def set_last_clob_params(user_data: Dict, params: Dict[str, Any]) -> None:
     """Save last used CLOB parameters"""
-    update_trading_context(user_data, "last_clob", params)
+    set_clob_last_order(user_data, params)
 
 
 def set_last_dex_swap_params(user_data: Dict, params: Dict[str, Any]) -> None:
     """Save last used DEX swap parameters"""
-    update_trading_context(user_data, "last_dex_swap", params)
+    set_dex_last_swap(user_data, params)
 
 
 def set_last_dex_pool_params(user_data: Dict, params: Dict[str, Any]) -> None:
     """Save last used DEX pool parameters"""
-    update_trading_context(user_data, "last_dex_pool", params)
+    set_dex_last_pool(user_data, params)
 
 
 def get_account(user_data: Dict) -> str:
     """Get the trading account for a user (defaults to master_account)"""
-    context = get_trading_context(user_data)
-    return context.get("account", DEFAULT_TRADING_ACCOUNT)
+    return get_clob_account(user_data)
 
 
 def set_account(user_data: Dict, account: str) -> None:
     """Set the trading account for a user"""
-    update_trading_context(user_data, "account", {"account": account})
+    set_clob_account(user_data, account)
 
 
 def clear_trading_context(user_data: Dict) -> None:
     """Clear all trading context for a user"""
-    if TRADING_CONTEXT_KEY in user_data:
-        del user_data[TRADING_CONTEXT_KEY]
-        logger.info("Cleared trading context (persisted automatically)")
+    # This is now a no-op since we don't want to clear all preferences
+    # Just clear the last order/swap params
+    from .user_preferences import _ensure_preferences
+    prefs = _ensure_preferences(user_data)
+    prefs["clob"]["last_order"] = {}
+    prefs["dex"]["last_swap"] = {}
+    prefs["dex"]["last_pool"] = {}
+    logger.info("Cleared trading context (last order/swap/pool params)")
+
+
+# ============================================
+# PORTFOLIO CONFIGURATION (Backward Compatible)
+# ============================================
+
+def _ensure_portfolio_config(user_data: Dict) -> None:
+    """DEPRECATED: Portfolio config is now part of user_preferences"""
+    pass  # Migration handled by user_preferences module
+
+
+def get_portfolio_config(user_data: Dict) -> Dict[str, Any]:
+    """Get portfolio configuration"""
+    return _get_portfolio_prefs(user_data)
+
+
+def set_portfolio_days(user_data: Dict, days: int) -> None:
+    """Set portfolio evolution days"""
+    _set_portfolio_days(user_data, days)
+
+
+def set_portfolio_interval(user_data: Dict, interval: str) -> None:
+    """Set portfolio data interval"""
+    _set_portfolio_interval(user_data, interval)

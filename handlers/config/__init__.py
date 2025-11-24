@@ -128,25 +128,53 @@ def get_config_callback_handler():
 
 def get_modify_value_handler():
     """
-    Get the message handler for text input during configuration flows
+    Get the UNIFIED message handler for ALL text input flows.
+
+    This handler routes text input to the appropriate sub-handler based on context state.
+    Order of priority:
+    1. Trading states (clob_state, dex_state) - highest priority
+    2. Config states (server modification, API keys, gateway)
     """
     from .servers import handle_server_input
     from .api_keys import handle_api_key_input
     from .gateway import handle_gateway_input
 
-    async def handle_all_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_all_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Route text input to appropriate handler based on context state"""
-        # Check which config flow is active
+
+        # 1. Check CLOB trading state (highest priority)
+        if context.user_data.get('clob_state'):
+            from handlers.clob import clob_message_handler
+            await clob_message_handler(update, context)
+            return
+
+        # 2. Check DEX trading state
+        if context.user_data.get('dex_state'):
+            from handlers.dex import dex_message_handler
+            await dex_message_handler(update, context)
+            return
+
+        # 3. Check config flows - server modification
         if context.user_data.get('awaiting_add_server_input') or context.user_data.get('awaiting_modify_input'):
             await handle_server_input(update, context)
-        elif context.user_data.get('awaiting_api_key_input'):
+            return
+
+        # 4. Check config flows - API keys
+        if context.user_data.get('awaiting_api_key_input'):
             await handle_api_key_input(update, context)
-        elif (context.user_data.get('awaiting_gateway_input') or
+            return
+
+        # 5. Check config flows - gateway
+        if (context.user_data.get('awaiting_gateway_input') or
               context.user_data.get('awaiting_wallet_input') or
               context.user_data.get('awaiting_connector_input') or
               context.user_data.get('awaiting_network_input') or
               context.user_data.get('awaiting_token_input') or
               context.user_data.get('awaiting_pool_input')):
             await handle_gateway_input(update, context)
+            return
 
-    return MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_config_input)
+        # No active state - ignore the message
+        logger.debug(f"No active input state for message: {update.message.text[:50] if update.message else 'N/A'}...")
+
+    return MessageHandler(filters.TEXT & ~filters.COMMAND, handle_all_text_input)

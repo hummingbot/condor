@@ -232,7 +232,7 @@ def _format_percent(value, decimals: int = 2) -> str:
 def _format_pool_table(pools: list) -> str:
     """Format pools as a compact table optimized for mobile
 
-    Shows: #, Pair, TVL, Fee, APR, Vol24h, Bin
+    Shows: #, Pair, TVL, Fee, APR, Vol, Bin
 
     Args:
         pools: List of pool data dictionaries
@@ -245,17 +245,17 @@ def _format_pool_table(pools: list) -> str:
 
     lines = []
 
-    # Header - compact for mobile (total ~38 chars)
+    # Header - balanced for mobile (~45 chars)
     lines.append("```")
-    lines.append(f"# {'Pair':<8} {'TVL':>5} {'Fee':>4} {'APR':>4} {'Vol':>5} {'B':>3}")
-    lines.append("─" * 38)
+    lines.append(f"{'#':>2} {'Pair':<10} {'TVL':>5} {'Fee':>4} {'APR %':>6} {'Vol':>4} {'Bin':>3}")
+    lines.append("─" * 45)
 
     for i, pool in enumerate(pools):
         idx = str(i + 1)
-        # Truncate pair to 8 chars
-        pair = pool.get('trading_pair', 'N/A')[:8]
+        # Truncate pair to 10 chars (fits AVICI-USDC)
+        pair = pool.get('trading_pair', 'N/A')[:10]
 
-        # Compact TVL (remove decimals for K/M)
+        # Compact TVL
         tvl = _format_compact(pool.get('liquidity', 0))
 
         # Base fee percentage - compact
@@ -269,17 +269,12 @@ def _format_pool_table(pools: list) -> str:
         else:
             fee_str = "—"
 
-        # APR percentage - compact
+        # APR percentage - always 2 decimals
         apr = pool.get('apr')
         if apr:
             try:
                 apr_val = float(apr)
-                if apr_val >= 100:
-                    apr_str = f"{apr_val:.0f}"
-                elif apr_val >= 1:
-                    apr_str = f"{apr_val:.1f}"
-                else:
-                    apr_str = f"{apr_val:.1f}"
+                apr_str = f"{apr_val:.2f}"
             except (ValueError, TypeError):
                 apr_str = "—"
         else:
@@ -291,7 +286,7 @@ def _format_pool_table(pools: list) -> str:
         # Bin step
         bin_step = pool.get('bin_step', '—')
 
-        lines.append(f"{idx} {pair:<8} {tvl:>5} {fee_str:>4} {apr_str:>4} {vol_24h:>5} {bin_step:>3}")
+        lines.append(f"{idx:>2} {pair:<10} {tvl:>5} {fee_str:>4} {apr_str:>6} {vol_24h:>4} {bin_step:>3}")
 
     lines.append("```")
 
@@ -1298,8 +1293,108 @@ def _calculate_max_range(current_price: float, bin_step: int, max_bins: int = 69
         return None, None
 
 
+def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
+                          current_price: float, width: int = 30) -> str:
+    """Generate ASCII visualization of liquidity with selected range markers
+
+    Args:
+        bins: List of bin data with price and liquidity
+        lower_price: Selected lower bound
+        upper_price: Selected upper bound
+        current_price: Current pool price
+        width: Width of the chart
+
+    Returns:
+        ASCII chart string
+    """
+    if not bins:
+        return ""
+
+    # Process bins
+    bin_data = []
+    for b in bins:
+        base = float(b.get('base_token_amount', 0) or 0)
+        quote = float(b.get('quote_token_amount', 0) or 0)
+        price = float(b.get('price', 0) or 0)
+        if price > 0:
+            bin_data.append({'price': price, 'liq': base + quote})
+
+    if not bin_data:
+        return ""
+
+    # Sort and filter to bins with liquidity
+    bin_data.sort(key=lambda x: x['price'])
+    active_bins = [b for b in bin_data if b['liq'] > 0]
+
+    if not active_bins:
+        return ""
+
+    # Get price range
+    min_price = min(b['price'] for b in active_bins)
+    max_price = max(b['price'] for b in active_bins)
+    price_range = max_price - min_price
+
+    if price_range <= 0:
+        return ""
+
+    # Find max liquidity for scaling
+    max_liq = max(b['liq'] for b in active_bins)
+
+    # Build histogram
+    lines = ["```"]
+    lines.append("Range Preview:")
+
+    # Sample to ~8 price points for compact display
+    if len(active_bins) > 8:
+        step = len(active_bins) // 8
+        sampled = active_bins[::step][:8]
+    else:
+        sampled = active_bins
+
+    for b in sampled:
+        price = b['price']
+        liq = b['liq']
+
+        # Calculate bar length
+        bar_len = int((liq / max_liq) * (width - 10)) if max_liq > 0 else 0
+
+        # Determine markers
+        in_range = lower_price <= price <= upper_price if lower_price and upper_price else False
+        is_current = abs(price - current_price) / current_price < 0.02 if current_price else False
+
+        # Build bar with range markers
+        if in_range:
+            bar = "█" * bar_len
+        else:
+            bar = "░" * bar_len
+
+        # Add markers
+        marker = ""
+        if is_current:
+            marker = "◄"
+        elif lower_price and abs(price - lower_price) / lower_price < 0.05:
+            marker = "L"
+        elif upper_price and abs(price - upper_price) / upper_price < 0.05:
+            marker = "U"
+
+        # Format price compactly
+        if price >= 1:
+            p_str = f"{price:.4f}"[:6]
+        else:
+            p_str = f"{price:.5f}"[:6]
+
+        lines.append(f"{p_str} |{bar:<{width-10}}|{marker}")
+
+    lines.append("```")
+    lines.append(r"_█ \= in range, ░ \= out, ◄ \= current_")
+
+    return "\n".join(lines)
+
+
 async def show_add_position_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, send_new: bool = False) -> None:
-    """Display the add position configuration menu"""
+    """Display the add position configuration menu with liquidity chart"""
+    from io import BytesIO
+
     params = context.user_data.get("add_position_params", {})
 
     # Get pool info if available for range suggestions
@@ -1309,8 +1404,10 @@ async def show_add_position_menu(update: Update, context: ContextTypes.DEFAULT_T
     # Get current price and bin step for range calculation
     current_price = pool_info.get('price') or selected_pool.get('current_price')
     bin_step = selected_pool.get('bin_step') or pool_info.get('bin_step')
+    bins = pool_info.get('bins', [])
+    pair = selected_pool.get('trading_pair', 'Pool')
 
-    # Calculate suggested max range (69 bins)
+    # Calculate max range (69 bins) and auto-fill if not set
     suggested_lower, suggested_upper = None, None
     if current_price and bin_step:
         try:
@@ -1318,109 +1415,151 @@ async def show_add_position_menu(update: Update, context: ContextTypes.DEFAULT_T
                 float(current_price),
                 int(bin_step)
             )
+            # Auto-fill if empty
+            if suggested_lower and not params.get('lower_price'):
+                params['lower_price'] = f"{suggested_lower:.6f}"
+            if suggested_upper and not params.get('upper_price'):
+                params['upper_price'] = f"{suggested_upper:.6f}"
         except (ValueError, TypeError):
             pass
 
+    # Get current range values for visualization
+    try:
+        lower_val = float(params.get('lower_price', 0)) if params.get('lower_price') else None
+        upper_val = float(params.get('upper_price', 0)) if params.get('upper_price') else None
+        current_val = float(current_price) if current_price else None
+    except (ValueError, TypeError):
+        lower_val, upper_val, current_val = None, None, None
+
     help_text = r"➕ *Add CLMM Position*" + "\n\n"
 
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
-    help_text += r"*📊 Position Configuration*" + "\n"
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
+    # Pool info section
+    help_text += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+    if current_price:
+        help_text += f"💱 *Current Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
+    if bin_step:
+        help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(max 69 bins\\)_\n"
 
-    help_text += f"🔌 *Connector:* `{escape_markdown_v2(params.get('connector', 'N/A'))}`\n"
-    help_text += f"🌐 *Network:* `{escape_markdown_v2(params.get('network', 'N/A'))}`\n"
-    help_text += f"🏊 *Pool:* `{escape_markdown_v2(params.get('pool_address', 'N/A')[:16] + '...' if params.get('pool_address') else 'N/A')}`\n"
-    help_text += f"📉 *Lower Price:* `{escape_markdown_v2(params.get('lower_price') or 'N/A')}`\n"
-    help_text += f"📈 *Upper Price:* `{escape_markdown_v2(params.get('upper_price') or 'N/A')}`\n"
-    help_text += f"💰 *Amount Base:* `{escape_markdown_v2(params.get('amount_base') or 'N/A')}`\n"
-    help_text += f"💵 *Amount Quote:* `{escape_markdown_v2(params.get('amount_quote') or 'N/A')}`\n"
+    help_text += "\n" + r"━━━ Position Config ━━━" + "\n\n"
 
-    # Show suggested range if available
-    if suggested_lower and suggested_upper:
-        help_text += "\n" + r"━━━━━━━━━━━━━━━━━━━━" + "\n"
-        help_text += r"*💡 Suggested Max Range \(69 bins\)*" + "\n"
-        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
-        help_text += f"Current Price: `{escape_markdown_v2(f'{float(current_price):.6f}')}`\n"
-        help_text += f"Bin Step: `{escape_markdown_v2(str(bin_step))}`\n"
-        help_text += f"Max Range: `{escape_markdown_v2(f'{suggested_lower:.6f}')}` \\- `{escape_markdown_v2(f'{suggested_upper:.6f}')}`\n"
-        help_text += "\n_Use 🎯 button to auto\\-fill max range_\n"
+    help_text += f"📉 *Lower:* `{escape_markdown_v2(params.get('lower_price') or '—')}`\n"
+    help_text += f"📈 *Upper:* `{escape_markdown_v2(params.get('upper_price') or '—')}`\n"
+    help_text += f"💰 *Base:* `{escape_markdown_v2(params.get('amount_base') or '—')}`\n"
+    help_text += f"💵 *Quote:* `{escape_markdown_v2(params.get('amount_quote') or '—')}`\n"
 
-    help_text += "\n" + r"━━━━━━━━━━━━━━━━━━━━" + "\n"
-    help_text += r"*⌨️ Or Type Directly*" + "\n"
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
-    help_text += r"`pool_address lower_price upper_price amount_base amount_quote`" + "\n"
+    # Add ASCII range visualization if we have bins
+    if bins and lower_val and upper_val:
+        ascii_chart = _generate_range_ascii(bins, lower_val, upper_val, current_val)
+        if ascii_chart:
+            help_text += "\n" + ascii_chart
+
+    # Network display (truncate smartly)
+    network = params.get('network', 'solana-mainnet-beta')
+    network_short = network[:18] + ".." if len(network) > 20 else network
 
     # Build keyboard
     keyboard = [
         [
             InlineKeyboardButton(
-                f"{params.get('connector', 'meteora')}",
-                callback_data="dex:pos_set_connector"
-            ),
-            InlineKeyboardButton(
-                f"{params.get('network', 'solana-mainnet-beta')[:15]}",
-                callback_data="dex:pos_set_network"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"Pool: {params.get('pool_address', '')[:8]}..." if params.get('pool_address') else "Set Pool",
-                callback_data="dex:pos_set_pool"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                f"Lower: {params.get('lower_price') or '—'}",
+                f"📉 Lower: {params.get('lower_price', '—')[:8]}",
                 callback_data="dex:pos_set_lower"
             ),
             InlineKeyboardButton(
-                f"Upper: {params.get('upper_price') or '—'}",
+                f"📈 Upper: {params.get('upper_price', '—')[:8]}",
                 callback_data="dex:pos_set_upper"
             )
         ],
-    ]
-
-    # Add max range button if we have suggestions
-    if suggested_lower and suggested_upper:
-        keyboard.append([
-            InlineKeyboardButton("🎯 Use Max Range (69 bins)", callback_data="dex:pos_use_max_range")
-        ])
-
-    keyboard.extend([
         [
             InlineKeyboardButton(
-                f"Base: {params.get('amount_base') or '—'}",
+                f"💰 Base: {params.get('amount_base') or '—'}",
                 callback_data="dex:pos_set_base"
             ),
             InlineKeyboardButton(
-                f"Quote: {params.get('amount_quote') or '—'}",
+                f"💵 Quote: {params.get('amount_quote') or '—'}",
                 callback_data="dex:pos_set_quote"
             )
         ],
         [
             InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
-            InlineKeyboardButton("« Cancel", callback_data="dex:main_menu")
+            InlineKeyboardButton("« Back", callback_data="dex:pool_list_back")
         ]
-    ])
+    ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if send_new or not update.callback_query:
-        await update.message.reply_text(
-            help_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
-    else:
+    # Generate chart image if bins available
+    chart_bytes = None
+    if bins:
         try:
-            await update.callback_query.message.edit_text(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+            chart_bytes = _generate_liquidity_chart(
+                bins=bins,
+                active_bin_id=pool_info.get('active_bin_id'),
+                current_price=current_val,
+                pair_name=pair
             )
         except Exception as e:
-            if "not modified" not in str(e).lower():
-                logger.warning(f"Failed to edit add position menu: {e}")
+            logger.warning(f"Failed to generate chart for add position: {e}")
+
+    # Determine how to send
+    if send_new or not update.callback_query:
+        chat = update.message.chat if update.message else update.callback_query.message.chat
+        if chart_bytes:
+            try:
+                photo_file = BytesIO(chart_bytes)
+                photo_file.name = "liquidity.png"
+                await chat.send_photo(
+                    photo=photo_file,
+                    caption=help_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send chart: {e}")
+                await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+        else:
+            await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+    else:
+        # Try to edit caption if it's a photo, otherwise edit text
+        msg = update.callback_query.message
+        try:
+            if msg.photo:
+                # It's a photo, edit caption
+                await msg.edit_caption(
+                    caption=help_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            else:
+                await msg.edit_text(
+                    text=help_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+        except Exception as e:
+            error_str = str(e).lower()
+            if "not modified" in error_str:
+                pass
+            else:
+                # Delete and send new with chart
+                chat = msg.chat
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                if chart_bytes:
+                    try:
+                        photo_file = BytesIO(chart_bytes)
+                        photo_file.name = "liquidity.png"
+                        await chat.send_photo(
+                            photo=photo_file,
+                            caption=help_text,
+                            parse_mode="MarkdownV2",
+                            reply_markup=reply_markup
+                        )
+                    except Exception:
+                        await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+                else:
+                    await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 
 
 async def handle_pos_use_max_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
