@@ -354,11 +354,11 @@ def get_clob_order_defaults(user_data: Dict) -> CLOBOrderParams:
     return {
         "connector": last_order.get("connector", prefs.get("default_connector", DEFAULT_CLOB_CONNECTOR)),
         "trading_pair": last_order.get("trading_pair", prefs.get("default_pair", DEFAULT_CLOB_PAIR)),
-        "side": DEFAULT_CLOB_SIDE,
-        "order_type": DEFAULT_CLOB_ORDER_TYPE,
-        "position_mode": DEFAULT_CLOB_POSITION_MODE,
-        "amount": DEFAULT_CLOB_AMOUNT,
-        "price": "88000",
+        "side": last_order.get("side", DEFAULT_CLOB_SIDE),
+        "order_type": last_order.get("order_type", DEFAULT_CLOB_ORDER_TYPE),
+        "position_mode": last_order.get("position_mode", DEFAULT_CLOB_POSITION_MODE),
+        "amount": last_order.get("amount", DEFAULT_CLOB_AMOUNT),
+        "price": last_order.get("price", "88000"),
     }
 
 

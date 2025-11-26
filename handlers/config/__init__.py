@@ -15,17 +15,12 @@ def clear_config_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Clear all config-related state from user context.
     Call this when starting other commands to prevent state pollution.
+
+    Note: This is now a convenience wrapper around clear_all_input_states()
+    for backwards compatibility.
     """
-    context.user_data.pop('modifying_server', None)
-    context.user_data.pop('modifying_field', None)
-    context.user_data.pop('awaiting_modify_input', None)
-    context.user_data.pop('adding_server', None)
-    context.user_data.pop('awaiting_add_server_input', None)
-    context.user_data.pop('configuring_api_key', None)
-    context.user_data.pop('awaiting_api_key_input', None)
-    context.user_data.pop('api_key_config_data', None)
-    context.user_data.pop('gateway_state', None)
-    context.user_data.pop('awaiting_gateway_input', None)
+    from handlers import clear_all_input_states
+    clear_all_input_states(context)
 
 
 def _get_config_menu_markup_and_text():
@@ -80,6 +75,9 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     - API Keys (Exchange API credentials)
     - Gateway (Gateway container and DEX operations)
     """
+    # Clear all pending input states to prevent interference
+    clear_config_state(context)
+
     reply_markup, message_text = _get_config_menu_markup_and_text()
 
     await update.message.reply_text(
@@ -141,6 +139,7 @@ def get_modify_value_handler():
 
     async def handle_all_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Route text input to appropriate handler based on context state"""
+        logger.info(f"handle_all_text_input: user_data keys = {list(context.user_data.keys())}")
 
         # 1. Check CLOB trading state (highest priority)
         if context.user_data.get('clob_state'):
