@@ -99,6 +99,27 @@ def format_amount(value: float, decimals: int = 4) -> str:
         return formatted if '.' in f"{value:.{decimals}f}" else f"{value:.0f}"
 
 
+def format_price(value: float) -> str:
+    """
+    Format token price with appropriate precision based on magnitude.
+    Shows more decimals for lower prices, fewer for higher prices.
+    """
+    if value == 0:
+        return "$0.00"
+    elif value >= 1000:
+        return f"${value:,.0f}"
+    elif value >= 100:
+        return f"${value:.1f}"
+    elif value >= 1:
+        return f"${value:.2f}"
+    elif value >= 0.01:
+        return f"${value:.4f}"
+    elif value >= 0.0001:
+        return f"${value:.6f}"
+    else:
+        return f"${value:.2e}"
+
+
 def format_portfolio_summary(summary: Dict[str, Any]) -> str:
     """
     Format portfolio summary for Telegram MarkdownV2
@@ -218,10 +239,10 @@ def format_portfolio_state(
 
             message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
 
-            # Start table
+            # Start table - show Token, Price, Value, %
             table_content = "```\n"
-            table_content += f"{'Token':<12} {'Amount':<15} {'Value':<12} {'%':>6}\n"
-            table_content += f"{'─'*12} {'─'*15} {'─'*12} {'─'*6}\n"
+            table_content += f"{'Token':<10} {'Price':<12} {'Value':<12} {'%':>6}\n"
+            table_content += f"{'─'*10} {'─'*12} {'─'*12} {'─'*6}\n"
 
             for balance in balances:
                 token = balance["token"]
@@ -229,15 +250,16 @@ def format_portfolio_state(
                 value = balance["value"]
                 percentage = balance["percentage"]
 
-                # Format values - remove $ signs from amounts in table
-                amount_str = format_amount(units)
+                # Calculate price per token
+                price = value / units if units > 0 else 0
+                price_str = format_price(price)
                 value_str = format_number(value).replace('$', '')
 
                 # Truncate long token names
-                token_display = token[:10] if len(token) > 10 else token
+                token_display = token[:9] if len(token) > 9 else token
 
                 # Add row to table
-                table_content += f"{token_display:<12} {amount_str:<15} {value_str:<12} {percentage:>5.1f}%\n"
+                table_content += f"{token_display:<10} {price_str:<12} {value_str:<12} {percentage:>5.1f}%\n"
 
             # Close table
             table_content += "```\n\n"
@@ -498,9 +520,10 @@ def format_perpetual_positions(positions_data: Dict[str, Any]) -> str:
         message += f"*Account:* {escape_markdown_v2(account_name)}\n"
 
         # Create table - optimized for mobile width with minimal spacing
+        # Columns: Connector(10) Pair(10) Side(4) Value(7) PnL$(7)
         table_content = "```\n"
-        table_content += f"{'Connector':<11} {'Pair':<9} {'Side':<5} {'Value':<7} {'PnL':>6}\n"
-        table_content += f"{'─'*11} {'─'*9} {'─'*5} {'─'*7} {'─'*6}\n"
+        table_content += f"{'Connector':<10} {'Pair':<10} {'Side':<4} {'Value':<7} {'PnL($)':>7}\n"
+        table_content += f"{'─'*10} {'─'*10} {'─'*4} {'─'*7} {'─'*7}\n"
 
         for pos in account_positions:
             connector = pos.get('connector_name', 'N/A')
@@ -512,13 +535,19 @@ def format_perpetual_positions(positions_data: Dict[str, Any]) -> str:
             unrealized_pnl = pos.get('unrealized_pnl', 0)
 
             # Truncate connector name if too long
-            connector_display = connector[:10] if len(connector) > 10 else connector
+            connector_display = connector[:9] if len(connector) > 9 else connector
 
-            # Truncate pair name if too long
-            pair_display = pair[:8] if len(pair) > 8 else pair
+            # Truncate pair name
+            pair_display = pair[:9] if len(pair) > 9 else pair
 
-            # Truncate side if too long
-            side_display = side[:4] if len(side) > 4 else side
+            # Truncate side - use short form
+            side_upper = side.upper() if side else 'N/A'
+            if side_upper in ('LONG', 'BUY'):
+                side_display = 'LONG'
+            elif side_upper in ('SHORT', 'SELL'):
+                side_display = 'SHRT'
+            else:
+                side_display = side[:4] if len(side) > 4 else side
 
             # Calculate position value (Size * Entry Price)
             try:
@@ -530,13 +559,13 @@ def format_perpetual_positions(positions_data: Dict[str, Any]) -> str:
             try:
                 pnl_float = float(unrealized_pnl)
                 if pnl_float >= 0:
-                    pnl_str = f"+{pnl_float:.1f}"[:5]
+                    pnl_str = f"+{pnl_float:.2f}"[:7]
                 else:
-                    pnl_str = f"{pnl_float:.1f}"[:5]
+                    pnl_str = f"{pnl_float:.2f}"[:7]
             except (ValueError, TypeError):
-                pnl_str = str(unrealized_pnl)[:5]
+                pnl_str = str(unrealized_pnl)[:7]
 
-            table_content += f"{connector_display:<11} {pair_display:<9} {side_display:<5} {value_str:<7} {pnl_str:>6}\n"
+            table_content += f"{connector_display:<10} {pair_display:<10} {side_display:<4} {value_str:<7} {pnl_str:>7}\n"
 
         table_content += "```\n\n"
         message += table_content
@@ -663,10 +692,28 @@ def format_active_orders(orders_data: Dict[str, Any]) -> str:
     return message
 
 
+def format_pnl_indicator(value: Optional[float]) -> str:
+    """Format a PNL percentage with color indicator"""
+    if value is None:
+        return "—"
+    arrow = "▲" if value >= 0 else "▼"
+    return f"{arrow}{abs(value):.1f}%"
+
+
+def format_change_compact(value: Optional[float]) -> str:
+    """Format a percentage change compactly for table columns"""
+    if value is None:
+        return "—"
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{value:.1f}%"
+
+
 def format_portfolio_overview(
     overview_data: Dict[str, Any],
     server_name: Optional[str] = None,
-    server_status: Optional[str] = None
+    server_status: Optional[str] = None,
+    pnl_indicators: Optional[Dict[str, Optional[float]]] = None,
+    changes_24h: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Format complete portfolio overview with all sections
@@ -679,6 +726,8 @@ def format_portfolio_overview(
             - active_orders: Active orders data
         server_name: Name of the server (optional)
         server_status: Status of the server (optional)
+        pnl_indicators: Dict with pnl_24h, pnl_7d, pnl_30d percentages (optional)
+        changes_24h: Dict with token and connector 24h changes (optional)
 
     Returns:
         Formatted Telegram message with all portfolio sections
@@ -696,6 +745,31 @@ def format_portfolio_overview(
         message = f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
     else:
         message = "💼 *Portfolio Details*\n\n"
+
+    # Add PNL indicators bar if available
+    if pnl_indicators:
+        pnl_24h = pnl_indicators.get("pnl_24h")
+        pnl_7d = pnl_indicators.get("pnl_7d")
+        pnl_30d = pnl_indicators.get("pnl_30d")
+        detected_movements = pnl_indicators.get("detected_movements", [])
+
+        # Only show if we have at least one value
+        if any(v is not None for v in [pnl_24h, pnl_7d, pnl_30d]):
+            pnl_parts = []
+            if pnl_24h is not None:
+                pnl_parts.append(f"24h: `{escape_markdown_v2(format_pnl_indicator(pnl_24h))}`")
+            if pnl_7d is not None:
+                pnl_parts.append(f"7d: `{escape_markdown_v2(format_pnl_indicator(pnl_7d))}`")
+            if pnl_30d is not None:
+                pnl_parts.append(f"30d: `{escape_markdown_v2(format_pnl_indicator(pnl_30d))}`")
+
+            if pnl_parts:
+                message += "📈 *PNL:* " + " \\| ".join(pnl_parts) + "\n"
+
+        # Show detected movements if any (max 5 most recent)
+        if detected_movements:
+            message += f"_\\({len(detected_movements)} movimiento\\(s\\) detectado\\(s\\) ajustados\\)_\n"
+            message += "\n"
 
     # ============================================
     # SECTION 1: BALANCES - Detailed tables by account and connector
@@ -742,6 +816,10 @@ def format_portfolio_overview(
             for connector in grouped[account]:
                 grouped[account][connector].sort(key=lambda x: x["value"], reverse=True)
 
+        # Get 24h changes data
+        token_changes = changes_24h.get("tokens", {}) if changes_24h else {}
+        connector_changes = changes_24h.get("connectors", {}) if changes_24h else {}
+
         # Build the balances section by iterating through accounts and connectors
         for account, connectors in grouped.items():
             message += f"*Account:* {escape_markdown_v2(account)}\n"
@@ -751,28 +829,50 @@ def format_portfolio_overview(
                 connector_total = sum(balance["value"] for balance in balances_list)
                 connector_total_str = format_number(connector_total)
 
-                message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
+                # Get connector 24h change
+                conn_change = connector_changes.get(account, {}).get(connector, {})
+                conn_pct = conn_change.get("pct_change")
 
-                # Start table
+                if conn_pct is not None:
+                    change_str = format_change_compact(conn_pct)
+                    message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}` \\({escape_markdown_v2(change_str)}\\)\n\n"
+                else:
+                    message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
+
+                # Start table - Token, Price, Value, %Total, 24h
                 table_content = "```\n"
-                table_content += f"{'Token':<12} {'Amount':<15} {'Value':<12} {'%':>6}\n"
-                table_content += f"{'─'*12} {'─'*15} {'─'*12} {'─'*6}\n"
+                table_content += f"{'Token':<6} {'Price':<8} {'Value':<7} {'%Tot':>5} {'24h':>6}\n"
+                table_content += f"{'─'*6} {'─'*8} {'─'*7} {'─'*5} {'─'*6}\n"
 
                 for balance in balances_list:
                     token = balance["token"]
                     units = balance["units"]
                     value = balance["value"]
-                    percentage = balance["percentage"]
 
-                    # Format values - remove $ signs from amounts in table
-                    amount_str = format_amount(units)
-                    value_str = format_number(value).replace('$', '')
+                    # Calculate price per token
+                    price = value / units if units > 0 else 0
+                    price_str = format_price(price)[:8]
+
+                    # Calculate percentage of total portfolio
+                    pct = (value / total_value * 100) if total_value > 0 else 0
+                    pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
+
+                    value_str = format_number(value).replace('$', '')[:7]
+
+                    # Get 24h price change for this token
+                    token_change = token_changes.get(token, {})
+                    price_change = token_change.get("price_change")
+                    if price_change is not None:
+                        sign = "+" if price_change >= 0 else ""
+                        change_24h_str = f"{sign}{price_change:.1f}%"[:6]
+                    else:
+                        change_24h_str = "—"
 
                     # Truncate long token names
-                    token_display = token[:10] if len(token) > 10 else token
+                    token_display = token[:5] if len(token) > 5 else token
 
                     # Add row to table
-                    table_content += f"{token_display:<12} {amount_str:<15} {value_str:<12} {percentage:>5.1f}%\n"
+                    table_content += f"{token_display:<6} {price_str:<8} {value_str:<7} {pct_str:>5} {change_24h_str:>6}\n"
 
                 # Close table
                 table_content += "```\n\n"
@@ -824,29 +924,36 @@ def format_orders_table(orders: List[Dict[str, Any]]) -> str:
 
     # Build monospace table
     table_content = ""
-    table_content += f"{'Pair':<12} {'Side':<5} {'Amount':<12} {'Type':<8} {'Status':<8}\n"
-    table_content += f"{'─'*12} {'─'*5} {'─'*12} {'─'*8} {'─'*8}\n"
+    table_content += f"{'Pair':<10} {'Side':<4} {'Amt':<8} {'Price':<8} {'Type':<6} {'Status':<7}\n"
+    table_content += f"{'─'*10} {'─'*4} {'─'*8} {'─'*8} {'─'*6} {'─'*7}\n"
 
     for order in orders[:10]:  # Limit to 10 for Telegram
         pair = order.get('trading_pair', 'N/A')
         side = order.get('trade_type', 'N/A')
         amount = order.get('amount', 0)
+        price = order.get('price', 0)
         order_type = order.get('order_type', 'N/A')
         status = order.get('status', 'N/A')
 
         # Truncate long values
-        pair_display = pair[:11] if len(pair) > 11 else pair
+        pair_display = pair[:9] if len(pair) > 9 else pair
         side_display = side[:4] if len(side) > 4 else side
-        type_display = order_type[:7] if len(order_type) > 7 else order_type
+        type_display = order_type[:6] if len(order_type) > 6 else order_type
         status_display = status[:7] if len(status) > 7 else status
 
         # Format amount
         try:
-            amount_str = format_amount(float(amount))[:11]
+            amount_str = format_amount(float(amount))[:8]
         except (ValueError, TypeError):
-            amount_str = str(amount)[:11]
+            amount_str = str(amount)[:8]
 
-        table_content += f"{pair_display:<12} {side_display:<5} {amount_str:<12} {type_display:<8} {status_display:<8}\n"
+        # Format price
+        try:
+            price_str = format_amount(float(price))[:8] if price else '-'
+        except (ValueError, TypeError):
+            price_str = str(price)[:8] if price else '-'
+
+        table_content += f"{pair_display:<10} {side_display:<4} {amount_str:<8} {price_str:<8} {type_display:<6} {status_display:<7}\n"
 
     if len(orders) > 10:
         table_content += f"\n... and {len(orders) - 10} more orders\n"
