@@ -321,7 +321,7 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             context.user_data,
             "gateway_data",
             _fetch_gateway_data,
-            ttl=60,  # Cache for 60 seconds
+            60,  # Cache for 60 seconds
             client
         )
         logger.debug(f"Gateway data: {len(gateway_data.get('balances_by_network', {}))} networks, total_value={gateway_data.get('total_value', 0)}")
