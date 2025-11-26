@@ -543,15 +543,17 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     Usage:
         /portfolio - Show portfolio dashboard with all graphs and information
+
+    Progressive loading: Fetches all data in parallel and updates UI as each piece arrives.
     """
+    import asyncio
+
     # Clear any config state to prevent interference
     clear_config_state(context)
 
-    # Send "typing" status
-    await update.message.reply_chat_action("typing")
-
     try:
         from servers import server_manager
+        from utils.trading_data import get_lp_positions, get_perpetual_positions, get_active_orders, get_tokens_for_networks
 
         # Get first enabled server
         servers = server_manager.list_servers()
@@ -569,49 +571,150 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         else:
             server_name = enabled_servers[0]
 
+        # Send initial loading message immediately
+        text_msg = await update.message.reply_text(
+            f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} ⏳_\n\n"
+            f"_Loading\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+
         client = await server_manager.get_client(server_name)
 
         # Check server status
         server_status_info = await server_manager.check_server_status(server_name)
         server_status = server_status_info.get("status", "online")
 
-        # Get portfolio config (only days now, interval is auto-calculated)
+        # Get portfolio config
         config = get_portfolio_prefs(context.user_data)
         days = config.get("days", 3)
+        start_time = _calculate_start_time(days)
+        pnl_start_time = _calculate_start_time(30)
+        graph_interval = _get_optimal_interval(days)
 
-        # Fetch all data in parallel (interval is calculated based on days)
-        overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval = await _fetch_dashboard_data(
-            client, days
-        )
+        # ========================================
+        # START ALL FETCHES IN PARALLEL
+        # ========================================
+        balances_task = asyncio.create_task(client.portfolio.get_state())
+        perp_task = asyncio.create_task(get_perpetual_positions(client))
+        lp_task = asyncio.create_task(get_lp_positions(client))
+        orders_task = asyncio.create_task(get_active_orders(client))
+        history_task = asyncio.create_task(client.portfolio.get_history(start_time=start_time, limit=100, interval=graph_interval))
+        pnl_history_task = asyncio.create_task(client.portfolio.get_history(start_time=pnl_start_time, limit=100, interval="1d"))
+        token_dist_task = asyncio.create_task(client.portfolio.get_distribution())
+        accounts_dist_task = asyncio.create_task(client.portfolio.get_accounts_distribution())
 
-        # Calculate current portfolio value for PNL
+        # Initialize data holders
+        balances = None
+        perp_positions = {"positions": [], "total": 0}
+        lp_positions = {"positions": [], "total": 0}
+        active_orders = {"orders": [], "total": 0}
+        pnl_indicators = None
+        changes_24h = None
         current_value = 0.0
-        if overview_data and overview_data.get('balances'):
-            for account_data in overview_data['balances'].values():
-                for connector_balances in account_data.values():
-                    if connector_balances:
-                        for balance in connector_balances:
-                            value = balance.get("value", 0)
-                            if value > 0:
-                                current_value += value
+        token_cache = {}  # Will be populated with Gateway tokens
 
-        # Calculate PNL indicators from history
-        pnl_indicators = _calculate_pnl_indicators(pnl_history, current_value)
+        # Helper to update UI
+        async def update_ui(loading_text: str = None):
+            nonlocal current_value
+            # Recalculate current value
+            if balances:
+                current_value = 0.0
+                for account_data in balances.values():
+                    for connector_balances in account_data.values():
+                        if connector_balances:
+                            for balance in connector_balances:
+                                value = balance.get("value", 0)
+                                if value > 0:
+                                    current_value += value
 
-        # Calculate 24h changes for tokens and connectors
-        changes_24h = _calculate_24h_changes(pnl_history, overview_data.get('balances', {}))
+            overview_data = {
+                'balances': balances,
+                'perp_positions': perp_positions,
+                'lp_positions': lp_positions,
+                'active_orders': active_orders,
+            }
+            message = format_portfolio_overview(
+                overview_data,
+                server_name=server_name,
+                server_status=server_status,
+                pnl_indicators=pnl_indicators,
+                changes_24h=changes_24h,
+                token_cache=token_cache
+            )
+            if loading_text:
+                message += f"\n_{escape_markdown_v2(loading_text)}_"
+            try:
+                await text_msg.edit_text(message, parse_mode="MarkdownV2")
+            except Exception:
+                pass
 
-        # Format the complete overview with PNL indicators and 24h changes
-        message = format_portfolio_overview(
-            overview_data,
-            server_name=server_name,
-            server_status=server_status,
-            pnl_indicators=pnl_indicators,
-            changes_24h=changes_24h
-        )
+        # ========================================
+        # WAIT FOR BALANCES FIRST (usually fast)
+        # ========================================
+        try:
+            balances = await balances_task
+            await update_ui("Loading positions & 24h data...")
+        except Exception as e:
+            logger.error(f"Failed to fetch balances: {e}")
 
-        # Send text overview first
-        text_msg = await update.message.reply_text(message, parse_mode="MarkdownV2")
+        # ========================================
+        # WAIT FOR POSITIONS AND 24H DATA IN PARALLEL
+        # ========================================
+        # Gather remaining fast tasks
+        try:
+            results = await asyncio.gather(
+                perp_task, lp_task, orders_task, pnl_history_task,
+                return_exceptions=True
+            )
+
+            if not isinstance(results[0], Exception):
+                perp_positions = results[0]
+            if not isinstance(results[1], Exception):
+                lp_positions = results[1]
+                # Populate token_cache from LP positions networks
+                lp_networks = list(set(
+                    pos.get('network', 'solana-mainnet-beta')
+                    for pos in lp_positions.get('positions', [])
+                ))
+                if lp_networks:
+                    try:
+                        token_cache = await get_tokens_for_networks(client, lp_networks)
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch tokens for LP networks: {e}")
+
+            if not isinstance(results[2], Exception):
+                active_orders = results[2]
+
+            # Calculate 24h changes if we have history
+            pnl_history = results[3] if not isinstance(results[3], Exception) else None
+            if pnl_history and balances:
+                pnl_indicators = _calculate_pnl_indicators(pnl_history, current_value)
+                changes_24h = _calculate_24h_changes(pnl_history, balances)
+
+            await update_ui("Generating graphs...")
+        except Exception as e:
+            logger.error(f"Error fetching positions: {e}")
+
+        # ========================================
+        # WAIT FOR GRAPH DATA
+        # ========================================
+        history = None
+        token_distribution = None
+        accounts_distribution = None
+
+        try:
+            graph_results = await asyncio.gather(
+                history_task, token_dist_task, accounts_dist_task,
+                return_exceptions=True
+            )
+            history = graph_results[0] if not isinstance(graph_results[0], Exception) else None
+            token_distribution = graph_results[1] if not isinstance(graph_results[1], Exception) else None
+            accounts_distribution = graph_results[2] if not isinstance(graph_results[2], Exception) else None
+        except Exception as e:
+            logger.error(f"Error fetching graph data: {e}")
+
+        # Final UI update (no loading text)
+        await update_ui()
 
         # Send "upload_photo" status
         await update.message.reply_chat_action("upload_photo")
@@ -623,24 +726,27 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create settings button (show auto-calculated interval)
+        # Create settings button
         keyboard = [[
-            InlineKeyboardButton(f"⚙️ Settings ({days}d / {graph_interval})", callback_data="portfolio:settings")
+            InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
         ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Send the dashboard image with settings button
+        # Send the dashboard image with buttons
         photo_msg = await update.message.reply_photo(
             photo=dashboard_bytes,
             caption=f"📊 Portfolio Dashboard - {server_name}",
             reply_markup=reply_markup
         )
 
-        # Store message IDs for later updates
+        # Store message IDs and data for later updates
         context.user_data["portfolio_text_message_id"] = text_msg.message_id
         context.user_data["portfolio_photo_message_id"] = photo_msg.message_id
         context.user_data["portfolio_chat_id"] = update.message.chat_id
         context.user_data["portfolio_graph_interval"] = graph_interval
+        context.user_data["portfolio_server_name"] = server_name
+        context.user_data["portfolio_server_status"] = server_status
+        context.user_data["portfolio_current_value"] = current_value
 
     except Exception as e:
         logger.error(f"Error fetching portfolio: {e}", exc_info=True)
@@ -708,6 +814,7 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
 
     try:
         from servers import server_manager
+        from utils.trading_data import get_tokens_for_networks
 
         # Always use the default server from server_manager
         servers = server_manager.list_servers()
@@ -756,11 +863,23 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
                             if value > 0:
                                 current_value += value
 
-        # Calculate PNL indicators
+        # Calculate PNL indicators and 24h changes
         pnl_indicators = _calculate_pnl_indicators(pnl_history, current_value)
+        changes_24h = _calculate_24h_changes(pnl_history, overview_data.get('balances', {})) if pnl_history else None
 
-        # Calculate 24h changes for tokens and connectors
-        changes_24h = _calculate_24h_changes(pnl_history, overview_data.get('balances', {}))
+        # Fetch tokens for LP positions
+        token_cache = {}
+        lp_positions = overview_data.get('lp_positions', {}) if overview_data else {}
+        if lp_positions and lp_positions.get('positions'):
+            lp_networks = list(set(
+                pos.get('network', 'solana-mainnet-beta')
+                for pos in lp_positions.get('positions', [])
+            ))
+            if lp_networks:
+                try:
+                    token_cache = await get_tokens_for_networks(client, lp_networks)
+                except Exception as e:
+                    logger.debug(f"Failed to fetch tokens for LP networks: {e}")
 
         # Update text message if we have it
         if text_message_id:
@@ -769,7 +888,8 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
                 server_name=server_name,
                 server_status=server_status,
                 pnl_indicators=pnl_indicators,
-                changes_24h=changes_24h
+                changes_24h=changes_24h,
+                token_cache=token_cache
             )
             try:
                 await bot.edit_message_text(
@@ -788,9 +908,9 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create settings button (show auto-calculated interval)
+        # Create settings button
         keyboard = [[
-            InlineKeyboardButton(f"⚙️ Settings ({days}d / {graph_interval})", callback_data="portfolio:settings")
+            InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
         ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -806,8 +926,11 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
             reply_markup=reply_markup
         )
 
-        # Store the new interval
+        # Store data for callbacks
         context.user_data["portfolio_graph_interval"] = graph_interval
+        context.user_data["portfolio_server_name"] = server_name
+        context.user_data["portfolio_server_status"] = server_status
+        context.user_data["portfolio_current_value"] = current_value
 
     except Exception as e:
         logger.error(f"Failed to refresh portfolio dashboard: {e}", exc_info=True)
