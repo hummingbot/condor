@@ -97,7 +97,5 @@ async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     context.user_data.pop("place_order_params", None)
     context.user_data.pop("current_positions", None)
 
-    await update.callback_query.message.edit_text(
-        "CLOB Trading closed\\.",
-        parse_mode="MarkdownV2"
-    )
+    # Delete the message instead of editing it
+    await update.callback_query.message.delete()

@@ -27,7 +27,7 @@ async def handle_change_account(update: Update, context: ContextTypes.DEFAULT_TY
 
     context.user_data["clob_state"] = "change_account"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup

@@ -74,7 +74,7 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             message,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
@@ -83,7 +83,7 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logger.error(f"Error getting positions: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to get positions: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
 async def handle_trade_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
@@ -95,7 +95,7 @@ async def handle_trade_position(update: Update, context: ContextTypes.DEFAULT_TY
 
         if position_index >= len(positions):
             error_message = format_error_message("Position not found. Please refresh positions.")
-            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+            await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
             return
 
         position = positions[position_index]
@@ -125,13 +125,13 @@ async def handle_trade_position(update: Update, context: ContextTypes.DEFAULT_TY
         # Set state to allow text input for direct order placement
         context.user_data["clob_state"] = "place_order"
 
-        # Show the place order menu with pre-filled parameters
-        await show_place_order_menu(update, context, send_new=True)
+        # Show the place order menu with pre-filled parameters (edit current message)
+        await show_place_order_menu(update, context, send_new=False)
 
     except Exception as e:
         logger.error(f"Error preparing trade for position: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to prepare trade: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
 async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
@@ -141,7 +141,7 @@ async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TY
 
         if position_index >= len(positions):
             error_message = format_error_message("Position not found. Please refresh positions.")
-            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+            await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
             return
 
         position = positions[position_index]
@@ -173,7 +173,7 @@ async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TY
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             confirm_message,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
@@ -182,7 +182,7 @@ async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"Error preparing to close position: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to close position: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
 async def handle_confirm_close_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
@@ -192,7 +192,7 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
 
         if position_index >= len(positions):
             error_message = format_error_message("Position not found. Please refresh positions.")
-            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+            await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
             return
 
         position = positions[position_index]
@@ -240,12 +240,21 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
         if "order_id" in result:
             success_msg += escape_markdown_v2(f"\nOrder ID: {result['order_id']}")
 
-        await update.callback_query.message.reply_text(success_msg, parse_mode="MarkdownV2")
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 View Positions", callback_data="clob:positions"),
+                InlineKeyboardButton("« Back to Menu", callback_data="clob:main_menu")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
-        # Return to positions view
-        await handle_positions(update, context)
+        await update.callback_query.message.edit_text(
+            success_msg,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
 
     except Exception as e:
         logger.error(f"Error closing position: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to close position: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")

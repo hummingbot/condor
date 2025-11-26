@@ -23,18 +23,18 @@ async def handle_repeat_last(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not last_params or not last_params.get("connector"):
         error_message = format_error_message("No previous trade found. Place an order first.")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
         return
 
-    # Pre-fill order parameters with last trade
+    # Pre-fill order parameters with last trade (use persisted values)
     context.user_data["place_order_params"] = {
         "connector": last_params.get("connector", "binance_perpetual"),
         "trading_pair": last_params.get("trading_pair", "BTC-USDT"),
         "side": last_params.get("side", "BUY"),
         "order_type": last_params.get("order_type", "MARKET"),
-        "position_mode": "OPEN",
-        "amount": "$10",  # Default amount, user can change
-        "price": "88000",
+        "position_mode": last_params.get("position_mode", "OPEN"),
+        "amount": last_params.get("amount", "$10"),  # Use persisted amount
+        "price": last_params.get("price", "88000"),
     }
 
     # Set state to allow text input for direct order placement
@@ -58,50 +58,172 @@ async def handle_place_order(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await show_place_order_menu(update, context)
 
 
-async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, send_new: bool = False) -> None:
+async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, send_new: bool = False, show_help: bool = False) -> None:
     """Display the place order configuration menu with interactive buttons
 
     Args:
         update: The update object
         context: The context object
         send_new: If True, always send a new message instead of editing
+        show_help: If True, show detailed help instead of balances
     """
     params = context.user_data.get("place_order_params", {})
+    connector_name = params.get("connector", "binance_perpetual")
 
-    # Build header with detailed explanation
-    help_text = r"📝 *Place Order*" + "\n\n"
+    if show_help:
+        # Show detailed help view
+        help_text = r"📖 *Place Order \- Help*" + "\n\n"
 
-    help_text += r"*Configure your order using the buttons below or type parameters directly\.*" + "\n\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+        help_text += r"*📊 Current Configuration*" + "\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
 
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
-    help_text += r"*📊 Current Configuration*" + "\n"
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
+        help_text += f"🔌 *Connector:* `{escape_markdown_v2(params.get('connector', 'N/A'))}`\n"
+        help_text += f"💱 *Trading Pair:* `{escape_markdown_v2(params.get('trading_pair', 'N/A'))}`\n"
+        help_text += f"📈 *Side:* `{escape_markdown_v2(params.get('side', 'N/A'))}`\n"
+        help_text += f"📋 *Order Type:* `{escape_markdown_v2(params.get('order_type', 'N/A'))}`\n"
+        help_text += f"🎯 *Position Mode:* `{escape_markdown_v2(params.get('position_mode', 'N/A'))}`\n"
+        help_text += f"💰 *Amount:* `{escape_markdown_v2(params.get('amount', 'N/A'))}`\n"
 
-    help_text += f"🔌 *Connector:* `{escape_markdown_v2(params.get('connector', 'N/A'))}`\n"
-    help_text += f"💱 *Trading Pair:* `{escape_markdown_v2(params.get('trading_pair', 'N/A'))}`\n"
-    help_text += f"📈 *Side:* `{escape_markdown_v2(params.get('side', 'N/A'))}`\n"
-    help_text += f"📋 *Order Type:* `{escape_markdown_v2(params.get('order_type', 'N/A'))}`\n"
-    help_text += f"🎯 *Position Mode:* `{escape_markdown_v2(params.get('position_mode', 'N/A'))}`\n"
-    help_text += f"💰 *Amount:* `{escape_markdown_v2(params.get('amount', 'N/A'))}`\n"
+        if params.get('order_type') in ['LIMIT', 'LIMIT_MAKER']:
+            help_text += f"💵 *Price:* `{escape_markdown_v2(params.get('price', 'N/A'))}`\n"
 
-    if params.get('order_type') == 'LIMIT' or params.get('order_type') == 'LIMIT_MAKER':
-        help_text += f"💵 *Price:* `{escape_markdown_v2(params.get('price', 'N/A'))}`\n"
+        help_text += "\n" + r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+        help_text += r"*🎮 Button Guide*" + "\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
 
-    help_text += "\n" + r"━━━━━━━━━━━━━━━━━━━━" + "\n"
-    help_text += r"*🎮 Interactive Configuration*" + "\n"
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
-    help_text += r"Click buttons below to configure each parameter:" + "\n"
-    help_text += r"• *Toggle buttons* cycle through options" + "\n"
-    help_text += r"• *Input buttons* prompt for new values" + "\n\n"
+        help_text += r"• *Row 1:* Connector \& Trading Pair" + "\n"
+        help_text += r"  _Tap to change exchange or pair_" + "\n\n"
 
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
-    help_text += r"*⌨️ Or Type Directly*" + "\n"
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
-    help_text += r"Reply with order parameters:" + "\n\n"
-    help_text += r"`connector trading_pair side amount [order_type] [price] [position_action]`" + "\n\n"
-    help_text += r"*Examples:*" + "\n"
-    help_text += r"`binance_perpetual BTC\-USDT BUY 0\.01 MARKET`" + "\n"
-    help_text += r"`binance BTC\-USDT SELL $100 LIMIT 45000 CLOSE`" + "\n\n"
+        help_text += r"• *Row 2:* Side \& Order Type" + "\n"
+        help_text += r"  _Tap to toggle BUY/SELL or MARKET/LIMIT_" + "\n\n"
+
+        help_text += r"• *Row 3:* Position Mode \& Amount" + "\n"
+        help_text += r"  _OPEN/CLOSE position, set trade size_" + "\n\n"
+
+        help_text += r"• *Row 4:* Price \(LIMIT orders only\)" + "\n"
+        help_text += r"  _Set your limit price_" + "\n\n"
+
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+        help_text += r"*⌨️ Text Input Format*" + "\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
+
+        help_text += r"`connector pair side amount [type] [price] [action]`" + "\n\n"
+
+        help_text += r"*Parameters:*" + "\n"
+        help_text += r"• `connector` \- Exchange \(binance, binance\_perpetual\)" + "\n"
+        help_text += r"• `pair` \- Trading pair \(BTC\-USDT\)" + "\n"
+        help_text += r"• `side` \- BUY or SELL" + "\n"
+        help_text += r"• `amount` \- Quantity or $USD value" + "\n"
+        help_text += r"• `type` \- MARKET, LIMIT, LIMIT\_MAKER" + "\n"
+        help_text += r"• `price` \- Limit price \(required for LIMIT\)" + "\n"
+        help_text += r"• `action` \- OPEN or CLOSE position" + "\n"
+
+    else:
+        # Show main view with balances
+        help_text = r"📝 *Place Order*" + "\n\n"
+
+        # Fetch and display balances
+        try:
+            from servers import server_manager
+            from utils.trading_data import get_portfolio_overview
+
+            servers = server_manager.list_servers()
+            enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+
+            if enabled_servers:
+                server_name = enabled_servers[0]
+                client = await server_manager.get_client(server_name)
+                account = get_clob_account(context.user_data)
+
+                # Use portfolio overview to get balances (same pattern as portfolio.py)
+                overview_data = await get_portfolio_overview(
+                    client,
+                    account_names=[account],
+                    include_balances=True,
+                    include_perp_positions=False,
+                    include_lp_positions=False,
+                    include_active_orders=False
+                )
+
+                help_text += f"*💰 Balances on* `{escape_markdown_v2(connector_name)}`\n"
+
+                # Extract balances for the selected connector
+                shown = 0
+                if overview_data and overview_data.get("balances"):
+                    account_balances = overview_data["balances"].get(account, {})
+                    connector_balances = account_balances.get(connector_name, [])
+
+                    # Build table format like portfolio
+                    if connector_balances:
+                        # Calculate total for percentage
+                        total_value = sum(float(h.get("value", 0)) for h in connector_balances)
+
+                        # Sort by value (descending) and filter by >= 0.3% allocation
+                        sorted_balances = sorted(
+                            connector_balances,
+                            key=lambda h: float(h.get("value", 0)),
+                            reverse=True
+                        )
+
+                        table = "```\n"
+                        table += f"{'Token':<6} {'Price':<8} {'Value':<8} {'%':>5}\n"
+                        table += f"{'─'*6} {'─'*8} {'─'*8} {'─'*5}\n"
+
+                        for holding in sorted_balances:
+                            token = holding.get("token", "")
+                            value = float(holding.get("value", 0))
+                            units = float(holding.get("units", 0))
+
+                            # Calculate percentage first to filter
+                            pct = (value / total_value * 100) if total_value > 0 else 0
+
+                            # Only show if >= 0.3% allocation
+                            if pct >= 0.3:
+                                # Calculate price
+                                price = value / units if units > 0 else 0
+                                # Format price
+                                if price >= 1000:
+                                    price_str = f"${price:,.0f}"
+                                elif price >= 1:
+                                    price_str = f"${price:.2f}"
+                                elif price >= 0.0001:
+                                    price_str = f"${price:.4f}"
+                                else:
+                                    price_str = f"${price:.2e}"
+                                price_str = price_str[:8]
+
+                                # Format value
+                                if value >= 1000:
+                                    value_str = f"{value/1000:.2f}K"
+                                else:
+                                    value_str = f"{value:.2f}"
+                                value_str = value_str[:8]
+
+                                # Format percentage
+                                pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
+
+                                # Truncate token name
+                                token_display = token[:5] if len(token) > 5 else token
+
+                                table += f"{token_display:<6} {price_str:<8} {value_str:<8} {pct_str:>5}\n"
+                                shown += 1
+
+                        table += "```"
+                        help_text += table + "\n"
+
+                if shown == 0:
+                    help_text += r"_No balances found_" + "\n"
+        except Exception as e:
+            logger.error(f"Error fetching balances: {e}", exc_info=True)
+            help_text += r"_Could not fetch balances_" + "\n"
+
+        help_text += "\n"
+        help_text += r"Use buttons or reply with order parameters:" + "\n\n"
+        help_text += r"`connector pair side amount [type] [price] [action]`" + "\n\n"
+        help_text += r"*Examples* \(tap to copy\):" + "\n"
+        help_text += r"`binance_perpetual BTC\-USDT BUY 0\.01 MARKET`" + "\n"
+        help_text += r"`binance BTC\-USDT SELL $100 LIMIT 45000 CLOSE`" + "\n"
 
     # Build keyboard with parameter buttons
     keyboard = []
@@ -151,10 +273,16 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
             )
         ])
 
-    # Row 5: Execute and Cancel
+    # Row 5: Execute, Help/Back toggle, and Cancel
+    help_button = (
+        InlineKeyboardButton("« Order", callback_data="clob:place_order")
+        if show_help else
+        InlineKeyboardButton("❓ Help", callback_data="clob:order_help")
+    )
     keyboard.append([
-        InlineKeyboardButton("✅ Execute Order", callback_data="clob:order_execute"),
-        InlineKeyboardButton("« Cancel", callback_data="clob:main_menu")
+        InlineKeyboardButton("✅ Execute", callback_data="clob:order_execute"),
+        help_button,
+        InlineKeyboardButton("« Menu", callback_data="clob:main_menu")
     ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -248,7 +376,7 @@ async def handle_order_set_connector(update: Update, context: ContextTypes.DEFAU
     context.user_data["clob_state"] = "order_set_connector"
     context.user_data["clob_previous_state"] = "place_order"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -272,7 +400,7 @@ async def handle_order_set_pair(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["clob_state"] = "order_set_pair"
     context.user_data["clob_previous_state"] = "place_order"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -297,7 +425,7 @@ async def handle_order_set_amount(update: Update, context: ContextTypes.DEFAULT_
 
     logger.info(f"Set clob_state to: order_set_amount, user_data: {context.user_data.get('clob_state')}")
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -320,11 +448,16 @@ async def handle_order_set_price(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["clob_state"] = "order_set_price"
     context.user_data["clob_previous_state"] = "place_order"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
     )
+
+
+async def handle_order_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show detailed help for place order"""
+    await show_place_order_menu(update, context, show_help=True)
 
 
 async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -385,12 +518,15 @@ async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYP
             position_action=position_action,
         )
 
-        # Save parameters for quick trading
+        # Save parameters for quick trading (persist all order params for next session)
         set_clob_last_order(context.user_data, {
             "connector": connector_name,
             "trading_pair": trading_pair,
             "side": trade_type,
             "order_type": order_type,
+            "position_mode": position_action,
+            "amount": amount,  # Persist the amount (with $ if it had it)
+            "price": price if price else "88000",
         })
 
         # Update place_order_params with the values used (don't clear, keep user's preferences)
@@ -425,7 +561,7 @@ async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard = [[InlineKeyboardButton("« Back to CLOB Trading", callback_data="clob:main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             order_info,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
@@ -434,7 +570,7 @@ async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Error executing order: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to execute order: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
 # ============================================
@@ -504,12 +640,15 @@ async def process_place_order(
             position_action=position_action,
         )
 
-        # Save parameters for quick trading
+        # Save parameters for quick trading (persist all order params for next session)
         set_clob_last_order(context.user_data, {
             "connector": connector_name,
             "trading_pair": trading_pair,
             "side": trade_type,
             "order_type": order_type,
+            "position_mode": position_action,
+            "amount": amount,  # Persist the amount (with $ if it had it)
+            "price": price if price else "88000",
         })
 
         order_info = escape_markdown_v2(

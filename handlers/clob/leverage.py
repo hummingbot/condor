@@ -154,7 +154,7 @@ async def handle_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Set state for leverage text input
     context.user_data["clob_state"] = "leverage"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -198,18 +198,16 @@ async def handle_toggle_position_mode(
         position_modes[connector_name] = new_mode
         context.user_data["position_modes"] = position_modes
 
-        # Show success message
+        # Update cached position mode and refresh the leverage menu
         short_name = connector_name.replace("_perpetual", "").upper()
-        success_msg = escape_markdown_v2(f"✅ {short_name} position mode changed to {new_mode}")
-        await update.callback_query.message.reply_text(success_msg, parse_mode="MarkdownV2")
 
-        # Refresh the leverage menu
+        # Refresh the leverage menu (will show updated mode)
         await handle_leverage(update, context)
 
     except Exception as e:
         logger.error(f"Error toggling position mode: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to change position mode: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
 async def process_leverage(

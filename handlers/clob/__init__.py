@@ -15,7 +15,7 @@ from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, fil
 
 from utils.auth import restricted
 from utils.telegram_formatters import format_error_message
-from handlers.config import clear_config_state
+from handlers import clear_all_input_states
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,8 @@ async def clob_trading_command(update: Update, context: ContextTypes.DEFAULT_TYP
     """
     from .menu import show_clob_menu
 
-    # Clear any config state to prevent interference
-    clear_config_state(context)
-
-    # Clear any DEX state to prevent interference
-    context.user_data.pop("dex_state", None)
+    # Clear all pending input states to prevent interference
+    clear_all_input_states(context)
 
     # Send "typing" status
     await update.message.reply_chat_action("typing")
@@ -69,9 +66,10 @@ async def clob_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         handle_order_set_amount,
         handle_order_set_price,
         handle_order_execute,
+        handle_order_help,
     )
     from .leverage import handle_leverage, handle_toggle_position_mode
-    from .orders import handle_search_orders
+    from .orders import handle_search_orders, handle_cancel_order, handle_confirm_cancel_order
     from .positions import (
         handle_positions,
         handle_trade_position,
@@ -111,6 +109,8 @@ async def clob_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await handle_order_set_price(update, context)
         elif action == "order_execute":
             await handle_order_execute(update, context)
+        elif action == "order_help":
+            await handle_order_help(update, context)
         elif action == "leverage":
             await handle_leverage(update, context)
         elif action.startswith("toggle_pos_mode:"):
@@ -125,6 +125,14 @@ async def clob_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await handle_search_orders(update, context, status="FILLED")
         elif action == "search_cancelled":
             await handle_search_orders(update, context, status="CANCELLED")
+        elif action.startswith("cancel_order:"):
+            # Extract order index from callback data
+            order_index = int(action.split(":")[1])
+            await handle_cancel_order(update, context, order_index)
+        elif action.startswith("confirm_cancel:"):
+            # Extract order index from callback data
+            order_index = int(action.split(":")[1])
+            await handle_confirm_cancel_order(update, context, order_index)
         elif action == "positions":
             await handle_positions(update, context)
         elif action.startswith("trade_position:"):
