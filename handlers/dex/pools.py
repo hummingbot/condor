@@ -115,7 +115,7 @@ async def process_pool_info(
     context: ContextTypes.DEFAULT_TYPE,
     user_input: str
 ) -> None:
-    """Process pool info lookup by address"""
+    """Process pool info lookup by address - shows full pool details with chart"""
     try:
         parts = user_input.split()
         if len(parts) < 2:
@@ -133,28 +133,56 @@ async def process_pool_info(
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
 
-        # Use get_pools with the pool address as search term to find it
-        # Some APIs support direct pool lookup, others we search
+        # Send loading message
+        loading_msg = await update.message.reply_text("🔄 Loading pool details...")
+
+        # Fetch pool info
         result = await client.gateway_clmm.get_pool_info(
             connector=connector,
             network="solana-mainnet-beta",
             pool_address=pool_address
         )
 
+        # Delete loading message
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+
         if not result:
             message = escape_markdown_v2(f"❌ Pool not found: {pool_address[:16]}...")
-        else:
-            pool_info_text = _format_pool_info(result)
-            message = escape_markdown_v2(pool_info_text)
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:main_menu")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                message,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+            return
 
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:main_menu")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Construct pool dict with connector info for _show_pool_detail
+        pool = {
+            'pool_address': pool_address,
+            'address': pool_address,
+            'connector': connector,
+            'trading_pair': result.get('trading_pair', result.get('name', 'N/A')),
+            # Copy over any available data from result
+            'liquidity': result.get('liquidity') or result.get('tvl'),
+            'volume_24h': result.get('volume_24h'),
+            'fees_24h': result.get('fees_24h'),
+            'base_fee_percentage': result.get('base_fee_percentage') or result.get('fee'),
+            'max_fee_percentage': result.get('max_fee_percentage'),
+            'apr': result.get('apr'),
+            'apy': result.get('apy'),
+            'bin_step': result.get('bin_step'),
+            'current_price': result.get('current_price') or result.get('price'),
+            'mint_x': result.get('mint_x') or result.get('base_token') or result.get('token_a'),
+            'mint_y': result.get('mint_y') or result.get('quote_token') or result.get('token_b'),
+        }
 
-        await update.message.reply_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        # Use the rich pool detail display with chart and add liquidity button
+        # has_list_context=False since there's no list to go back to
+        await _show_pool_detail(update, context, pool, from_callback=False, has_list_context=False)
 
     except Exception as e:
         logger.error(f"Error getting pool info: {e}", exc_info=True)
@@ -391,9 +419,9 @@ async def process_pool_list(
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:main_menu")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
-            # Sort by TVL (liquidity) descending, filter out zero TVL
+            # Sort by APR% descending, filter out zero TVL
             active_pools = [p for p in pools if float(p.get('liquidity', 0)) > 0]
-            active_pools.sort(key=lambda x: float(x.get('liquidity', 0)), reverse=True)
+            active_pools.sort(key=lambda x: float(x.get('apr', 0) or 0), reverse=True)
 
             # If no active pools, show all
             display_pools = active_pools[:display_limit] if active_pools else pools[:display_limit]
@@ -480,7 +508,7 @@ def _generate_liquidity_chart(
         if not bins:
             return None
 
-        # Process bin data
+        # Process bin data - convert base token to quote value for comparison
         bin_data = []
         for b in bins:
             base = float(b.get('base_token_amount', 0) or 0)
@@ -489,9 +517,11 @@ def _generate_liquidity_chart(
             bin_id = b.get('bin_id')
 
             if price > 0:
+                # Convert base token amount to quote token value
+                base_value_in_quote = base * price
                 bin_data.append({
                     'bin_id': bin_id,
-                    'base': base,
+                    'base_value': base_value_in_quote,  # Base token value in quote terms
                     'quote': quote,
                     'price': price,
                     'is_active': bin_id == active_bin_id
@@ -503,30 +533,30 @@ def _generate_liquidity_chart(
         # Sort by price
         bin_data.sort(key=lambda x: x['price'])
 
-        # Extract data for plotting
+        # Extract data for plotting (both now in quote token value)
         prices = [b['price'] for b in bin_data]
-        base_amounts = [b['base'] for b in bin_data]
+        base_values = [b['base_value'] for b in bin_data]  # Base value in quote terms
         quote_amounts = [b['quote'] for b in bin_data]
 
         # Create figure with stacked bars
         fig = go.Figure()
 
-        # Quote token bars (bottom - typically USDC)
+        # Quote token bars (bottom)
         fig.add_trace(go.Bar(
             x=prices,
             y=quote_amounts,
             name='Quote Token',
             marker_color='#22c55e',  # Green
-            hovertemplate='Price: %{x:.6f}<br>Quote: %{y:,.0f}<extra></extra>'
+            hovertemplate='Price: %{x:.6f}<br>Quote Value: %{y:,.2f}<extra></extra>'
         ))
 
-        # Base token bars (top - typically the other token)
+        # Base token bars (top) - now showing value in quote terms
         fig.add_trace(go.Bar(
             x=prices,
-            y=base_amounts,
-            name='Base Token',
+            y=base_values,
+            name='Base Token (in Quote)',
             marker_color='#3b82f6',  # Blue
-            hovertemplate='Price: %{x:.6f}<br>Base: %{y:,.0f}<extra></extra>'
+            hovertemplate='Price: %{x:.6f}<br>Base Value: %{y:,.2f}<extra></extra>'
         ))
 
         # Add current price line
@@ -549,7 +579,7 @@ def _generate_liquidity_chart(
                 x=0.5
             ),
             xaxis_title="Price",
-            yaxis_title="Liquidity (Token Amount)",
+            yaxis_title="Liquidity (Quote Value)",
             barmode='stack',
             template='plotly_dark',
             paper_bgcolor='#1a1a2e',
@@ -592,12 +622,21 @@ def _generate_liquidity_chart(
         return None
 
 
-async def _fetch_pool_info(client, pool_address: str) -> dict:
-    """Fetch detailed pool info including bins"""
+async def _fetch_pool_info(client, pool_address: str, connector: str = "meteora") -> dict:
+    """Fetch detailed pool info including bins
+
+    Args:
+        client: Gateway client
+        pool_address: Pool address to fetch
+        connector: Connector name (meteora, raydium)
+
+    Returns:
+        Pool info dict with bins data
+    """
     try:
         if hasattr(client, 'gateway_clmm'):
             result = await client.gateway_clmm.get_pool_info(
-                connector="meteora",
+                connector=connector,
                 network="solana-mainnet-beta",
                 pool_address=pool_address
             )
@@ -611,18 +650,43 @@ async def _show_pool_detail(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     pool: dict,
-    from_callback: bool = False
+    from_callback: bool = False,
+    has_list_context: bool = True
 ) -> None:
-    """Show detailed pool information with address and liquidity chart image"""
+    """Show detailed pool information with address and liquidity chart image
+
+    Args:
+        update: Telegram update
+        context: Bot context
+        pool: Pool data dict
+        from_callback: Whether triggered from callback (button click)
+        has_list_context: Whether there's a pool list to go back to
+    """
     from io import BytesIO
 
-    pair = pool.get('trading_pair', 'N/A')
     pool_address = pool.get('pool_address', pool.get('address', 'N/A'))
     connector = pool.get('connector', 'meteora')
 
     # Fetch additional pool info with bins
     client = await get_gateway_client()
-    pool_info = await _fetch_pool_info(client, pool_address)
+    pool_info = await _fetch_pool_info(client, pool_address, connector)
+
+    # Try to get trading pair name from multiple sources
+    pair = pool.get('trading_pair') or pool.get('name')
+    if not pair or pair == 'N/A':
+        # Try to construct from pool_info token symbols
+        token_x = pool_info.get('token_x_symbol') or pool_info.get('base_symbol')
+        token_y = pool_info.get('token_y_symbol') or pool_info.get('quote_symbol')
+        if token_x and token_y:
+            pair = f"{token_x}/{token_y}"
+        else:
+            # Try from mint addresses (truncated)
+            mint_x = pool.get('mint_x') or pool_info.get('mint_x')
+            mint_y = pool.get('mint_y') or pool_info.get('mint_y')
+            if mint_x and mint_y:
+                pair = f"{mint_x[:4]}.../{mint_y[:4]}..."
+            else:
+                pair = "Unknown Pair"
 
     lines = []
     lines.append(f"🏊 Pool: {pair}")
@@ -633,57 +697,50 @@ async def _show_pool_detail(
     lines.append(f"   {pool_address}")
     lines.append("")
 
-    # Pool metrics section
-    lines.append("━━━ Metrics ━━━")
+    # Pool metrics section - collect metrics first, then display
+    tvl = pool.get('liquidity') or pool.get('tvl') or pool_info.get('liquidity') or pool_info.get('tvl')
+    vol_24h = pool.get('volume_24h') or pool_info.get('volume_24h')
+    fees_24h = pool.get('fees_24h') or pool_info.get('fees_24h')
 
-    tvl = pool.get('liquidity', 0)
-    lines.append(f"💰 TVL: ${_format_number(tvl)}")
+    if tvl or vol_24h or fees_24h:
+        lines.append("━━━ Metrics ━━━")
+        if tvl:
+            lines.append(f"💰 TVL: ${_format_number(tvl)}")
+        if vol_24h:
+            lines.append(f"📈 Volume 24h: ${_format_number(vol_24h)}")
+        if fees_24h:
+            lines.append(f"💵 Fees 24h: ${_format_number(fees_24h)}")
+        lines.append("")
 
-    vol_24h = pool.get('volume_24h', 0)
-    lines.append(f"📈 Volume 24h: ${_format_number(vol_24h)}")
+    # Fees and APR section - collect first, then display
+    base_fee = pool.get('base_fee_percentage') or pool_info.get('base_fee_percentage')
+    dynamic_fee = pool_info.get('dynamic_fee_pct')
+    max_fee = pool.get('max_fee_percentage') or pool_info.get('max_fee_percentage')
+    apr = pool.get('apr') or pool_info.get('apr')
+    apy = pool.get('apy') or pool_info.get('apy')
 
-    fees_24h = pool.get('fees_24h', 0)
-    if fees_24h:
-        lines.append(f"💵 Fees 24h: ${_format_number(fees_24h)}")
-
-    lines.append("")
-
-    # Fees and APR section
-    lines.append("━━━ Fees & Yield ━━━")
-
-    # Base fee percentage
-    base_fee = pool.get('base_fee_percentage')
-    if base_fee:
-        lines.append(f"💸 Base Fee: {base_fee}%")
-
-    # Dynamic fee from pool_info
-    if pool_info.get('dynamic_fee_pct'):
-        lines.append(f"⚡ Dynamic Fee: {pool_info['dynamic_fee_pct']}%")
-
-    # Max fee
-    max_fee = pool.get('max_fee_percentage')
-    if max_fee:
-        lines.append(f"📊 Max Fee: {max_fee}%")
-
-    # APR/APY
-    apr = pool.get('apr')
-    if apr:
-        try:
-            apr_val = float(apr)
-            lines.append(f"📈 APR: {apr_val:.2f}%")
-        except (ValueError, TypeError):
-            pass
-
-    apy = pool.get('apy')
-    if apy:
-        try:
-            apy_val = float(apy)
-            if apy_val < 1000000:  # Reasonable APY
-                lines.append(f"📊 APY: {apy_val:.2f}%")
-        except (ValueError, TypeError):
-            pass
-
-    lines.append("")
+    if base_fee or dynamic_fee or max_fee or apr or apy:
+        lines.append("━━━ Fees & Yield ━━━")
+        if base_fee:
+            lines.append(f"💸 Base Fee: {base_fee}%")
+        if dynamic_fee:
+            lines.append(f"⚡ Dynamic Fee: {dynamic_fee}%")
+        if max_fee:
+            lines.append(f"📊 Max Fee: {max_fee}%")
+        if apr:
+            try:
+                apr_val = float(apr)
+                lines.append(f"📈 APR: {apr_val:.2f}%")
+            except (ValueError, TypeError):
+                pass
+        if apy:
+            try:
+                apy_val = float(apy)
+                if apy_val < 1000000:  # Reasonable APY
+                    lines.append(f"📊 APY: {apy_val:.2f}%")
+            except (ValueError, TypeError):
+                pass
+        lines.append("")
 
     # Pool config section
     lines.append("━━━ Pool Config ━━━")
@@ -724,16 +781,24 @@ async def _show_pool_detail(
     context.user_data["selected_pool"] = pool
     context.user_data["selected_pool_info"] = pool_info
 
+    # Build keyboard - show different back button based on context
     keyboard = [
         [
             InlineKeyboardButton("➕ Add Liquidity", callback_data="dex:add_position_from_pool"),
             InlineKeyboardButton("📋 Copy Address", callback_data=f"dex:copy_pool:{pool_address[:20]}")
-        ],
-        [
-            InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-            InlineKeyboardButton("« Main Menu", callback_data="dex:main_menu")
         ]
     ]
+
+    if has_list_context:
+        keyboard.append([
+            InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
+            InlineKeyboardButton("« Main Menu", callback_data="dex:main_menu")
+        ])
+    else:
+        keyboard.append([
+            InlineKeyboardButton("« Main Menu", callback_data="dex:main_menu")
+        ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Generate liquidity chart if bins available
@@ -1255,8 +1320,9 @@ async def handle_add_position(update: Update, context: ContextTypes.DEFAULT_TYPE
             "pool_address": last_pool.get("pool_address", ""),
             "lower_price": "",
             "upper_price": "",
-            "amount_base": "",
-            "amount_quote": "",
+            "amount_base": "10%",  # Default to 10% of balance
+            "amount_quote": "10%",  # Default to 10% of balance
+            "strategy_type": "0",  # Default strategy type (Spot for Meteora)
         }
 
     context.user_data["dex_state"] = "add_position"
@@ -1293,19 +1359,83 @@ def _calculate_max_range(current_price: float, bin_step: int, max_bins: int = 69
         return None, None
 
 
+async def _fetch_token_balances(client, network: str, base_token: str, quote_token: str) -> dict:
+    """Fetch wallet balances for base and quote tokens
+
+    Args:
+        client: Gateway client
+        network: Network name (e.g., 'solana-mainnet-beta')
+        base_token: Base token symbol
+        quote_token: Quote token symbol
+
+    Returns:
+        Dict with 'base_balance', 'quote_balance', 'base_value', 'quote_value'
+    """
+    result = {
+        "base_balance": 0.0,
+        "quote_balance": 0.0,
+        "base_value": 0.0,
+        "quote_value": 0.0,
+    }
+
+    try:
+        if not hasattr(client, 'portfolio'):
+            return result
+
+        # Fetch portfolio state
+        state = await client.portfolio.get_state()
+        if not state:
+            return result
+
+        # Normalize token symbols for comparison
+        base_upper = base_token.upper() if base_token else ""
+        quote_upper = quote_token.upper() if quote_token else ""
+
+        # Network name normalization for connector matching
+        # e.g., 'solana-mainnet-beta' -> match 'solana', 'gateway_solana', etc.
+        network_key = network.split("-")[0].lower() if network else ""
+
+        for account_name, account_data in state.items():
+            for connector_name, balances in account_data.items():
+                connector_lower = connector_name.lower()
+                # Check if this is a gateway connector matching our network
+                is_match = (
+                    network_key in connector_lower or
+                    "gateway" in connector_lower and network_key in connector_lower
+                )
+
+                if is_match and balances:
+                    for bal in balances:
+                        token = bal.get("token", "").upper()
+                        units = float(bal.get("units", 0) or 0)
+                        value = float(bal.get("value", 0) or 0)
+
+                        if token == base_upper:
+                            result["base_balance"] = units
+                            result["base_value"] = value
+                        elif token == quote_upper:
+                            result["quote_balance"] = units
+                            result["quote_value"] = value
+
+    except Exception as e:
+        logger.warning(f"Error fetching token balances: {e}")
+
+    return result
+
+
 def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
-                          current_price: float, width: int = 30) -> str:
-    """Generate ASCII visualization of liquidity with selected range markers
+                          current_price: float, width: int = 20) -> str:
+    """Generate improved ASCII visualization of liquidity with selected range markers
 
     Args:
         bins: List of bin data with price and liquidity
         lower_price: Selected lower bound
         upper_price: Selected upper bound
         current_price: Current pool price
-        width: Width of the chart
+        width: Width of the bar chart
 
     Returns:
-        ASCII chart string
+        ASCII chart string (no leading/trailing code blocks - handled by caller)
     """
     if not bins:
         return ""
@@ -1341,8 +1471,7 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
     max_liq = max(b['liq'] for b in active_bins)
 
     # Build histogram
-    lines = ["```"]
-    lines.append("Range Preview:")
+    lines = []
 
     # Sample to ~8 price points for compact display
     if len(active_bins) > 8:
@@ -1356,43 +1485,52 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
         liq = b['liq']
 
         # Calculate bar length
-        bar_len = int((liq / max_liq) * (width - 10)) if max_liq > 0 else 0
+        bar_len = int((liq / max_liq) * width) if max_liq > 0 else 0
 
-        # Determine markers
+        # Determine if in range and marker
         in_range = lower_price <= price <= upper_price if lower_price and upper_price else False
-        is_current = abs(price - current_price) / current_price < 0.02 if current_price else False
+        is_current = abs(price - current_price) / current_price < 0.03 if current_price else False
+        near_lower = lower_price and abs(price - lower_price) / max(lower_price, 0.0001) < 0.06
+        near_upper = upper_price and abs(price - upper_price) / max(upper_price, 0.0001) < 0.06
 
-        # Build bar with range markers
-        if in_range:
-            bar = "█" * bar_len
-        else:
-            bar = "░" * bar_len
+        # Build bar with different characters for in/out of range
+        bar = "█" * bar_len if in_range else "░" * bar_len
 
-        # Add markers
-        marker = ""
+        # Marker column
         if is_current:
             marker = "◄"
-        elif lower_price and abs(price - lower_price) / lower_price < 0.05:
+        elif near_lower:
             marker = "L"
-        elif upper_price and abs(price - upper_price) / upper_price < 0.05:
+        elif near_upper:
             marker = "U"
+        else:
+            marker = " "
 
         # Format price compactly
         if price >= 1:
-            p_str = f"{price:.4f}"[:6]
+            p_str = f"{price:.4f}"[:7]
         else:
-            p_str = f"{price:.5f}"[:6]
+            p_str = f"{price:.5f}"[:7]
 
-        lines.append(f"{p_str} |{bar:<{width-10}}|{marker}")
-
-    lines.append("```")
-    lines.append(r"_█ \= in range, ░ \= out, ◄ \= current_")
+        lines.append(f"{p_str} |{bar:<{width}}|{marker}")
 
     return "\n".join(lines)
 
 
-async def show_add_position_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, send_new: bool = False) -> None:
-    """Display the add position configuration menu with liquidity chart"""
+async def show_add_position_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    send_new: bool = False,
+    show_help: bool = False
+) -> None:
+    """Display the add position configuration menu with liquidity chart
+
+    Args:
+        update: The update object
+        context: The context object
+        send_new: If True, always send a new message instead of editing
+        show_help: If True, show detailed help instead of balances/ASCII
+    """
     from io import BytesIO
 
     params = context.user_data.get("add_position_params", {})
@@ -1406,6 +1544,16 @@ async def show_add_position_menu(update: Update, context: ContextTypes.DEFAULT_T
     bin_step = selected_pool.get('bin_step') or pool_info.get('bin_step')
     bins = pool_info.get('bins', [])
     pair = selected_pool.get('trading_pair', 'Pool')
+    network = params.get('network', 'solana-mainnet-beta')
+
+    # Extract token symbols from pool info
+    base_token = selected_pool.get('base_token') or pool_info.get('base_token')
+    quote_token = selected_pool.get('quote_token') or pool_info.get('quote_token')
+    # Fall back to parsing from pair name if not available
+    if not base_token and '-' in pair:
+        base_token = pair.split('-')[0]
+    if not quote_token and '-' in pair:
+        quote_token = pair.split('-')[1] if len(pair.split('-')) > 1 else ''
 
     # Calculate max range (69 bins) and auto-fill if not set
     suggested_lower, suggested_upper = None, None
@@ -1431,65 +1579,150 @@ async def show_add_position_menu(update: Update, context: ContextTypes.DEFAULT_T
     except (ValueError, TypeError):
         lower_val, upper_val, current_val = None, None, None
 
-    help_text = r"➕ *Add CLMM Position*" + "\n\n"
+    if show_help:
+        # ========== HELP VIEW ==========
+        help_text = r"📖 *Add Position \- Help*" + "\n\n"
 
-    # Pool info section
-    help_text += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
-    if current_price:
-        help_text += f"💱 *Current Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
-    if bin_step:
-        help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(max 69 bins\\)_\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+        help_text += r"*🎮 Button Guide*" + "\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
 
-    help_text += "\n" + r"━━━ Position Config ━━━" + "\n\n"
+        help_text += r"• *Row 1:* Lower \\& Upper Price Bounds" + "\n"
+        help_text += r"  _Define your position's price range_" + "\n\n"
 
-    help_text += f"📉 *Lower:* `{escape_markdown_v2(params.get('lower_price') or '—')}`\n"
-    help_text += f"📈 *Upper:* `{escape_markdown_v2(params.get('upper_price') or '—')}`\n"
-    help_text += f"💰 *Base:* `{escape_markdown_v2(params.get('amount_base') or '—')}`\n"
-    help_text += f"💵 *Quote:* `{escape_markdown_v2(params.get('amount_quote') or '—')}`\n"
+        help_text += r"• *Row 2:* Base \\& Quote Amounts" + "\n"
+        help_text += r"  _Set how much to deposit_" + "\n\n"
 
-    # Add ASCII range visualization if we have bins
-    if bins and lower_val and upper_val:
-        ascii_chart = _generate_range_ascii(bins, lower_val, upper_val, current_val)
-        if ascii_chart:
-            help_text += "\n" + ascii_chart
+        help_text += r"• *Row 3:* Strategy Type" + "\n"
+        help_text += r"  _Meteora liquidity distribution_" + "\n\n"
 
-    # Network display (truncate smartly)
-    network = params.get('network', 'solana-mainnet-beta')
-    network_short = network[:18] + ".." if len(network) > 20 else network
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+        help_text += r"*💰 Amount Formats*" + "\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
 
-    # Build keyboard
+        help_text += r"• `10%` \- 10% of your wallet balance" + "\n"
+        help_text += r"• `100` \- Exact 100 tokens" + "\n"
+        help_text += r"• `0\.5` \- Exact 0\.5 tokens" + "\n\n"
+
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+        help_text += r"*🎯 Strategy Types*" + "\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
+
+        help_text += r"• `0` \- *Spot*: Uniform distribution" + "\n"
+        help_text += r"• `1` \- *Curve*: Bell curve around price" + "\n"
+        help_text += r"• `2` \- *Bid Ask*: Split at current price" + "\n\n"
+
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+        help_text += r"*📊 Chart Legend*" + "\n"
+        help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
+
+        help_text += r"• `█` \- In your selected range" + "\n"
+        help_text += r"• `░` \- Outside your range" + "\n"
+        help_text += r"• `◄` \- Current price" + "\n"
+        help_text += r"• `L` \- Lower bound" + "\n"
+        help_text += r"• `U` \- Upper bound" + "\n"
+
+    else:
+        # ========== MAIN VIEW ==========
+        help_text = r"➕ *Add CLMM Position*" + "\n\n"
+
+        # Pool info header
+        help_text += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+        if current_price:
+            help_text += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
+        if bin_step:
+            help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(max 69 bins\\)_\n"
+
+        # Fetch and display token balances
+        try:
+            client = await get_gateway_client()
+            balances = await _fetch_token_balances(client, network, base_token, quote_token)
+
+            if balances["base_balance"] > 0 or balances["quote_balance"] > 0:
+                help_text += "\n" + r"━━━ Wallet Balances ━━━" + "\n"
+
+                # Format base token balance
+                if balances["base_balance"] > 0:
+                    base_bal_str = _format_number(balances["base_balance"])
+                    base_val_str = f"${_format_number(balances['base_value'])}" if balances["base_value"] > 0 else ""
+                    help_text += f"💰 `{escape_markdown_v2(base_token)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
+
+                # Format quote token balance
+                if balances["quote_balance"] > 0:
+                    quote_bal_str = _format_number(balances["quote_balance"])
+                    quote_val_str = f"${_format_number(balances['quote_value'])}" if balances["quote_value"] > 0 else ""
+                    help_text += f"💵 `{escape_markdown_v2(quote_token)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
+
+                # Store balances in context for percentage calculation
+                context.user_data["token_balances"] = balances
+
+        except Exception as e:
+            logger.warning(f"Could not fetch token balances: {e}")
+
+        # Add ASCII range visualization if we have bins
+        if bins and lower_val and upper_val:
+            ascii_lines = _generate_range_ascii(bins, lower_val, upper_val, current_val)
+            if ascii_lines:
+                help_text += "\n```\n" + ascii_lines + "\n```\n"
+                help_text += r"_█\=in range, ░\=out, ◄\=current, L/U\=bounds_" + "\n"
+
+    # Build keyboard - values shown in buttons, not in message body
+    lower_display = params.get('lower_price', '—')[:8] if params.get('lower_price') else '—'
+    upper_display = params.get('upper_price', '—')[:8] if params.get('upper_price') else '—'
+    base_display = params.get('amount_base') or '10%'
+    quote_display = params.get('amount_quote') or '10%'
+    strategy_display = params.get('strategy_type', '0')
+
+    # Strategy type name mapping
+    strategy_names = {'0': 'Spot', '1': 'Curve', '2': 'BidAsk'}
+    strategy_name = strategy_names.get(strategy_display, 'Spot')
+
     keyboard = [
         [
             InlineKeyboardButton(
-                f"📉 Lower: {params.get('lower_price', '—')[:8]}",
+                f"📉 Lower: {lower_display}",
                 callback_data="dex:pos_set_lower"
             ),
             InlineKeyboardButton(
-                f"📈 Upper: {params.get('upper_price', '—')[:8]}",
+                f"📈 Upper: {upper_display}",
                 callback_data="dex:pos_set_upper"
             )
         ],
         [
             InlineKeyboardButton(
-                f"💰 Base: {params.get('amount_base') or '—'}",
+                f"💰 Base: {base_display}",
                 callback_data="dex:pos_set_base"
             ),
             InlineKeyboardButton(
-                f"💵 Quote: {params.get('amount_quote') or '—'}",
+                f"💵 Quote: {quote_display}",
                 callback_data="dex:pos_set_quote"
             )
         ],
         [
-            InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
-            InlineKeyboardButton("« Back", callback_data="dex:pool_list_back")
+            InlineKeyboardButton(
+                f"🎯 Strategy: {strategy_name}",
+                callback_data="dex:pos_toggle_strategy"
+            )
         ]
     ]
 
+    # Help/Back toggle and action buttons
+    help_button = (
+        InlineKeyboardButton("« Position", callback_data="dex:add_position_from_pool")
+        if show_help else
+        InlineKeyboardButton("❓ Help", callback_data="dex:pos_help")
+    )
+    keyboard.append([
+        InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
+        help_button,
+        InlineKeyboardButton("« Back", callback_data="dex:pool_list_back")
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Generate chart image if bins available
+    # Generate chart image if bins available (only for main view, not help)
     chart_bytes = None
-    if bins:
+    if bins and not show_help:
         try:
             chart_bytes = _generate_liquidity_chart(
                 bins=bins,
@@ -1560,6 +1793,27 @@ async def show_add_position_menu(update: Update, context: ContextTypes.DEFAULT_T
                         await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
                 else:
                     await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+
+
+async def handle_pos_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show detailed help for add position"""
+    await show_add_position_menu(update, context, show_help=True)
+
+
+async def handle_pos_toggle_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle between strategy types (0=Spot, 1=Curve, 2=BidAsk)"""
+    params = context.user_data.get("add_position_params", {})
+    current_strategy = params.get("strategy_type", "0")
+
+    # Cycle through strategies: 0 -> 1 -> 2 -> 0
+    if current_strategy == "0":
+        params["strategy_type"] = "1"
+    elif current_strategy == "1":
+        params["strategy_type"] = "2"
+    else:
+        params["strategy_type"] = "0"
+
+    await show_add_position_menu(update, context)
 
 
 async def handle_pos_use_max_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1705,14 +1959,22 @@ async def handle_pos_set_upper(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_pos_set_base(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt user to input base amount"""
+    # Get balance for display
+    balances = context.user_data.get("token_balances", {})
+    base_bal = balances.get("base_balance", 0)
+    bal_info = f"_Balance: {_format_number(base_bal)}_\n\n" if base_bal > 0 else ""
+
     help_text = (
-        r"📝 *Set Base Token Amount*" + "\n\n"
+        r"📝 *Set Base Token Amount*" + "\n\n" +
+        bal_info +
         r"Enter the amount of base token:" + "\n\n"
-        r"*Example:*" + "\n"
-        r"`100` \- 100 base tokens"
+        r"*Examples:*" + "\n"
+        r"`10%` \- 10% of your balance" + "\n"
+        r"`100` \- Exact 100 tokens" + "\n"
+        r"`0\.5` \- Exact 0\.5 tokens"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:add_position")]]
+    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:add_position_from_pool")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pos_set_base"
@@ -1726,14 +1988,22 @@ async def handle_pos_set_base(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_pos_set_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt user to input quote amount"""
+    # Get balance for display
+    balances = context.user_data.get("token_balances", {})
+    quote_bal = balances.get("quote_balance", 0)
+    bal_info = f"_Balance: {_format_number(quote_bal)}_\n\n" if quote_bal > 0 else ""
+
     help_text = (
-        r"📝 *Set Quote Token Amount*" + "\n\n"
+        r"📝 *Set Quote Token Amount*" + "\n\n" +
+        bal_info +
         r"Enter the amount of quote token:" + "\n\n"
-        r"*Example:*" + "\n"
-        r"`50` \- 50 quote tokens"
+        r"*Examples:*" + "\n"
+        r"`10%` \- 10% of your balance" + "\n"
+        r"`50` \- Exact 50 tokens" + "\n"
+        r"`0\.5` \- Exact 0\.5 tokens"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:add_position")]]
+    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:add_position_from_pool")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pos_set_quote"
@@ -1743,6 +2013,36 @@ async def handle_pos_set_quote(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
     )
+
+
+def _parse_amount(amount_str: str, balance: float) -> Decimal:
+    """Parse amount string - supports percentage (10%) or absolute values
+
+    Args:
+        amount_str: Amount string like "10%", "100", "0.5"
+        balance: Wallet balance for percentage calculation
+
+    Returns:
+        Decimal amount
+    """
+    if not amount_str:
+        return None
+
+    amount_str = amount_str.strip()
+
+    # Check if it's a percentage
+    if amount_str.endswith('%'):
+        try:
+            pct = float(amount_str[:-1])
+            return Decimal(str(balance * pct / 100))
+        except (ValueError, TypeError):
+            return None
+
+    # Otherwise it's an absolute amount
+    try:
+        return Decimal(amount_str)
+    except (ValueError, TypeError):
+        return None
 
 
 async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1755,14 +2055,15 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         pool_address = params.get("pool_address")
         lower_price = params.get("lower_price")
         upper_price = params.get("upper_price")
-        amount_base = params.get("amount_base")
-        amount_quote = params.get("amount_quote")
+        amount_base_str = params.get("amount_base")
+        amount_quote_str = params.get("amount_quote")
+        strategy_type = int(params.get("strategy_type", "0"))
 
         # Validate required parameters
         if not all([connector, network, pool_address, lower_price, upper_price]):
             raise ValueError("Missing required parameters (connector, network, pool, prices)")
 
-        if not amount_base and not amount_quote:
+        if not amount_base_str and not amount_quote_str:
             raise ValueError("Need at least one amount (base or quote)")
 
         client = await get_gateway_client()
@@ -1770,14 +2071,37 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
 
-        result = await client.gateway_clmm.add_liquidity(
+        # Get token balances for percentage calculation
+        balances = context.user_data.get("token_balances", {})
+        base_balance = balances.get("base_balance", 0)
+        quote_balance = balances.get("quote_balance", 0)
+
+        # Parse amounts (handles both % and absolute values)
+        amount_base = _parse_amount(amount_base_str, base_balance) if amount_base_str else None
+        amount_quote = _parse_amount(amount_quote_str, quote_balance) if amount_quote_str else None
+
+        # Validate we have at least one valid amount
+        if amount_base is None and amount_quote is None:
+            raise ValueError("Invalid amounts. Use '10%' for percentage or '100' for absolute value.")
+
+        # Check if using percentage with no balance
+        if amount_base_str and amount_base_str.endswith('%') and base_balance <= 0:
+            raise ValueError(f"Cannot use percentage - no base token balance found")
+        if amount_quote_str and amount_quote_str.endswith('%') and quote_balance <= 0:
+            raise ValueError(f"Cannot use percentage - no quote token balance found")
+
+        # Build extra_params for strategy type
+        extra_params = {"strategyType": strategy_type}
+
+        result = await client.gateway_clmm.open_position(
             connector=connector,
             network=network,
             pool_address=pool_address,
             lower_price=Decimal(lower_price),
             upper_price=Decimal(upper_price),
-            amount_base=Decimal(amount_base) if amount_base else None,
-            amount_quote=Decimal(amount_quote) if amount_quote else None,
+            base_token_amount=amount_base,
+            quote_token_amount=amount_quote,
+            extra_params=extra_params,
         )
 
         if result is None:
@@ -1790,17 +2114,22 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
             "pool_address": pool_address
         })
 
+        # Strategy name for display
+        strategy_names = {0: 'Spot', 1: 'Curve', 2: 'BidAsk'}
+        strategy_name = strategy_names.get(strategy_type, 'Spot')
+
         pos_info = escape_markdown_v2(
             f"✅ Position Added!\n\n"
             f"Connector: {connector}\n"
             f"Pool: {pool_address[:16]}...\n"
-            f"Range: [{lower_price} - {upper_price}]\n"
+            f"Range: [{lower_price[:8]} - {upper_price[:8]}]\n"
+            f"Strategy: {strategy_name}\n"
         )
 
         if amount_base:
-            pos_info += escape_markdown_v2(f"Base: {amount_base}\n")
+            pos_info += escape_markdown_v2(f"Base: {float(amount_base):.6f}\n")
         if amount_quote:
-            pos_info += escape_markdown_v2(f"Quote: {amount_quote}\n")
+            pos_info += escape_markdown_v2(f"Quote: {float(amount_quote):.6f}\n")
 
         if isinstance(result, dict):
             if 'tx_hash' in result:

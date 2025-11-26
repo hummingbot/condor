@@ -5,12 +5,120 @@ Contains:
 - Server client helper
 - Explorer URL generation
 - Common formatters
+- Conversation-level caching
 """
 
 import logging
-from typing import Optional, Dict, Any
+import time
+from typing import Optional, Dict, Any, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar('T')
+
+# Default cache TTL in seconds
+DEFAULT_CACHE_TTL = 60
+
+
+# ============================================
+# CONVERSATION-LEVEL CACHE
+# ============================================
+
+def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+    """Get a cached value if still valid.
+
+    Args:
+        user_data: context.user_data dict
+        key: Cache key
+        ttl: Time-to-live in seconds
+
+    Returns:
+        Cached value or None if expired/missing
+    """
+    cache = user_data.get("_cache", {})
+    entry = cache.get(key)
+
+    if entry is None:
+        return None
+
+    value, timestamp = entry
+    if time.time() - timestamp > ttl:
+        # Expired
+        return None
+
+    return value
+
+
+def set_cached(user_data: dict, key: str, value: Any) -> None:
+    """Store a value in the conversation cache.
+
+    Args:
+        user_data: context.user_data dict
+        key: Cache key
+        value: Value to cache
+    """
+    if "_cache" not in user_data:
+        user_data["_cache"] = {}
+
+    user_data["_cache"][key] = (value, time.time())
+
+
+def clear_cache(user_data: dict, key: Optional[str] = None) -> None:
+    """Clear cached values.
+
+    Args:
+        user_data: context.user_data dict
+        key: Specific key to clear, or None to clear all
+    """
+    if key is None:
+        user_data.pop("_cache", None)
+    elif "_cache" in user_data:
+        user_data["_cache"].pop(key, None)
+
+
+async def cached_call(
+    user_data: dict,
+    key: str,
+    fetch_func: Callable,
+    ttl: int = DEFAULT_CACHE_TTL,
+    *args,
+    **kwargs
+) -> Any:
+    """Execute an async function with caching.
+
+    Args:
+        user_data: context.user_data dict
+        key: Cache key
+        fetch_func: Async function to call if cache miss
+        ttl: Time-to-live in seconds
+        *args, **kwargs: Arguments to pass to fetch_func
+
+    Returns:
+        Cached or fresh result
+
+    Example:
+        data = await cached_call(
+            context.user_data,
+            "gateway_balances",
+            _fetch_gateway_data,
+            ttl=60,
+            client
+        )
+    """
+    # Check cache first
+    cached = get_cached(user_data, key, ttl)
+    if cached is not None:
+        logger.debug(f"Cache hit for '{key}'")
+        return cached
+
+    # Cache miss - fetch fresh data
+    logger.debug(f"Cache miss for '{key}', fetching...")
+    result = await fetch_func(*args, **kwargs)
+
+    # Store in cache
+    set_cached(user_data, key, result)
+
+    return result
 
 
 # ============================================

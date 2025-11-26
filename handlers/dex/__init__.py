@@ -21,7 +21,7 @@ from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
 from utils.auth import restricted
-from handlers.config import clear_config_state
+from handlers import clear_all_input_states
 
 # Import submodule handlers
 from .menu import show_dex_menu, handle_close
@@ -88,6 +88,8 @@ from .pools import (
     handle_pos_set_quote,
     handle_pos_add_confirm,
     handle_pos_use_max_range,
+    handle_pos_help,
+    handle_pos_toggle_strategy,
     process_pool_info,
     process_pool_list,
     process_position_list,
@@ -116,10 +118,8 @@ async def dex_trading_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     Usage:
         /dex_trading - Show DEX trading menu
     """
-    clear_config_state(context)
-    # Clear any CLOB state to prevent interference
-    context.user_data.pop("clob_state", None)
-    context.user_data.pop("place_order_params", None)
+    # Clear all pending input states to prevent interference
+    clear_all_input_states(context)
     await update.message.reply_chat_action("typing")
     await show_dex_menu(update, context)
 
@@ -232,10 +232,11 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     "pool_address": pool_address,
                     "lower_price": "",
                     "upper_price": "",
-                    "amount_base": "",
-                    "amount_quote": "",
+                    "amount_base": "10%",  # Default to 10% of balance
+                    "amount_quote": "10%",  # Default to 10% of balance
+                    "strategy_type": "0",  # Default strategy type (Spot)
                 }
-            await handle_add_position(update, context)
+            await show_add_position_menu(update, context)
         elif action.startswith("copy_pool:"):
             # Show pool address for copying
             selected_pool = context.user_data.get("selected_pool", {})
@@ -259,6 +260,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pos_add_confirm(update, context)
         elif action == "pos_use_max_range":
             await handle_pos_use_max_range(update, context)
+        elif action == "pos_help":
+            await handle_pos_help(update, context)
+        elif action == "pos_toggle_strategy":
+            await handle_pos_toggle_strategy(update, context)
 
         # Close menu
         elif action == "close":
