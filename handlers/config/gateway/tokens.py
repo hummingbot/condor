@@ -57,6 +57,10 @@ async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     except Exception as e:
+        # Ignore "message not modified" errors - they're harmless
+        if "not modified" in str(e).lower():
+            logger.debug(f"Message not modified (ignored): {e}")
+            return
         logger.error(f"Error showing tokens menu: {e}", exc_info=True)
         error_text = f"❌ Error loading networks: {escape_markdown_v2(str(e))}"
         keyboard = [[InlineKeyboardButton("« Back to Gateway", callback_data="config_gateway")]]
@@ -184,6 +188,10 @@ async def show_network_tokens(query, context: ContextTypes.DEFAULT_TYPE, network
         )
 
     except Exception as e:
+        # Ignore "message not modified" errors - they're harmless
+        if "not modified" in str(e).lower():
+            logger.debug(f"Message not modified (ignored): {e}")
+            return
         logger.error(f"Error showing network tokens: {e}", exc_info=True)
         error_text = f"❌ Error loading tokens: {escape_markdown_v2(str(e))}"
         keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_tokens")]]
@@ -195,6 +203,10 @@ async def prompt_add_token(query, context: ContextTypes.DEFAULT_TYPE, network_id
     """Prompt user to enter token details"""
     try:
         network_escaped = escape_markdown_v2(network_id)
+
+        # Clear any lingering states from previous operations
+        context.user_data.pop('dex_state', None)
+        context.user_data.pop('clob_state', None)
 
         context.user_data['awaiting_token_input'] = 'token_details'
         context.user_data['token_network'] = network_id
@@ -229,6 +241,10 @@ async def prompt_remove_token(query, context: ContextTypes.DEFAULT_TYPE, network
     """Prompt user to enter token address to remove"""
     try:
         network_escaped = escape_markdown_v2(network_id)
+
+        # Clear any lingering states from previous operations
+        context.user_data.pop('dex_state', None)
+        context.user_data.pop('clob_state', None)
 
         context.user_data['awaiting_token_input'] = 'token_address_remove'
         context.user_data['token_network'] = network_id
@@ -366,7 +382,10 @@ async def remove_token(query, context: ContextTypes.DEFAULT_TYPE, network_id: st
 async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle text input during token addition/removal flow"""
     awaiting_field = context.user_data.get('awaiting_token_input')
+    logger.info(f"handle_token_input called. awaiting_field={awaiting_field}, user_data keys={list(context.user_data.keys())}")
+
     if not awaiting_field:
+        logger.info("No awaiting_token_input, returning")
         return
 
     # Delete user's input message
@@ -382,6 +401,7 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         network_id = context.user_data.get('token_network')
         message_id = context.user_data.get('token_message_id')
         chat_id = context.user_data.get('token_chat_id')
+        logger.info(f"Token input: network_id={network_id}, message_id={message_id}, chat_id={chat_id}")
 
         if awaiting_field == 'token_details':
             # Parse token details: address,symbol,decimals,name
@@ -400,11 +420,12 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             decimals = int(parts[2])
             name = parts[3] if len(parts) > 3 else None
 
-            # Clear context
+            # Clear context (including any lingering dex_state from previous operations)
             context.user_data.pop('awaiting_token_input', None)
             context.user_data.pop('token_network', None)
             context.user_data.pop('token_message_id', None)
             context.user_data.pop('token_chat_id', None)
+            context.user_data.pop('dex_state', None)
 
             # Show adding message
             network_escaped = escape_markdown_v2(network_id)
@@ -446,6 +467,10 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 import asyncio
                 await asyncio.sleep(2)
 
+                async def mock_answer(text=""):
+                    """Mock async answer method"""
+                    pass
+
                 mock_message = SimpleNamespace(
                     edit_text=lambda text, parse_mode=None, reply_markup=None: update.get_bot().edit_message_text(
                         chat_id=chat_id,
@@ -459,7 +484,7 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 mock_query = SimpleNamespace(
                     message=mock_message,
-                    answer=lambda text="": None
+                    answer=mock_answer
                 )
                 await show_network_tokens(mock_query, context, network_id)
 
@@ -477,14 +502,20 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         elif awaiting_field == 'token_address_remove':
             # Parse token address to remove
             token_address = update.message.text.strip()
+            logger.info(f"Processing token_address_remove: token_address={token_address}, network_id={network_id}")
 
-            # Clear context
+            # Clear context (including any lingering dex_state from previous operations)
             context.user_data.pop('awaiting_token_input', None)
             context.user_data.pop('token_network', None)
             context.user_data.pop('token_message_id', None)
             context.user_data.pop('token_chat_id', None)
+            context.user_data.pop('dex_state', None)
 
             # Create mock query and call confirmation dialog
+            async def mock_answer(text=""):
+                """Mock async answer method"""
+                pass
+
             mock_message = SimpleNamespace(
                 edit_text=lambda text, parse_mode=None, reply_markup=None: update.get_bot().edit_message_text(
                     chat_id=chat_id,
@@ -498,7 +529,7 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             mock_query = SimpleNamespace(
                 message=mock_message,
-                answer=lambda text="": None
+                answer=mock_answer
             )
             await show_delete_token_confirmation(mock_query, context, network_id, token_address)
 
