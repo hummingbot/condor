@@ -8,9 +8,11 @@ Contains:
 - Conversation-level caching
 """
 
+import asyncio
+import functools
 import logging
 import time
-from typing import Optional, Dict, Any, Callable, TypeVar
+from typing import Optional, Dict, Any, Callable, TypeVar, List
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +124,194 @@ async def cached_call(
 
 
 # ============================================
+# CACHE INVALIDATION GROUPS
+# ============================================
+
+# Define which cache keys should be invalidated together
+CACHE_GROUPS = {
+    "balances": ["gateway_balances", "portfolio_data", "wallet_balances", "token_balances", "gateway_data"],
+    "positions": ["clmm_positions", "liquidity_positions", "pool_positions", "gateway_lp_positions"],
+    "swaps": ["swap_history", "recent_swaps"],
+    "tokens": ["token_cache"],  # Token list from gateway
+    "all": None,  # Special: clears entire cache
+}
+
+
+def invalidate_cache(user_data: dict, *groups: str) -> None:
+    """Invalidate cache keys by group name(s).
+
+    Args:
+        user_data: context.user_data dict
+        *groups: One or more group names or individual cache keys
+
+    Example:
+        invalidate_cache(context.user_data, "balances")
+        invalidate_cache(context.user_data, "balances", "swaps")
+    """
+    for group in groups:
+        if group == "all":
+            clear_cache(user_data)
+            # Also clear token_cache stored directly in user_data
+            user_data.pop("token_cache", None)
+            logger.debug("Cache fully cleared")
+            return
+
+        keys = CACHE_GROUPS.get(group, [group])  # Fallback to group as key
+        for key in keys:
+            clear_cache(user_data, key)
+            # Also clear if stored directly in user_data (e.g., token_cache)
+            if key in user_data:
+                user_data.pop(key, None)
+        logger.debug(f"Invalidated cache group '{group}': {keys}")
+
+
+def invalidates(*groups: str):
+    """Decorator that invalidates cache groups after handler execution.
+
+    Args:
+        *groups: Cache groups to invalidate after the handler runs
+
+    Example:
+        @invalidates("balances", "swaps")
+        async def execute_swap(update, context):
+            ...
+    """
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            result = await func(*args, **kwargs)
+
+            # Find context in args (usually second arg for handlers)
+            context = None
+            for arg in args:
+                if hasattr(arg, 'user_data'):
+                    context = arg
+                    break
+
+            if context:
+                invalidate_cache(context.user_data, *groups)
+
+            return result
+        return wrapper
+    return decorator
+
+
+# ============================================
+# BACKGROUND REFRESH MANAGER
+# ============================================
+
+# Inactivity timeout in seconds (stop refreshing after this)
+INACTIVITY_TIMEOUT = 300  # 5 minutes
+REFRESH_INTERVAL = 30  # seconds between refreshes
+
+
+class BackgroundRefreshManager:
+    """Manages background data refresh for active users.
+
+    Starts refreshing when user becomes active, stops after inactivity.
+    Stores refresh tasks per user_id to avoid duplicates.
+    """
+
+    def __init__(self):
+        self._tasks: Dict[int, asyncio.Task] = {}
+        self._last_activity: Dict[int, float] = {}
+        self._refresh_funcs: Dict[str, Callable] = {}
+
+    def register_refresh(self, key: str, func: Callable) -> None:
+        """Register a function to be called during background refresh.
+
+        Args:
+            key: Cache key this function populates
+            func: Async function(user_data, client) that fetches and caches data
+        """
+        self._refresh_funcs[key] = func
+        logger.debug(f"Registered background refresh for '{key}'")
+
+    def touch(self, user_id: int, user_data: dict) -> None:
+        """Mark user as active, starting background refresh if needed.
+
+        Call this at the start of any handler to keep refresh alive.
+
+        Args:
+            user_id: Telegram user ID
+            user_data: context.user_data dict
+        """
+        self._last_activity[user_id] = time.time()
+
+        if user_id not in self._tasks or self._tasks[user_id].done():
+            self._tasks[user_id] = asyncio.create_task(
+                self._refresh_loop(user_id, user_data)
+            )
+            logger.debug(f"Started background refresh for user {user_id}")
+
+    async def _refresh_loop(self, user_id: int, user_data: dict) -> None:
+        """Background loop that refreshes data until inactivity timeout."""
+        try:
+            client = await get_gateway_client()
+        except Exception as e:
+            logger.warning(f"Background refresh: couldn't get client: {e}")
+            return
+
+        while True:
+            await asyncio.sleep(REFRESH_INTERVAL)
+
+            # Check for inactivity
+            last = self._last_activity.get(user_id, 0)
+            if time.time() - last > INACTIVITY_TIMEOUT:
+                logger.debug(f"Stopping background refresh for user {user_id} (inactive)")
+                break
+
+            # Refresh all registered functions
+            for key, func in self._refresh_funcs.items():
+                try:
+                    result = await func(client)
+                    set_cached(user_data, key, result)
+                    logger.debug(f"Background refreshed '{key}' for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Background refresh failed for '{key}': {e}")
+
+        # Cleanup
+        self._tasks.pop(user_id, None)
+        self._last_activity.pop(user_id, None)
+
+    def stop(self, user_id: int) -> None:
+        """Manually stop background refresh for a user."""
+        if user_id in self._tasks:
+            self._tasks[user_id].cancel()
+            self._tasks.pop(user_id, None)
+            self._last_activity.pop(user_id, None)
+            logger.debug(f"Manually stopped background refresh for user {user_id}")
+
+
+# Global instance
+background_refresh = BackgroundRefreshManager()
+
+
+def with_background_refresh(func: Callable) -> Callable:
+    """Decorator that touches background refresh on handler entry.
+
+    Example:
+        @with_background_refresh
+        async def my_handler(update, context):
+            ...
+    """
+    @functools.wraps(func)
+    async def wrapper(update, context, *args, **kwargs):
+        if update.effective_user:
+            background_refresh.touch(
+                update.effective_user.id,
+                context.user_data
+            )
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+
+# ============================================
 # SERVER CLIENT HELPERS
 # ============================================
 
 async def get_gateway_client():
-    """Get the gateway client from the first enabled server
+    """Get the gateway client from the default server
 
     Returns:
         Client instance with gateway_swap and gateway_clmm attributes
@@ -142,7 +327,14 @@ async def get_gateway_client():
     if not enabled_servers:
         raise ValueError("No enabled API servers available")
 
-    server_name = enabled_servers[0]
+    # Use default server if set, otherwise fall back to first enabled
+    default_server = server_manager.get_default_server()
+    if default_server and default_server in enabled_servers:
+        server_name = default_server
+    else:
+        server_name = enabled_servers[0]
+
+    logger.info(f"DEX using server: {server_name} (default: {default_server}, enabled: {enabled_servers})")
     client = await server_manager.get_client(server_name)
 
     return client

@@ -24,7 +24,7 @@ from utils.auth import restricted
 from handlers import clear_all_input_states
 
 # Import submodule handlers
-from .menu import show_dex_menu, handle_close
+from .menu import show_dex_menu, handle_close, handle_refresh
 from .swap_quote import (
     handle_swap_quote,
     show_swap_quote_menu,
@@ -71,6 +71,7 @@ from .pools import (
     handle_pool_list,
     handle_pool_select,
     handle_pool_list_back,
+    handle_plot_liquidity,
     handle_manage_positions,
     handle_pos_view,
     handle_pos_collect_fees,
@@ -199,6 +200,9 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pool_select(update, context, pool_index)
         elif action == "pool_list_back":
             await handle_pool_list_back(update, context)
+        elif action.startswith("plot_liquidity:"):
+            percentile = int(action.split(":")[1])
+            await handle_plot_liquidity(update, context, percentile)
 
         # Manage positions (unified view)
         elif action == "manage_positions":
@@ -264,6 +268,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pos_help(update, context)
         elif action == "pos_toggle_strategy":
             await handle_pos_toggle_strategy(update, context)
+
+        # Refresh data
+        elif action == "refresh":
+            await handle_refresh(update, context)
 
         # Close menu
         elif action == "close":

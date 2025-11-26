@@ -10,9 +10,9 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import escape_markdown_v2
+from utils.telegram_formatters import escape_markdown_v2, resolve_token_symbol, KNOWN_TOKENS
 from handlers.config.user_preferences import get_dex_last_swap
-from ._shared import get_gateway_client, cached_call
+from ._shared import get_gateway_client, cached_call, invalidate_cache
 
 logger = logging.getLogger(__name__)
 
@@ -40,26 +40,29 @@ def _format_value(value: float) -> str:
         return f"${value:.2f}"
 
 
-def _format_position_line(pos: dict) -> str:
-    """Format a single LP position line"""
-    pair = pos.get('trading_pair', pos.get('pool_name', 'Unknown'))
+def _format_position_line(pos: dict, token_cache: dict = None) -> str:
+    """Format a single LP position line with resolved token symbols"""
+    token_cache = token_cache or {}
     connector = pos.get('connector', 'unknown')
 
-    # Get amounts
-    amount_a = pos.get('amount_a', pos.get('token_a_amount', 0))
-    amount_b = pos.get('amount_b', pos.get('token_b_amount', 0))
-    token_a = pos.get('token_a', pos.get('base_token', ''))
-    token_b = pos.get('token_b', pos.get('quote_token', ''))
+    # Resolve token addresses to symbols
+    base_token = pos.get('base_token', pos.get('token_a', ''))
+    quote_token = pos.get('quote_token', pos.get('token_b', ''))
+    base_symbol = resolve_token_symbol(base_token, token_cache)
+    quote_symbol = resolve_token_symbol(quote_token, token_cache)
+    pair = f"{base_symbol}-{quote_symbol}"
+
+    # Get current amounts
+    amount_a = pos.get('base_token_amount', pos.get('amount_a', pos.get('token_a_amount', 0)))
+    amount_b = pos.get('quote_token_amount', pos.get('amount_b', pos.get('token_b_amount', 0)))
 
     # Get price range
     lower = pos.get('lower_price', pos.get('price_lower', ''))
     upper = pos.get('upper_price', pos.get('price_upper', ''))
 
-    # Format amounts
-    if amount_a and amount_b:
-        amounts = f"{_format_amount(float(amount_a))} {token_a} / {_format_amount(float(amount_b))} {token_b}"
-    else:
-        amounts = "N/A"
+    # Get in-range status
+    in_range = pos.get('in_range', '')
+    status_emoji = "🟢" if in_range == "IN_RANGE" else "🔴" if in_range == "OUT_OF_RANGE" else ""
 
     # Format range
     if lower and upper:
@@ -67,7 +70,7 @@ def _format_position_line(pos: dict) -> str:
     else:
         range_str = ""
 
-    return f"  • {pair} ({connector}): {amounts} {range_str}"
+    return f"  • {pair} ({connector}): {status_emoji} {range_str}"
 
 
 def _format_price(price) -> str:
@@ -84,97 +87,164 @@ def _format_price(price) -> str:
         return str(price)
 
 
-async def _fetch_gateway_data(client) -> dict:
-    """Fetch gateway balances and LP positions, organized by network"""
-    import asyncio
+async def _fetch_balances(client) -> dict:
+    """Fetch gateway balances only (fast)"""
     from collections import defaultdict
 
     data = {
-        "balances_by_network": defaultdict(list),  # network -> list of balances
-        "lp_positions": [],
-        "total_value": 0
+        "balances_by_network": defaultdict(list),
+        "total_value": 0,
     }
 
     try:
-        # Fetch portfolio state and LP positions in parallel
-        tasks = []
-
-        # Portfolio state for gateway balances
-        if hasattr(client, 'portfolio'):
-            tasks.append(("state", client.portfolio.get_state()))
-
-        # LP positions
-        if hasattr(client, 'gateway_clmm'):
-            tasks.append(("lp", client.gateway_clmm.search_positions(
-                limit=100,
-                offset=0,
-                status="OPEN"
-            )))
-
-        if not tasks:
+        if not hasattr(client, 'portfolio'):
             return data
 
-        task_names = [t[0] for t in tasks]
-        task_coros = [t[1] for t in tasks]
+        result = await client.portfolio.get_state()
+        if not result:
+            return data
 
-        results = await asyncio.gather(*task_coros, return_exceptions=True)
+        logger.info(f"Processing portfolio state with {len(result)} accounts")
+        for account_name, account_data in result.items():
+            logger.info(f"Account: {account_name}, connectors: {list(account_data.keys())}")
+            for connector_name, balances in account_data.items():
+                # Only show DEX/blockchain connectors, not CEX
+                connector_lower = connector_name.lower()
+                is_dex_connector = (
+                    connector_lower.startswith("solana") or
+                    connector_lower.startswith("ethereum") or
+                    connector_lower in ["polygon", "arbitrum", "optimism", "base", "avalanche"]
+                )
 
-        for i, name in enumerate(task_names):
-            result = results[i]
-            if isinstance(result, Exception):
-                logger.warning(f"Failed to fetch {name}: {result}")
-                continue
+                if not is_dex_connector:
+                    logger.debug(f"Skipping non-DEX connector: {connector_name}")
+                    continue
 
-            if name == "state" and result:
-                # Extract gateway balances from portfolio state, organized by network
-                logger.info(f"Processing portfolio state with {len(result)} accounts")
-                for account_name, account_data in result.items():
-                    logger.info(f"Account: {account_name}, connectors: {list(account_data.keys())}")
-                    for connector_name, balances in account_data.items():
-                        # Only show gateway connectors (look for gateway prefix or known chains)
-                        is_gateway = (
-                            "gateway" in connector_name.lower() or
-                            connector_name.lower().startswith("solana") or
-                            connector_name.lower().startswith("ethereum") or
-                            connector_name.lower() in ["polygon", "arbitrum", "optimism", "base", "avalanche"]
-                        )
+                if balances:
+                    network = connector_lower
+                    logger.info(f"Processing DEX connector: {connector_name}, balances: {len(balances)}")
 
-                        if is_gateway and balances:
-                            # Extract network name from connector
-                            # e.g., "gateway_solana" -> "solana", "solana_gateway" -> "solana"
-                            network = connector_name.lower().replace("gateway_", "").replace("_gateway", "").replace("gateway", "")
-                            if not network:
-                                network = connector_name.lower()
+                    for balance in balances:
+                        token = balance.get("token", "???")
+                        units = balance.get("units", 0)
+                        value = balance.get("value", 0)
+                        logger.debug(f"  Token: {token}, units: {units}, value: {value}")
+                        if value > 0.01:
+                            data["balances_by_network"][network].append({
+                                "token": token,
+                                "units": units,
+                                "value": value
+                            })
+                            data["total_value"] += value
 
-                            logger.info(f"Found gateway connector: {connector_name} -> network: {network}, balances: {len(balances)}")
-
-                            for balance in balances:
-                                token = balance.get("token", "???")
-                                units = balance.get("units", 0)
-                                value = balance.get("value", 0)
-                                if value > 0.01:  # Show balances > $0.01
-                                    data["balances_by_network"][network].append({
-                                        "token": token,
-                                        "units": units,
-                                        "value": value
-                                    })
-                                    data["total_value"] += value
-
-                # Calculate percentages and sort within each network
-                for network in data["balances_by_network"]:
-                    for balance in data["balances_by_network"][network]:
-                        balance["percentage"] = (balance["value"] / data["total_value"] * 100) if data["total_value"] > 0 else 0
-                    # Sort by value descending
-                    data["balances_by_network"][network].sort(key=lambda x: x["value"], reverse=True)
-
-            elif name == "lp" and result:
-                positions = result.get("data", [])
-                data["lp_positions"] = positions[:5]  # Show top 5
+        # Calculate percentages and sort
+        for network in data["balances_by_network"]:
+            for balance in data["balances_by_network"][network]:
+                balance["percentage"] = (balance["value"] / data["total_value"] * 100) if data["total_value"] > 0 else 0
+            data["balances_by_network"][network].sort(key=lambda x: x["value"], reverse=True)
 
     except Exception as e:
-        logger.error(f"Error fetching gateway data: {e}", exc_info=True)
+        logger.error(f"Error fetching balances: {e}", exc_info=True)
 
     return data
+
+
+async def _fetch_lp_positions(client) -> dict:
+    """Fetch LP positions only"""
+    data = {
+        "lp_positions": [],
+        "token_cache": dict(KNOWN_TOKENS)
+    }
+
+    try:
+        if not hasattr(client, 'gateway_clmm'):
+            return data
+
+        result = await client.gateway_clmm.search_positions(
+            limit=100,
+            offset=0,
+            status="OPEN"
+        )
+
+        if not result:
+            return data
+
+        positions = result.get("data", [])
+        logger.info(f"LP positions API returned {len(positions)} positions")
+        for p in positions[:5]:
+            logger.info(f"  Position: {p.get('trading_pair')} status={p.get('status')} liquidity={p.get('liquidity')}")
+
+        # Filter to only show OPEN positions
+        open_positions = [p for p in positions if p.get("status") == "OPEN"]
+        logger.info(f"After OPEN filter: {len(open_positions)} positions")
+
+        # Filter out positions with 0 liquidity
+        def has_liquidity(pos):
+            liq = pos.get('liquidity') or pos.get('current_liquidity')
+            if liq is not None:
+                try:
+                    return float(liq) > 0
+                except (ValueError, TypeError):
+                    pass
+            base = pos.get('base_amount') or pos.get('amount_base')
+            quote = pos.get('quote_amount') or pos.get('amount_quote')
+            if base is not None and quote is not None:
+                try:
+                    return float(base) > 0 or float(quote) > 0
+                except (ValueError, TypeError):
+                    pass
+            return True
+
+        active_positions = [p for p in open_positions if has_liquidity(p)]
+        if len(active_positions) < len(open_positions):
+            logger.info(f"Filtered {len(open_positions) - len(active_positions)} positions with 0 liquidity")
+
+        data["lp_positions"] = active_positions[:5]
+
+        # Fetch tokens for LP position networks
+        lp_networks = list(set(pos.get('network', 'solana-mainnet-beta') for pos in active_positions))
+        if lp_networks and hasattr(client, 'gateway'):
+            for network in lp_networks:
+                try:
+                    tokens = []
+                    if hasattr(client.gateway, 'get_network_tokens'):
+                        resp = await client.gateway.get_network_tokens(network)
+                        tokens = resp.get('tokens', []) if resp else []
+                    elif hasattr(client.gateway, 'get_network_config'):
+                        resp = await client.gateway.get_network_config(network)
+                        tokens = resp.get('tokens', []) if resp else []
+                    for token in tokens:
+                        addr = token.get('address', '')
+                        symbol = token.get('symbol', '')
+                        if addr and symbol:
+                            data["token_cache"][addr] = symbol
+                except Exception as e:
+                    logger.debug(f"Failed to fetch tokens for {network}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error fetching LP positions: {e}", exc_info=True)
+
+    return data
+
+
+async def _fetch_gateway_data(client) -> dict:
+    """Fetch gateway balances and LP positions, organized by network (legacy wrapper)"""
+    import asyncio
+
+    # Fetch both in parallel
+    balances_task = asyncio.create_task(_fetch_balances(client))
+    lp_task = asyncio.create_task(_fetch_lp_positions(client))
+
+    balances_data = await balances_task
+    lp_data = await lp_task
+
+    # Merge results
+    return {
+        "balances_by_network": balances_data.get("balances_by_network", {}),
+        "total_value": balances_data.get("total_value", 0),
+        "lp_positions": lp_data.get("lp_positions", []),
+        "token_cache": lp_data.get("token_cache", {}),
+    }
 
 
 def _build_menu_keyboard() -> InlineKeyboardMarkup:
@@ -191,6 +261,7 @@ def _build_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📍 Positions", callback_data="dex:manage_positions")
         ],
         [
+            InlineKeyboardButton("🔄 Refresh", callback_data="dex:refresh"),
             InlineKeyboardButton("✖️ Close", callback_data="dex:close")
         ]
     ]
@@ -248,8 +319,9 @@ def _build_menu_with_data(gateway_data: dict, last_swap: dict = None) -> str:
     # Show active LP positions if available
     if gateway_data.get("lp_positions"):
         header += r"📍 *Active LP Positions:*" + "\n"
+        token_cache = gateway_data.get("token_cache", {})
         for pos in gateway_data["lp_positions"]:
-            line = _format_position_line(pos)
+            line = _format_position_line(pos, token_cache=token_cache)
             header += escape_markdown_v2(line) + "\n"
         header += "\n"
 
@@ -268,9 +340,10 @@ def _build_menu_with_data(gateway_data: dict, last_swap: dict = None) -> str:
 async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display main DEX trading menu with balances and positions
 
-    Uses progressive loading: shows menu immediately with loading indicator,
-    then updates with actual balances when data is fetched.
+    Uses progressive loading: shows balances first, then LP positions.
     """
+    import asyncio
+
     reply_markup = _build_menu_keyboard()
 
     # Step 1: Show menu immediately with loading indicator
@@ -311,24 +384,59 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             reply_markup=reply_markup
         )
 
-    # Step 2: Fetch gateway data (with 60s cache)
-    gateway_data = {"balances_by_network": {}, "lp_positions": [], "total_value": 0}
     last_swap = get_dex_last_swap(context.user_data)
+    gateway_data = {"balances_by_network": {}, "lp_positions": [], "total_value": 0, "token_cache": {}}
 
     try:
         client = await get_gateway_client()
-        gateway_data = await cached_call(
+
+        # Step 2: Fetch balances first (usually fast) and update UI immediately
+        balances_data = await cached_call(
             context.user_data,
-            "gateway_data",
-            _fetch_gateway_data,
-            60,  # Cache for 60 seconds
+            "gateway_balances",
+            _fetch_balances,
+            60,
             client
         )
-        logger.debug(f"Gateway data: {len(gateway_data.get('balances_by_network', {}))} networks, total_value={gateway_data.get('total_value', 0)}")
+
+        gateway_data["balances_by_network"] = balances_data.get("balances_by_network", {})
+        gateway_data["total_value"] = balances_data.get("total_value", 0)
+
+        # Update UI with balances (show "Loading positions..." for LP)
+        if gateway_data["balances_by_network"]:
+            balances_message = _build_menu_with_data(gateway_data, last_swap)
+            # Add loading indicator for positions
+            balances_message = balances_message.replace(
+                "Select operation:",
+                "_Loading LP positions\\.\\.\\._\n\nSelect operation:"
+            )
+            try:
+                await message.edit_text(
+                    balances_message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                pass
+
+        # Step 3: Fetch LP positions (can be slower)
+        lp_data = await cached_call(
+            context.user_data,
+            "gateway_lp_positions",
+            _fetch_lp_positions,
+            60,
+            client
+        )
+
+        gateway_data["lp_positions"] = lp_data.get("lp_positions", [])
+        gateway_data["token_cache"] = lp_data.get("token_cache", {})
+
+        logger.debug(f"Gateway data: {len(gateway_data.get('balances_by_network', {}))} networks, {len(gateway_data.get('lp_positions', []))} LP positions")
+
     except Exception as e:
         logger.warning(f"Could not fetch gateway data for menu: {e}")
 
-    # Step 3: Update message with actual data
+    # Step 4: Final update with all data
     final_message = _build_menu_with_data(gateway_data, last_swap)
 
     try:
@@ -351,3 +459,15 @@ async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception as e:
         logger.warning(f"Failed to delete message: {e}")
         await query.answer("Menu closed")
+
+
+async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle refresh button - clear cache and reload data"""
+    query = update.callback_query
+    await query.answer("Refreshing...")
+
+    # Invalidate all balance, position, and token caches
+    invalidate_cache(context.user_data, "balances", "positions", "tokens")
+
+    # Re-show the menu with fresh data
+    await show_dex_menu(update, context)
