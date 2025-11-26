@@ -18,7 +18,8 @@ from handlers.bots import bots_command
 from handlers.trade_ai import trade_command
 from handlers.clob import clob_trading_command, clob_callback_handler
 from handlers.dex import dex_trading_command, dex_callback_handler
-from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
+from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
+from handlers import clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
 
@@ -32,8 +33,8 @@ logger = logging.getLogger(__name__)
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the conversation and display the main menu."""
-    # Clear any config state to prevent interference
-    clear_config_state(context)
+    # Clear all pending input states to prevent interference
+    clear_all_input_states(context)
 
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -89,7 +90,6 @@ def reload_handlers():
         'handlers.config.api_keys',
         'handlers.config.gateway',
         'handlers.config.user_preferences',
-        'handlers.chatid',
         'utils.auth',
         'utils.telegram_formatters',
     ]
@@ -108,8 +108,7 @@ def register_handlers(application: Application) -> None:
     from handlers.trade_ai import trade_command
     from handlers.clob import clob_trading_command, clob_callback_handler
     from handlers.dex import dex_trading_command, dex_callback_handler
-    from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler, clear_config_state
-    from handlers.chatid import chatid_command
+    from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
 
     # Clear existing handlers
     application.handlers.clear()
