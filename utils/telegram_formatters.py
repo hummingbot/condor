@@ -573,52 +573,197 @@ def format_perpetual_positions(positions_data: Dict[str, Any]) -> str:
     return message
 
 
-def format_lp_positions(positions_data: Dict[str, Any]) -> str:
+# Well-known token addresses for resolution
+KNOWN_TOKENS = {
+    # Solana Native
+    "So11111111111111111111111111111111111111112": "SOL",
+    # Stablecoins
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
+    # LSTs
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "mSOL",
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": "jitoSOL",
+    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": "bSOL",
+    # Major tokens
+    "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs": "ETH",
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": "JUP",
+    "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE": "ORCA",
+    "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3": "PYTH",
+    "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof": "RNDR",
+    # Mining/DeFi
+    "oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp": "ORE",
+    # Add more as needed
+}
+
+
+def resolve_token_symbol(address: str, token_cache: Optional[Dict[str, str]] = None) -> str:
     """
-    Format LP (CLMM) positions for Telegram display
+    Resolve a token address to its symbol.
+
+    Args:
+        address: Token address to resolve
+        token_cache: Optional cache from Gateway tokens {address: symbol}
+
+    Returns:
+        Token symbol or shortened address
+    """
+    if not address:
+        return "???"
+
+    # Check provided cache first
+    if token_cache and address in token_cache:
+        return token_cache[address]
+
+    # Check known tokens
+    if address in KNOWN_TOKENS:
+        return KNOWN_TOKENS[address]
+
+    # Shorten address: first 4 chars
+    return address[:4] if len(address) > 4 else address
+
+
+def _resolve_token_symbol(address: str) -> str:
+    """Resolve a token address to its symbol (legacy wrapper)."""
+    return resolve_token_symbol(address, None)
+
+
+def _get_chain_from_network(network: str) -> str:
+    """Extract chain name from network string (e.g., 'solana-mainnet-beta' -> 'solana')."""
+    if not network:
+        return "?"
+    network = network.lower()
+    if network.startswith("solana"):
+        return "solana"
+    elif network.startswith("ethereum") or network.startswith("eth"):
+        return "ethereum"
+    elif network.startswith("polygon"):
+        return "polygon"
+    elif network.startswith("arbitrum"):
+        return "arbitrum"
+    elif network.startswith("base"):
+        return "base"
+    # Fallback: first part before dash
+    if '-' in network:
+        return network.split('-')[0][:8]
+    return network[:8]
+
+
+def _looks_like_address(s: str) -> bool:
+    """Check if a string looks like a blockchain address (long alphanumeric)."""
+    if not s:
+        return False
+    # Addresses are typically 32+ chars and alphanumeric
+    return len(s) > 20 and s.replace('1', '').replace('2', '').isalnum()
+
+
+def _format_pnl_value(value: float) -> str:
+    """Format PNL value with sign and compact notation."""
+    if value is None:
+        return "—"
+    sign = "+" if value >= 0 else ""
+    if abs(value) >= 1000:
+        return f"{sign}{value/1000:.1f}k"
+    elif abs(value) >= 1:
+        return f"{sign}{value:.2f}"
+    elif abs(value) >= 0.01:
+        return f"{sign}{value:.3f}"
+    else:
+        return f"{sign}{value:.4f}"
+
+
+def format_lp_positions(positions_data: Dict[str, Any], token_cache: Optional[Dict[str, str]] = None) -> str:
+    """
+    Format LP (CLMM) positions for Telegram display, grouped by connector.
 
     Args:
         positions_data: Dictionary with 'positions' list and 'total' count
+        token_cache: Optional {address: symbol} mapping for token resolution
 
     Returns:
         Formatted string section for LP positions
     """
     positions = positions_data.get('positions', [])
     total = positions_data.get('total', 0)
+    token_cache = token_cache or {}
 
     if not positions or total == 0:
         return "🏊 *LP Positions \\(CLMM\\)*\n_No active LP positions_\n"
 
-    message = f"🏊 *LP Positions \\(CLMM\\)* \\({escape_markdown_v2(str(total))}\\)\n\n"
+    message = f"🏊 *LP Positions \\(CLMM\\)* \\({escape_markdown_v2(str(total))}\\)\n"
 
-    # Create table
-    table_content = "```\n"
-    table_content += f"{'Connector':<12} {'Network':<10} {'Pair':<12} {'Range':<18}\n"
-    table_content += f"{'─'*12} {'─'*10} {'─'*12} {'─'*18}\n"
+    # Group positions by connector
+    from collections import defaultdict
+    by_connector = defaultdict(list)
+    for pos in positions:
+        connector = pos.get('connector', 'unknown')
+        by_connector[connector].append(pos)
 
-    for pos in positions[:10]:  # Show max 10 positions
-        connector = pos.get('connector', 'N/A')[:11]
-        network = pos.get('network', 'N/A')[:9]
-        trading_pair = pos.get('trading_pair', 'N/A')[:11]
-        lower_price = pos.get('lower_price', 0)
-        upper_price = pos.get('upper_price', 0)
+    # Format each connector's positions
+    for connector, conn_positions in by_connector.items():
+        # Get network/chain from first position
+        first_pos = conn_positions[0]
+        chain = _get_chain_from_network(first_pos.get('network', ''))
 
-        # Format price range
-        if lower_price and upper_price:
-            try:
-                range_str = f"{float(lower_price):.2f}-{float(upper_price):.2f}"[:17]
-            except:
+        message += f"\n*{escape_markdown_v2(connector)}* \\({escape_markdown_v2(chain)}\\)\n"
+
+        # Create table with PNL info
+        # Pair(10) Range(9) Status(3) BasePNL(8) QuotePNL(8)
+        table_content = "```\n"
+        table_content += f"{'Pair':<10} {'Range':<9} {'St':>2} {'B.PNL':>7} {'Q.PNL':>7}\n"
+        table_content += f"{'─'*10} {'─'*9} {'─'*2} {'─'*7} {'─'*7}\n"
+
+        for pos in conn_positions[:8]:  # Max 8 per connector
+            # Resolve token pair using cache
+            base_token = pos.get('base_token', '')
+            quote_token = pos.get('quote_token', '')
+            base_symbol = resolve_token_symbol(base_token, token_cache)
+            quote_symbol = resolve_token_symbol(quote_token, token_cache)
+            pair_str = f"{base_symbol[:4]}-{quote_symbol[:4]}"
+
+            # Format range
+            lower_price = pos.get('lower_price', 0)
+            upper_price = pos.get('upper_price', 0)
+            if lower_price and upper_price:
+                try:
+                    low = float(lower_price)
+                    high = float(upper_price)
+                    if low >= 1000:
+                        range_str = f"{low/1000:.1f}k-{high/1000:.1f}k"
+                    elif low >= 1:
+                        range_str = f"{low:.2f}-{high:.2f}"
+                    else:
+                        range_str = f"{low:.3f}-{high:.3f}"
+                    range_str = range_str[:8]
+                except:
+                    range_str = "N/A"
+            else:
                 range_str = "N/A"
-        else:
-            range_str = "N/A"
 
-        table_content += f"{connector:<12} {network:<10} {trading_pair:<12} {range_str:<18}\n"
+            # Status (IN_RANGE -> "IN", OUT_OF_RANGE -> "OUT")
+            in_range = pos.get('in_range', '')
+            if in_range == 'IN_RANGE':
+                status = "✓"
+            elif in_range == 'OUT_OF_RANGE':
+                status = "✗"
+            else:
+                status = "?"
 
-    if total > 10:
-        table_content += f"\n... and {total - 10} more positions\n"
+            # PNL from pnl_summary
+            pnl_summary = pos.get('pnl_summary', {})
+            base_pnl = pnl_summary.get('base_pnl')
+            quote_pnl = pnl_summary.get('quote_pnl')
 
-    table_content += "```\n\n"
-    message += table_content
+            base_pnl_str = _format_pnl_value(base_pnl)[:7] if base_pnl is not None else "—"
+            quote_pnl_str = _format_pnl_value(quote_pnl)[:7] if quote_pnl is not None else "—"
+
+            table_content += f"{pair_str:<10} {range_str:<9} {status:>2} {base_pnl_str:>7} {quote_pnl_str:>7}\n"
+
+        if len(conn_positions) > 8:
+            table_content += f"... +{len(conn_positions) - 8} more\n"
+
+        table_content += "```\n"
+        message += table_content
 
     return message
 
@@ -713,7 +858,8 @@ def format_portfolio_overview(
     server_name: Optional[str] = None,
     server_status: Optional[str] = None,
     pnl_indicators: Optional[Dict[str, Optional[float]]] = None,
-    changes_24h: Optional[Dict[str, Any]] = None
+    changes_24h: Optional[Dict[str, Any]] = None,
+    token_cache: Optional[Dict[str, str]] = None
 ) -> str:
     """
     Format complete portfolio overview with all sections
@@ -728,6 +874,7 @@ def format_portfolio_overview(
         server_status: Status of the server (optional)
         pnl_indicators: Dict with pnl_24h, pnl_7d, pnl_30d percentages (optional)
         changes_24h: Dict with token and connector 24h changes (optional)
+        token_cache: Dict mapping token addresses to symbols for LP position resolution (optional)
 
     Returns:
         Formatted Telegram message with all portfolio sections
@@ -894,7 +1041,7 @@ def format_portfolio_overview(
     # SECTION 3: LP POSITIONS
     # ============================================
     lp_positions = overview_data.get('lp_positions', {"positions": [], "total": 0})
-    message += format_lp_positions(lp_positions)
+    message += format_lp_positions(lp_positions, token_cache)
 
     # ============================================
     # SECTION 4: ACTIVE ORDERS

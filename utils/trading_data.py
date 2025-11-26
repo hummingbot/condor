@@ -7,6 +7,87 @@ from typing import Dict, List, Any, Optional
 logger = logging.getLogger(__name__)
 
 
+async def get_network_tokens(client, network_id: str) -> Dict[str, str]:
+    """
+    Fetch tokens from Gateway for a specific network.
+
+    Args:
+        client: HummingbotAPIClient instance
+        network_id: Network identifier (e.g., 'solana-mainnet-beta')
+
+    Returns:
+        Dictionary mapping token address to symbol {address: symbol}
+    """
+    try:
+        if not hasattr(client, 'gateway'):
+            return {}
+
+        tokens = []
+
+        # Try get_network_tokens first
+        try:
+            if hasattr(client.gateway, 'get_network_tokens'):
+                response = await client.gateway.get_network_tokens(network_id)
+                tokens = response.get('tokens', []) if response else []
+        except Exception as e:
+            logger.debug(f"get_network_tokens failed for {network_id}: {e}")
+
+        # Fallback to get_network_config
+        if not tokens:
+            try:
+                config = await client.gateway.get_network_config(network_id)
+                tokens = config.get('tokens', []) if config else []
+            except Exception as e:
+                logger.debug(f"get_network_config failed for {network_id}: {e}")
+
+        # Build address -> symbol mapping
+        token_map = {}
+        for token in tokens:
+            address = token.get('address', '')
+            symbol = token.get('symbol', '')
+            if address and symbol:
+                token_map[address] = symbol
+
+        logger.debug(f"Loaded {len(token_map)} tokens for {network_id}")
+        return token_map
+
+    except Exception as e:
+        logger.warning(f"Failed to load tokens for {network_id}: {e}")
+        return {}
+
+
+async def get_tokens_for_networks(client, networks: List[str]) -> Dict[str, str]:
+    """
+    Fetch tokens from Gateway for multiple networks in parallel.
+
+    Args:
+        client: HummingbotAPIClient instance
+        networks: List of network identifiers
+
+    Returns:
+        Combined dictionary mapping token address to symbol
+    """
+    import asyncio
+
+    if not networks:
+        return {}
+
+    # Fetch tokens for all networks in parallel
+    unique_networks = list(set(networks))
+    results = await asyncio.gather(
+        *[get_network_tokens(client, net) for net in unique_networks],
+        return_exceptions=True
+    )
+
+    # Combine all token maps
+    combined = {}
+    for result in results:
+        if isinstance(result, dict):
+            combined.update(result)
+
+    return combined
+
+
 async def get_perpetual_positions(client, account_names: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Get all perpetual positions across accounts
@@ -96,13 +177,46 @@ async def get_active_orders(client, account_names: Optional[List[str]] = None) -
         return {"orders": [], "total": 0}
 
 
+def _is_position_active(pos: Dict[str, Any]) -> bool:
+    """
+    Check if a CLMM position is actually active (has liquidity).
+
+    Positions that are closed on-chain may still appear in the database
+    with status="OPEN". This function filters them out by checking liquidity.
+
+    Args:
+        pos: Position data dictionary
+
+    Returns:
+        True if position appears to be active (has liquidity)
+    """
+    # Check liquidity field (exact field name may vary)
+    liquidity = pos.get('liquidity') or pos.get('current_liquidity') or pos.get('liq')
+    if liquidity is not None:
+        try:
+            if float(liquidity) <= 0:
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    # Check if position has any token amounts remaining
+    base_amount = pos.get('base_amount') or pos.get('amount_base') or pos.get('token_a_amount')
+    quote_amount = pos.get('quote_amount') or pos.get('amount_quote') or pos.get('token_b_amount')
+
+    if base_amount is not None and quote_amount is not None:
+        try:
+            if float(base_amount) <= 0 and float(quote_amount) <= 0:
+                return False
+        except (ValueError, TypeError):
+            pass
+
+    # If we can't determine, assume it's active
+    return True
+
+
 async def get_lp_positions(client, account_names: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Get all LP (CLMM) positions from blockchain DEXs
-
-    This fetches real-time position data from the blockchain by:
-    1. Finding all pools the user has interacted with (from database)
-    2. Querying each pool's current state from the blockchain
+    Get all LP (CLMM) positions from the database.
 
     Args:
         client: HummingbotAPIClient instance
@@ -117,13 +231,11 @@ async def get_lp_positions(client, account_names: Optional[List[str]] = None) ->
             logger.debug("Client doesn't have gateway_clmm - LP positions not available")
             return {"positions": [], "total": 0}
 
-        # Step 1: Get all unique pools from database (to know which pools to query)
-        # This uses the backend database to find pools the user has interacted with
         try:
             search_result = await client.gateway_clmm.search_positions(
-                limit=100,  # Reduced limit for portfolio overview
+                limit=100,
                 offset=0,
-                status="OPEN",  # Only get open positions
+                status="OPEN",
             )
         except Exception as e:
             logger.debug(f"CLMM search_positions not available: {e}")
@@ -132,80 +244,17 @@ async def get_lp_positions(client, account_names: Optional[List[str]] = None) ->
         if not search_result or not isinstance(search_result, dict):
             return {"positions": [], "total": 0}
 
-        db_positions = search_result.get("data", [])
-        if not db_positions:
-            return {"positions": [], "total": 0}
+        positions = search_result.get("data", [])
 
-        # Step 2: Get unique pool addresses and their networks/connectors
-        pools_map = {}  # {(connector, network, pool_address): True}
-        for pos in db_positions:
-            connector = pos.get("connector")
-            network = pos.get("network")
-            pool_address = pos.get("pool_address")
+        # Filter out positions that appear to be closed (0 liquidity)
+        active_positions = [p for p in positions if _is_position_active(p)]
 
-            # Validate all required fields are present and non-empty
-            if not connector or not network or not pool_address:
-                continue
-
-            # Skip if pool_address looks invalid (too short)
-            if len(pool_address) < 20:
-                logger.debug(f"Skipping invalid pool_address: {pool_address}")
-                continue
-
-            pools_map[(connector, network, pool_address)] = True
-
-        if not pools_map:
-            return {"positions": [], "total": 0}
-
-        logger.info(f"LP Positions: querying {len(pools_map)} pools in parallel")
-
-        # Step 3: Fetch real-time data for all pools in parallel
-        import asyncio
-
-        async def fetch_pool_positions(connector: str, network: str, pool_address: str):
-            """Fetch positions for a single pool"""
-            try:
-                # Ensure network has the chain prefix (e.g., "solana-mainnet-beta")
-                if network and '-' not in network:
-                    chain = "solana" if connector in ("meteora", "raydium", "orca") else "ethereum"
-                    network = f"{chain}-{network}"
-
-                positions = await client.gateway_clmm.get_positions_owned(
-                    connector=connector,
-                    network=network,
-                    pool_address=pool_address,
-                    wallet_address=None
-                )
-
-                if positions and isinstance(positions, list):
-                    # Add connector and network info to each position
-                    for pos in positions:
-                        pos["connector"] = connector
-                        pos["network"] = network
-                    return positions
-                return []
-            except Exception as e:
-                logger.debug(f"Failed to get LP positions for {connector}/{pool_address[:12]}...: {str(e)}")
-                return []
-
-        # Create tasks for all pools
-        tasks = [
-            fetch_pool_positions(connector, network, pool_address)
-            for (connector, network, pool_address) in pools_map.keys()
-        ]
-
-        # Execute all in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Collect all positions
-        real_time_positions = []
-        for result in results:
-            if isinstance(result, list):
-                real_time_positions.extend(result)
+        if len(active_positions) < len(positions):
+            logger.info(f"Filtered {len(positions) - len(active_positions)} closed positions (0 liquidity)")
 
         return {
-            "positions": real_time_positions,
-            "total": len(real_time_positions)
+            "positions": active_positions,
+            "total": len(active_positions)
         }
 
     except Exception as e:
