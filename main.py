@@ -15,7 +15,6 @@ from telegram.ext import (
 
 from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
 from handlers.bots import bots_command
-from handlers.trade_ai import trade_command
 from handlers.clob import clob_trading_command, clob_callback_handler
 from handlers.dex import dex_trading_command, dex_callback_handler
 from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
@@ -70,7 +69,6 @@ def reload_handlers():
     modules_to_reload = [
         'handlers.portfolio',
         'handlers.bots',
-        'handlers.trade_ai',
         'handlers.clob',
         'handlers.clob.menu',
         'handlers.clob.place_order',
@@ -105,7 +103,6 @@ def register_handlers(application: Application) -> None:
     # Import fresh versions after reload
     from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
     from handlers.bots import bots_command
-    from handlers.trade_ai import trade_command
     from handlers.clob import clob_trading_command, clob_callback_handler
     from handlers.dex import dex_trading_command, dex_callback_handler
     from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
@@ -117,7 +114,6 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("bots", bots_command))
-    application.add_handler(CommandHandler("trade", trade_command))
     application.add_handler(CommandHandler("clob_trading", clob_trading_command))
     application.add_handler(CommandHandler("dex_trading", dex_trading_command))
     application.add_handler(CommandHandler("config", config_command))
