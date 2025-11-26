@@ -62,6 +62,7 @@ async def clob_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         handle_order_toggle_type,
         handle_order_toggle_position,
         handle_order_set_connector,
+        handle_select_connector,
         handle_order_set_pair,
         handle_order_set_amount,
         handle_order_set_price,
@@ -101,6 +102,10 @@ async def clob_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             await handle_order_toggle_position(update, context)
         elif action == "order_set_connector":
             await handle_order_set_connector(update, context)
+        elif action.startswith("select_connector:"):
+            # Extract connector name from callback data
+            connector_name = action.split(":", 1)[1]
+            await handle_select_connector(update, context, connector_name)
         elif action == "order_set_pair":
             await handle_order_set_pair(update, context)
         elif action == "order_set_amount":

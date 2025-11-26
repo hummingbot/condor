@@ -187,6 +187,8 @@ async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_confirm_close_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
     """Confirm and execute closing a position"""
+    from ._shared import invalidate_cache
+
     try:
         positions = context.user_data.get("current_positions", [])
 
@@ -228,6 +230,9 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
             price=None,
             position_action="CLOSE",
         )
+
+        # Invalidate cache after successful position close
+        invalidate_cache(context.user_data, "balances", "positions")
 
         success_msg = escape_markdown_v2(
             f"✅ Position closed successfully!\n\n"

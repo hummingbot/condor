@@ -149,6 +149,8 @@ async def handle_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE, order_index: int) -> None:
     """Confirm and execute order cancellation"""
+    from ._shared import invalidate_cache
+
     try:
         orders = context.user_data.get("current_orders", [])
 
@@ -184,6 +186,9 @@ async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFA
             connector_name=connector_name,
             client_order_id=client_order_id,
         )
+
+        # Invalidate cache after successful order cancellation
+        invalidate_cache(context.user_data, "balances", "orders")
 
         success_msg = escape_markdown_v2(
             f"✅ Order cancelled successfully!\n\n"

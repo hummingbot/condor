@@ -120,13 +120,16 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
         help_text += r"• `action` \- OPEN or CLOSE position" + "\n"
 
     else:
-        # Show main view with balances
+        # Show main view with balances and trading rules
+        from ._shared import get_cex_balances, get_trading_rules, format_trading_rules_info
+
         help_text = r"📝 *Place Order*" + "\n\n"
 
-        # Fetch and display balances
+        trading_pair = params.get("trading_pair", "BTC-USDT")
+
+        # Fetch and display balances and trading rules
         try:
             from servers import server_manager
-            from utils.trading_data import get_portfolio_overview
 
             servers = server_manager.list_servers()
             enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
@@ -136,87 +139,93 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
                 client = await server_manager.get_client(server_name)
                 account = get_clob_account(context.user_data)
 
-                # Use portfolio overview to get balances (same pattern as portfolio.py)
-                overview_data = await get_portfolio_overview(
+                # Fetch CEX balances with caching
+                cex_balances = await get_cex_balances(
+                    context.user_data,
                     client,
-                    account_names=[account],
-                    include_balances=True,
-                    include_perp_positions=False,
-                    include_lp_positions=False,
-                    include_active_orders=False
+                    account
                 )
 
                 help_text += f"*💰 Balances on* `{escape_markdown_v2(connector_name)}`\n"
 
                 # Extract balances for the selected connector
                 shown = 0
-                if overview_data and overview_data.get("balances"):
-                    account_balances = overview_data["balances"].get(account, {})
-                    connector_balances = account_balances.get(connector_name, [])
+                connector_balances = cex_balances.get(connector_name, [])
 
-                    # Build table format like portfolio
-                    if connector_balances:
-                        # Calculate total for percentage
-                        total_value = sum(float(h.get("value", 0)) for h in connector_balances)
+                if connector_balances:
+                    # Calculate total for percentage
+                    total_value = sum(float(h.get("value", 0)) for h in connector_balances)
 
-                        # Sort by value (descending) and filter by >= 0.3% allocation
-                        sorted_balances = sorted(
-                            connector_balances,
-                            key=lambda h: float(h.get("value", 0)),
-                            reverse=True
-                        )
+                    # Sort by value (descending) and filter by >= 0.3% allocation
+                    sorted_balances = sorted(
+                        connector_balances,
+                        key=lambda h: float(h.get("value", 0)),
+                        reverse=True
+                    )
 
-                        table = "```\n"
-                        table += f"{'Token':<6} {'Price':<8} {'Value':<8} {'%':>5}\n"
-                        table += f"{'─'*6} {'─'*8} {'─'*8} {'─'*5}\n"
+                    table = "```\n"
+                    table += f"{'Token':<6} {'Price':<8} {'Value':<8} {'%':>5}\n"
+                    table += f"{'─'*6} {'─'*8} {'─'*8} {'─'*5}\n"
 
-                        for holding in sorted_balances:
-                            token = holding.get("token", "")
-                            value = float(holding.get("value", 0))
-                            units = float(holding.get("units", 0))
+                    for holding in sorted_balances:
+                        token = holding.get("token", "")
+                        value = float(holding.get("value", 0))
+                        units = float(holding.get("units", 0))
 
-                            # Calculate percentage first to filter
-                            pct = (value / total_value * 100) if total_value > 0 else 0
+                        # Calculate percentage first to filter
+                        pct = (value / total_value * 100) if total_value > 0 else 0
 
-                            # Only show if >= 0.3% allocation
-                            if pct >= 0.3:
-                                # Calculate price
-                                price = value / units if units > 0 else 0
-                                # Format price
-                                if price >= 1000:
-                                    price_str = f"${price:,.0f}"
-                                elif price >= 1:
-                                    price_str = f"${price:.2f}"
-                                elif price >= 0.0001:
-                                    price_str = f"${price:.4f}"
-                                else:
-                                    price_str = f"${price:.2e}"
-                                price_str = price_str[:8]
+                        # Only show if >= 0.3% allocation
+                        if pct >= 0.3:
+                            # Calculate price
+                            price = value / units if units > 0 else 0
+                            # Format price
+                            if price >= 1000:
+                                price_str = f"${price:,.0f}"
+                            elif price >= 1:
+                                price_str = f"${price:.2f}"
+                            elif price >= 0.0001:
+                                price_str = f"${price:.4f}"
+                            else:
+                                price_str = f"${price:.2e}"
+                            price_str = price_str[:8]
 
-                                # Format value
-                                if value >= 1000:
-                                    value_str = f"{value/1000:.2f}K"
-                                else:
-                                    value_str = f"{value:.2f}"
-                                value_str = value_str[:8]
+                            # Format value
+                            if value >= 1000:
+                                value_str = f"{value/1000:.2f}K"
+                            else:
+                                value_str = f"{value:.2f}"
+                            value_str = value_str[:8]
 
-                                # Format percentage
-                                pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
+                            # Format percentage
+                            pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
 
-                                # Truncate token name
-                                token_display = token[:5] if len(token) > 5 else token
+                            # Truncate token name
+                            token_display = token[:5] if len(token) > 5 else token
 
-                                table += f"{token_display:<6} {price_str:<8} {value_str:<8} {pct_str:>5}\n"
-                                shown += 1
+                            table += f"{token_display:<6} {price_str:<8} {value_str:<8} {pct_str:>5}\n"
+                            shown += 1
 
-                        table += "```"
-                        help_text += table + "\n"
+                    table += "```"
+                    help_text += table + "\n"
 
                 if shown == 0:
                     help_text += r"_No balances found_" + "\n"
+
+                # Fetch and display trading rules for the selected pair
+                trading_rules = await get_trading_rules(
+                    context.user_data,
+                    client,
+                    connector_name
+                )
+
+                rules_info = format_trading_rules_info(trading_rules, trading_pair)
+                if rules_info:
+                    help_text += f"\n📏 *{escape_markdown_v2(trading_pair)} Rules:* `{escape_markdown_v2(rules_info)}`\n"
+
         except Exception as e:
-            logger.error(f"Error fetching balances: {e}", exc_info=True)
-            help_text += r"_Could not fetch balances_" + "\n"
+            logger.error(f"Error fetching data: {e}", exc_info=True)
+            help_text += r"_Could not fetch data_" + "\n"
 
         help_text += "\n"
         help_text += r"Use buttons or reply with order parameters:" + "\n\n"
@@ -359,28 +368,82 @@ async def handle_order_toggle_position(update: Update, context: ContextTypes.DEF
 
 
 async def handle_order_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt user to input connector"""
-    help_text = (
-        r"📝 *Set Connector*" + "\n\n"
-        r"Enter the exchange connector name:" + "\n\n"
-        r"*Examples:*" + "\n"
-        r"`binance_perpetual`" + "\n"
-        r"`binance`" + "\n"
-        r"`bybit_perpetual`" + "\n"
-        r"`bybit`"
-    )
+    """Show connector selection keyboard with available CEX connectors"""
+    from ._shared import get_available_cex_connectors
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="clob:place_order")]]
+    help_text = r"📝 *Select Connector*" + "\n\n" + r"Choose an exchange:"
+
+    # Build keyboard with available CEX connectors
+    keyboard = []
+
+    try:
+        from servers import server_manager
+
+        servers = server_manager.list_servers()
+        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+
+        if enabled_servers:
+            server_name = enabled_servers[0]
+            client = await server_manager.get_client(server_name)
+
+            # Get available CEX connectors
+            cex_connectors = await get_available_cex_connectors(context.user_data, client)
+
+            # Create buttons for each CEX connector (max 2 per row)
+            row = []
+            for connector in cex_connectors:
+                row.append(InlineKeyboardButton(
+                    connector,
+                    callback_data=f"clob:select_connector:{connector}"
+                ))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+            if not cex_connectors:
+                help_text += "\n\n_No CEX connectors available_"
+
+    except Exception as e:
+        logger.error(f"Error fetching connectors: {e}", exc_info=True)
+        help_text += "\n\n_Could not fetch available connectors_"
+
+    # Add back button
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="clob:place_order")])
     reply_markup = InlineKeyboardMarkup(keyboard)
-
-    context.user_data["clob_state"] = "order_set_connector"
-    context.user_data["clob_previous_state"] = "place_order"
 
     await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
     )
+
+
+async def handle_select_connector(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
+    """Handle connector selection from keyboard"""
+    from ._shared import get_trading_rules
+
+    params = context.user_data.get("place_order_params", {})
+    params["connector"] = connector_name
+
+    # Fetch and cache trading rules for this connector
+    try:
+        from servers import server_manager
+
+        servers = server_manager.list_servers()
+        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+
+        if enabled_servers:
+            server_name = enabled_servers[0]
+            client = await server_manager.get_client(server_name)
+            await get_trading_rules(context.user_data, client, connector_name)
+
+    except Exception as e:
+        logger.error(f"Error fetching trading rules: {e}", exc_info=True)
+
+    # Return to place order menu
+    await show_place_order_menu(update, context)
 
 
 async def handle_order_set_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -462,6 +525,8 @@ async def handle_order_help(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Execute the order with current parameters"""
+    from ._shared import get_trading_rules, validate_order_against_rules, invalidate_cache
+
     try:
         params = context.user_data.get("place_order_params", {})
         account = get_clob_account(context.user_data)
@@ -491,8 +556,11 @@ async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         server_name = enabled_servers[0]
         client = await server_manager.get_client(server_name)
 
+        # Check if amount is in quote currency (USD)
+        is_quote_amount = "$" in amount
+
         # Handle USD amount conversion
-        if "$" in amount:
+        if is_quote_amount:
             usd_value = float(amount.replace("$", ""))
 
             # Get current market price for conversion
@@ -502,10 +570,26 @@ async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             current_price = prices["prices"][trading_pair]
 
+            # Validate against min_notional_size before conversion
+            trading_rules = await get_trading_rules(context.user_data, client, connector_name)
+            is_valid, error_msg = validate_order_against_rules(
+                trading_rules, trading_pair, usd_value, is_quote_amount=True
+            )
+            if not is_valid:
+                raise ValueError(error_msg)
+
             # Convert USD to base token amount
             amount_float = usd_value / current_price
         else:
             amount_float = float(amount)
+
+            # Validate against min_order_size
+            trading_rules = await get_trading_rules(context.user_data, client, connector_name)
+            is_valid, error_msg = validate_order_against_rules(
+                trading_rules, trading_pair, amount_float, is_quote_amount=False
+            )
+            if not is_valid:
+                raise ValueError(error_msg)
 
         result = await client.trading.place_order(
             account_name=account,
@@ -517,6 +601,9 @@ async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYP
             price=float(price) if price and order_type in ["LIMIT", "LIMIT_MAKER"] else None,
             position_action=position_action,
         )
+
+        # Invalidate cache after successful order placement
+        invalidate_cache(context.user_data, "balances", "orders")
 
         # Save parameters for quick trading (persist all order params for next session)
         set_clob_last_order(context.user_data, {
