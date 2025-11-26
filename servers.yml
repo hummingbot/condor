@@ -1,27 +1,12 @@
-# Hummingbot API Servers Configuration
-# Each server must have a unique name and connection details
-
-# Default server name (used when no server is specified)
-default_server: remote
-
 servers:
-  remote:
-    host: 212.85.15.60
+#  remote:
+#    host: 212.1.12.23
+#    port: 8000
+#    username: donero
+#    password: barabit
+  local:
+    host: localhost
     port: 8000
-    username: donero
-    password: barabit
-    enabled: true
-
-  # docker:
-  #   host: host.docker.internal
-  #   port: 8080
-  #   username: admin
-  #   password: abc
-  #   enabled: true
-
-  # remote:
-  #   host: 192.168.1.100
-  #   port: 8080
-  #   username: admin
-  #   password: abc
-  #   enabled: false
+    username: admin
+    password: admin
+default_server: remote
