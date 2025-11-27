@@ -7,7 +7,7 @@ dependencies:
   - pip
   - pip:
       - python-telegram-bot[job-queue]
-      - hummingbot-api-client==1.2.2
+      - hummingbot-api-client==1.2.3
       - python-dotenv
       - pytest
       - pre-commit
