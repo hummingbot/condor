@@ -34,7 +34,6 @@ async def start_deploy_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> Non
             keyboard = [
                 [InlineKeyboardButton("hummingbot/gateway:latest (recommended)", callback_data="gateway_deploy_image_latest")],
                 [InlineKeyboardButton("hummingbot/gateway:development", callback_data="gateway_deploy_image_development")],
-                [InlineKeyboardButton("hummingbot/gateway:stable", callback_data="gateway_deploy_image_stable")],
                 [InlineKeyboardButton("✏️ Custom Image", callback_data="gateway_deploy_custom")],
                 [InlineKeyboardButton("« Back", callback_data="config_gateway")],
             ]
