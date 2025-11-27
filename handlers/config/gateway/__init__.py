@@ -88,7 +88,7 @@ async def handle_gateway_input(update: Update, context: ContextTypes.DEFAULT_TYP
         await handle_token_input(update, context)
     elif context.user_data.get('awaiting_pool_input'):
         await handle_pool_input(update, context)
-    elif context.user_data.get('awaiting_network_config'):
+    elif context.user_data.get('awaiting_network_input'):
         await handle_network_config_input(update, context)
     elif context.user_data.get('awaiting_connector_config'):
         await handle_connector_config_input(update, context)
