@@ -1,117 +1,212 @@
-# Condor 🦅
+# Condor
 
-A lightweight Telegram bot for monitoring Hummingbot trading bots with AI-powered assistance.
+A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
 
-## What It Does
+## Features
 
-- 📊 **View Portfolio** - Check balances and holdings across all exchanges
-- 🤖 **Monitor Bots** - Track active bots with real-time PnL and metrics
-- 💹 **AI Assistant** - Ask questions about prices, market data, and your portfolio using natural language
+- **Portfolio Dashboard** - Comprehensive portfolio view with PNL tracking, 24h changes, and graphical analysis
+- **Bot Monitoring** - Track active Hummingbot trading bots with real-time status and metrics
+- **CLOB Trading** - Place orders on centralized exchanges (Binance, Bybit, etc.) with interactive menus
+- **DEX Trading** - Swap tokens and manage CLMM liquidity positions via Gateway
+- **Configuration** - Manage API servers and exchange credentials through Telegram
+- **AI Assistant** - Natural language queries via GPT-4o + MCP (coming soon)
 
 ## Quick Start
 
-**Prerequisites:** Python 3.11+, Conda, Docker, Hummingbot API running, Telegram Bot Token, OpenAI API Key
+**Prerequisites:** Python 3.11+, Conda, Hummingbot Backend API running, Telegram Bot Token
 
 ```bash
 # Install
 conda env create -f environment.yml
 conda activate condor
 
-# Configure .env file (copy from .env.example)
+# Configure
 cp .env.example .env
-# Edit .env with your credentials
-
-# IMPORTANT: Update MCP server path in handlers/trade_ai.py (line 68)
-# Replace with your actual hummingbot_mcp config path
+# Edit .env with your credentials:
+# - TELEGRAM_TOKEN
+# - TELEGRAM_ALLOWED_IDS
+# - OPENAI_API_KEY (optional, for AI features)
 
 # Run
 python main.py
 ```
 
-**Note:** For `/trade` AI features, see [MCP_SETUP.md](MCP_SETUP.md) for Docker MCP server configuration.
-
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/portfolio` | Portfolio summary with top holdings |
-| `/portfolio detailed` | Detailed breakdown by account |
-| `/bots` | All active bots with PnL and metrics |
+| `/portfolio` | Portfolio dashboard with PNL indicators, holdings, and graphs |
+| `/bots` | All active bots with status and metrics |
 | `/bots <name>` | Specific bot details |
-| `/trade <question>` | AI assistant for prices, market data, portfolio queries |
+| `/clob_trading` | CLOB trading menu (place orders, manage positions) |
+| `/dex_trading` | DEX trading menu (swaps, pools, liquidity positions) |
+| `/config` | Configuration menu (servers, API keys) |
+| `/trade <question>` | AI assistant (disabled, coming soon) |
 
-**Examples:**
+## Architecture
+
 ```
-/portfolio
-/bots trading_bot_1
-/trade What's the price of BTC?
-/trade Show my portfolio
-/trade Analyze the ETH-USDT order book
-```
-
-## How It Works
-
-Condor uses two approaches:
-
-1. **Direct API** (`/portfolio`, `/bots`) - Fast API calls via hummingbot_api_client
-2. **AI Assistant** (`/trade`) - GPT-4o + MCP server in Docker with access to all Hummingbot tools
-
-**Architecture:**
-```
-Telegram → Condor Bot → Hummingbot API → Trading Bots
-                     ↘ GPT-4o → MCP (Docker) → Hummingbot API
+Telegram → Condor Bot → Hummingbot Backend API → Trading Bots
+                     ↘ Gateway → DEX Protocols
+                     ↘ GPT-4o → MCP (Docker) → Hummingbot API (future)
 ```
 
-The AI assistant has real-time access to your portfolio, bots, market data, and more via MCP tools.
+### Direct API Commands
+- `/portfolio`, `/bots`, `/clob_trading`, `/dex_trading` use direct API calls via `hummingbot_api_client`
+- Fast, reliable, interactive button menus
 
-## Example Output
-
-**Portfolio:**
-```
-📊 Portfolio Summary
-💰 Total Value: $12,450.32
-🏆 Top Holdings:
-1. USDT: $5,234.12 (42.0%)
-2. BTC: $3,456.78 (27.8%)
-```
-
-**Bots:**
-```
-🤖 Active Bots Status
-🟢 trading_bot_1
-  📈 PnL: $245.67
-  📊 Volume: $15.4K
-```
-
-**AI Assistant:**
-```
-🤖 Current BTC price:
-BTC-USDT: $43,251.25
-```
+### AI Assistant (Future)
+- `/trade` uses GPT-4o + MCP server with access to all Hummingbot tools
+- Natural language interface for market data, portfolio queries, and more
 
 ## Project Structure
 
 ```
 condor/
-├── handlers/              # Command handlers (/portfolio, /bots, /trade)
-├── utils/                 # Auth, config, formatters
-├── hummingbot_api_client/ # Direct API client
-├── hummingbot_mcp/        # MCP AI tools
-└── main.py               # Entry point
+├── handlers/                    # Telegram command handlers
+│   ├── bots.py                 # /bots command
+│   ├── portfolio.py            # /portfolio command with dashboard
+│   ├── trade_ai.py             # /trade AI assistant (disabled)
+│   ├── clob/                   # CLOB trading module
+│   │   ├── __init__.py         # Main command, callback router
+│   │   ├── menu.py             # Trading menu with overview
+│   │   ├── place_order.py      # Order placement flow
+│   │   ├── leverage.py         # Leverage/position mode config
+│   │   ├── orders.py           # Order search/cancel
+│   │   ├── positions.py        # Position management
+│   │   └── account.py          # Account switching
+│   ├── dex/                    # DEX trading module
+│   │   ├── __init__.py         # Main command, callback router
+│   │   ├── menu.py             # Trading menu with balances
+│   │   ├── swap_quote.py       # Get swap quotes
+│   │   ├── swap_execute.py     # Execute swaps
+│   │   ├── swap_history.py     # Swap history/status
+│   │   └── pools.py            # Pool discovery & LP management
+│   └── config/                 # Configuration module
+│       ├── __init__.py         # /config command
+│       ├── servers.py          # API server management
+│       ├── api_keys.py         # Exchange credentials
+│       └── user_preferences.py # User preference storage
+├── utils/                      # Utilities
+│   ├── auth.py                 # @restricted decorator
+│   ├── telegram_formatters.py  # Message formatting
+│   ├── portfolio_graphs.py     # Dashboard chart generation
+│   └── trading_data.py         # Data aggregation helpers
+├── servers/                    # Server management
+│   ├── server_manager.py       # Server CRUD & client pool
+│   └── servers.yml             # Server configuration
+├── hummingbot_api_client/      # API client library
+├── hummingbot_mcp/             # MCP AI tools (Docker)
+├── flows/                      # Documentation
+│   ├── bots_flow.txt           # /bots command flow
+│   ├── portfolio_flow.txt      # /portfolio command flow
+│   ├── clob_trading_flow.txt   # CLOB trading flow
+│   ├── dex_trading_flow.txt    # DEX trading flow
+│   ├── config_flow.txt         # Configuration flow
+│   └── common_patterns.txt     # Shared patterns
+└── main.py                     # Entry point
+```
+
+## Handler Features
+
+### Portfolio (`/portfolio`)
+- **PNL Indicators** - 24h, 7d, 30d with deposit/withdrawal detection
+- **Token Holdings** - Balances with 24h price changes
+- **Positions** - Perpetual positions with unrealized PnL
+- **LP Positions** - CLMM positions with in-range status
+- **Active Orders** - Open order summary
+- **Dashboard** - Combined chart with value history, token distribution, account breakdown
+- **Settings** - Configure time period (1d, 3d, 7d, 14d, 30d)
+
+### CLOB Trading (`/clob_trading`)
+- **Overview** - Account balances, positions, orders at a glance
+- **Place Orders** - Interactive menu with dual input (buttons + direct text)
+  - Toggle: side, order type, position mode
+  - Input: connector, pair, amount, price
+  - USD notation: `$100` auto-converts to token units
+- **Set Leverage** - Configure leverage and position mode per connector
+- **Search Orders** - View/filter/cancel orders
+- **Manage Positions** - View, trade, close positions with confirmation
+
+### DEX Trading (`/dex_trading`)
+- **Gateway Balances** - Token balances across DEX wallets
+- **Swap Quote** - Get quotes before executing
+- **Execute Swap** - Perform swaps with slippage control
+- **Quick Swap** - Repeat last swap with minimal input
+- **Pool Discovery** - Search pools by connector and token
+- **Pool Info** - Detailed pool stats with liquidity charts
+- **LP Positions** - Manage CLMM positions (add, close, collect fees)
+
+### Configuration (`/config`)
+- **API Servers** - Add, modify, delete Hummingbot Backend API servers
+  - Real-time status checking (online/offline/auth error)
+  - Set default server
+  - Progressive form for adding servers
+- **API Keys** - Manage exchange credentials per account
+  - View connected exchanges
+  - Add new credentials (field-by-field input)
+  - Delete credentials with confirmation
+
+## User Preferences
+
+Preferences are automatically saved and persist across sessions:
+
+- **Portfolio** - Graph time period (days, interval)
+- **CLOB** - Active account, last order parameters
+- **DEX** - Default network/connector, last swap parameters
+- **General** - Active server
+
+## Security
+
+- **User ID Whitelist** - Only `TELEGRAM_ALLOWED_IDS` can access
+- **@restricted Decorator** - Applied to all command handlers
+- **Environment Credentials** - API keys stored in `.env`
+- **Secret Masking** - Passwords hidden in UI
+
+## Configuration Files
+
+### `.env`
+```bash
+TELEGRAM_TOKEN=your_bot_token
+TELEGRAM_ALLOWED_IDS=123456789,987654321
+OPENAI_API_KEY=sk-...  # Optional, for AI features
+```
+
+### `servers.yml`
+```yaml
+default_server: main
+servers:
+  main:
+    host: localhost
+    port: 8000
+    username: admin
+    password: admin
+    enabled: true
 ```
 
 ## Troubleshooting
 
-- **Bot not responding?** Check `TELEGRAM_TOKEN` and `TELEGRAM_ALLOWED_IDS` in `.env`
-- **Commands failing?** Verify Hummingbot API is running and credentials are correct
-- **AI not working?** Check `OPENAI_API_KEY` is set and you have API credits
+| Issue | Solution |
+|-------|----------|
+| Bot not responding | Check `TELEGRAM_TOKEN` and `TELEGRAM_ALLOWED_IDS` |
+| Commands failing | Verify Hummingbot API is running |
+| Connection refused | Check server host:port in `/config` |
+| Auth error | Verify server credentials |
+| DEX features unavailable | Ensure Gateway is configured and running |
 
-## Security
+## Development
 
-- User ID whitelist (`TELEGRAM_ALLOWED_IDS`)
-- Environment-based credentials
-- `@restricted` decorator on all commands
+### Flow Documentation
+See `flows/` directory for detailed command flow documentation:
+- Each handler has a corresponding `*_flow.txt` file
+- `common_patterns.txt` documents shared patterns across handlers
+
+### Adding New Features
+1. Create handler in `handlers/` (or subdirectory for complex features)
+2. Register in `main.py`
+3. Follow patterns in `flows/common_patterns.txt`
+4. Document flow in `flows/`
 
 ---
 
-**Built with Hummingbot, Telegram, and OpenAI**
+**Built with [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) and [Hummingbot](https://hummingbot.org/)**
