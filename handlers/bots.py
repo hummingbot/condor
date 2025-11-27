@@ -25,8 +25,14 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Clear any config state to prevent interference
     clear_config_state(context)
 
+    # Get the appropriate message object for replies
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        logger.error("No message object available for bots_command")
+        return
+
     # Send "typing" status
-    await update.message.reply_chat_action("typing")
+    await msg.reply_chat_action("typing")
 
     try:
         from servers import server_manager
@@ -37,25 +43,25 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         if not enabled_servers:
             error_message = format_error_message("No enabled API servers. Edit servers.yml to enable a server.")
-            await update.message.reply_text(error_message, parse_mode="MarkdownV2")
+            await msg.reply_text(error_message, parse_mode="MarkdownV2")
             return
 
         # Get client from first enabled server
         client = await server_manager.get_client(enabled_servers[0])
 
-        if len(context.args) > 0:
+        if context.args and len(context.args) > 0:
             # Get specific bot status
             bot_name = context.args[0]
             bot_status = await client.bot_orchestration.get_bot_status(bot_name)
-            message = format_bot_status(bot_status)
+            response_message = format_bot_status(bot_status)
         else:
             # Get all active bots
             bots_data = await client.bot_orchestration.get_active_bots_status()
-            message = format_active_bots(bots_data)
+            response_message = format_active_bots(bots_data)
 
-        await update.message.reply_text(message, parse_mode="MarkdownV2")
+        await msg.reply_text(response_message, parse_mode="MarkdownV2")
 
     except Exception as e:
         logger.error(f"Error fetching bots status: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to fetch bots status: {str(e)}")
-        await update.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await msg.reply_text(error_message, parse_mode="MarkdownV2")

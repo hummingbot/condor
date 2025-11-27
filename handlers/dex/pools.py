@@ -387,7 +387,7 @@ def _format_percent(value, decimals: int = 2) -> str:
 def _format_pool_table(pools: list) -> str:
     """Format pools as a compact table optimized for mobile
 
-    Shows: #, Pair, TVL, Fee, APR, Vol, Bin
+    Shows: #, Pair, APR%, Bin, Fee, TVL, Vol
 
     Args:
         pools: List of pool data dictionaries
@@ -400,10 +400,10 @@ def _format_pool_table(pools: list) -> str:
 
     lines = []
 
-    # Header - balanced for mobile (~45 chars)
+    # Header - balanced for mobile (~40 chars)
     lines.append("```")
-    lines.append(f"{'#':>2} {'Pair':<10} {'TVL':>5} {'Fee':>4} {'APR %':>6} {'Vol':>4} {'Bin':>3}")
-    lines.append("─" * 45)
+    lines.append(f"{'#':>2} {'Pair':<10} {'APR%':>6} {'Bin':>3} {'Fee':>4} {'TVL':>5} {'Vol':>4}")
+    lines.append("─" * 40)
 
     for i, pool in enumerate(pools):
         idx = str(i + 1)
@@ -441,7 +441,7 @@ def _format_pool_table(pools: list) -> str:
         # Bin step
         bin_step = pool.get('bin_step', '—')
 
-        lines.append(f"{idx:>2} {pair:<10} {tvl:>5} {fee_str:>4} {apr_str:>6} {vol_24h:>4} {bin_step:>3}")
+        lines.append(f"{idx:>2} {pair:<10} {apr_str:>6} {bin_step:>3} {fee_str:>4} {tvl:>5} {vol_24h:>4}")
 
     lines.append("```")
 

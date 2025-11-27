@@ -551,6 +551,12 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Clear any config state to prevent interference
     clear_config_state(context)
 
+    # Get the appropriate message object for replies
+    message = update.message or (update.callback_query.message if update.callback_query else None)
+    if not message:
+        logger.error("No message object available for portfolio_command")
+        return
+
     try:
         from servers import server_manager
         from utils.trading_data import get_lp_positions, get_perpetual_positions, get_active_orders, get_tokens_for_networks
@@ -561,7 +567,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         if not enabled_servers:
             error_message = format_error_message("No enabled API servers. Edit servers.yml to enable a server.")
-            await update.message.reply_text(error_message, parse_mode="MarkdownV2")
+            await message.reply_text(error_message, parse_mode="MarkdownV2")
             return
 
         # Always use the default server from server_manager
@@ -572,7 +578,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             server_name = enabled_servers[0]
 
         # Send initial loading message immediately
-        text_msg = await update.message.reply_text(
+        text_msg = await message.reply_text(
             f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} ⏳_\n\n"
             f"_Loading\\.\\.\\._",
             parse_mode="MarkdownV2"
@@ -717,7 +723,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update_ui()
 
         # Send "upload_photo" status
-        await update.message.reply_chat_action("upload_photo")
+        await message.reply_chat_action("upload_photo")
 
         # Generate the comprehensive dashboard
         dashboard_bytes = generate_portfolio_dashboard(
@@ -733,7 +739,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Send the dashboard image with buttons
-        photo_msg = await update.message.reply_photo(
+        photo_msg = await message.reply_photo(
             photo=dashboard_bytes,
             caption=f"📊 Portfolio Dashboard - {server_name}",
             reply_markup=reply_markup
@@ -742,7 +748,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Store message IDs and data for later updates
         context.user_data["portfolio_text_message_id"] = text_msg.message_id
         context.user_data["portfolio_photo_message_id"] = photo_msg.message_id
-        context.user_data["portfolio_chat_id"] = update.message.chat_id
+        context.user_data["portfolio_chat_id"] = message.chat_id
         context.user_data["portfolio_graph_interval"] = graph_interval
         context.user_data["portfolio_server_name"] = server_name
         context.user_data["portfolio_server_status"] = server_status
@@ -751,7 +757,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception as e:
         logger.error(f"Error fetching portfolio: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to fetch portfolio: {str(e)}")
-        await update.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await message.reply_text(error_message, parse_mode="MarkdownV2")
 
 
 # ============================================

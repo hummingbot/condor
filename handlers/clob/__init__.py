@@ -44,8 +44,14 @@ async def clob_trading_command(update: Update, context: ContextTypes.DEFAULT_TYP
     # Clear all pending input states to prevent interference
     clear_all_input_states(context)
 
+    # Get the appropriate message object for replies
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        logger.error("No message object available for clob_trading_command")
+        return
+
     # Send "typing" status
-    await update.message.reply_chat_action("typing")
+    await msg.reply_chat_action("typing")
 
     # Show main CLOB trading menu
     await show_clob_menu(update, context)

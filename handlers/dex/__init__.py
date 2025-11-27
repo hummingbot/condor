@@ -47,7 +47,9 @@ from .swap_execute import (
     show_swap_execute_menu,
     handle_swap_toggle_side,
     handle_swap_set_connector,
+    handle_swap_connector_select,
     handle_swap_set_network,
+    handle_swap_network_select,
     handle_swap_set_pair,
     handle_swap_set_amount,
     handle_swap_set_slippage,
@@ -123,7 +125,14 @@ async def dex_trading_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     """
     # Clear all pending input states to prevent interference
     clear_all_input_states(context)
-    await update.message.reply_chat_action("typing")
+
+    # Get the appropriate message object for replies
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        logger.error("No message object available for dex_trading_command")
+        return
+
+    await msg.reply_chat_action("typing")
     await show_dex_menu(update, context)
 
 
@@ -176,8 +185,14 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_swap_toggle_side(update, context)
         elif action == "swap_set_connector":
             await handle_swap_set_connector(update, context)
+        elif action.startswith("swap_connector_"):
+            connector_name = action.replace("swap_connector_", "")
+            await handle_swap_connector_select(update, context, connector_name)
         elif action == "swap_set_network":
             await handle_swap_set_network(update, context)
+        elif action.startswith("swap_network_"):
+            network_id = action.replace("swap_network_", "")
+            await handle_swap_network_select(update, context, network_id)
         elif action == "swap_set_pair":
             await handle_swap_set_pair(update, context)
         elif action == "swap_set_amount":

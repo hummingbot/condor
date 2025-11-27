@@ -80,11 +80,19 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     reply_markup, message_text = _get_config_menu_markup_and_text()
 
-    await update.message.reply_text(
-        message_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
-    )
+    # Handle both direct command and callback query invocations
+    if update.message:
+        await update.message.reply_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
 
 
 async def config_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -21,9 +21,138 @@ from handlers.config.user_preferences import (
     set_dex_last_swap,
     DEFAULT_DEX_NETWORK,
 )
-from ._shared import get_gateway_client
+from ._shared import get_gateway_client, get_cached, set_cached, DEFAULT_CACHE_TTL
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+def _format_number(value, decimals: int = 2) -> str:
+    """Format number with K/M suffix for readability"""
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+        if num == 0:
+            return "0"
+        if abs(num) >= 1_000_000:
+            return f"{num/1_000_000:.{decimals}f}M"
+        if abs(num) >= 1_000:
+            return f"{num/1_000:.{decimals}f}K"
+        if abs(num) >= 1:
+            return f"{num:.{decimals}f}"
+        if abs(num) >= 0.01:
+            return f"{num:.4f}"
+        return f"{num:.6f}"
+    except (ValueError, TypeError):
+        return "—"
+
+
+async def _fetch_token_balances(client, network: str, base_token: str, quote_token: str) -> dict:
+    """Fetch wallet balances for base and quote tokens"""
+    result = {
+        "base_balance": 0.0,
+        "quote_balance": 0.0,
+        "base_value": 0.0,
+        "quote_value": 0.0,
+    }
+
+    try:
+        if not hasattr(client, 'portfolio'):
+            return result
+
+        state = await client.portfolio.get_state()
+        if not state:
+            return result
+
+        base_upper = base_token.upper() if base_token else ""
+        quote_upper = quote_token.upper() if quote_token else ""
+        network_key = network.split("-")[0].lower() if network else ""
+
+        for account_name, account_data in state.items():
+            for connector_name, balances in account_data.items():
+                connector_lower = connector_name.lower()
+                is_match = (
+                    network_key in connector_lower or
+                    "gateway" in connector_lower and network_key in connector_lower
+                )
+
+                if is_match and balances:
+                    for bal in balances:
+                        token = bal.get("token", "").upper()
+                        units = float(bal.get("units", 0) or 0)
+                        value = float(bal.get("value", 0) or 0)
+
+                        if token == base_upper:
+                            result["base_balance"] = units
+                            result["base_value"] = value
+                        elif token == quote_upper:
+                            result["quote_balance"] = units
+                            result["quote_value"] = value
+
+    except Exception as e:
+        logger.warning(f"Error fetching token balances: {e}")
+
+    return result
+
+
+async def _fetch_router_connectors(client) -> list:
+    """Fetch connectors that have 'router' trading type"""
+    try:
+        response = await client.gateway.list_connectors()
+        connectors = response.get('connectors', [])
+        # Filter to only router connectors
+        router_connectors = [
+            c for c in connectors
+            if 'router' in c.get('trading_types', [])
+        ]
+        return router_connectors
+    except Exception as e:
+        logger.warning(f"Error fetching router connectors: {e}")
+        return []
+
+
+async def _fetch_networks(client) -> list:
+    """Fetch available networks"""
+    try:
+        response = await client.gateway.list_networks()
+        return response.get('networks', [])
+    except Exception as e:
+        logger.warning(f"Error fetching networks: {e}")
+        return []
+
+
+def _get_routers_for_network(connectors: list, network_id: str) -> list:
+    """Get router connectors available for a specific network"""
+    if not network_id or not connectors:
+        return connectors
+
+    # Parse network_id to get chain and network
+    # e.g., "solana-mainnet-beta" -> chain="solana", network="mainnet-beta"
+    # e.g., "ethereum-arbitrum" -> chain="ethereum", network="arbitrum"
+    parts = network_id.split("-", 1)
+    chain = parts[0] if parts else ""
+    network = parts[1] if len(parts) > 1 else ""
+
+    matching = []
+    for c in connectors:
+        c_chain = c.get('chain', '')
+        c_networks = c.get('networks', [])
+        if c_chain == chain and network in c_networks:
+            matching.append(c)
+
+    return matching if matching else connectors
+
+
+def _get_networks_for_chain(networks: list, chain: str) -> list:
+    """Get networks available for a specific chain"""
+    if not chain or not networks:
+        return networks
+
+    return [n for n in networks if n.get('chain', '') == chain]
 
 
 # ============================================
@@ -52,57 +181,90 @@ async def show_swap_execute_menu(update: Update, context: ContextTypes.DEFAULT_T
     """
     params = context.user_data.get("execute_swap_params", {})
 
+    # Get trading pair tokens for balance display
+    trading_pair = params.get('trading_pair', 'SOL-USDC')
+    network = params.get('network', 'solana-mainnet-beta')
+
+    # Parse trading pair to get base and quote tokens
+    if '-' in trading_pair:
+        base_token, quote_token = trading_pair.split('-', 1)
+    else:
+        base_token, quote_token = trading_pair, 'USDC'
+
     # Build header
     help_text = r"✅ *Execute Swap*" + "\n\n"
 
-    help_text += r"Configure your swap using the buttons below or type parameters:" + "\n\n"
+    # Use cached gateway_data from main menu (already fetched, no blocking)
+    try:
+        gateway_data = get_cached(context.user_data, "gateway_data", ttl=120)
+        if gateway_data and gateway_data.get("balances_by_network"):
+            # Find balances for current network
+            network_key = network.split("-")[0].lower() if network else ""
+            balances_found = {}
 
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n"
-    help_text += r"*📊 Current Configuration*" + "\n"
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
+            for net_name, balances_list in gateway_data["balances_by_network"].items():
+                if network_key in net_name.lower():
+                    for bal in balances_list:
+                        token = bal.get("token", "").upper()
+                        if token == base_token.upper():
+                            balances_found["base_balance"] = bal.get("units", 0)
+                            balances_found["base_value"] = bal.get("value", 0)
+                        elif token == quote_token.upper():
+                            balances_found["quote_balance"] = bal.get("units", 0)
+                            balances_found["quote_value"] = bal.get("value", 0)
 
-    help_text += f"🔌 *Connector:* `{escape_markdown_v2(params.get('connector', 'N/A'))}`\n"
-    help_text += f"🌐 *Network:* `{escape_markdown_v2(params.get('network', 'N/A'))}`\n"
-    help_text += f"💱 *Trading Pair:* `{escape_markdown_v2(params.get('trading_pair', 'N/A'))}`\n"
-    help_text += f"📈 *Side:* `{escape_markdown_v2(params.get('side', 'N/A'))}`\n"
-    help_text += f"💰 *Amount:* `{escape_markdown_v2(params.get('amount', 'N/A'))}`\n"
-    help_text += f"📊 *Slippage:* `{escape_markdown_v2(params.get('slippage', 'N/A'))}%`\n"
+            if balances_found.get("base_balance", 0) > 0 or balances_found.get("quote_balance", 0) > 0:
+                help_text += r"━━━ Wallet Balances ━━━" + "\n"
 
-    help_text += "\n" + r"━━━━━━━━━━━━━━━━━━━━" + "\n"
+                if balances_found.get("base_balance", 0) > 0:
+                    base_bal_str = _format_number(balances_found["base_balance"])
+                    base_val_str = f"${_format_number(balances_found.get('base_value', 0))}" if balances_found.get("base_value", 0) > 0 else ""
+                    help_text += f"💰 `{escape_markdown_v2(base_token)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
+
+                if balances_found.get("quote_balance", 0) > 0:
+                    quote_bal_str = _format_number(balances_found["quote_balance"])
+                    quote_val_str = f"${_format_number(balances_found.get('quote_value', 0))}" if balances_found.get("quote_value", 0) > 0 else ""
+                    help_text += f"💵 `{escape_markdown_v2(quote_token)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
+
+                context.user_data["swap_token_balances"] = balances_found
+                help_text += "\n"
+
+    except Exception as e:
+        logger.warning(f"Could not get cached balances: {e}")
+
     help_text += r"*⌨️ Or Type Directly*" + "\n"
-    help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
     help_text += r"`trading_pair side amount [slippage]`" + "\n"
     help_text += r"*Example:* `SOL\-USDC BUY 1\.5`" + "\n"
 
-    # Build keyboard
+    # Build keyboard - values shown in buttons
     keyboard = [
         [
             InlineKeyboardButton(
-                f"{params.get('connector', 'jupiter')}",
+                f"🔌 {params.get('connector', 'jupiter')}",
                 callback_data="dex:swap_set_connector"
             ),
             InlineKeyboardButton(
-                f"{params.get('network', 'solana-mainnet-beta')}",
+                f"🌐 {params.get('network', 'solana-mainnet-beta')}",
                 callback_data="dex:swap_set_network"
             )
         ],
         [
             InlineKeyboardButton(
-                f"{params.get('trading_pair', 'SOL-USDC')}",
+                f"💱 {params.get('trading_pair', 'SOL-USDC')}",
                 callback_data="dex:swap_set_pair"
             ),
             InlineKeyboardButton(
-                f"{params.get('side', 'BUY')}",
+                f"📈 {params.get('side', 'BUY')}",
                 callback_data="dex:swap_toggle_side"
             )
         ],
         [
             InlineKeyboardButton(
-                f"{params.get('amount', '1.0')}",
+                f"💰 {params.get('amount', '1.0')}",
                 callback_data="dex:swap_set_amount"
             ),
             InlineKeyboardButton(
-                f"{params.get('slippage', '1.0')}%",
+                f"📊 {params.get('slippage', '1.0')}%",
                 callback_data="dex:swap_set_slippage"
             )
         ],
@@ -141,53 +303,189 @@ async def handle_swap_toggle_side(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt user to input connector"""
-    help_text = (
-        r"📝 *Set Connector*" + "\n\n"
-        r"Enter the DEX connector name:" + "\n\n"
-        r"*Examples:*" + "\n"
-        r"`jupiter` \- Solana" + "\n"
-        r"`uniswap` \- Ethereum/Arbitrum/Base" + "\n"
-        r"`meteora` \- Solana CLMM" + "\n"
-        r"`raydium` \- Solana CLMM"
-    )
+    """Show available router connectors for selection"""
+    params = context.user_data.get("execute_swap_params", {})
+    network = params.get("network", "solana-mainnet-beta")
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap_execute")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        client = await get_gateway_client()
 
-    context.user_data["dex_state"] = "swap_set_connector"
-    context.user_data["dex_previous_state"] = "swap_execute"
+        # Fetch router connectors (cached)
+        cache_key = "router_connectors"
+        connectors = get_cached(context.user_data, cache_key, ttl=300)
+        if connectors is None:
+            connectors = await _fetch_router_connectors(client)
+            set_cached(context.user_data, cache_key, connectors)
 
-    await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
-    )
+        # Filter to connectors available for current network
+        available = _get_routers_for_network(connectors, network)
+
+        if not available:
+            help_text = (
+                r"🔌 *Select Connector*" + "\n\n"
+                r"_No router connectors available for this network\._"
+            )
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap_execute")]]
+        else:
+            help_text = (
+                r"🔌 *Select Connector*" + "\n\n"
+                r"_Choose a DEX router:_"
+            )
+
+            # Build connector buttons (2 per row)
+            connector_buttons = []
+            row = []
+            for c in available:
+                name = c.get('name', 'unknown')
+                chain = c.get('chain', '')
+                btn_text = f"{name} ({chain})"
+                row.append(InlineKeyboardButton(btn_text, callback_data=f"dex:swap_connector_{name}"))
+                if len(row) == 2:
+                    connector_buttons.append(row)
+                    row = []
+            if row:
+                connector_buttons.append(row)
+
+            keyboard = connector_buttons + [[InlineKeyboardButton("« Back", callback_data="dex:swap_execute")]]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.callback_query.message.edit_text(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error showing connectors: {e}", exc_info=True)
+        error_text = format_error_message(f"Error loading connectors: {str(e)}")
+        await update.callback_query.message.reply_text(error_text, parse_mode="MarkdownV2")
+
+
+async def handle_swap_connector_select(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
+    """Handle connector selection from button"""
+    params = context.user_data.get("execute_swap_params", {})
+    params["connector"] = connector_name
+
+    # Auto-update network based on connector chain
+    cache_key = "router_connectors"
+    connectors = get_cached(context.user_data, cache_key, ttl=300)
+    if connectors:
+        for c in connectors:
+            if c.get('name') == connector_name:
+                chain = c.get('chain', '')
+                networks = c.get('networks', [])
+                # Set a default network for this chain
+                if chain == "solana" and "mainnet-beta" in networks:
+                    params["network"] = "solana-mainnet-beta"
+                elif chain == "ethereum" and "mainnet" in networks:
+                    params["network"] = "ethereum-mainnet"
+                elif chain == "ethereum" and networks:
+                    # Pick first available network
+                    params["network"] = f"ethereum-{networks[0]}"
+                break
+
+    context.user_data["dex_state"] = "swap_execute"
+    await show_swap_execute_menu(update, context)
 
 
 async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt user to input network"""
-    help_text = (
-        r"📝 *Set Network*" + "\n\n"
-        r"Enter the network name:" + "\n\n"
-        r"*Examples:*" + "\n"
-        r"`solana\-mainnet\-beta`" + "\n"
-        r"`ethereum\-mainnet`" + "\n"
-        r"`ethereum\-arbitrum`" + "\n"
-        r"`ethereum\-base`"
-    )
+    """Show available networks for selection"""
+    params = context.user_data.get("execute_swap_params", {})
+    current_connector = params.get("connector", "jupiter")
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap_execute")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        client = await get_gateway_client()
 
-    context.user_data["dex_state"] = "swap_set_network"
-    context.user_data["dex_previous_state"] = "swap_execute"
+        # Fetch networks (cached)
+        networks_cache_key = "gateway_networks"
+        networks = get_cached(context.user_data, networks_cache_key, ttl=300)
+        if networks is None:
+            networks = await _fetch_networks(client)
+            set_cached(context.user_data, networks_cache_key, networks)
 
-    await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
-    )
+        # Also get router connectors to filter networks that have routers
+        connectors_cache_key = "router_connectors"
+        connectors = get_cached(context.user_data, connectors_cache_key, ttl=300)
+        if connectors is None:
+            connectors = await _fetch_router_connectors(client)
+            set_cached(context.user_data, connectors_cache_key, connectors)
+
+        # Build set of (chain, network) pairs that have routers
+        router_networks = set()
+        for c in connectors:
+            chain = c.get('chain', '')
+            for net in c.get('networks', []):
+                router_networks.add((chain, net))
+
+        # Filter networks to only those with router connectors
+        available = [
+            n for n in networks
+            if (n.get('chain', ''), n.get('network', '')) in router_networks
+        ]
+
+        if not available:
+            help_text = (
+                r"🌐 *Select Network*" + "\n\n"
+                r"_No networks available\._"
+            )
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap_execute")]]
+        else:
+            help_text = (
+                r"🌐 *Select Network*" + "\n\n"
+                r"_Choose a network:_"
+            )
+
+            # Build network buttons (2 per row)
+            network_buttons = []
+            row = []
+            for n in available:
+                network_id = n.get('network_id', '')
+                row.append(InlineKeyboardButton(network_id, callback_data=f"dex:swap_network_{network_id}"))
+                if len(row) == 2:
+                    network_buttons.append(row)
+                    row = []
+            if row:
+                network_buttons.append(row)
+
+            keyboard = network_buttons + [[InlineKeyboardButton("« Back", callback_data="dex:swap_execute")]]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.callback_query.message.edit_text(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error showing networks: {e}", exc_info=True)
+        error_text = format_error_message(f"Error loading networks: {str(e)}")
+        await update.callback_query.message.reply_text(error_text, parse_mode="MarkdownV2")
+
+
+async def handle_swap_network_select(update: Update, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
+    """Handle network selection from button"""
+    params = context.user_data.get("execute_swap_params", {})
+    params["network"] = network_id
+
+    # Auto-update connector based on network chain
+    # Parse network_id to get chain (e.g., "solana-mainnet-beta" -> "solana")
+    chain = network_id.split("-")[0] if network_id else ""
+    network = network_id.split("-", 1)[1] if "-" in network_id else ""
+
+    # Get cached router connectors and find one for this network
+    cache_key = "router_connectors"
+    connectors = get_cached(context.user_data, cache_key, ttl=300)
+    if connectors:
+        # Find a router connector that supports this network
+        for c in connectors:
+            if c.get('chain') == chain and network in c.get('networks', []):
+                params["connector"] = c.get('name')
+                break
+
+    context.user_data["dex_state"] = "swap_execute"
+    await show_swap_execute_menu(update, context)
 
 
 async def handle_swap_set_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,6 +576,23 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
 
         if not all([connector, network, trading_pair, side, amount]):
             raise ValueError("Missing required parameters")
+
+        # Validate amount > 0
+        try:
+            amount_val = Decimal(str(amount))
+            if amount_val <= 0:
+                raise ValueError("Amount must be greater than 0")
+        except Exception:
+            raise ValueError("Amount must be a valid number greater than 0")
+
+        # Validate slippage > 0%
+        try:
+            slippage_str = str(slippage).rstrip('%').strip()
+            slippage_val = Decimal(slippage_str)
+            if slippage_val <= 0:
+                raise ValueError("Slippage must be greater than 0%")
+        except Exception:
+            raise ValueError("Slippage must be a valid number greater than 0%")
 
         client = await get_gateway_client()
 
@@ -596,13 +911,23 @@ async def process_swap_set_amount(
     """Process swap set amount input"""
     try:
         logger.info(f"Processing swap set amount: {user_input}")
+        amount_str = user_input.strip()
+
+        # Validate amount > 0
+        try:
+            amount_val = Decimal(amount_str)
+            if amount_val <= 0:
+                raise ValueError("Amount must be greater than 0")
+        except Exception:
+            raise ValueError("Amount must be a valid number greater than 0")
+
         params = context.user_data.get("execute_swap_params", {})
-        params["amount"] = user_input.strip()
+        params["amount"] = amount_str
 
         context.user_data["dex_state"] = "swap_execute"
         logger.info(f"Updated params: {params}, restored state to: swap_execute")
 
-        success_msg = escape_markdown_v2(f"✅ Amount set to: {user_input}")
+        success_msg = escape_markdown_v2(f"✅ Amount set to: {amount_str}")
         await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
         await show_swap_execute_menu(update, context, send_new=True)
         logger.info("Showed swap execute menu")
@@ -620,12 +945,23 @@ async def process_swap_set_slippage(
 ) -> None:
     """Process swap set slippage input"""
     try:
+        # Strip any % sign and validate
+        slippage_str = user_input.strip().rstrip('%').strip()
+
+        # Validate slippage > 0%
+        try:
+            slippage_val = Decimal(slippage_str)
+            if slippage_val <= 0:
+                raise ValueError("Slippage must be greater than 0%")
+        except Exception:
+            raise ValueError("Slippage must be a valid number greater than 0%")
+
         params = context.user_data.get("execute_swap_params", {})
-        params["slippage"] = user_input.strip()
+        params["slippage"] = slippage_str
 
         context.user_data["dex_state"] = "swap_execute"
 
-        success_msg = escape_markdown_v2(f"✅ Slippage set to: {user_input}%")
+        success_msg = escape_markdown_v2(f"✅ Slippage set to: {slippage_str}%")
         await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
         await show_swap_execute_menu(update, context, send_new=True)
 
