@@ -3,6 +3,7 @@ Gateway liquidity pool management functions
 """
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from ._shared import logger, escape_markdown_v2, filter_pool_connectors, extract_network_id
@@ -118,13 +119,35 @@ async def handle_pool_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             await prompt_remove_pool(query, context, connector_name, network_id)
         else:
             await query.answer("❌ Session expired, please start over")
+    elif action_data.startswith("select_remove_"):
+        # User selected a pool to remove from the list
+        pool_idx_str = action_data.replace("select_remove_", "")
+        try:
+            pool_idx = int(pool_idx_str)
+            pool_list = context.user_data.get('pool_list', [])
+            connector_name = context.user_data.get('pool_connector_name')
+            network_id = context.user_data.get('pool_current_network')
+
+            if connector_name and network_id and 0 <= pool_idx < len(pool_list):
+                pool = pool_list[pool_idx]
+                pool_address = pool.get('address', pool.get('pool_id', ''))
+                pool_type = pool.get('type', '')
+                # Store for confirmation
+                context.user_data['pool_remove_address'] = pool_address
+                context.user_data['pool_remove_type'] = pool_type
+                await show_delete_pool_confirmation(query, context, connector_name, network_id, pool_address, pool_type)
+            else:
+                await query.answer("❌ Pool not found")
+        except ValueError:
+            await query.answer("❌ Invalid pool selection")
     elif action_data == "confirm_remove":
-        # Full pool address stored in context
+        # Full pool address and type stored in context
         pool_address = context.user_data.get('pool_remove_address')
+        pool_type = context.user_data.get('pool_remove_type')
         connector_name = context.user_data.get('pool_connector_name')
         network_id = context.user_data.get('pool_current_network')
-        if pool_address and connector_name and network_id:
-            await remove_pool(query, context, connector_name, network_id, pool_address)
+        if pool_address and pool_type and connector_name and network_id:
+            await remove_pool(query, context, connector_name, network_id, pool_address, pool_type)
         else:
             await query.answer("❌ Session expired, please start over")
     elif action_data == "view":
@@ -283,6 +306,16 @@ async def show_connector_pools(query, context: ContextTypes.DEFAULT_TYPE, connec
             reply_markup=reply_markup
         )
 
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            # Ignore - message content is the same (e.g., on refresh with no changes)
+            pass
+        else:
+            logger.error(f"Error showing connector pools: {e}", exc_info=True)
+            error_text = f"❌ Error loading pools: {escape_markdown_v2(str(e))}"
+            keyboard = [[InlineKeyboardButton("« Back", callback_data=f"gateway_pool_connector_{connector_name}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error showing connector pools: {e}", exc_info=True)
         error_text = f"❌ Error loading pools: {escape_markdown_v2(str(e))}"
@@ -328,27 +361,50 @@ async def prompt_add_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_n
 
 
 async def prompt_remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str) -> None:
-    """Prompt user to enter pool address to remove"""
+    """Show list of pools to remove with numbered buttons"""
     try:
+        from servers import server_manager
+
         connector_escaped = escape_markdown_v2(connector_name)
         network_escaped = escape_markdown_v2(network)
 
-        context.user_data['awaiting_pool_input'] = 'pool_address_remove'
-        context.user_data['pool_connector'] = connector_name
-        context.user_data['pool_network'] = network
-        context.user_data['pool_message_id'] = query.message.message_id
-        context.user_data['pool_chat_id'] = query.message.chat_id
+        # Fetch pools to display as options
+        client = await server_manager.get_default_client()
+        pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
 
-        message_text = (
-            f"➖ *Remove Pool from {connector_escaped}*\n"
-            f"Network: `{network_escaped}`\n\n"
-            "*Enter the pool address to remove:*\n\n"
-            "*Example:*\n"
-            "`8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj`\n\n"
-            "⚠️ _Restart Gateway after removing for changes to take effect\\._"
-        )
+        if not pools:
+            message_text = (
+                f"➖ *Remove Pool from {connector_escaped}*\n"
+                f"Network: `{network_escaped}`\n\n"
+                "_No pools found to remove\\._"
+            )
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_pool_view")]]
+        else:
+            # Store pools in context for later retrieval
+            context.user_data['pool_list'] = pools
 
-        keyboard = [[InlineKeyboardButton("« Cancel", callback_data="gateway_pool_view")]]
+            pool_lines = []
+            keyboard = []
+            for idx, pool in enumerate(pools[:10], 1):
+                trading_pair = pool.get('trading_pair', pool.get('tradingPair', 'N/A'))
+                pool_type = pool.get('type', 'N/A')
+                trading_pair_escaped = escape_markdown_v2(str(trading_pair))
+                pool_type_escaped = escape_markdown_v2(str(pool_type))
+                pool_lines.append(f"{idx}\\. `{trading_pair_escaped}` \\({pool_type_escaped}\\)")
+                # Add button for each pool
+                keyboard.append([InlineKeyboardButton(f"{idx}. {trading_pair} ({pool_type})", callback_data=f"gateway_pool_select_remove_{idx-1}")])
+
+            pools_text = "\n".join(pool_lines)
+
+            message_text = (
+                f"➖ *Remove Pool from {connector_escaped}*\n"
+                f"Network: `{network_escaped}`\n\n"
+                "*Select a pool to remove:*\n\n"
+                f"{pools_text}\n\n"
+                "⚠️ _Restart Gateway after removing for changes to take effect\\._"
+            )
+            keyboard.append([InlineKeyboardButton("« Cancel", callback_data="gateway_pool_view")])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
@@ -363,20 +419,12 @@ async def prompt_remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connecto
         await query.answer(f"❌ Error: {str(e)[:100]}")
 
 
-async def show_delete_pool_confirmation(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str, pool_address: str) -> None:
+async def show_delete_pool_confirmation(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str, pool_address: str, pool_type: str) -> None:
     """Show confirmation dialog before deleting a pool"""
     try:
-        from servers import server_manager
-
-        # Get pool details to show in confirmation
-        client = await server_manager.get_default_client()
-        pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
-
-        # Find the pool to get its details
-        pool_info = next((p for p in pools if p.get('pool_id') == pool_address or p.get('address') == pool_address), None)
-
         connector_escaped = escape_markdown_v2(connector_name)
         network_escaped = escape_markdown_v2(network)
+        pool_type_escaped = escape_markdown_v2(pool_type)
         addr_display = pool_address[:10] + "..." + pool_address[-8:] if len(pool_address) > 20 else pool_address
         addr_escaped = escape_markdown_v2(addr_display)
 
@@ -384,24 +432,16 @@ async def show_delete_pool_confirmation(query, context: ContextTypes.DEFAULT_TYP
             f"🗑 *Delete Pool*\n\n"
             f"Connector: *{connector_escaped}*\n"
             f"Network: *{network_escaped}*\n"
-        )
-
-        if pool_info:
-            trading_pair = pool_info.get('trading_pair', pool_info.get('tradingPair', 'Unknown'))
-            pool_type = pool_info.get('type', 'Unknown')
-            trading_pair_escaped = escape_markdown_v2(str(trading_pair))
-            pool_type_escaped = escape_markdown_v2(str(pool_type))
-            message_text += f"Pool: *{trading_pair_escaped}* \\({pool_type_escaped}\\)\n"
-
-        message_text += (
+            f"Type: *{pool_type_escaped}*\n"
             f"Address: `{addr_escaped}`\n\n"
             f"⚠️ This will remove the pool from *{connector_escaped}* on *{network_escaped}*\\.\n"
             "You will need to restart the Gateway for changes to take effect\\.\n\n"
             "Are you sure you want to delete this pool?"
         )
 
-        # Store pool address in context to avoid long callback_data
+        # Store pool address and type in context
         context.user_data['pool_remove_address'] = pool_address
+        context.user_data['pool_remove_type'] = pool_type
 
         keyboard = [
             [InlineKeyboardButton("✅ Yes, Delete", callback_data="gateway_pool_confirm_remove")],
@@ -414,22 +454,31 @@ async def show_delete_pool_confirmation(query, context: ContextTypes.DEFAULT_TYP
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
-        await query.answer()
+        try:
+            await query.answer()
+        except TypeError:
+            pass  # Mock query doesn't support answer
 
     except Exception as e:
         logger.error(f"Error showing delete pool confirmation: {e}", exc_info=True)
-        await query.answer(f"❌ Error: {str(e)[:100]}")
+        try:
+            await query.answer(f"❌ Error: {str(e)[:100]}")
+        except TypeError:
+            pass  # Mock query doesn't support answer
 
 
-async def remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str, pool_address: str) -> None:
+async def remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str, pool_address: str, pool_type: str) -> None:
     """Remove a pool from Gateway"""
     try:
         from servers import server_manager
 
-        await query.answer("Removing pool...")
+        try:
+            await query.answer("Removing pool...")
+        except TypeError:
+            pass  # Mock query doesn't support answer
 
         client = await server_manager.get_default_client()
-        await client.gateway.delete_pool(connector_name=connector_name, network=network, pool_id=pool_address)
+        await client.gateway.delete_pool(connector=connector_name, network=network, pool_type=pool_type, address=pool_address)
 
         connector_escaped = escape_markdown_v2(connector_name)
         network_escaped = escape_markdown_v2(network)
@@ -523,9 +572,11 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
                 await client.gateway.add_pool(
                     connector_name=connector_name,
+                    pool_type=pool_type,
                     network=network,
-                    pool_id=address,
-                    trading_pair=f"{base}-{quote}"
+                    base=base,
+                    quote=quote,
+                    address=address
                 )
 
                 success_text = (
@@ -556,9 +607,11 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     chat_id=chat_id,
                     message_id=message_id
                 )
+                async def noop_answer(text=""):
+                    pass
                 mock_query = SimpleNamespace(
                     message=mock_message,
-                    answer=lambda text="": None
+                    answer=noop_answer
                 )
                 await show_connector_pools(mock_query, context, connector_name, network)
 
@@ -572,35 +625,6 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                         text=error_text,
                         parse_mode="MarkdownV2"
                     )
-
-        elif awaiting_field == 'pool_address_remove':
-            # Parse pool address to remove
-            pool_address = update.message.text.strip()
-
-            # Clear context
-            context.user_data.pop('awaiting_pool_input', None)
-            context.user_data.pop('pool_connector', None)
-            context.user_data.pop('pool_network', None)
-            context.user_data.pop('pool_message_id', None)
-            context.user_data.pop('pool_chat_id', None)
-
-            # Create mock query and call confirmation dialog
-            mock_message = SimpleNamespace(
-                edit_text=lambda text, parse_mode=None, reply_markup=None: update.get_bot().edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup
-                ),
-                chat_id=chat_id,
-                message_id=message_id
-            )
-            mock_query = SimpleNamespace(
-                message=mock_message,
-                answer=lambda text="": None
-            )
-            await show_delete_pool_confirmation(mock_query, context, connector_name, network, pool_address)
 
     except Exception as e:
         logger.error(f"Error handling pool input: {e}", exc_info=True)
