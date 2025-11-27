@@ -6,6 +6,7 @@ Provides:
 - Close functionality
 """
 
+import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -15,6 +16,18 @@ from handlers.config.user_preferences import get_dex_last_swap
 from ._shared import get_gateway_client, cached_call, invalidate_cache
 
 logger = logging.getLogger(__name__)
+
+# Key for storing the background loading task
+DEX_LOADING_TASK_KEY = "_dex_menu_loading_task"
+
+
+def cancel_dex_loading_task(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel any pending DEX menu loading task"""
+    task = context.user_data.get(DEX_LOADING_TASK_KEY)
+    if task and not task.done():
+        task.cancel()
+        logger.debug("Cancelled pending DEX menu loading task")
+    context.user_data.pop(DEX_LOADING_TASK_KEY, None)
 
 
 def _format_amount(value: float) -> str:
@@ -337,54 +350,17 @@ def _build_menu_with_data(gateway_data: dict, last_swap: dict = None) -> str:
     return header
 
 
-async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display main DEX trading menu with balances and positions
+async def _load_menu_data_background(
+    message,
+    context: ContextTypes.DEFAULT_TYPE,
+    reply_markup,
+    last_swap
+) -> None:
+    """Background task to load gateway data and update the menu progressively.
 
-    Uses progressive loading: shows balances first, then LP positions.
+    This runs as a background task so users can navigate away without waiting.
+    Handles cancellation gracefully.
     """
-    import asyncio
-
-    reply_markup = _build_menu_keyboard()
-
-    # Step 1: Show menu immediately with loading indicator
-    loading_message = _build_loading_message()
-
-    if update.callback_query:
-        query_message = update.callback_query.message
-
-        # Check if the current message is a photo (can't edit_text on photos)
-        if query_message.photo:
-            # Delete the photo message and send a new text message
-            try:
-                await query_message.delete()
-            except Exception:
-                pass
-            message = await query_message.chat.send_message(
-                loading_message,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-        else:
-            # Regular text message - edit it
-            try:
-                await query_message.edit_text(
-                    loading_message,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
-                )
-                message = query_message
-            except Exception as e:
-                if "not modified" not in str(e).lower():
-                    logger.warning(f"Failed to edit menu message: {e}")
-                message = query_message
-    else:
-        message = await update.message.reply_text(
-            loading_message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
-
-    last_swap = get_dex_last_swap(context.user_data)
     gateway_data = {"balances_by_network": {}, "lp_positions": [], "total_value": 0, "token_cache": {}}
 
     try:
@@ -433,6 +409,9 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         logger.debug(f"Gateway data: {len(gateway_data.get('balances_by_network', {}))} networks, {len(gateway_data.get('lp_positions', []))} LP positions")
 
+    except asyncio.CancelledError:
+        logger.debug("Menu data loading was cancelled (user navigated away)")
+        return
     except Exception as e:
         logger.warning(f"Could not fetch gateway data for menu: {e}")
 
@@ -445,14 +424,80 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
+    except asyncio.CancelledError:
+        logger.debug("Menu data loading was cancelled during final update")
     except Exception as e:
         # Ignore "message is not modified" errors
         if "not modified" not in str(e).lower():
             logger.warning(f"Failed to update menu with data: {e}")
+    finally:
+        # Clean up task reference
+        context.user_data.pop(DEX_LOADING_TASK_KEY, None)
+
+
+async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display main DEX trading menu with balances and positions
+
+    Uses progressive loading: shows menu immediately, then loads data in background.
+    User can navigate away without waiting for data to load.
+    """
+    # Cancel any existing loading task first
+    cancel_dex_loading_task(context)
+
+    reply_markup = _build_menu_keyboard()
+
+    # Step 1: Show menu immediately with loading indicator
+    loading_message = _build_loading_message()
+
+    if update.callback_query:
+        query_message = update.callback_query.message
+
+        # Check if the current message is a photo (can't edit_text on photos)
+        if query_message.photo:
+            # Delete the photo message and send a new text message
+            try:
+                await query_message.delete()
+            except Exception:
+                pass
+            message = await query_message.chat.send_message(
+                loading_message,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        else:
+            # Regular text message - edit it
+            try:
+                await query_message.edit_text(
+                    loading_message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+                message = query_message
+            except Exception as e:
+                if "not modified" not in str(e).lower():
+                    logger.warning(f"Failed to edit menu message: {e}")
+                message = query_message
+    else:
+        message = await update.message.reply_text(
+            loading_message,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+    last_swap = get_dex_last_swap(context.user_data)
+
+    # Spawn background task to load data - user can navigate away without waiting
+    task = asyncio.create_task(
+        _load_menu_data_background(message, context, reply_markup, last_swap)
+    )
+    context.user_data[DEX_LOADING_TASK_KEY] = task
 
 
 async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle close button - delete the menu message"""
+    # Cancel any pending loading task
+    cancel_dex_loading_task(context)
+
     query = update.callback_query
     try:
         await query.message.delete()

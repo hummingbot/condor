@@ -14,7 +14,7 @@ from telegram.error import BadRequest
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
 from handlers.config.user_preferences import set_dex_last_pool, get_dex_last_pool
-from ._shared import get_gateway_client, get_cached
+from ._shared import get_gateway_client, get_cached, set_cached, cached_call, DEFAULT_CACHE_TTL
 
 logger = logging.getLogger(__name__)
 
@@ -1243,9 +1243,13 @@ async def _show_pool_detail(
     pool_address = pool.get('pool_address', pool.get('address', 'N/A'))
     connector = pool.get('connector', 'meteora')
 
-    # Fetch additional pool info with bins
-    client = await get_gateway_client()
-    pool_info = await _fetch_pool_info(client, pool_address, connector)
+    # Fetch additional pool info with bins (cached with 60s TTL)
+    cache_key = f"pool_info_{connector}_{pool_address}"
+    pool_info = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
+    if pool_info is None:
+        client = await get_gateway_client()
+        pool_info = await _fetch_pool_info(client, pool_address, connector)
+        set_cached(context.user_data, cache_key, pool_info)
 
     # Try to get trading pair name from multiple sources
     pair = pool.get('trading_pair') or pool.get('name')
@@ -1361,6 +1365,7 @@ async def _show_pool_detail(
     keyboard = [
         [
             InlineKeyboardButton("➕ Add Liquidity", callback_data="dex:add_position_from_pool"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="dex:pool_detail_refresh"),
             InlineKeyboardButton("📋 Copy Address", callback_data=f"dex:copy_pool:{pool_address[:20]}")
         ]
     ]
@@ -1454,6 +1459,27 @@ async def handle_pool_select(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _show_pool_detail(update, context, pool, from_callback=True)
     else:
         await update.callback_query.answer("Pool not found. Please search again.")
+
+
+async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh pool detail by clearing cache and re-fetching"""
+    from ._shared import clear_cache
+
+    selected_pool = context.user_data.get("selected_pool", {})
+    if not selected_pool:
+        await update.callback_query.answer("No pool selected")
+        return
+
+    pool_address = selected_pool.get('pool_address', selected_pool.get('address', ''))
+    connector = selected_pool.get('connector', 'meteora')
+
+    # Clear pool info cache
+    cache_key = f"pool_info_{connector}_{pool_address}"
+    clear_cache(context.user_data, cache_key)
+    context.user_data.pop("selected_pool_info", None)
+
+    await update.callback_query.answer("Refreshing...")
+    await _show_pool_detail(update, context, selected_pool, from_callback=True)
 
 
 async def handle_pool_list_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1661,27 +1687,35 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
 
         all_positions = result.get("data", []) if result else []
 
-        # Filter out positions with 0 liquidity (closed on-chain but DB not updated)
-        def has_liquidity(pos):
+        # Filter out CLOSED positions and positions with 0 liquidity
+        def is_active_position(pos):
+            # Check status field first - exclude CLOSED positions
+            status = pos.get('status', '').upper()
+            if status == 'CLOSED':
+                return False
+
+            # Check liquidity
             liq = pos.get('liquidity') or pos.get('current_liquidity')
             if liq is not None:
                 try:
                     return float(liq) > 0
                 except (ValueError, TypeError):
                     pass
-            # Check token amounts as fallback
-            base = pos.get('base_amount') or pos.get('amount_base')
-            quote = pos.get('quote_amount') or pos.get('amount_quote')
-            if base is not None and quote is not None:
+            # Check token amounts as fallback (use correct field names)
+            base = pos.get('base_token_amount') or pos.get('base_amount') or pos.get('amount_base')
+            quote = pos.get('quote_token_amount') or pos.get('quote_amount') or pos.get('amount_quote')
+            if base is not None or quote is not None:
                 try:
-                    return float(base) > 0 or float(quote) > 0
+                    base_val = float(base) if base is not None else 0
+                    quote_val = float(quote) if quote is not None else 0
+                    return base_val > 0 or quote_val > 0
                 except (ValueError, TypeError):
                     pass
             return True  # Assume active if we can't determine
 
-        positions = [p for p in all_positions if has_liquidity(p)]
+        positions = [p for p in all_positions if is_active_position(p)]
         if len(positions) < len(all_positions):
-            logger.info(f"Filtered {len(all_positions) - len(positions)} positions with 0 liquidity")
+            logger.info(f"Filtered {len(all_positions) - len(positions)} closed/empty positions")
 
         # Build message
         if positions:
@@ -1689,7 +1723,8 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
 
             for i, pos in enumerate(positions[:10]):  # Show top 10
                 pos_detail = _format_position_detail(pos, token_cache=token_cache, detailed=False)
-                header += escape_markdown_v2(pos_detail) + "\n\n"
+                # Add index number prefix to correlate with buttons
+                header += escape_markdown_v2(f"#{i+1} ") + escape_markdown_v2(pos_detail) + "\n\n"
 
             if len(positions) > 10:
                 header += escape_markdown_v2(f"... and {len(positions) - 10} more positions")
@@ -1701,24 +1736,23 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
         # Build keyboard with position actions
         keyboard = []
 
+        # Initialize positions cache
+        if "positions_cache" not in context.user_data:
+            context.user_data["positions_cache"] = {}
+
         # Add buttons for each position (max 5 for manageability)
         for i, pos in enumerate(positions[:5]):
-            pool_addr = pos.get('pool_address', '')
-
             # Resolve pair name for button label
             base_token = pos.get('base_token', pos.get('token_a', ''))
             quote_token = pos.get('quote_token', pos.get('token_b', ''))
-            pair = format_pair_from_addresses(base_token, quote_token, token_cache)[:12]
-
-            pos_id = pos.get('position_id', pos.get('nft_id', i))
+            pair = format_pair_from_addresses(base_token, quote_token, token_cache)[:10]
 
             # Store position info in context for later use
-            if "positions_cache" not in context.user_data:
-                context.user_data["positions_cache"] = {}
             context.user_data["positions_cache"][str(i)] = pos
 
+            # Use index number to distinguish positions with same pair
             keyboard.append([
-                InlineKeyboardButton(f"📍 {pair}", callback_data=f"dex:pos_view:{i}"),
+                InlineKeyboardButton(f"#{i+1} {pair}", callback_data=f"dex:pos_view:{i}"),
                 InlineKeyboardButton("💰 Fees", callback_data=f"dex:pos_collect:{i}"),
                 InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{i}")
             ])
@@ -2181,7 +2215,8 @@ async def _fetch_token_balances(client, network: str, base_token: str, quote_tok
 
 
 def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
-                          current_price: float, width: int = 20) -> str:
+                          current_price: float, width: int = 20, max_bins_per_side: int = 40,
+                          bin_step: int = 2) -> str:
     """Generate improved ASCII visualization of liquidity with selected range markers
 
     Args:
@@ -2190,6 +2225,8 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
         upper_price: Selected upper bound
         current_price: Current pool price
         width: Width of the bar chart
+        max_bins_per_side: Maximum bins to show on each side of current price (default 40)
+        bin_step: Step between displayed bins (default 2, shows every other bin)
 
     Returns:
         ASCII chart string (no leading/trailing code blocks - handled by caller)
@@ -2209,46 +2246,54 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
     if not bin_data:
         return ""
 
-    # Sort and filter to bins with liquidity
+    # Sort bins by price
     bin_data.sort(key=lambda x: x['price'])
-    active_bins = [b for b in bin_data if b['liq'] > 0]
 
-    if not active_bins:
+    # Find current price index for centering
+    current_idx = 0
+    if current_price:
+        for i, b in enumerate(bin_data):
+            if b['price'] >= current_price:
+                current_idx = i
+                break
+        else:
+            current_idx = len(bin_data) - 1
+
+    # Calculate range to display: max_bins_per_side on each side of current price
+    start_idx = max(0, current_idx - max_bins_per_side)
+    end_idx = min(len(bin_data), current_idx + max_bins_per_side + 1)
+
+    # Get subset of bins in display range
+    display_bins = bin_data[start_idx:end_idx]
+
+    if not display_bins:
         return ""
 
-    # Get price range
-    min_price = min(b['price'] for b in active_bins)
-    max_price = max(b['price'] for b in active_bins)
-    price_range = max_price - min_price
+    # Find max liquidity for scaling (from all bins for consistent scale)
+    max_liq = max((b['liq'] for b in bin_data), default=0)
+    if max_liq <= 0:
+        max_liq = 1  # Avoid division by zero
 
-    if price_range <= 0:
-        return ""
-
-    # Find max liquidity for scaling
-    max_liq = max(b['liq'] for b in active_bins)
-
-    # Build histogram
+    # Build histogram with step sampling
     lines = []
-
-    # Sample to ~8 price points for compact display
-    if len(active_bins) > 8:
-        step = len(active_bins) // 8
-        sampled = active_bins[::step][:8]
-    else:
-        sampled = active_bins
-
-    for b in sampled:
+    for i, b in enumerate(display_bins):
+        # Only show every bin_step bins, but always show bins near current price and bounds
         price = b['price']
+        is_current = current_price and abs(price - current_price) / max(current_price, 0.0001) < 0.03
+        near_lower = lower_price and abs(price - lower_price) / max(lower_price, 0.0001) < 0.03
+        near_upper = upper_price and abs(price - upper_price) / max(upper_price, 0.0001) < 0.03
+
+        # Skip bins not at step interval unless they're special (current, lower, upper bounds)
+        if i % bin_step != 0 and not is_current and not near_lower and not near_upper:
+            continue
+
         liq = b['liq']
 
         # Calculate bar length
         bar_len = int((liq / max_liq) * width) if max_liq > 0 else 0
 
-        # Determine if in range and marker
+        # Determine if in range
         in_range = lower_price <= price <= upper_price if lower_price and upper_price else False
-        is_current = abs(price - current_price) / current_price < 0.03 if current_price else False
-        near_lower = lower_price and abs(price - lower_price) / max(lower_price, 0.0001) < 0.06
-        near_upper = upper_price and abs(price - upper_price) / max(upper_price, 0.0001) < 0.06
 
         # Build bar with different characters for in/out of range
         bar = "█" * bar_len if in_range else "░" * bar_len
@@ -2390,10 +2435,14 @@ async def show_add_position_menu(
         if bin_step:
             help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(default 20 bins each side\\)_\n"
 
-        # Fetch and display token balances
+        # Fetch and display token balances (cached with 60s TTL)
         try:
-            client = await get_gateway_client()
-            balances = await _fetch_token_balances(client, network, base_token, quote_token)
+            balance_cache_key = f"token_balances_{network}_{base_token}_{quote_token}"
+            balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
+            if balances is None:
+                client = await get_gateway_client()
+                balances = await _fetch_token_balances(client, network, base_token, quote_token)
+                set_cached(context.user_data, balance_cache_key, balances)
 
             if balances["base_balance"] > 0 or balances["quote_balance"] > 0:
                 help_text += "\n" + r"━━━ Wallet Balances ━━━" + "\n"
@@ -2471,7 +2520,10 @@ async def show_add_position_menu(
     )
     keyboard.append([
         InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
+        InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
         help_button,
+    ])
+    keyboard.append([
         InlineKeyboardButton("« Back", callback_data="dex:pool_list_back")
     ])
 
@@ -2570,6 +2622,41 @@ async def handle_pos_toggle_strategy(update: Update, context: ContextTypes.DEFAU
     else:
         params["strategy_type"] = "0"
 
+    await show_add_position_menu(update, context)
+
+
+async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh pool info and token balances by clearing cache"""
+    from ._shared import clear_cache
+
+    # Get current pool info to build cache keys
+    params = context.user_data.get("add_position_params", {})
+    selected_pool = context.user_data.get("selected_pool", {})
+
+    pool_address = params.get("pool_address") or selected_pool.get("pool_address", "")
+    connector = params.get("connector") or selected_pool.get("connector", "meteora")
+    network = params.get("network", "solana-mainnet-beta")
+    base_token = selected_pool.get("base_token", "")
+    quote_token = selected_pool.get("quote_token", "")
+
+    # Clear specific cache keys
+    pool_cache_key = f"pool_info_{connector}_{pool_address}"
+    balance_cache_key = f"token_balances_{network}_{base_token}_{quote_token}"
+
+    clear_cache(context.user_data, pool_cache_key)
+    clear_cache(context.user_data, balance_cache_key)
+
+    # Also clear stored pool info to force refresh
+    context.user_data.pop("selected_pool_info", None)
+
+    # Refetch pool info
+    if pool_address:
+        client = await get_gateway_client()
+        pool_info = await _fetch_pool_info(client, pool_address, connector)
+        set_cached(context.user_data, pool_cache_key, pool_info)
+        context.user_data["selected_pool_info"] = pool_info
+
+    await update.callback_query.answer("Refreshed!")
     await show_add_position_menu(update, context)
 
 

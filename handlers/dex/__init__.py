@@ -24,7 +24,7 @@ from utils.auth import restricted
 from handlers import clear_all_input_states
 
 # Import submodule handlers
-from .menu import show_dex_menu, handle_close, handle_refresh
+from .menu import show_dex_menu, handle_close, handle_refresh, cancel_dex_loading_task
 from .swap_quote import (
     handle_swap_quote,
     show_swap_quote_menu,
@@ -71,6 +71,7 @@ from .pools import (
     handle_pool_list,
     handle_pool_select,
     handle_pool_list_back,
+    handle_pool_detail_refresh,
     handle_plot_liquidity,
     handle_manage_positions,
     handle_pos_view,
@@ -91,6 +92,7 @@ from .pools import (
     handle_pos_use_max_range,
     handle_pos_help,
     handle_pos_toggle_strategy,
+    handle_pos_refresh,
     process_pool_info,
     process_pool_list,
     process_position_list,
@@ -139,6 +141,11 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         callback_parts = query.data.split(":", 1)
         action = callback_parts[1] if len(callback_parts) > 1 else query.data
+
+        # Cancel any pending menu loading task when navigating to a different action
+        # (show_dex_menu will cancel it internally anyway, so skip for main_menu)
+        if action != "main_menu":
+            cancel_dex_loading_task(context)
 
         # Menu
         if action == "main_menu":
@@ -200,6 +207,8 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pool_select(update, context, pool_index)
         elif action == "pool_list_back":
             await handle_pool_list_back(update, context)
+        elif action == "pool_detail_refresh":
+            await handle_pool_detail_refresh(update, context)
         elif action.startswith("plot_liquidity:"):
             percentile = int(action.split(":")[1])
             await handle_plot_liquidity(update, context, percentile)
@@ -268,6 +277,8 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pos_help(update, context)
         elif action == "pos_toggle_strategy":
             await handle_pos_toggle_strategy(update, context)
+        elif action == "pos_refresh":
+            await handle_pos_refresh(update, context)
 
         # Refresh data
         elif action == "refresh":
