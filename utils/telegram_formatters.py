@@ -596,6 +596,38 @@ KNOWN_TOKENS = {
     # Add more as needed
 }
 
+# Reverse lookup: symbol -> address
+KNOWN_TOKEN_ADDRESSES = {symbol: address for address, symbol in KNOWN_TOKENS.items()}
+
+
+def resolve_token_address(symbol: str, token_cache: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """
+    Resolve a token symbol to its address.
+
+    Args:
+        symbol: Token symbol to resolve (e.g., "SOL", "USDC")
+        token_cache: Optional cache from Gateway tokens {address: symbol}
+
+    Returns:
+        Token address or None if not found
+    """
+    if not symbol:
+        return None
+
+    symbol_upper = symbol.upper()
+
+    # Check known tokens first
+    if symbol_upper in KNOWN_TOKEN_ADDRESSES:
+        return KNOWN_TOKEN_ADDRESSES[symbol_upper]
+
+    # Check provided cache (reverse lookup)
+    if token_cache:
+        for address, sym in token_cache.items():
+            if sym.upper() == symbol_upper:
+                return address
+
+    return None
+
 
 def resolve_token_symbol(address: str, token_cache: Optional[Dict[str, str]] = None) -> str:
     """

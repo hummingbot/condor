@@ -273,10 +273,15 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 }
             await show_add_position_menu(update, context)
         elif action.startswith("copy_pool:"):
-            # Show pool address for copying
+            # Show pool address for copying - send as message so user can easily copy
             selected_pool = context.user_data.get("selected_pool", {})
             pool_address = selected_pool.get('pool_address', selected_pool.get('address', 'N/A'))
-            await query.answer(f"Address: {pool_address[:40]}...", show_alert=True)
+            # Send as a code block message for easy copying (Telegram allows tap-to-copy on code blocks)
+            await query.answer("Address sent below ⬇️")
+            await query.message.reply_text(
+                f"`{pool_address}`",
+                parse_mode="Markdown"
+            )
         elif action == "pos_set_connector":
             await handle_pos_set_connector(update, context)
         elif action == "pos_set_network":

@@ -7,6 +7,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from ._shared import logger, escape_markdown_v2, filter_pool_connectors, extract_network_id
+from utils.telegram_formatters import resolve_token_address
 
 
 async def show_pools_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -545,6 +546,17 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
             pool_type, base, quote, address = parts
 
+            # Resolve token addresses from symbols
+            base_address = resolve_token_address(base)
+            quote_address = resolve_token_address(quote)
+
+            if not base_address:
+                await update.message.reply_text(f"❌ Unknown token symbol: {base}\nPlease use known tokens (SOL, USDC, USDT, etc.)")
+                return
+            if not quote_address:
+                await update.message.reply_text(f"❌ Unknown token symbol: {quote}\nPlease use known tokens (SOL, USDC, USDT, etc.)")
+                return
+
             # Clear context
             context.user_data.pop('awaiting_pool_input', None)
             context.user_data.pop('pool_connector', None)
@@ -568,7 +580,8 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 client = await server_manager.get_default_client()
 
                 logger.info(f"Adding pool: connector={connector_name}, network={network}, "
-                           f"pool_type={pool_type}, base={base}, quote={quote}, address={address}")
+                           f"pool_type={pool_type}, base={base}, quote={quote}, address={address}, "
+                           f"base_address={base_address}, quote_address={quote_address}")
 
                 await client.gateway.add_pool(
                     connector_name=connector_name,
@@ -576,7 +589,9 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     network=network,
                     base=base,
                     quote=quote,
-                    address=address
+                    address=address,
+                    base_address=base_address,
+                    quote_address=quote_address
                 )
 
                 success_text = (
