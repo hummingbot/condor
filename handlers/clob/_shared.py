@@ -220,33 +220,37 @@ async def fetch_cex_balances(client, account_name: str) -> Dict[str, List[Dict[s
         Dict of connector_name -> list of balances
     """
     try:
-        # Get available connectors
-        connectors_result = await client.connectors.get_connectors()
-        all_connectors = connectors_result.get("connectors", {})
+        # Get connectors with credentials configured for this account
+        configured_connectors = await client.accounts.list_account_credentials(account_name)
 
-        # Filter to CEX only
-        cex_connectors = get_cex_connectors(all_connectors)
+        # Filter to CEX only (list_account_credentials returns List[str])
+        cex_connectors = [c for c in configured_connectors if is_cex_connector(c)]
 
         if not cex_connectors:
             logger.warning("No CEX connectors found")
             return {}
 
-        # Fetch balances for each CEX connector
-        balances = {}
-        for connector_name in cex_connectors:
-            try:
-                result = await client.connectors.get_balances(
-                    account_name=account_name,
-                    connector_name=connector_name
-                )
-                balance_list = result.get("balances", [])
+        # Fetch balances using portfolio.get_state
+        try:
+            portfolio_state = await client.portfolio.get_state(
+                account_names=[account_name],
+                connector_names=cex_connectors
+            )
+
+            # portfolio.get_state returns {account_name: {connector_name: [balances]}}
+            account_data = portfolio_state.get(account_name, {})
+
+            # Filter to only connectors with non-empty balances
+            balances = {}
+            for connector_name, balance_list in account_data.items():
                 if balance_list:
                     balances[connector_name] = balance_list
-            except Exception as e:
-                logger.warning(f"Failed to fetch balances for {connector_name}: {e}")
-                continue
 
-        return balances
+            return balances
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch portfolio state: {e}")
+            return {}
 
     except Exception as e:
         logger.error(f"Error fetching CEX balances: {e}", exc_info=True)
@@ -410,19 +414,21 @@ def format_trading_rules_info(
 # AVAILABLE CONNECTORS FETCHING
 # ============================================
 
-async def fetch_available_cex_connectors(client) -> List[str]:
-    """Fetch list of available CEX connectors.
+async def fetch_available_cex_connectors(client, account_name: str = "master_account") -> List[str]:
+    """Fetch list of available CEX connectors with credentials configured.
 
     Args:
         client: API client
+        account_name: Account name to check credentials for
 
     Returns:
         List of available CEX connector names
     """
     try:
-        connectors_result = await client.connectors.get_connectors()
-        all_connectors = connectors_result.get("connectors", {})
-        return get_cex_connectors(all_connectors)
+        # Get connectors with credentials configured for this account
+        configured_connectors = await client.accounts.list_account_credentials(account_name)
+        # Filter to CEX only
+        return [c for c in configured_connectors if is_cex_connector(c)]
     except Exception as e:
         logger.error(f"Error fetching connectors: {e}", exc_info=True)
         return []
@@ -431,6 +437,7 @@ async def fetch_available_cex_connectors(client) -> List[str]:
 async def get_available_cex_connectors(
     user_data: dict,
     client,
+    account_name: str = "master_account",
     ttl: int = 300  # 5 min cache
 ) -> List[str]:
     """Get available CEX connectors with caching.
@@ -438,17 +445,20 @@ async def get_available_cex_connectors(
     Args:
         user_data: context.user_data dict
         client: API client
+        account_name: Account name to check credentials for
         ttl: Cache TTL in seconds
 
     Returns:
         List of available CEX connector names
     """
+    cache_key = f"available_cex_connectors_{account_name}"
     return await cached_call(
         user_data,
-        "available_cex_connectors",
+        cache_key,
         fetch_available_cex_connectors,
         ttl,
-        client
+        client,
+        account_name
     )
 
 
