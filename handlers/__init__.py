@@ -68,3 +68,12 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Gateway - token states
     context.user_data.pop("awaiting_token_input", None)
     context.user_data.pop("token_network", None)
+
+    # Bots - controller config states
+    context.user_data.pop("bots_state", None)
+    context.user_data.pop("controller_config_params", None)
+    context.user_data.pop("controller_configs_list", None)
+    context.user_data.pop("selected_controllers", None)
+    context.user_data.pop("editing_controller_field", None)
+    context.user_data.pop("deploy_params", None)
+    context.user_data.pop("editing_deploy_field", None)
