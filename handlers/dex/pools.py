@@ -2388,11 +2388,24 @@ async def show_add_position_menu(
     selected_pool = context.user_data.get("selected_pool", {})
     pool_info = context.user_data.get("selected_pool_info", {})
 
+    # If we have a pool but no pool_info with bins, try to use cached or fetch
+    pool_address = params.get('pool_address') or selected_pool.get('pool_address', selected_pool.get('address', ''))
+    connector = params.get('connector') or selected_pool.get('connector', 'meteora')
+
+    if pool_address and not pool_info.get('bins'):
+        # Try to get from cache first
+        cache_key = f"pool_info_{connector}_{pool_address}"
+        cached_info = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
+        if cached_info and cached_info.get('bins'):
+            pool_info = cached_info
+            context.user_data["selected_pool_info"] = pool_info
+
     # Get current price and bin step for range calculation
-    current_price = pool_info.get('price') or selected_pool.get('current_price')
-    bin_step = selected_pool.get('bin_step') or pool_info.get('bin_step')
+    # Prefer pool_info (fetched data) over selected_pool (list data)
+    current_price = pool_info.get('price') or selected_pool.get('current_price') or selected_pool.get('price')
+    bin_step = pool_info.get('bin_step') or selected_pool.get('bin_step')
     bins = pool_info.get('bins', [])
-    pair = selected_pool.get('trading_pair', 'Pool')
+    pair = selected_pool.get('trading_pair') or pool_info.get('trading_pair', 'Pool')
     network = params.get('network', 'solana-mainnet-beta')
 
     # Extract token symbols from pool info
@@ -2417,8 +2430,8 @@ async def show_add_position_menu(
                 params['lower_price'] = f"{suggested_lower:.6f}"
             if suggested_upper and not params.get('upper_price'):
                 params['upper_price'] = f"{suggested_upper:.6f}"
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to calculate range: {e}")
 
     # Get current range values for visualization
     try:
@@ -2427,6 +2440,9 @@ async def show_add_position_menu(
         current_val = float(current_price) if current_price else None
     except (ValueError, TypeError):
         lower_val, upper_val, current_val = None, None, None
+
+    # Debug logging for ASCII visualization
+    logger.info(f"Add position - bins: {len(bins)}, lower: {lower_val}, upper: {upper_val}, price: {current_val}")
 
     if show_help:
         # ========== HELP VIEW ==========
@@ -2512,12 +2528,8 @@ async def show_add_position_menu(
         except Exception as e:
             logger.warning(f"Could not fetch token balances: {e}")
 
-        # Add ASCII range visualization if we have bins
-        if bins and lower_val and upper_val:
-            ascii_lines = _generate_range_ascii(bins, lower_val, upper_val, current_val)
-            if ascii_lines:
-                help_text += "\n```\n" + ascii_lines + "\n```\n"
-                help_text += r"_█ in range  ░ out  ◄ current price  ↓↑ your bounds_" + "\n"
+        # NOTE: ASCII visualization is added AFTER we know if chart image is available
+        # This is done below, after chart_bytes is generated
 
     # Build keyboard - values shown in buttons, not in message body
     lower_display = params.get('lower_price', '—')[:8] if params.get('lower_price') else '—'
@@ -2588,6 +2600,14 @@ async def show_add_position_menu(
             )
         except Exception as e:
             logger.warning(f"Failed to generate chart for add position: {e}")
+
+    # Add ASCII visualization ONLY if there's NO chart image (ASCII is fallback)
+    # This avoids caption too long error on Telegram (1024 char limit for photo captions)
+    if not chart_bytes and not show_help and bins and lower_val and upper_val:
+        ascii_lines = _generate_range_ascii(bins, lower_val, upper_val, current_val)
+        if ascii_lines:
+            help_text += "\n```\n" + ascii_lines + "\n```\n"
+            help_text += r"_█ in range  ░ out  ◄ current price  ↓↑ your bounds_" + "\n"
 
     # Determine how to send
     if send_new or not update.callback_query:

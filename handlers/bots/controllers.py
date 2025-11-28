@@ -192,7 +192,7 @@ async def show_config_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             value = config.get(field_name, "")
 
         formatted_value = format_config_field_value(field_name, value)
-        required = "*" if field_info.get("required") else ""
+        required = "\\*" if field_info.get("required") else ""
 
         lines.append(f"*{escape_markdown_v2(label)}*{required}: `{escape_markdown_v2(formatted_value)}`")
 

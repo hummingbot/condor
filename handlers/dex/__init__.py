@@ -145,7 +145,6 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle inline button callbacks - Routes to appropriate sub-module"""
     query = update.callback_query
     await query.answer()
-    await query.message.reply_chat_action("typing")
 
     try:
         callback_parts = query.data.split(":", 1)
@@ -155,6 +154,12 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # (show_dex_menu will cancel it internally anyway, so skip for main_menu)
         if action != "main_menu":
             cancel_dex_loading_task(context)
+
+        # Only show typing for slow operations that need network calls
+        slow_actions = {"main_menu", "swap_execute_confirm", "pool_info", "pool_list",
+                        "manage_positions", "pos_add_confirm", "pos_close_exec"}
+        if action in slow_actions:
+            await query.message.reply_chat_action("typing")
 
         # Menu
         if action == "main_menu":
