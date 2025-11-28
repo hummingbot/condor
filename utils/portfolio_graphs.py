@@ -648,12 +648,13 @@ def generate_portfolio_dashboard(
     # Initialize y_min/y_max for Y-axis range
     y_min, y_max = None, None
 
+    # Initialize lists before conditional to avoid UnboundLocalError
+    all_timestamps = []
+    all_total_values = []
+    all_token_snapshots = []
+
     if data_points:
         # Process historical data
-        all_timestamps = []
-        all_total_values = []
-        all_token_snapshots = []
-
         for point in data_points:
             timestamp_str = point.get("timestamp", "")
             state = point.get("state", {})
