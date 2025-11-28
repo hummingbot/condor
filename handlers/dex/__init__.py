@@ -250,6 +250,8 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == "add_position":
             await handle_add_position(update, context)
         elif action == "add_position_from_pool":
+            # Show loading indicator
+            await query.answer("Loading position form...")
             # Pre-fill add position with selected pool
             selected_pool = context.user_data.get("selected_pool", {})
             if selected_pool:

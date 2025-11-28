@@ -1663,6 +1663,20 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
             if pnl_parts:
                 lines.append(f"   📊 {' '.join(pnl_parts)}")
 
+        # Compact Fees - show if any fees are pending
+        try:
+            base_fee_f = float(base_fee) if base_fee else 0
+            quote_fee_f = float(quote_fee) if quote_fee else 0
+            if base_fee_f > 0 or quote_fee_f > 0:
+                fee_parts = []
+                if base_fee_f > 0:
+                    fee_parts.append(f"{format_amount(base_fee_f)} {base_symbol}")
+                if quote_fee_f > 0:
+                    fee_parts.append(f"{format_amount(quote_fee_f)} {quote_symbol}")
+                lines.append(f"   🎁 Fees: {' / '.join(fee_parts)}")
+        except (ValueError, TypeError):
+            pass
+
     return "\n".join(lines)
 
 
@@ -1845,20 +1859,27 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
     """Collect fees from a position - shows progress inline then returns to positions"""
     import asyncio
 
+    query = update.callback_query
+
     try:
         positions_cache = context.user_data.get("positions_cache", {})
         pos = positions_cache.get(pos_index)
 
         if not pos:
-            await update.callback_query.answer("Position not found. Please refresh.")
+            await query.answer("Position not found. Please refresh.")
             return
 
-        pair = pos.get('trading_pair', 'Unknown')
+        # Get token cache for better pair display
+        token_cache = context.user_data.get("token_cache", {})
+        base_token = pos.get('base_token', pos.get('token_a', ''))
+        quote_token = pos.get('quote_token', pos.get('token_b', ''))
+        pair = format_pair_from_addresses(base_token, quote_token, token_cache)
 
         # Edit message to show collecting status
-        await update.callback_query.answer()
-        await update.callback_query.message.edit_text(
-            f"⏳ Collecting fees from {pair}...",
+        await query.answer()
+        await query.message.edit_text(
+            f"⏳ Collecting fees from {escape_markdown_v2(pair)}\\.\\.\\.",
+            parse_mode="MarkdownV2",
             reply_markup=None
         )
 
@@ -1870,42 +1891,68 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
         # Get position details
         connector = pos.get('connector', 'meteora')
         network = pos.get('network', 'solana-mainnet-beta')
-        pool_address = pos.get('pool_address', '')
         position_address = pos.get('position_address', pos.get('nft_id', ''))
 
-        # Call collect fees
-        result = await client.gateway_clmm.collect_fees(
-            connector=connector,
-            network=network,
-            position_address=position_address
-        )
+        # Call collect fees with 10s timeout - Solana should be fast
+        try:
+            result = await asyncio.wait_for(
+                client.gateway_clmm.collect_fees(
+                    connector=connector,
+                    network=network,
+                    position_address=position_address
+                ),
+                timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError("Operation timed out. Check your connection to the backend.")
+
+        # Build back button
+        back_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("« Back to Positions", callback_data="dex:manage_positions")]
+        ])
 
         if result:
-            success_msg = f"✅ Fees collected from {pair}!"
-            if isinstance(result, dict) and result.get('tx_hash'):
-                success_msg += f"\n\nTx: {result['tx_hash'][:20]}..."
+            success_msg = f"✅ *Fees collected from {escape_markdown_v2(pair)}\\!*"
+            if isinstance(result, dict):
+                tx_hash = result.get('tx_hash') or result.get('txHash') or result.get('signature')
+                if tx_hash:
+                    success_msg += f"\n\nTx: `{tx_hash[:30]}...`"
 
-            # Show success briefly
-            await update.callback_query.message.edit_text(success_msg)
-            await asyncio.sleep(2)
-
-            # Delete message and return to positions
-            await update.callback_query.message.delete()
+            await query.message.edit_text(
+                success_msg,
+                parse_mode="MarkdownV2",
+                reply_markup=back_keyboard
+            )
         else:
-            # No fees to collect - show briefly then delete
-            await update.callback_query.message.edit_text(f"ℹ️ No fees to collect from {pair}")
-            await asyncio.sleep(2)
-            await update.callback_query.message.delete()
+            await query.message.edit_text(
+                f"ℹ️ No fees to collect from {escape_markdown_v2(pair)}",
+                parse_mode="MarkdownV2",
+                reply_markup=back_keyboard
+            )
 
     except Exception as e:
         logger.error(f"Error collecting fees: {e}", exc_info=True)
-        # Show error briefly then delete
+
+        # Build error message with back button
+        error_msg = str(e)
+        if "timeout" in error_msg.lower() or "Timeout" in error_msg:
+            display_error = "Operation timed out\\. The transaction may still be processing on\\-chain\\."
+        else:
+            display_error = escape_markdown_v2(error_msg[:150])
+
+        back_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Retry", callback_data=f"dex:pos_collect:{pos_index}")],
+            [InlineKeyboardButton("« Back to Positions", callback_data="dex:manage_positions")]
+        ])
+
         try:
-            await update.callback_query.message.edit_text(f"❌ Failed to collect fees: {str(e)[:100]}")
-            await asyncio.sleep(3)
-            await update.callback_query.message.delete()
-        except Exception:
-            pass
+            await query.message.edit_text(
+                f"❌ *Failed to collect fees*\n\n{display_error}",
+                parse_mode="MarkdownV2",
+                reply_markup=back_keyboard
+            )
+        except Exception as edit_error:
+            logger.warning(f"Could not edit message: {edit_error}")
 
 
 async def handle_pos_close_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
@@ -2298,13 +2345,13 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
         # Build bar with different characters for in/out of range
         bar = "█" * bar_len if in_range else "░" * bar_len
 
-        # Marker column
+        # Marker column - use intuitive symbols
         if is_current:
-            marker = "◄"
+            marker = "◄"  # Current price marker
         elif near_lower:
-            marker = "L"
+            marker = "↓"  # Lower bound marker
         elif near_upper:
-            marker = "U"
+            marker = "↑"  # Upper bound marker
         else:
             marker = " "
 
@@ -2418,11 +2465,11 @@ async def show_add_position_menu(
         help_text += r"*📊 Chart Legend*" + "\n"
         help_text += r"━━━━━━━━━━━━━━━━━━━━" + "\n\n"
 
-        help_text += r"• `█` \- In your selected range" + "\n"
-        help_text += r"• `░` \- Outside your range" + "\n"
-        help_text += r"• `◄` \- Current price" + "\n"
-        help_text += r"• `L` \- Lower bound" + "\n"
-        help_text += r"• `U` \- Upper bound" + "\n"
+        help_text += r"• `█` \- Bins in your selected range" + "\n"
+        help_text += r"• `░` \- Bins outside your range" + "\n"
+        help_text += r"• `◄` \- Current market price" + "\n"
+        help_text += r"• `↓` \- Near your lower bound" + "\n"
+        help_text += r"• `↑` \- Near your upper bound" + "\n"
 
     else:
         # ========== MAIN VIEW ==========
@@ -2470,7 +2517,7 @@ async def show_add_position_menu(
             ascii_lines = _generate_range_ascii(bins, lower_val, upper_val, current_val)
             if ascii_lines:
                 help_text += "\n```\n" + ascii_lines + "\n```\n"
-                help_text += r"_█\=in range, ░\=out, ◄\=current, L/U\=bounds_" + "\n"
+                help_text += r"_█ in range  ░ out  ◄ current price  ↓↑ your bounds_" + "\n"
 
     # Build keyboard - values shown in buttons, not in message body
     lower_display = params.get('lower_price', '—')[:8] if params.get('lower_price') else '—'
@@ -2562,10 +2609,11 @@ async def show_add_position_menu(
             await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
     else:
         # Try to edit caption if it's a photo, otherwise edit text
+        # Prioritize editing over delete+resend to avoid message flicker
         msg = update.callback_query.message
         try:
             if msg.photo:
-                # It's a photo, edit caption
+                # It's a photo, edit caption only (keep existing image)
                 await msg.edit_caption(
                     caption=help_text,
                     parse_mode="MarkdownV2",
@@ -2582,26 +2630,16 @@ async def show_add_position_menu(
             if "not modified" in error_str:
                 pass
             else:
-                # Delete and send new with chart
-                chat = msg.chat
+                # Log error but don't delete message - just try updating keyboard
+                logger.warning(f"Failed to edit message: {e}")
                 try:
-                    await msg.delete()
+                    # Try updating just the keyboard as fallback
+                    if msg.photo:
+                        await msg.edit_reply_markup(reply_markup=reply_markup)
+                    else:
+                        await msg.edit_reply_markup(reply_markup=reply_markup)
                 except Exception:
                     pass
-                if chart_bytes:
-                    try:
-                        photo_file = BytesIO(chart_bytes)
-                        photo_file.name = "liquidity.png"
-                        await chat.send_photo(
-                            photo=photo_file,
-                            caption=help_text,
-                            parse_mode="MarkdownV2",
-                            reply_markup=reply_markup
-                        )
-                    except Exception:
-                        await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
-                else:
-                    await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 
 
 async def handle_pos_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
