@@ -28,6 +28,7 @@ from .controllers import (
     show_config_form,
     handle_set_field,
     handle_toggle_side,
+    handle_select_connector,
     process_field_input,
     handle_save_config,
     handle_edit_config,
@@ -41,7 +42,7 @@ from .controllers import (
     process_deploy_field_input,
     handle_execute_deploy,
 )
-from ._shared import clear_bots_state
+from ._shared import clear_bots_state, SIDE_LONG, SIDE_SHORT
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "toggle_side":
             await handle_toggle_side(update, context)
+
+        elif main_action == "select_connector":
+            if len(action_parts) > 1:
+                connector_name = action_parts[1]
+                await handle_select_connector(update, context, connector_name)
 
         elif main_action == "save_config":
             await handle_save_config(update, context)

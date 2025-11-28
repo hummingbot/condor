@@ -4,7 +4,11 @@ Controller configuration management
 Provides:
 - List existing controller configs
 - Create new controller configs (grid_strike)
-- Interactive form for configuration
+- Interactive form for configuration with:
+  - Connector selection via buttons
+  - Auto-pricing based on current market price
+  - Candle chart visualization
+  - Auto-generated config IDs
 - Deploy selected controllers
 """
 
@@ -23,10 +27,18 @@ from ._shared import (
     init_new_controller_config,
     format_controller_config_summary,
     format_config_field_value,
+    get_available_cex_connectors,
+    fetch_current_price,
+    fetch_candles,
+    calculate_auto_prices,
+    generate_config_id,
+    generate_candles_chart,
     SUPPORTED_CONTROLLERS,
     GRID_STRIKE_DEFAULTS,
     GRID_STRIKE_FIELDS,
     GRID_STRIKE_FIELD_ORDER,
+    SIDE_LONG,
+    SIDE_SHORT,
 )
 
 logger = logging.getLogger(__name__)
@@ -259,6 +271,11 @@ async def handle_set_field(update: Update, context: ContextTypes.DEFAULT_TYPE, f
     """
     query = update.callback_query
 
+    # Special handling for connector_name - show button selector
+    if field_name == "connector_name":
+        await show_connector_selector(update, context)
+        return
+
     field_info = GRID_STRIKE_FIELDS.get(field_name, {})
     label = field_info.get("label", field_name)
     hint = field_info.get("hint", "")
@@ -297,14 +314,206 @@ async def handle_set_field(update: Update, context: ContextTypes.DEFAULT_TYPE, f
     )
 
 
+# ============================================
+# CONNECTOR SELECTOR
+# ============================================
+
+async def show_connector_selector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show connector selection keyboard with available CEX connectors"""
+    query = update.callback_query
+
+    try:
+        client = await get_bots_client()
+
+        # Get available CEX connectors (with cache)
+        cex_connectors = await get_available_cex_connectors(context.user_data, client)
+
+        if not cex_connectors:
+            await query.answer("No CEX connectors configured", show_alert=True)
+            return
+
+        # Build connector buttons (2 per row)
+        keyboard = []
+        row = []
+
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(
+                connector,
+                callback_data=f"bots:select_connector:{connector}"
+            ))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([InlineKeyboardButton("Cancel", callback_data="bots:edit_config_back")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        config = get_controller_config(context)
+        current = config.get("connector_name", "") or "Not set"
+
+        await query.message.edit_text(
+            r"*Select Connector*" + "\n\n"
+            f"Current: `{escape_markdown_v2(current)}`\n\n"
+            r"Choose an exchange from your configured connectors:",
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error showing connector selector: {e}", exc_info=True)
+        await query.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+async def handle_select_connector(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
+    """Handle connector selection from keyboard"""
+    query = update.callback_query
+
+    config = get_controller_config(context)
+    config["connector_name"] = connector_name
+    set_controller_config(context, config)
+
+    await query.answer(f"Connector set to {connector_name}")
+
+    # If we have both connector and trading pair, fetch market data
+    if config.get("trading_pair"):
+        await fetch_and_apply_market_data(update, context)
+    else:
+        await show_config_form(update, context)
+
+
+# ============================================
+# MARKET DATA & AUTO-PRICING
+# ============================================
+
+async def fetch_and_apply_market_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetch current price and candles, apply auto-pricing, show chart"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    connector = config.get("connector_name")
+    pair = config.get("trading_pair")
+    side = config.get("side", SIDE_LONG)
+
+    if not connector or not pair:
+        await show_config_form(update, context)
+        return
+
+    try:
+        client = await get_bots_client()
+
+        # Show loading message
+        await query.message.edit_text(
+            f"Fetching market data for *{escape_markdown_v2(pair)}*\\.\\.\\.",
+            parse_mode="MarkdownV2"
+        )
+
+        # Fetch current price
+        current_price = await fetch_current_price(client, connector, pair)
+
+        if current_price:
+            # Cache the current price
+            context.user_data["grid_strike_current_price"] = current_price
+
+            # Calculate auto prices
+            start, end, limit = calculate_auto_prices(current_price, side)
+            config["start_price"] = start
+            config["end_price"] = end
+            config["limit_price"] = limit
+
+            # Generate auto ID
+            config["id"] = generate_config_id(connector, pair, side, start, end)
+
+            set_controller_config(context, config)
+
+            # Fetch candles for chart
+            candles = await fetch_candles(client, connector, pair, interval="5m", max_records=50)
+
+            if candles and candles.get("data"):
+                # Generate and send chart
+                chart_bytes = generate_candles_chart(
+                    candles,
+                    pair,
+                    start_price=start,
+                    end_price=end,
+                    limit_price=limit,
+                    current_price=current_price
+                )
+
+                # Send chart as photo
+                await query.message.reply_photo(
+                    photo=chart_bytes,
+                    caption=(
+                        f"*{escape_markdown_v2(pair)}* Grid Zone\n\n"
+                        f"Current: `{current_price:,.4f}`\n"
+                        f"Start: `{start:,.4f}` \\(\\-2%\\)\n"
+                        f"End: `{end:,.4f}` \\(\\+2%\\)\n"
+                        f"Limit: `{limit:,.4f}`"
+                    ),
+                    parse_mode="MarkdownV2"
+                )
+            else:
+                # No candles, just show price info
+                await query.message.reply_text(
+                    f"*{escape_markdown_v2(pair)}* Market Data\n\n"
+                    f"Current Price: `{current_price:,.4f}`\n"
+                    f"Auto\\-calculated grid:\n"
+                    f"  Start: `{start:,.4f}`\n"
+                    f"  End: `{end:,.4f}`\n"
+                    f"  Limit: `{limit:,.4f}`",
+                    parse_mode="MarkdownV2"
+                )
+        else:
+            await query.message.reply_text(
+                f"Could not fetch price for {pair}. Please set prices manually.",
+                parse_mode="HTML"
+            )
+
+    except Exception as e:
+        logger.error(f"Error fetching market data: {e}", exc_info=True)
+        await query.message.reply_text(
+            f"Error fetching market data: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+    # Show the config form
+    keyboard = [[InlineKeyboardButton("Continue Editing", callback_data="bots:edit_config_back")]]
+    await query.message.reply_text(
+        "Tap to continue editing configuration\\.",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def handle_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Toggle the side between LONG and SHORT"""
     query = update.callback_query
     config = get_controller_config(context)
 
-    current_side = config.get("side", 1)
-    new_side = -1 if current_side == 1 else 1
+    current_side = config.get("side", SIDE_LONG)
+    new_side = SIDE_SHORT if current_side == SIDE_LONG else SIDE_LONG
     config["side"] = new_side
+
+    # Recalculate prices if we have a current price cached
+    current_price = context.user_data.get("grid_strike_current_price")
+    if current_price:
+        start, end, limit = calculate_auto_prices(current_price, new_side)
+        config["start_price"] = start
+        config["end_price"] = end
+        config["limit_price"] = limit
+
+        # Regenerate ID
+        if config.get("connector_name") and config.get("trading_pair"):
+            config["id"] = generate_config_id(
+                config["connector_name"],
+                config["trading_pair"],
+                new_side,
+                start,
+                end
+            )
+
     set_controller_config(context, config)
 
     # Refresh the form
@@ -354,17 +563,82 @@ async def process_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop("editing_controller_field", None)
         context.user_data["bots_state"] = "editing_config"
 
-        # Show success and return to form
+        # Show success
         await update.message.reply_text(
             f"{label} set to: {value}",
             parse_mode="HTML"
         )
 
-        # Show the form again using a fake callback query
-        # We need to edit the previous message, so we'll send a new one
+        # If trading_pair was set and we have a connector, fetch market data
+        if field_name == "trading_pair" and config.get("connector_name"):
+            # Create a fake callback query context for fetch_and_apply_market_data
+            keyboard = [[InlineKeyboardButton("Fetching market data...", callback_data="bots:noop")]]
+            msg = await update.message.reply_text(
+                "Fetching market data\\.\\.\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+            try:
+                client = await get_bots_client()
+                connector = config.get("connector_name")
+                pair = config.get("trading_pair")
+                side = config.get("side", SIDE_LONG)
+
+                # Fetch current price
+                current_price = await fetch_current_price(client, connector, pair)
+
+                if current_price:
+                    # Cache and calculate
+                    context.user_data["grid_strike_current_price"] = current_price
+                    start, end, limit = calculate_auto_prices(current_price, side)
+                    config["start_price"] = start
+                    config["end_price"] = end
+                    config["limit_price"] = limit
+                    config["id"] = generate_config_id(connector, pair, side, start, end)
+                    set_controller_config(context, config)
+
+                    # Fetch candles
+                    candles = await fetch_candles(client, connector, pair, interval="5m", max_records=50)
+
+                    if candles and candles.get("data"):
+                        chart_bytes = generate_candles_chart(
+                            candles, pair,
+                            start_price=start,
+                            end_price=end,
+                            limit_price=limit,
+                            current_price=current_price
+                        )
+                        await update.message.reply_photo(
+                            photo=chart_bytes,
+                            caption=(
+                                f"*{escape_markdown_v2(pair)}* Grid Zone\n\n"
+                                f"Current: `{current_price:,.4f}`\n"
+                                f"Start: `{start:,.4f}` \\(\\-2%\\)\n"
+                                f"End: `{end:,.4f}` \\(\\+2%\\)\n"
+                                f"Limit: `{limit:,.4f}`"
+                            ),
+                            parse_mode="MarkdownV2"
+                        )
+                    else:
+                        await update.message.reply_text(
+                            f"*{escape_markdown_v2(pair)}* prices auto\\-calculated\\.\n\n"
+                            f"Current: `{current_price:,.4f}`",
+                            parse_mode="MarkdownV2"
+                        )
+                else:
+                    await update.message.reply_text(
+                        f"Could not fetch price for {pair}. Set prices manually."
+                    )
+
+            except Exception as e:
+                logger.error(f"Error fetching market data: {e}", exc_info=True)
+                await update.message.reply_text(f"Error fetching market data: {str(e)[:50]}")
+
+        # Show the form again
         keyboard = [[InlineKeyboardButton("Continue Editing", callback_data="bots:edit_config_back")]]
         await update.message.reply_text(
-            "Value updated\\. Tap to continue editing\\.",
+            "Tap to continue editing configuration\\.",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -464,12 +738,60 @@ async def handle_edit_config(update: Update, context: ContextTypes.DEFAULT_TYPE,
 # Default deploy settings
 DEPLOY_DEFAULTS = {
     "instance_name": "",
-    "credentials_profile": "",
+    "credentials_profile": "master_account",
     "controllers_config": [],
     "max_global_drawdown_quote": None,
     "max_controller_drawdown_quote": None,
     "image": "hummingbot/hummingbot:latest",
 }
+
+# Deploy field configuration for progressive flow
+DEPLOY_FIELDS = {
+    "instance_name": {
+        "label": "Instance Name",
+        "required": True,
+        "hint": "Name for your bot instance (e.g. my_grid_bot)",
+        "type": "str",
+        "default": None,
+    },
+    "credentials_profile": {
+        "label": "Credentials Profile",
+        "required": True,
+        "hint": "Account profile with exchange credentials",
+        "type": "str",
+        "default": "master_account",
+    },
+    "max_global_drawdown_quote": {
+        "label": "Max Global Drawdown",
+        "required": False,
+        "hint": "Maximum total loss in quote currency (e.g. 1000 USDT)",
+        "type": "float",
+        "default": None,
+    },
+    "max_controller_drawdown_quote": {
+        "label": "Max Controller Drawdown",
+        "required": False,
+        "hint": "Maximum loss per controller in quote currency",
+        "type": "float",
+        "default": None,
+    },
+    "image": {
+        "label": "Docker Image",
+        "required": False,
+        "hint": "Hummingbot image to use",
+        "type": "str",
+        "default": "hummingbot/hummingbot:latest",
+    },
+}
+
+# Field order for progressive flow
+DEPLOY_FIELD_ORDER = [
+    "instance_name",
+    "credentials_profile",
+    "max_global_drawdown_quote",
+    "max_controller_drawdown_quote",
+    "image",
+]
 
 
 async def show_deploy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -576,7 +898,7 @@ async def handle_clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def show_deploy_configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show the deployment configuration form"""
+    """Start the progressive deployment configuration flow"""
     query = update.callback_query
 
     selected = context.user_data.get("selected_controllers", set())
@@ -592,12 +914,20 @@ async def show_deploy_configure(update: Update, context: ContextTypes.DEFAULT_TY
         for i in selected if i < len(configs)
     ]
 
-    # Initialize or get deploy params
-    deploy_params = context.user_data.get("deploy_params", DEPLOY_DEFAULTS.copy())
+    # Initialize deploy params with defaults
+    deploy_params = DEPLOY_DEFAULTS.copy()
     deploy_params["controllers_config"] = controller_names
     context.user_data["deploy_params"] = deploy_params
 
-    await show_deploy_form(update, context)
+    # Store message info for updates
+    context.user_data["deploy_message_id"] = query.message.message_id
+    context.user_data["deploy_chat_id"] = query.message.chat_id
+
+    # Start progressive flow with first field
+    context.user_data["bots_state"] = "deploy_progressive"
+    context.user_data["deploy_current_field"] = DEPLOY_FIELD_ORDER[0]
+
+    await show_deploy_progressive_form(update, context)
 
 
 async def show_deploy_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
