@@ -161,17 +161,23 @@ def get_modify_value_handler():
             await dex_message_handler(update, context)
             return
 
-        # 3. Check config flows - server modification
+        # 3. Check Bots state
+        if context.user_data.get('bots_state'):
+            from handlers.bots import bots_message_handler
+            await bots_message_handler(update, context)
+            return
+
+        # 4. Check config flows - server modification
         if context.user_data.get('awaiting_add_server_input') or context.user_data.get('awaiting_modify_input'):
             await handle_server_input(update, context)
             return
 
-        # 4. Check config flows - API keys
+        # 5. Check config flows - API keys
         if context.user_data.get('awaiting_api_key_input'):
             await handle_api_key_input(update, context)
             return
 
-        # 5. Check config flows - gateway
+        # 6. Check config flows - gateway
         if (context.user_data.get('awaiting_gateway_input') or
               context.user_data.get('awaiting_wallet_input') or
               context.user_data.get('awaiting_connector_input') or
