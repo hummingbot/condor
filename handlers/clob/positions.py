@@ -6,7 +6,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import format_error_message, escape_markdown_v2
+from utils.telegram_formatters import format_error_message, escape_markdown_v2, format_number
 from handlers.config.user_preferences import get_clob_account
 
 logger = logging.getLogger(__name__)
@@ -150,18 +150,52 @@ async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TY
         connector_name = position.get('connector_name', 'N/A')
         trading_pair = position.get('trading_pair', 'N/A')
         amount = position.get('amount', 0)
+        entry_price = position.get('entry_price', 0)
+        unrealized_pnl = position.get('unrealized_pnl', 0)
         side = position.get('position_side') or position.get('side') or position.get('trade_type', 'LONG')
 
         # Determine the opposite side to close the position
         close_side = "SELL" if side in ["LONG", "BUY"] else "BUY"
 
+        # Format side display
+        side_upper = side.upper() if side else 'N/A'
+        if side_upper in ('LONG', 'BUY'):
+            side_display = 'LONG'
+        elif side_upper in ('SHORT', 'SELL'):
+            side_display = 'SHRT'
+        else:
+            side_display = side[:4] if len(side) > 4 else side
+
+        # Calculate position value
+        try:
+            position_value = abs(float(amount) * float(entry_price))
+            value_str = format_number(position_value).replace('$', '')[:7]
+        except (ValueError, TypeError):
+            value_str = "N/A"
+
+        # Format PnL
+        try:
+            pnl_float = float(unrealized_pnl)
+            if pnl_float >= 0:
+                pnl_str = f"+{pnl_float:.2f}"[:7]
+            else:
+                pnl_str = f"{pnl_float:.2f}"[:7]
+        except (ValueError, TypeError):
+            pnl_str = str(unrealized_pnl)[:7]
+
+        # Truncate display values
+        connector_display = connector_name[:9] if len(connector_name) > 9 else connector_name
+        pair_display = trading_pair[:9] if len(trading_pair) > 9 else trading_pair
+
+        # Build table
+        table_content = f"{'Connector':<10} {'Pair':<10} {'Side':<4} {'Value':<7} {'PnL($)':>7}\n"
+        table_content += f"{'─'*10} {'─'*10} {'─'*4} {'─'*7} {'─'*7}\n"
+        table_content += f"{connector_display:<10} {pair_display:<10} {side_display:<4} {value_str:<7} {pnl_str:>7}\n"
+
         # Confirm with user
         confirm_message = (
             r"⚠️ *Confirm Close Position*" + "\n\n"
-            f"Pair: `{escape_markdown_v2(trading_pair)}`\n"
-            f"Side: `{escape_markdown_v2(side)}`\n"
-            f"Size: `{escape_markdown_v2(str(amount))}`\n"
-            f"Connector: `{escape_markdown_v2(connector_name)}`\n\n"
+            f"```\n{table_content}```\n"
             f"This will place a {close_side} market order to close the position\\."
         )
 
@@ -225,7 +259,7 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
             connector_name=connector_name,
             trading_pair=trading_pair,
             trade_type=close_side,
-            amount=float(amount),
+            amount=abs(float(amount)),
             order_type="MARKET",
             price=None,
             position_action="CLOSE",
