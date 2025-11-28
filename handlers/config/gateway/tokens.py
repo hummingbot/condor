@@ -94,12 +94,16 @@ async def handle_token_action(query, context: ContextTypes.DEFAULT_TYPE) -> None
         # Show tokens to remove from network
         network_id = action_data.replace("remove_", "")
         await prompt_remove_token(query, context, network_id)
-    elif action_data.startswith("confirm_remove_"):
-        # Format: confirm_remove_{network_id}_{token_address}
-        parts = action_data.replace("confirm_remove_", "").split("_", 1)
-        if len(parts) == 2:
-            network_id, token_address = parts
+    elif action_data == "confirm_remove":
+        # Get token info from user_data (stored to avoid 64-byte callback limit)
+        pending_delete = context.user_data.get('pending_token_delete')
+        if pending_delete:
+            network_id = pending_delete['network_id']
+            token_address = pending_delete['token_address']
+            context.user_data.pop('pending_token_delete', None)  # Clean up
             await remove_token(query, context, network_id, token_address)
+        else:
+            await query.answer("❌ Token deletion expired. Please try again.")
     elif action_data.startswith("view_"):
         # Back to viewing tokens for network
         network_id = action_data.replace("view_", "")
@@ -319,8 +323,14 @@ async def show_delete_token_confirmation(query, context: ContextTypes.DEFAULT_TY
             "Are you sure you want to delete this token?"
         )
 
+        # Store token info in user_data to avoid exceeding Telegram's 64-byte callback limit
+        context.user_data['pending_token_delete'] = {
+            'network_id': network_id,
+            'token_address': token_address
+        }
+
         keyboard = [
-            [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"gateway_token_confirm_remove_{network_id}_{token_address}")],
+            [InlineKeyboardButton("✅ Yes, Delete", callback_data="gateway_token_confirm_remove")],
             [InlineKeyboardButton("❌ Cancel", callback_data=f"gateway_token_view_{network_id}")],
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
