@@ -32,6 +32,8 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("selected_pool", None)
     context.user_data.pop("pool_list_data", None)
     context.user_data.pop("position_list_data", None)
+    context.user_data.pop("add_position_menu_msg_id", None)
+    context.user_data.pop("add_position_menu_chat_id", None)
 
     # Config - server modification states
     context.user_data.pop("modifying_server", None)
