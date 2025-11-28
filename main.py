@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 
 from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
-from handlers.bots import bots_command
+from handlers.bots import bots_command, bots_callback_handler
 from handlers.clob import clob_trading_command, clob_callback_handler
 from handlers.dex import dex_trading_command, dex_callback_handler
 from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
@@ -305,6 +305,9 @@ def reload_handlers():
     modules_to_reload = [
         'handlers.portfolio',
         'handlers.bots',
+        'handlers.bots.menu',
+        'handlers.bots.controllers',
+        'handlers.bots._shared',
         'handlers.clob',
         'handlers.clob.menu',
         'handlers.clob.place_order',
@@ -338,7 +341,7 @@ def register_handlers(application: Application) -> None:
     """Register all command handlers."""
     # Import fresh versions after reload
     from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
-    from handlers.bots import bots_command
+    from handlers.bots import bots_command, bots_callback_handler
     from handlers.clob import clob_trading_command, clob_callback_handler
     from handlers.dex import dex_trading_command, dex_callback_handler
     from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
@@ -360,6 +363,7 @@ def register_handlers(application: Application) -> None:
     # Add callback query handlers for trading operations
     application.add_handler(CallbackQueryHandler(clob_callback_handler, pattern="^clob:"))
     application.add_handler(CallbackQueryHandler(dex_callback_handler, pattern="^dex:"))
+    application.add_handler(CallbackQueryHandler(bots_callback_handler, pattern="^bots:"))
 
     # Add callback query handler for portfolio settings
     application.add_handler(get_portfolio_callback_handler())
