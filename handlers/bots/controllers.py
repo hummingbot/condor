@@ -197,7 +197,7 @@ async def show_config_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         lines.append(f"*{escape_markdown_v2(label)}*{required}: `{escape_markdown_v2(formatted_value)}`")
 
     lines.append("")
-    lines.append(r"_Tap a button to edit a field\. \* = required_")
+    lines.append(r"_Tap a button to edit a field\. \* \= required_")
 
     # Build keyboard with field buttons
     keyboard = []
@@ -623,7 +623,7 @@ async def show_deploy_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lines.append(f"*Max Controller DD*: `{max_controller if max_controller else 'Not set'}`")
     lines.append(f"*Image*: `{escape_markdown_v2(image)}`")
     lines.append("")
-    lines.append(r"_\* = required_")
+    lines.append(r"_\* \= required_")
 
     # Build keyboard
     keyboard = [
