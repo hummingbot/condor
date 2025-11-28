@@ -32,6 +32,10 @@ fi
 
 echo ""
 echo ".env file created successfully!"
+
+echo ""
+echo "Installing Chrome for Plotly image generation..."
+plotly_get_chrome || kaleido_get_chrome || python -c "import kaleido; kaleido.get_chrome_sync()"
 echo ""
 echo "==================================="
 echo "  How to Run Condor"
