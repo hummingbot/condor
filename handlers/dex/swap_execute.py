@@ -359,7 +359,7 @@ async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"Error showing connectors: {e}", exc_info=True)
         error_text = format_error_message(f"Error loading connectors: {str(e)}")
-        await update.callback_query.message.reply_text(error_text, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_text, parse_mode="MarkdownV2")
 
 
 async def handle_swap_connector_select(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
@@ -461,7 +461,7 @@ async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         logger.error(f"Error showing networks: {e}", exc_info=True)
         error_text = format_error_message(f"Error loading networks: {str(e)}")
-        await update.callback_query.message.reply_text(error_text, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_text, parse_mode="MarkdownV2")
 
 
 async def handle_swap_network_select(update: Update, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
@@ -648,7 +648,7 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
         keyboard = [[InlineKeyboardButton("« Back to DEX Trading", callback_data="dex:main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             swap_info,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
@@ -657,7 +657,7 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
     except Exception as e:
         logger.error(f"Error executing swap: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to execute swap: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
 # ============================================

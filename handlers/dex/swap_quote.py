@@ -333,7 +333,7 @@ async def handle_quote_get_confirm(update: Update, context: ContextTypes.DEFAULT
         keyboard = [[InlineKeyboardButton("« Back to DEX Trading", callback_data="dex:main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.reply_text(
+        await update.callback_query.message.edit_text(
             quote_info,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
@@ -342,7 +342,7 @@ async def handle_quote_get_confirm(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         logger.error(f"Error getting quote: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to get quote: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
 # ============================================
