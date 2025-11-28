@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -29,26 +29,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMIUM_PATH=/usr/bin/chromium
 
-# Copy requirements first for better caching
-COPY environment.yml .
-
-# Install pip dependencies from environment.yml
-RUN pip install --no-cache-dir \
-    python-telegram-bot[job-queue] \
-    hummingbot-api-client==1.2.3 \
-    python-dotenv \
-    pytest \
-    pre-commit \
-    black \
-    isort \
-    PyYAML \
-    pydantic-ai \
-    pydantic-ai-slim[openai] \
-    aiohttp \
-    watchfiles \
-    kaleido \
-    plotly \
-    pandas
+# Copy and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Download Chrome for Kaleido (fallback if system chromium doesn't work)
 RUN python -c "import kaleido; kaleido.get_chrome_sync()" || true
