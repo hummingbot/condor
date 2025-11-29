@@ -2560,23 +2560,21 @@ async def show_add_position_menu(
                 balances = await _fetch_token_balances(client, network, base_token, quote_token)
                 set_cached(context.user_data, balance_cache_key, balances)
 
-            if balances["base_balance"] > 0 or balances["quote_balance"] > 0:
-                help_text += "\n" + r"━━━ Wallet Balances ━━━" + "\n"
+            # Always show wallet balances section
+            help_text += "\n" + r"━━━ Wallet Balances ━━━" + "\n"
 
-                # Format base token balance - use symbol instead of address
-                if balances["base_balance"] > 0:
-                    base_bal_str = _format_number(balances["base_balance"])
-                    base_val_str = f"${_format_number(balances['base_value'])}" if balances["base_value"] > 0 else ""
-                    help_text += f"💰 `{escape_markdown_v2(base_symbol)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
+            # Format base token balance - always show, even if 0
+            base_bal_str = _format_number(balances["base_balance"])
+            base_val_str = f"${_format_number(balances['base_value'])}" if balances["base_value"] > 0 else ""
+            help_text += f"💰 `{escape_markdown_v2(base_symbol)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
 
-                # Format quote token balance - use symbol instead of address
-                if balances["quote_balance"] > 0:
-                    quote_bal_str = _format_number(balances["quote_balance"])
-                    quote_val_str = f"${_format_number(balances['quote_value'])}" if balances["quote_value"] > 0 else ""
-                    help_text += f"💵 `{escape_markdown_v2(quote_symbol)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
+            # Format quote token balance - always show, even if 0
+            quote_bal_str = _format_number(balances["quote_balance"])
+            quote_val_str = f"${_format_number(balances['quote_value'])}" if balances["quote_value"] > 0 else ""
+            help_text += f"💵 `{escape_markdown_v2(quote_symbol)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
 
-                # Store balances in context for percentage calculation
-                context.user_data["token_balances"] = balances
+            # Store balances in context for percentage calculation
+            context.user_data["token_balances"] = balances
 
         except Exception as e:
             logger.warning(f"Could not fetch token balances: {e}")
