@@ -11,6 +11,7 @@ Contains:
 
 import io
 import logging
+import random
 import time
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -58,7 +59,7 @@ GRID_STRIKE_DEFAULTS: Dict[str, Any] = {
     "max_orders_per_batch": 1,
     "min_spread_between_orders": 0.0002,
     "order_frequency": 3,
-    "activation_bounds": 0.001,
+    "activation_bounds": 0.01,  # Default 1%
     "keep_position": True,
     "triple_barrier_config": {
         "open_order_type": 3,
@@ -66,6 +67,18 @@ GRID_STRIKE_DEFAULTS: Dict[str, Any] = {
         "take_profit_order_type": 3,
     },
 }
+
+# Progressive wizard steps for Grid Strike
+GS_WIZARD_STEPS = [
+    "connector_name",
+    "trading_pair",
+    "side",
+    "leverage",
+    "total_amount_quote",
+    "prices",  # Special step: shows OHLC + start/end/limit
+    "take_profit",
+    "review",  # Final review with all values
+]
 
 # Side value mapping
 SIDE_LONG = 1
@@ -85,13 +98,16 @@ GRID_STRIKE_FIELDS = {
     "max_open_orders": {"label": "Max Open Orders", "type": "int", "required": False, "hint": "Default: 3"},
     "min_spread_between_orders": {"label": "Min Spread", "type": "float", "required": False, "hint": "Default: 0.0002"},
     "take_profit": {"label": "Take Profit", "type": "float", "required": False, "hint": "Default: 0.0001"},
+    "keep_position": {"label": "Keep Position", "type": "bool", "required": False, "hint": "Keep position open after grid completion"},
+    "activation_bounds": {"label": "Activation Bounds", "type": "float", "required": False, "hint": "Price distance to activate (default: 0.01 = 1%)"},
 }
 
 # Field display order for the menu
 GRID_STRIKE_FIELD_ORDER = [
     "id", "connector_name", "trading_pair", "side", "leverage",
     "total_amount_quote", "start_price", "end_price", "limit_price",
-    "max_open_orders", "min_spread_between_orders", "take_profit"
+    "max_open_orders", "min_spread_between_orders", "take_profit",
+    "keep_position", "activation_bounds"
 ]
 
 
@@ -256,10 +272,16 @@ def format_config_field_value(field_name: str, value: Any) -> str:
         return "LONG" if value == SIDE_LONG else "SHORT"
     elif field_name == "keep_position":
         return "Yes" if value else "No"
+    elif field_name == "activation_bounds":
+        if value is None:
+            return "0.01 (1%)"
+        return f"{value} ({value*100:.1f}%)"
     elif isinstance(value, float):
         if value == 0:
             return "Not set"
         return f"{value:g}"
+    elif isinstance(value, bool):
+        return "Yes" if value else "No"
     elif isinstance(value, dict):
         return "..."
     elif value == "" or value is None:
@@ -433,26 +455,28 @@ def calculate_auto_prices(
 def generate_config_id(
     connector_name: str,
     trading_pair: str,
-    side: int,
-    start_price: float,
-    end_price: float,
-    index: int = 1
+    side: int = None,
+    start_price: float = None,
+    end_price: float = None,
+    index: int = None
 ) -> str:
     """
     Generate a unique config ID based on parameters.
 
-    Format: grid_strike_{connector}_{pair}_{side}_{lower}_{upper}_{index}
+    Format: gs_{connector}_{pair}_{random_number}
 
-    Example: grid_strike_binance_sol_fdusd_long_230_240_1
+    Example: gs_binance_SOL-USDT_4821
     """
-    pair_clean = trading_pair.lower().replace("-", "_")
-    side_str = "long" if side == SIDE_LONG else "short"
+    # Clean connector name (remove _perpetual suffix if present)
+    conn_clean = connector_name.replace("_perpetual", "").replace("_spot", "")
 
-    # Format prices (remove decimals for cleaner ID)
-    lower = int(min(start_price, end_price))
-    upper = int(max(start_price, end_price))
+    # Keep pair format as-is (e.g., SOL-USDT)
+    pair_clean = trading_pair.upper()
 
-    return f"grid_strike_{connector_name}_{pair_clean}_{side_str}_{lower}_{upper}_{index}"
+    # Generate random 4-digit number
+    rand_num = random.randint(1000, 9999)
+
+    return f"gs_{conn_clean}_{pair_clean}_{rand_num}"
 
 
 # ============================================
@@ -460,7 +484,7 @@ def generate_config_id(
 # ============================================
 
 def generate_candles_chart(
-    candles_data: Dict[str, Any],
+    candles_data: List[Dict[str, Any]],
     trading_pair: str,
     start_price: Optional[float] = None,
     end_price: Optional[float] = None,
@@ -471,7 +495,7 @@ def generate_candles_chart(
     Generate a candlestick chart with optional grid zone overlay.
 
     Args:
-        candles_data: Candles data from API (with 'data' key containing list of candles)
+        candles_data: List of candles from API (each with open, high, low, close, timestamp)
         trading_pair: Trading pair name for title
         start_price: Grid start price line
         end_price: Grid end price line
@@ -481,7 +505,8 @@ def generate_candles_chart(
     Returns:
         BytesIO object containing the PNG image
     """
-    data = candles_data.get("data", [])
+    # Handle both list and dict input for backwards compatibility
+    data = candles_data if isinstance(candles_data, list) else candles_data.get("data", [])
 
     if not data:
         # Create empty chart with message

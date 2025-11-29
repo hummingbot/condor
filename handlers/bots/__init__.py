@@ -20,7 +20,20 @@ from utils.auth import restricted
 from handlers import clear_all_input_states
 
 # Import submodule handlers
-from .menu import show_bots_menu, show_bot_detail, handle_refresh, handle_close
+from .menu import (
+    show_bots_menu,
+    show_bot_detail,
+    handle_refresh,
+    handle_close,
+    show_controller_detail,
+    handle_stop_controller,
+    handle_confirm_stop_controller,
+    handle_stop_bot,
+    handle_confirm_stop_bot,
+    show_bot_logs,
+    handle_back_to_bot,
+    handle_refresh_bot,
+)
 from .controllers import (
     show_controller_configs_menu,
     show_configs_list,
@@ -41,6 +54,25 @@ from .controllers import (
     handle_deploy_set_field,
     process_deploy_field_input,
     handle_execute_deploy,
+    # Progressive deploy flow
+    show_deploy_progressive_form,
+    handle_deploy_progressive_input,
+    handle_deploy_use_default,
+    handle_deploy_skip_field,
+    handle_deploy_prev_field,
+    handle_deploy_edit_field,
+    # Progressive Grid Strike wizard
+    handle_gs_wizard_connector,
+    handle_gs_wizard_side,
+    handle_gs_wizard_leverage,
+    handle_gs_wizard_amount,
+    handle_gs_accept_prices,
+    handle_gs_wizard_take_profit,
+    handle_gs_edit_id,
+    handle_gs_save,
+    handle_gs_review_back,
+    handle_gs_edit_price,
+    process_gs_wizard_input,
 )
 from ._shared import clear_bots_state, SIDE_LONG, SIDE_SHORT
 
@@ -184,11 +216,102 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "execute_deploy":
             await handle_execute_deploy(update, context)
 
+        # Progressive deploy flow
+        elif main_action == "deploy_use_default":
+            if len(action_parts) > 1:
+                field_name = action_parts[1]
+                await handle_deploy_use_default(update, context, field_name)
+
+        elif main_action == "deploy_skip_field":
+            await handle_deploy_skip_field(update, context)
+
+        elif main_action == "deploy_prev_field":
+            await handle_deploy_prev_field(update, context)
+
+        elif main_action == "deploy_edit":
+            if len(action_parts) > 1:
+                field_name = action_parts[1]
+                await handle_deploy_edit_field(update, context, field_name)
+
+        # Progressive Grid Strike wizard
+        elif main_action == "gs_connector":
+            if len(action_parts) > 1:
+                connector = action_parts[1]
+                await handle_gs_wizard_connector(update, context, connector)
+
+        elif main_action == "gs_side":
+            if len(action_parts) > 1:
+                side_str = action_parts[1]
+                await handle_gs_wizard_side(update, context, side_str)
+
+        elif main_action == "gs_leverage":
+            if len(action_parts) > 1:
+                leverage = int(action_parts[1])
+                await handle_gs_wizard_leverage(update, context, leverage)
+
+        elif main_action == "gs_amount":
+            if len(action_parts) > 1:
+                amount = float(action_parts[1])
+                await handle_gs_wizard_amount(update, context, amount)
+
+        elif main_action == "gs_accept_prices":
+            await handle_gs_accept_prices(update, context)
+
+        elif main_action == "gs_edit_price":
+            if len(action_parts) > 1:
+                price_type = action_parts[1]
+                await handle_gs_edit_price(update, context, price_type)
+
+        elif main_action == "gs_tp":
+            if len(action_parts) > 1:
+                tp = float(action_parts[1])
+                await handle_gs_wizard_take_profit(update, context, tp)
+
+        elif main_action == "gs_edit_id":
+            await handle_gs_edit_id(update, context)
+
+        elif main_action == "gs_save":
+            await handle_gs_save(update, context)
+
+        elif main_action == "gs_review_back":
+            await handle_gs_review_back(update, context)
+
         # Bot detail
         elif main_action == "bot_detail":
             if len(action_parts) > 1:
                 bot_name = action_parts[1]
                 await show_bot_detail(update, context, bot_name)
+
+        # Controller detail (by index, uses context)
+        elif main_action == "ctrl_idx":
+            if len(action_parts) > 1:
+                idx = int(action_parts[1])
+                await show_controller_detail(update, context, idx)
+
+        # Stop controller (uses context)
+        elif main_action == "stop_ctrl":
+            await handle_stop_controller(update, context)
+
+        elif main_action == "confirm_stop_ctrl":
+            await handle_confirm_stop_controller(update, context)
+
+        # Stop bot (uses context)
+        elif main_action == "stop_bot":
+            await handle_stop_bot(update, context)
+
+        elif main_action == "confirm_stop_bot":
+            await handle_confirm_stop_bot(update, context)
+
+        # View logs (uses context)
+        elif main_action == "view_logs":
+            await show_bot_logs(update, context)
+
+        # Navigation
+        elif main_action == "back_to_bot":
+            await handle_back_to_bot(update, context)
+
+        elif main_action == "refresh_bot":
+            await handle_refresh_bot(update, context)
 
         else:
             logger.warning(f"Unknown bots action: {action}")
@@ -228,9 +351,15 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle controller config field input
         if bots_state.startswith("set_field:"):
             await process_field_input(update, context, user_input)
-        # Handle deploy field input
+        # Handle deploy field input (legacy form)
         elif bots_state.startswith("deploy_set:"):
             await process_deploy_field_input(update, context, user_input)
+        # Handle progressive deploy flow input
+        elif bots_state == "deploy_progressive":
+            await handle_deploy_progressive_input(update, context)
+        # Handle Grid Strike wizard input
+        elif bots_state == "gs_wizard_input":
+            await process_gs_wizard_input(update, context, user_input)
         else:
             logger.debug(f"Unhandled bots state: {bots_state}")
 
