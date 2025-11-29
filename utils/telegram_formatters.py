@@ -274,6 +274,48 @@ def format_portfolio_state(
     return message
 
 
+def _shorten_controller_for_table(name: str, max_len: int = 28) -> str:
+    """Shorten controller name for table display
+
+    Example: grid_strike_binance_perpetual_SOL-FDUSD_long_0.0001_0.0002_1
+    Result:  binance_SOL-FDUSD_L
+    """
+    if len(name) <= max_len:
+        return name
+
+    parts = name.split("_")
+    connector = ""
+    pair = ""
+    side = ""
+
+    for p in parts:
+        p_lower = p.lower()
+        p_upper = p.upper()
+        if p_upper in ("LONG", "SHORT"):
+            side = "L" if p_upper == "LONG" else "S"
+        elif "-" in p:
+            pair = p.upper()  # SOL-FDUSD
+        elif p_lower in ("binance", "hyperliquid", "kucoin", "okx", "bybit", "gate", "mexc"):
+            connector = p_lower[:7]  # max 7 chars
+
+    if pair:
+        if connector and side:
+            short = f"{connector}_{pair}_{side}"
+        elif connector:
+            short = f"{connector}_{pair}"
+        elif side:
+            short = f"{pair}_{side}"
+        else:
+            short = pair
+
+        if len(short) <= max_len:
+            return short
+        # Truncate pair if needed
+        return short[:max_len-1] + "."
+
+    return name[:max_len-1] + "."
+
+
 def format_active_bots(
     bots_data: Dict[str, Any],
     server_name: Optional[str] = None,
@@ -292,55 +334,89 @@ def format_active_bots(
     """
     message = "🤖 *Active Bots*\n\n"
 
-    bots = bots_data.get("data", [])
+    # Handle different response formats
+    # New format: {"status": "success", "data": {"bot_name": {...}}}
+    if isinstance(bots_data, dict):
+        if "data" in bots_data and isinstance(bots_data["data"], dict):
+            # New nested format - data is a dict of bot_name -> bot_info
+            bots_dict = bots_data["data"]
+        elif "data" in bots_data and isinstance(bots_data["data"], list):
+            # Old format - data is a list
+            bots_dict = {str(i): bot for i, bot in enumerate(bots_data["data"])}
+        else:
+            bots_dict = bots_data
+    elif isinstance(bots_data, list):
+        bots_dict = {str(i): bot for i, bot in enumerate(bots_data)}
+    else:
+        bots_dict = {}
 
-    if not bots:
+    if not bots_dict:
         message += "_No active bots found_\n"
         return message
 
-    for bot in bots:
-        bot_name = bot.get("name", "Unknown")
-        is_running = bot.get("is_running", False)
-        controllers = bot.get("controllers", [])
+    for bot_name, bot_info in bots_dict.items():
+        # Handle string bot_info (just name)
+        if isinstance(bot_info, str):
+            message += f"🟢 *{escape_markdown_v2(bot_info)}*\n\n"
+            continue
 
-        # Bot header
+        # Full dict format
+        status = bot_info.get("status", "unknown")
+        is_running = status == "running"
         status_emoji = "🟢" if is_running else "🔴"
-        message += f"{status_emoji} *{escape_markdown_v2(bot_name)}*\n"
 
-        # Performance metrics
-        performance = bot.get("performance", {})
-        realized_pnl = performance.get("realized_pnl_quote", 0)
-        unrealized_pnl = performance.get("unrealized_pnl_quote", 0)
-        total_pnl = realized_pnl + unrealized_pnl
-        volume = performance.get("volume_traded", 0)
+        # Truncate long bot names for display
+        display_name = bot_name[:40] + "..." if len(bot_name) > 40 else bot_name
+        message += f"{status_emoji} *{escape_markdown_v2(display_name)}*\n"
 
-        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
-        message += f"  {pnl_emoji} *PnL:* {escape_markdown_v2(format_number(total_pnl))}\n"
-        message += f"    \\- Realized: {escape_markdown_v2(format_number(realized_pnl))}\n"
-        message += f"    \\- Unrealized: {escape_markdown_v2(format_number(unrealized_pnl))}\n"
-        message += f"  📊 *Volume:* {escape_markdown_v2(format_number(volume))}\n"
+        # Performance is a dict of controller_name -> controller_info
+        performance = bot_info.get("performance", {})
 
-        # Controllers
-        if controllers:
-            message += f"  ⚙️ *Controllers:* {escape_markdown_v2(str(len(controllers)))}\n"
-            for ctrl in controllers[:3]:  # Show max 3 controllers
-                ctrl_name = ctrl.get("controller_name", "Unknown")
-                ctrl_status = ctrl.get("status", "unknown")
-                message += f"    • {escape_markdown_v2(ctrl_name)} _{escape_markdown_v2(f'({ctrl_status})')}_\n"
+        if performance:
+            # Build controller table - compact format with numbers
+            message += "```\n"
 
-        # Latest errors
-        error_logs = bot.get("error_logs", [])
+            total_pnl = 0
+            total_volume = 0
+
+            for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())[:5]):
+                if isinstance(ctrl_info, dict):
+                    ctrl_status = ctrl_info.get("status", "")
+                    ctrl_perf = ctrl_info.get("performance", {})
+                    realized = ctrl_perf.get("realized_pnl_quote", 0) or 0
+                    unrealized = ctrl_perf.get("unrealized_pnl_quote", 0) or 0
+                    volume = ctrl_perf.get("volume_traded", 0) or 0
+                    pnl = realized + unrealized
+
+                    total_pnl += pnl
+                    total_volume += volume
+
+                    # Shorten controller name intelligently
+                    short_name = _shorten_controller_for_table(ctrl_name, 26)
+
+                    # Format numbers compactly
+                    pnl_str = f"{pnl:+.1f}"
+                    vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
+
+                    message += f"{idx+1}.{short_name} {pnl_str} v:{vol_str}\n"
+
+            # Show totals only if multiple controllers
+            if len(performance) > 1:
+                vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
+                message += f"{'─'*38}\n"
+                message += f"TOTAL: {total_pnl:+.1f} v:{vol_total}\n"
+
+            message += "```\n"
+
+        # Show error indicator if there are errors
+        error_logs = bot_info.get("error_logs", [])
         if error_logs:
-            message += f"  ⚠️ *Latest Error:*\n"
-            latest_error = error_logs[0].get("message", "Unknown error")
-            # Truncate long errors
-            if len(latest_error) > 50:
-                latest_error = latest_error[:50] + "..."
-            message += f"    _{escape_markdown_v2(latest_error)}_\n"
+            message += f"⚠️ _{len(error_logs)} error\\(s\\)_\n"
 
         message += "\n"
 
-    message += f"*Total Active Bots:* {escape_markdown_v2(str(len(bots)))}\n"
+    message += f"*Total:* {len(bots_dict)} bot\\(s\\)\n"
+    message += "_Tap a bot for details_"
 
     # Add server footer at the bottom right
     if server_name:
@@ -1153,52 +1229,68 @@ def format_positions_table(positions: List[Dict[str, Any]]) -> str:
     if not positions:
         return "No positions found"
 
-    # Build monospace table - optimized for mobile width
+    # Group positions by account
+    from collections import defaultdict
+    by_account = defaultdict(list)
+
+    for pos in positions:
+        account_name = pos.get('account_name', 'master_account')
+        by_account[account_name].append(pos)
+
     table_content = ""
-    table_content += f"{'Exchange':<13} {'Pair':<10} {'Side':<5} {'Size':<7} {'Entry':<8} {'PnL':>7}\n"
-    table_content += f"{'─'*13} {'─'*10} {'─'*5} {'─'*7} {'─'*8} {'─'*7}\n"
 
-    for pos in positions[:10]:  # Limit to 10 for Telegram
-        connector = pos.get('connector_name', 'N/A')
-        pair = pos.get('trading_pair', 'N/A')
-        # Try multiple field names for side
-        side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
-        size = pos.get('amount', 0)
-        entry = pos.get('entry_price', 0)
-        pnl = pos.get('unrealized_pnl', 0)
+    # Format each account's positions
+    for account_name, account_positions in by_account.items():
+        table_content += f"Account: {account_name}\n"
 
-        # Truncate connector name if too long
-        connector_display = connector[:12] if len(connector) > 12 else connector
+        # Create table - same format as format_perpetual_positions
+        table_content += f"{'Connector':<10} {'Pair':<10} {'Side':<4} {'Value':<7} {'PnL($)':>7}\n"
+        table_content += f"{'─'*10} {'─'*10} {'─'*4} {'─'*7} {'─'*7}\n"
 
-        # Truncate pair name if too long
-        pair_display = pair[:9] if len(pair) > 9 else pair
+        for pos in account_positions[:10]:  # Limit to 10 for Telegram
+            connector = pos.get('connector_name', 'N/A')
+            pair = pos.get('trading_pair', 'N/A')
+            # Try multiple field names for side
+            side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
+            amount = pos.get('amount', 0)
+            entry_price = pos.get('entry_price', 0)
+            pnl = pos.get('unrealized_pnl', 0)
 
-        # Truncate side if too long
-        side_display = side[:4] if len(side) > 4 else side
+            # Truncate connector name if too long
+            connector_display = connector[:9] if len(connector) > 9 else connector
 
-        # Format numbers
-        try:
-            size_str = format_amount(float(size))[:6]
-        except (ValueError, TypeError):
-            size_str = str(size)[:6]
+            # Truncate pair name if too long
+            pair_display = pair[:9] if len(pair) > 9 else pair
 
-        try:
-            entry_str = f"{float(entry):.2f}"[:7]
-        except (ValueError, TypeError):
-            entry_str = str(entry)[:7]
-
-        try:
-            pnl_float = float(pnl)
-            if pnl_float >= 0:
-                pnl_str = f"+{pnl_float:.2f}"[:6]
+            # Truncate side - use short form
+            side_upper = side.upper() if side else 'N/A'
+            if side_upper in ('LONG', 'BUY'):
+                side_display = 'LONG'
+            elif side_upper in ('SHORT', 'SELL'):
+                side_display = 'SHRT'
             else:
-                pnl_str = f"{pnl_float:.2f}"[:6]
-        except (ValueError, TypeError):
-            pnl_str = str(pnl)[:6]
+                side_display = side[:4] if len(side) > 4 else side
 
-        table_content += f"{connector_display:<13} {pair_display:<10} {side_display:<5} {size_str:<7} {entry_str:<8} {pnl_str:>7}\n"
+            # Calculate position value (Size * Entry Price)
+            try:
+                position_value = abs(float(amount) * float(entry_price))
+                value_str = format_number(position_value).replace('$', '')[:6]
+            except (ValueError, TypeError):
+                value_str = "N/A"
 
-    if len(positions) > 10:
-        table_content += f"\n... and {len(positions) - 10} more positions\n"
+            # Format PnL
+            try:
+                pnl_float = float(pnl)
+                if pnl_float >= 0:
+                    pnl_str = f"+{pnl_float:.2f}"[:7]
+                else:
+                    pnl_str = f"{pnl_float:.2f}"[:7]
+            except (ValueError, TypeError):
+                pnl_str = str(pnl)[:7]
+
+            table_content += f"{connector_display:<10} {pair_display:<10} {side_display:<4} {value_str:<7} {pnl_str:>7}\n"
+
+        if len(account_positions) > 10:
+            table_content += f"\n... and {len(account_positions) - 10} more positions\n"
 
     return table_content
