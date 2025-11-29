@@ -34,7 +34,7 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         positions = result.get("data", [])
 
         if not positions:
-            message = r"📊 *Open Positions*" + "\n\n" + r"No positions found\."
+            message = r"📊 *Perpetual Positions*" + "\n\n" + r"No positions found\."
             keyboard = [
                 [
                     InlineKeyboardButton("🔄 Refresh", callback_data="clob:positions"),
@@ -44,7 +44,7 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             from utils.telegram_formatters import format_positions_table
             positions_table = format_positions_table(positions)
-            message = r"📊 *Open Positions* \(" + escape_markdown_v2(str(len(positions))) + r" found\)" + "\n\n" + r"```" + "\n" + positions_table + "\n" + r"```"
+            message = r"📊 *Perpetual Positions* \(" + escape_markdown_v2(str(len(positions))) + r"\)" + "\n\n" + r"```" + "\n" + positions_table + "\n" + r"```"
 
             # Store positions data in context for later use
             context.user_data["current_positions"] = positions
