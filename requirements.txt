@@ -13,3 +13,4 @@ watchfiles
 kaleido
 plotly
 pandas
+geckoterminal-py
