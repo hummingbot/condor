@@ -269,7 +269,7 @@ def _build_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🔍 History", callback_data="dex:swap_search")
         ],
         [
-            InlineKeyboardButton("📋 List Pools", callback_data="dex:pool_list"),
+            InlineKeyboardButton("🦎 Explore Pools", callback_data="dex:gecko_explore"),
             InlineKeyboardButton("🔍 Pool Info", callback_data="dex:pool_info"),
             InlineKeyboardButton("📍 Positions", callback_data="dex:manage_positions")
         ],

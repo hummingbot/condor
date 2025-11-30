@@ -6,6 +6,7 @@ Supports:
 - CLMM Pools (Meteora, Raydium, Uniswap)
 - CLMM Positions management
 - Quick trading with saved parameters
+- GeckoTerminal pool exploration with OHLCV charts
 
 Structure:
 - menu.py: Main DEX menu and help
@@ -13,6 +14,7 @@ Structure:
 - swap_execute.py: Swap execution and quick swap
 - swap_history.py: Swap history and status
 - pools.py: Pool and position management
+- geckoterminal.py: GeckoTerminal pool explorer with charts
 - _shared.py: Shared utilities
 """
 
@@ -107,6 +109,24 @@ from .pools import (
     process_pos_set_base,
     process_pos_set_quote,
 )
+from .geckoterminal import (
+    show_gecko_explore_menu,
+    handle_gecko_trending,
+    show_trending_pools,
+    handle_gecko_top,
+    show_top_pools,
+    handle_gecko_new,
+    show_new_pools,
+    handle_gecko_networks,
+    show_network_menu,
+    handle_gecko_search,
+    process_gecko_search,
+    show_pool_detail,
+    show_ohlcv_chart,
+    show_recent_trades,
+    handle_copy_address,
+    handle_back_to_list,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +177,11 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Only show typing for slow operations that need network calls
         slow_actions = {"main_menu", "swap_execute_confirm", "pool_info", "pool_list",
-                        "manage_positions", "pos_add_confirm", "pos_close_exec"}
-        if action in slow_actions:
+                        "manage_positions", "pos_add_confirm", "pos_close_exec",
+                        "gecko_networks", "gecko_trades"}
+        # Also show typing for gecko actions that start with these prefixes
+        gecko_slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:")
+        if action in slow_actions or action.startswith(gecko_slow_prefixes):
             await query.message.reply_chat_action("typing")
 
         # Menu
@@ -307,6 +330,46 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == "pos_refresh":
             await handle_pos_refresh(update, context)
 
+        # GeckoTerminal explore handlers
+        elif action == "gecko_explore":
+            await show_gecko_explore_menu(update, context)
+        elif action == "gecko_trending":
+            await handle_gecko_trending(update, context)
+        elif action.startswith("gecko_trending_"):
+            network = action.replace("gecko_trending_", "")
+            network = None if network == "all" else network
+            await show_trending_pools(update, context, network)
+        elif action == "gecko_top":
+            await handle_gecko_top(update, context)
+        elif action.startswith("gecko_top_"):
+            network = action.replace("gecko_top_", "")
+            await show_top_pools(update, context, network)
+        elif action == "gecko_new":
+            await handle_gecko_new(update, context)
+        elif action.startswith("gecko_new_"):
+            network = action.replace("gecko_new_", "")
+            network = None if network == "all" else network
+            await show_new_pools(update, context, network)
+        elif action == "gecko_networks":
+            await handle_gecko_networks(update, context)
+        elif action.startswith("gecko_net_"):
+            network = action.replace("gecko_net_", "")
+            await show_network_menu(update, context, network)
+        elif action == "gecko_search":
+            await handle_gecko_search(update, context)
+        elif action.startswith("gecko_pool:"):
+            pool_index = int(action.split(":")[1])
+            await show_pool_detail(update, context, pool_index)
+        elif action.startswith("gecko_ohlcv:"):
+            timeframe = action.split(":")[1]
+            await show_ohlcv_chart(update, context, timeframe)
+        elif action == "gecko_trades":
+            await show_recent_trades(update, context)
+        elif action == "gecko_copy_addr":
+            await handle_copy_address(update, context)
+        elif action == "gecko_back_to_list":
+            await handle_back_to_list(update, context)
+
         # Refresh data
         elif action == "refresh":
             await handle_refresh(update, context)
@@ -414,6 +477,10 @@ async def dex_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             await process_pos_set_base(update, context, user_input)
         elif dex_state == "pos_set_quote":
             await process_pos_set_quote(update, context, user_input)
+
+        # GeckoTerminal search handler
+        elif dex_state == "gecko_search":
+            await process_gecko_search(update, context, user_input)
 
         else:
             await update.message.reply_text(f"Unknown state: {dex_state}")
