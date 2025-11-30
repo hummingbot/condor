@@ -1,0 +1,1633 @@
+"""
+GeckoTerminal Pool Explorer
+
+Provides comprehensive pool exploration using GeckoTerminal API:
+- Trending pools (all networks / by network)
+- Top pools by volume
+- New pools discovery
+- Pool details with OHLCV charts
+- Token search
+- Recent trades
+"""
+
+import asyncio
+import io
+import logging
+from typing import Optional, Dict, Any, List
+from datetime import datetime
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ContextTypes
+
+from geckoterminal_py import GeckoTerminalAsyncClient
+from utils.telegram_formatters import escape_markdown_v2
+from ._shared import cached_call, set_cached, get_cached, clear_cache
+
+logger = logging.getLogger(__name__)
+
+# Cache TTLs
+TRENDING_CACHE_TTL = 120  # 2 minutes for trending data
+POOL_CACHE_TTL = 60  # 1 minute for pool details
+OHLCV_CACHE_TTL = 300  # 5 minutes for OHLCV data
+
+# Network display names
+NETWORK_NAMES = {
+    "solana": "Solana",
+    "eth": "Ethereum",
+    "arbitrum": "Arbitrum",
+    "base": "Base",
+    "bsc": "BNB Chain",
+    "polygon_pos": "Polygon",
+    "avalanche": "Avalanche",
+    "optimism": "Optimism",
+    "sui-network": "Sui",
+}
+
+# Popular networks for quick access
+POPULAR_NETWORKS = ["solana", "eth", "base", "arbitrum", "bsc"]
+
+
+# ============================================
+# UTILITY FUNCTIONS
+# ============================================
+
+def _format_price(price: float) -> str:
+    """Format price with appropriate precision"""
+    if price is None:
+        return "N/A"
+    if price == 0:
+        return "0"
+    if abs(price) >= 1000:
+        return f"${price:,.2f}"
+    elif abs(price) >= 1:
+        return f"${price:.4f}"
+    elif abs(price) >= 0.0001:
+        return f"${price:.6f}"
+    else:
+        return f"${price:.10f}"
+
+
+def _format_volume(volume: float) -> str:
+    """Format volume with K/M/B suffixes"""
+    if volume is None:
+        return "N/A"
+    if volume >= 1_000_000_000:
+        return f"${volume/1_000_000_000:.2f}B"
+    elif volume >= 1_000_000:
+        return f"${volume/1_000_000:.2f}M"
+    elif volume >= 1_000:
+        return f"${volume/1_000:.2f}K"
+    else:
+        return f"${volume:.2f}"
+
+
+def _format_change(change: float) -> str:
+    """Format price change with emoji"""
+    if change is None:
+        return "N/A"
+    emoji = "🟢" if change >= 0 else "🔴"
+    return f"{emoji} {change:+.2f}%"
+
+
+def _get_nested_value(data: dict, *keys, default=None):
+    """Get a value from dict trying multiple key patterns.
+
+    Handles both nested dicts and flattened DataFrame columns.
+    Example keys: ("volume_usd", "h24") will try:
+    - data["volume_usd"]["h24"]
+    - data["volume_usd.h24"]
+    - data["volume_usd_h24"]
+    """
+    # Try nested access
+    try:
+        result = data
+        for key in keys:
+            if isinstance(result, dict):
+                result = result.get(key)
+            else:
+                result = None
+                break
+        if result is not None:
+            return result
+    except (KeyError, TypeError):
+        pass
+
+    # Try dot-notation flattened key
+    dot_key = ".".join(str(k) for k in keys)
+    if dot_key in data:
+        return data[dot_key]
+
+    # Try underscore-notation flattened key
+    underscore_key = "_".join(str(k) for k in keys)
+    if underscore_key in data:
+        return data[underscore_key]
+
+    return default
+
+
+def _parse_symbols_from_name(name: str) -> tuple:
+    """Parse base and quote symbols from pool name like 'PENGU / SOL'"""
+    if not name or "/" not in name:
+        return "?", "?"
+    parts = name.split("/")
+    if len(parts) >= 2:
+        return parts[0].strip(), parts[1].strip()
+    return "?", "?"
+
+
+def _get_pool_symbols(pool: dict) -> tuple:
+    """Get base and quote symbols from pool data.
+
+    Tries direct columns first, falls back to parsing from name.
+    Returns (base_symbol, quote_symbol)
+    """
+    attrs = pool.get("attributes", pool) if isinstance(pool, dict) else {}
+
+    base = _get_nested_value(attrs, "base_token_symbol")
+    quote = _get_nested_value(attrs, "quote_token_symbol")
+
+    # Fallback: parse from name
+    if not base or not quote:
+        name = _get_nested_value(attrs, "name") or ""
+        parsed_base, parsed_quote = _parse_symbols_from_name(name)
+        base = base or parsed_base
+        quote = quote or parsed_quote
+
+    return base, quote
+
+
+def _format_pool_line(pool: dict, index: int = None) -> str:
+    """Format a single pool line for list display"""
+    # Handle both nested API response and flattened DataFrame
+    attrs = pool.get("attributes", pool) if isinstance(pool, dict) else pool
+
+    name = attrs.get("name", "Unknown") if isinstance(attrs, dict) else "Unknown"
+
+    # Try multiple key patterns for symbols
+    base_symbol = (
+        _get_nested_value(attrs, "base_token_symbol") or
+        _get_nested_value(attrs, "base_token", "symbol")
+    )
+    quote_symbol = (
+        _get_nested_value(attrs, "quote_token_symbol") or
+        _get_nested_value(attrs, "quote_token", "symbol")
+    )
+
+    # Fallback: parse from name (e.g., "PENGU / SOL")
+    if not base_symbol or not quote_symbol:
+        parsed_base, parsed_quote = _parse_symbols_from_name(name)
+        base_symbol = base_symbol or parsed_base
+        quote_symbol = quote_symbol or parsed_quote
+
+    # Get price - try multiple patterns
+    price = _get_nested_value(attrs, "base_token_price_usd")
+    if price:
+        try:
+            price = float(price)
+        except (ValueError, TypeError):
+            price = None
+
+    # Get volume - try nested and flattened patterns
+    volume_24h = (
+        _get_nested_value(attrs, "volume_usd", "h24") or
+        _get_nested_value(attrs, "volume_usd_h24") or
+        0
+    )
+    if volume_24h:
+        try:
+            volume_24h = float(volume_24h)
+        except (ValueError, TypeError):
+            volume_24h = 0
+
+    # Get price change - try nested and flattened patterns
+    change_24h = (
+        _get_nested_value(attrs, "price_change_percentage", "h24") or
+        _get_nested_value(attrs, "price_change_percentage_h24")
+    )
+    if change_24h:
+        try:
+            change_24h = float(change_24h)
+        except (ValueError, TypeError):
+            change_24h = None
+
+    # Build the line
+    prefix = f"{index}. " if index is not None else "• "
+    pair = f"{base_symbol}/{quote_symbol}"
+
+    parts = [f"{prefix}{pair}"]
+    if price:
+        parts.append(_format_price(price))
+    if change_24h is not None:
+        parts.append(_format_change(change_24h))
+    if volume_24h:
+        parts.append(f"Vol: {_format_volume(volume_24h)}")
+
+    return " | ".join(parts)
+
+
+def _extract_pools_from_response(result, limit: int = 10) -> list:
+    """Extract pools list from various response formats.
+
+    Handles:
+    - pandas DataFrame (library default)
+    - Dict with 'data' key: {"data": [...]}
+    - Direct list: [...]
+    - Object with 'data' attribute
+    """
+    pools = []
+
+    if result is None:
+        logger.warning("GeckoTerminal returned None")
+        return pools
+
+    # Check for pandas DataFrame first (library returns DataFrames)
+    try:
+        import pandas as pd
+        if isinstance(result, pd.DataFrame):
+            # Convert DataFrame rows to list of dicts
+            pools = result.to_dict('records')
+            logger.info(f"Converted DataFrame with {len(pools)} rows, columns: {list(result.columns)[:10]}")
+            if pools:
+                logger.debug(f"First pool keys: {list(pools[0].keys())[:15]}")
+            return pools[:limit] if pools else []
+    except ImportError:
+        pass
+
+    # If it's already a list, use directly
+    if isinstance(result, list):
+        pools = result
+    # If it's a dict with 'data' key
+    elif isinstance(result, dict):
+        pools = result.get("data", [])
+    # If it has a 'data' attribute (object-style response)
+    elif hasattr(result, 'data'):
+        data = result.data
+        if isinstance(data, list):
+            pools = data
+        elif isinstance(data, dict):
+            pools = data.get("data", [])
+    else:
+        logger.warning(f"Unknown GeckoTerminal response type: {type(result)}")
+        # Try to_dict if available (DataFrame-like)
+        if hasattr(result, 'to_dict'):
+            try:
+                pools = result.to_dict('records')
+            except Exception as e:
+                logger.error(f"Failed to convert to dict: {e}")
+        else:
+            try:
+                pools = list(result)
+            except (TypeError, ValueError):
+                logger.error(f"Cannot extract pools from response: {result}")
+
+    logger.debug(f"Extracted {len(pools)} pools from response")
+    return pools[:limit] if pools else []
+
+
+def _extract_pool_data(pool: dict) -> dict:
+    """Extract relevant data from pool response.
+
+    Handles both nested API response and flattened DataFrame columns.
+    """
+    if not isinstance(pool, dict):
+        logger.warning(f"Pool is not a dict: {type(pool)}")
+        return {}
+
+    attrs = pool.get("attributes", pool)
+    relationships = pool.get("relationships", {})
+
+    # Get name and parse symbols as fallback
+    name = _get_nested_value(attrs, "name") or "Unknown"
+    base_symbol = _get_nested_value(attrs, "base_token_symbol")
+    quote_symbol = _get_nested_value(attrs, "quote_token_symbol")
+
+    # Fallback: parse from name (e.g., "PENGU / SOL")
+    if not base_symbol or not quote_symbol:
+        parsed_base, parsed_quote = _parse_symbols_from_name(name)
+        base_symbol = base_symbol or parsed_base
+        quote_symbol = quote_symbol or parsed_quote
+
+    # For flattened DataFrames, try direct keys first
+    return {
+        "id": pool.get("id", ""),
+        "name": name,
+        "address": _get_nested_value(attrs, "address") or "",
+        "base_token_symbol": base_symbol,
+        "quote_token_symbol": quote_symbol,
+        "base_token_price_usd": _get_nested_value(attrs, "base_token_price_usd"),
+        "quote_token_price_usd": _get_nested_value(attrs, "quote_token_price_usd"),
+        "base_token_price_native": _get_nested_value(attrs, "base_token_price_native_currency"),
+        "fdv_usd": _get_nested_value(attrs, "fdv_usd"),
+        "market_cap_usd": _get_nested_value(attrs, "market_cap_usd"),
+        "reserve_usd": _get_nested_value(attrs, "reserve_in_usd"),
+        "volume_24h": _get_nested_value(attrs, "volume_usd", "h24") or _get_nested_value(attrs, "volume_usd_h24") or 0,
+        "volume_6h": _get_nested_value(attrs, "volume_usd", "h6") or _get_nested_value(attrs, "volume_usd_h6") or 0,
+        "volume_1h": _get_nested_value(attrs, "volume_usd", "h1") or _get_nested_value(attrs, "volume_usd_h1") or 0,
+        "price_change_24h": _get_nested_value(attrs, "price_change_percentage", "h24") or _get_nested_value(attrs, "price_change_percentage_h24"),
+        "price_change_6h": _get_nested_value(attrs, "price_change_percentage", "h6") or _get_nested_value(attrs, "price_change_percentage_h6"),
+        "price_change_1h": _get_nested_value(attrs, "price_change_percentage", "h1") or _get_nested_value(attrs, "price_change_percentage_h1"),
+        "transactions_24h": _get_nested_value(attrs, "transactions", "h24") or _get_nested_value(attrs, "transactions_h24") or {},
+        "dex_id": (
+            _get_nested_value(relationships, "dex", "data", "id") or
+            _get_nested_value(pool, "dex_id") or
+            _get_nested_value(pool, "dex") or
+            ""
+        ),
+        "network": (
+            _get_nested_value(relationships, "network", "data", "id") or
+            _get_nested_value(pool, "network_id") or
+            _get_nested_value(pool, "network") or
+            ""
+        ),
+        "pool_created_at": _get_nested_value(attrs, "pool_created_at"),
+    }
+
+
+# ============================================
+# MAIN EXPLORE MENU
+# ============================================
+
+async def show_gecko_explore_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display the main GeckoTerminal explore menu"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🔥 Trending", callback_data="dex:gecko_trending"),
+            InlineKeyboardButton("📈 Top Pools", callback_data="dex:gecko_top"),
+        ],
+        [
+            InlineKeyboardButton("🆕 New Pools", callback_data="dex:gecko_new"),
+            InlineKeyboardButton("🔍 Search Token", callback_data="dex:gecko_search"),
+        ],
+        [
+            InlineKeyboardButton("🌐 By Network", callback_data="dex:gecko_networks"),
+            InlineKeyboardButton("📋 Meteora Pools", callback_data="dex:pool_list"),
+        ],
+        [
+            InlineKeyboardButton("« Back", callback_data="dex:main_menu"),
+        ],
+    ]
+
+    message = (
+        r"🦎 *GeckoTerminal Explorer*" + "\n\n"
+        "Explore pools across all DEXes:\n\n"
+        "• 🔥 *Trending* \\- Hot pools by activity\n"
+        "• 📈 *Top Pools* \\- Highest volume pools\n"
+        "• 🆕 *New Pools* \\- Recently created\n"
+        "• 🔍 *Search* \\- Find by token\n"
+        "• 🌐 *By Network* \\- Filter by chain\n"
+        "• 📋 *Meteora Pools* \\- List Meteora CLMM pools\n"
+    )
+
+    if update.callback_query:
+        await update.callback_query.message.edit_text(
+            message,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            message,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+# ============================================
+# TRENDING POOLS
+# ============================================
+
+async def handle_gecko_trending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show trending pools menu"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🌍 All Networks", callback_data="dex:gecko_trending_all"),
+        ],
+    ]
+
+    # Add popular network buttons
+    row = []
+    for network in POPULAR_NETWORKS:
+        display = NETWORK_NAMES.get(network, network.title())
+        row.append(InlineKeyboardButton(display, callback_data=f"dex:gecko_trending_{network}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")])
+
+    message = (
+        r"🔥 *Trending Pools*" + "\n\n"
+        "Select network to view trending pools:"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_trending_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, network: str = None) -> None:
+    """Fetch and display trending pools"""
+    query = update.callback_query
+
+    # Show loading
+    await query.message.edit_text(
+        r"🔥 *Trending Pools*" + "\n\n" + r"_Loading\.\.\._",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        cache_key = f"gecko_trending_{network or 'all'}"
+
+        async def fetch_trending():
+            client = GeckoTerminalAsyncClient()
+            if network and network != "all":
+                result = await client.get_trending_pools_by_network(network)
+            else:
+                result = await client.get_trending_pools()
+            logger.info(f"GeckoTerminal trending response type: {type(result)}")
+            return _extract_pools_from_response(result, 10)
+
+        pools = await cached_call(
+            context.user_data,
+            cache_key,
+            fetch_trending,
+            TRENDING_CACHE_TTL
+        )
+
+        # Store pools for selection
+        context.user_data["gecko_pools"] = pools
+        context.user_data["gecko_view"] = "trending"
+        context.user_data["gecko_network"] = network
+
+        # Build message
+        network_name = NETWORK_NAMES.get(network, network.title()) if network else "All Networks"
+        lines = [f"🔥 *Trending Pools \\- {escape_markdown_v2(network_name)}*\n"]
+
+        if not pools:
+            lines.append("\n_No trending pools found_")
+        else:
+            lines.append("")
+            for i, pool in enumerate(pools, 1):
+                line = _format_pool_line(pool, i)
+                lines.append(escape_markdown_v2(line))
+
+        lines.append("\n_Select a pool for details:_")
+
+        # Build keyboard with pool buttons
+        keyboard = []
+        row = []
+        for i, pool in enumerate(pools):
+            base, quote = _get_pool_symbols(pool)
+            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
+            row.append(btn)
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_trending_{network or 'all'}"),
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_trending"),
+        ])
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching trending pools: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error fetching trending pools: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_trending")]
+            ])
+        )
+
+
+# ============================================
+# TOP POOLS
+# ============================================
+
+async def handle_gecko_top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show top pools menu"""
+    keyboard = []
+
+    # Add popular network buttons
+    row = []
+    for network in POPULAR_NETWORKS:
+        display = NETWORK_NAMES.get(network, network.title())
+        row.append(InlineKeyboardButton(display, callback_data=f"dex:gecko_top_{network}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")])
+
+    message = (
+        r"📈 *Top Pools by Volume*" + "\n\n"
+        "Select network to view top pools:"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_top_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, network: str) -> None:
+    """Fetch and display top pools by volume"""
+    query = update.callback_query
+
+    # Show loading
+    await query.message.edit_text(
+        r"📈 *Top Pools*" + "\n\n" + r"_Loading\.\.\._",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        cache_key = f"gecko_top_{network}"
+
+        async def fetch_top():
+            client = GeckoTerminalAsyncClient()
+            result = await client.get_top_pools_by_network(network)
+            return _extract_pools_from_response(result, 10)
+
+        pools = await cached_call(
+            context.user_data,
+            cache_key,
+            fetch_top,
+            TRENDING_CACHE_TTL
+        )
+
+        # Store pools for selection
+        context.user_data["gecko_pools"] = pools
+        context.user_data["gecko_view"] = "top"
+        context.user_data["gecko_network"] = network
+
+        # Build message
+        network_name = NETWORK_NAMES.get(network, network.title())
+        lines = [f"📈 *Top Pools \\- {escape_markdown_v2(network_name)}*\n"]
+
+        if not pools:
+            lines.append("\n_No pools found_")
+        else:
+            lines.append("")
+            for i, pool in enumerate(pools, 1):
+                line = _format_pool_line(pool, i)
+                lines.append(escape_markdown_v2(line))
+
+        lines.append("\n_Select a pool for details:_")
+
+        # Build keyboard with pool buttons
+        keyboard = []
+        row = []
+        for i, pool in enumerate(pools):
+            base, quote = _get_pool_symbols(pool)
+            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
+            row.append(btn)
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_top_{network}"),
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_top"),
+        ])
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching top pools: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error fetching top pools: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_top")]
+            ])
+        )
+
+
+# ============================================
+# NEW POOLS
+# ============================================
+
+async def handle_gecko_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show new pools menu"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🌍 All Networks", callback_data="dex:gecko_new_all"),
+        ],
+    ]
+
+    # Add popular network buttons
+    row = []
+    for network in POPULAR_NETWORKS:
+        display = NETWORK_NAMES.get(network, network.title())
+        row.append(InlineKeyboardButton(display, callback_data=f"dex:gecko_new_{network}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")])
+
+    message = (
+        r"🆕 *New Pools*" + "\n\n"
+        "Select network to view recently created pools:"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_new_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, network: str = None) -> None:
+    """Fetch and display new pools"""
+    query = update.callback_query
+
+    # Show loading
+    await query.message.edit_text(
+        r"🆕 *New Pools*" + "\n\n" + r"_Loading\.\.\._",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        cache_key = f"gecko_new_{network or 'all'}"
+
+        async def fetch_new():
+            client = GeckoTerminalAsyncClient()
+            if network and network != "all":
+                result = await client.get_new_pools_by_network(network)
+            else:
+                result = await client.get_new_pools_all_networks()
+            return _extract_pools_from_response(result, 10)
+
+        pools = await cached_call(
+            context.user_data,
+            cache_key,
+            fetch_new,
+            TRENDING_CACHE_TTL
+        )
+
+        # Store pools for selection
+        context.user_data["gecko_pools"] = pools
+        context.user_data["gecko_view"] = "new"
+        context.user_data["gecko_network"] = network
+
+        # Build message
+        network_name = NETWORK_NAMES.get(network, network.title()) if network else "All Networks"
+        lines = [f"🆕 *New Pools \\- {escape_markdown_v2(network_name)}*\n"]
+
+        if not pools:
+            lines.append("\n_No new pools found_")
+        else:
+            lines.append("")
+            for i, pool in enumerate(pools, 1):
+                attrs = pool.get("attributes", pool)
+                line = _format_pool_line(pool, i)
+                # Add creation time if available
+                created = attrs.get("pool_created_at")
+                if created:
+                    try:
+                        created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                        age = datetime.now(created_dt.tzinfo) - created_dt
+                        if age.days > 0:
+                            age_str = f"{age.days}d ago"
+                        elif age.seconds >= 3600:
+                            age_str = f"{age.seconds // 3600}h ago"
+                        else:
+                            age_str = f"{age.seconds // 60}m ago"
+                        line += f" | {age_str}"
+                    except Exception:
+                        pass
+                lines.append(escape_markdown_v2(line))
+
+        lines.append("\n_Select a pool for details:_")
+
+        # Build keyboard with pool buttons
+        keyboard = []
+        row = []
+        for i, pool in enumerate(pools):
+            base, quote = _get_pool_symbols(pool)
+            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
+            row.append(btn)
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_new_{network or 'all'}"),
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_new"),
+        ])
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching new pools: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error fetching new pools: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_new")]
+            ])
+        )
+
+
+# ============================================
+# NETWORK SELECTION
+# ============================================
+
+async def handle_gecko_networks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show all available networks"""
+    query = update.callback_query
+
+    # Show loading
+    await query.message.edit_text(
+        r"🌐 *Networks*" + "\n\n" + r"_Loading\.\.\._",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        cache_key = "gecko_networks"
+
+        async def fetch_networks():
+            client = GeckoTerminalAsyncClient()
+            result = await client.get_networks()
+            return _extract_pools_from_response(result, 100)
+
+        networks = await cached_call(
+            context.user_data,
+            cache_key,
+            fetch_networks,
+            600  # Cache for 10 minutes
+        )
+
+        # Store networks and build keyboard (show first 20 most popular)
+        keyboard = []
+        row = []
+        for network in networks[:20]:
+            attrs = network.get("attributes", network)
+            network_id = network.get("id", "")
+            name = attrs.get("name", network_id)[:12]
+            row.append(InlineKeyboardButton(name, callback_data=f"dex:gecko_net_{network_id}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")])
+
+        message = (
+            r"🌐 *Select Network*" + "\n\n"
+            "Choose a network to explore pools:"
+        )
+
+        await query.message.edit_text(
+            message,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching networks: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error fetching networks: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")]
+            ])
+        )
+
+
+async def show_network_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, network: str) -> None:
+    """Show options for a specific network"""
+    network_name = NETWORK_NAMES.get(network, network.title())
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔥 Trending", callback_data=f"dex:gecko_trending_{network}"),
+            InlineKeyboardButton("📈 Top Pools", callback_data=f"dex:gecko_top_{network}"),
+        ],
+        [
+            InlineKeyboardButton("🆕 New Pools", callback_data=f"dex:gecko_new_{network}"),
+        ],
+        [
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_networks"),
+        ],
+    ]
+
+    message = (
+        f"🌐 *{escape_markdown_v2(network_name)}*\n\n"
+        "Select what to explore:"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# ============================================
+# TOKEN SEARCH
+# ============================================
+
+async def handle_gecko_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Prompt user to enter token address for search"""
+    context.user_data["dex_state"] = "gecko_search"
+
+    keyboard = [
+        [InlineKeyboardButton("« Cancel", callback_data="dex:gecko_explore")]
+    ]
+
+    message = (
+        r"🔍 *Token Search*" + "\n\n"
+        "Enter a token address to find pools:\n\n"
+        "_Example: Enter a Solana or Ethereum token address_"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def process_gecko_search(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
+    """Process token search input"""
+    context.user_data.pop("dex_state", None)
+
+    # Show loading message
+    loading_msg = await update.message.reply_text(
+        r"🔍 *Searching\.\.\.*",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        # Determine network from address format
+        token_address = user_input.strip()
+
+        # Try to detect network
+        if token_address.startswith("0x"):
+            networks = ["eth", "base", "arbitrum", "bsc", "polygon_pos"]
+        else:
+            networks = ["solana"]  # Assume Solana for non-0x addresses
+
+        pools = []
+        found_network = None
+
+        client = GeckoTerminalAsyncClient()
+        for network in networks:
+            try:
+                result = await client.get_top_pools_by_network_token(network, token_address)
+                data = _extract_pools_from_response(result, 10)
+                if data:
+                    pools = data
+                    found_network = network
+                    break
+            except Exception:
+                continue
+
+        if not pools:
+            await loading_msg.edit_text(
+                r"❌ *No pools found*" + "\n\n"
+                "Could not find any pools for this token address\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 Try Again", callback_data="dex:gecko_search")],
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")]
+                ])
+            )
+            return
+
+        # Store pools for selection
+        context.user_data["gecko_pools"] = pools
+        context.user_data["gecko_view"] = "search"
+        context.user_data["gecko_network"] = found_network
+        context.user_data["gecko_search_token"] = token_address
+
+        # Build message
+        network_name = NETWORK_NAMES.get(found_network, found_network)
+        lines = [f"🔍 *Pools for Token \\- {escape_markdown_v2(network_name)}*\n"]
+        lines.append(f"Token: `{escape_markdown_v2(token_address[:20])}...`\n")
+
+        for i, pool in enumerate(pools, 1):
+            line = _format_pool_line(pool, i)
+            lines.append(escape_markdown_v2(line))
+
+        lines.append("\n_Select a pool for details:_")
+
+        # Build keyboard with pool buttons
+        keyboard = []
+        row = []
+        for i, pool in enumerate(pools):
+            base, quote = _get_pool_symbols(pool)
+            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
+            row.append(btn)
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([
+            InlineKeyboardButton("🔍 New Search", callback_data="dex:gecko_search"),
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_explore"),
+        ])
+
+        await loading_msg.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error searching token: {e}", exc_info=True)
+        await loading_msg.edit_text(
+            f"❌ Error searching: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")]
+            ])
+        )
+
+
+# ============================================
+# POOL DETAIL VIEW
+# ============================================
+
+async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, pool_index: int) -> None:
+    """Show detailed information for a selected pool"""
+    query = update.callback_query
+
+    pools = context.user_data.get("gecko_pools", [])
+    if pool_index >= len(pools):
+        await query.answer("Pool not found")
+        return
+
+    pool = pools[pool_index]
+    pool_data = _extract_pool_data(pool)
+
+    # Store current pool for OHLCV/trades
+    context.user_data["gecko_selected_pool"] = pool_data
+    context.user_data["gecko_selected_pool_index"] = pool_index
+
+    # Build detailed view
+    network_name = NETWORK_NAMES.get(pool_data["network"], pool_data["network"])
+
+    lines = [
+        f"📊 *{escape_markdown_v2(pool_data['name'])}*\n",
+        f"🌐 Network: {escape_markdown_v2(network_name)}",
+        f"🏦 DEX: {escape_markdown_v2(pool_data['dex_id'])}",
+        "",
+        r"💰 *Price Info:*",
+    ]
+
+    if pool_data["base_token_price_usd"]:
+        try:
+            price = float(pool_data["base_token_price_usd"])
+            lines.append(f"• {pool_data['base_token_symbol']}: {escape_markdown_v2(_format_price(price))}")
+        except (ValueError, TypeError):
+            pass
+
+    if pool_data["quote_token_price_usd"]:
+        try:
+            price = float(pool_data["quote_token_price_usd"])
+            lines.append(f"• {pool_data['quote_token_symbol']}: {escape_markdown_v2(_format_price(price))}")
+        except (ValueError, TypeError):
+            pass
+
+    lines.append("")
+    lines.append(r"📈 *Price Changes:*")
+
+    for period, key in [("1h", "price_change_1h"), ("6h", "price_change_6h"), ("24h", "price_change_24h")]:
+        change = pool_data.get(key)
+        if change is not None:
+            try:
+                change = float(change)
+                lines.append(f"• {period}: {escape_markdown_v2(_format_change(change))}")
+            except (ValueError, TypeError):
+                pass
+
+    lines.append("")
+    lines.append(r"📊 *Volume:*")
+
+    for period, key in [("1h", "volume_1h"), ("6h", "volume_6h"), ("24h", "volume_24h")]:
+        vol = pool_data.get(key)
+        if vol:
+            try:
+                vol = float(vol)
+                lines.append(f"• {period}: {escape_markdown_v2(_format_volume(vol))}")
+            except (ValueError, TypeError):
+                pass
+
+    # Market cap and FDV
+    lines.append("")
+    if pool_data.get("market_cap_usd"):
+        try:
+            mc = float(pool_data["market_cap_usd"])
+            lines.append(f"💎 Market Cap: {escape_markdown_v2(_format_volume(mc))}")
+        except (ValueError, TypeError):
+            pass
+
+    if pool_data.get("fdv_usd"):
+        try:
+            fdv = float(pool_data["fdv_usd"])
+            lines.append(f"📈 FDV: {escape_markdown_v2(_format_volume(fdv))}")
+        except (ValueError, TypeError):
+            pass
+
+    if pool_data.get("reserve_usd"):
+        try:
+            reserve = float(pool_data["reserve_usd"])
+            lines.append(f"💧 Liquidity: {escape_markdown_v2(_format_volume(reserve))}")
+        except (ValueError, TypeError):
+            pass
+
+    # Transactions
+    txns = pool_data.get("transactions_24h", {})
+    if txns:
+        buys = txns.get("buys", 0)
+        sells = txns.get("sells", 0)
+        if buys or sells:
+            lines.append("")
+            lines.append(r"🔄 *24h Transactions:*")
+            lines.append(f"• Buys: {buys} | Sells: {sells}")
+
+    # Pool address
+    lines.append("")
+    addr = pool_data.get("address", "")
+    if addr:
+        lines.append(f"📍 Address: `{escape_markdown_v2(addr[:16])}...`")
+
+    # Build keyboard
+    keyboard = [
+        [
+            InlineKeyboardButton("📈 OHLCV 1h", callback_data="dex:gecko_ohlcv:1m"),
+            InlineKeyboardButton("📈 OHLCV 1d", callback_data="dex:gecko_ohlcv:1h"),
+        ],
+        [
+            InlineKeyboardButton("📈 OHLCV 7d", callback_data="dex:gecko_ohlcv:1d"),
+            InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
+        ],
+        [
+            InlineKeyboardButton("📋 Show Address", callback_data="dex:gecko_copy_addr"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_pool:{pool_index}"),
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_back_to_list"),
+        ],
+    ]
+
+    # Handle case when returning from photo (OHLCV chart) - can't edit photo to text
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.chat.send_message(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+# ============================================
+# OHLCV CHART
+# ============================================
+
+async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str) -> None:
+    """Fetch OHLCV data and display as chart"""
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    await query.answer("Loading chart...")
+
+    # Show loading - handle photo messages (can't edit photo to text)
+    if query.message.photo:
+        await query.message.delete()
+        loading_msg = await query.message.chat.send_message(
+            f"📈 *OHLCV Chart*\n\n_Loading {timeframe} data\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+    else:
+        await query.message.edit_text(
+            f"📈 *OHLCV Chart*\n\n_Loading {timeframe} data\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+        loading_msg = query.message
+
+    try:
+        network = pool_data["network"]
+        address = pool_data["address"]
+
+        client = GeckoTerminalAsyncClient()
+        result = await client.get_ohlcv(network, address, timeframe)
+
+        logger.info(f"OHLCV raw response type: {type(result)}")
+
+        # Handle various response formats for OHLCV
+        ohlcv_data = []
+
+        # Check for pandas DataFrame first (library often returns DataFrames)
+        try:
+            import pandas as pd
+            if isinstance(result, pd.DataFrame):
+                # DataFrame columns: typically datetime, open, high, low, close, volume
+                logger.info(f"OHLCV DataFrame columns: {list(result.columns)}, shape: {result.shape}")
+                if not result.empty:
+                    # Convert to list of lists, handling index if it's the timestamp
+                    if result.index.name == 'datetime' or 'datetime' not in result.columns:
+                        # Index is the timestamp, reset it to include in data
+                        result = result.reset_index()
+                    ohlcv_data = result.values.tolist()
+                    logger.info(f"Converted OHLCV DataFrame with {len(ohlcv_data)} rows")
+                    if ohlcv_data:
+                        logger.debug(f"First OHLCV row: {ohlcv_data[0]}")
+        except ImportError:
+            pass
+
+        # If not a DataFrame, try other formats
+        if not ohlcv_data:
+            if isinstance(result, dict):
+                logger.debug(f"OHLCV dict keys: {result.keys() if result else 'empty'}")
+                ohlcv_data = result.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+            elif hasattr(result, 'data'):
+                data = result.data
+                if isinstance(data, dict):
+                    ohlcv_data = data.get("attributes", {}).get("ohlcv_list", [])
+                elif hasattr(data, 'attributes'):
+                    ohlcv_data = getattr(data.attributes, 'ohlcv_list', [])
+            # Try as a list directly
+            elif isinstance(result, list):
+                ohlcv_data = result
+                logger.info(f"OHLCV is a direct list with {len(ohlcv_data)} items")
+
+        logger.info(f"OHLCV final: type={type(result)}, extracted {len(ohlcv_data)} candles")
+
+        if not ohlcv_data:
+            await loading_msg.edit_text(
+                "📈 *OHLCV Chart*\n\n_No data available for this timeframe_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
+
+        # Generate chart image
+        chart_buffer = _generate_ohlcv_chart(ohlcv_data, pool_data, timeframe)
+
+        # Build caption
+        caption_lines = [
+            f"📈 *{escape_markdown_v2(pool_data['name'])}*",
+            f"Timeframe: {escape_markdown_v2(timeframe)}",
+            f"Data points: {len(ohlcv_data)}",
+        ]
+
+        # Get latest price info
+        if ohlcv_data:
+            latest = ohlcv_data[0]  # Most recent candle
+            if len(latest) >= 5:
+                timestamp, open_p, high_p, low_p, close_p = latest[:5]
+                caption_lines.append("")
+                caption_lines.append(f"Latest: {escape_markdown_v2(_format_price(close_p))}")
+                caption_lines.append(f"High: {escape_markdown_v2(_format_price(high_p))}")
+                caption_lines.append(f"Low: {escape_markdown_v2(_format_price(low_p))}")
+
+        caption = "\n".join(caption_lines)
+
+        # Build keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("1h", callback_data="dex:gecko_ohlcv:1m"),
+                InlineKeyboardButton("1d", callback_data="dex:gecko_ohlcv:1h"),
+                InlineKeyboardButton("7d", callback_data="dex:gecko_ohlcv:1d"),
+            ],
+            [
+                InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+            ],
+        ]
+
+        # Delete loading message and send photo
+        await loading_msg.delete()
+        await loading_msg.chat.send_photo(
+            photo=chart_buffer,
+            caption=caption,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating OHLCV chart: {e}", exc_info=True)
+        await loading_msg.edit_text(
+            f"❌ Error loading chart: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+            ])
+        )
+
+
+def _generate_ohlcv_chart(ohlcv_data: List, pool_data: dict, timeframe: str) -> io.BytesIO:
+    """Generate OHLCV candlestick chart using plotly"""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from datetime import datetime
+
+    # Parse OHLCV data
+    # Format: [timestamp, open, high, low, close, volume]
+    times = []
+    opens = []
+    highs = []
+    lows = []
+    closes = []
+    volumes = []
+
+    for candle in reversed(ohlcv_data):  # Reverse to get chronological order
+        if len(candle) >= 5:
+            ts, o, h, l, c = candle[:5]
+            v = candle[5] if len(candle) > 5 else 0
+
+            # Handle timestamp - could be Unix int, datetime, or pandas Timestamp
+            if isinstance(ts, (int, float)):
+                times.append(datetime.fromtimestamp(ts))
+            elif hasattr(ts, 'to_pydatetime'):  # pandas Timestamp
+                times.append(ts.to_pydatetime())
+            elif isinstance(ts, datetime):
+                times.append(ts)
+            else:
+                # Try to parse as string or skip
+                try:
+                    times.append(datetime.fromisoformat(str(ts).replace('Z', '+00:00')))
+                except Exception:
+                    continue
+
+            opens.append(float(o))
+            highs.append(float(h))
+            lows.append(float(l))
+            closes.append(float(c))
+            volumes.append(float(v) if v else 0)
+
+    if not times:
+        raise ValueError("No valid OHLCV data")
+
+    # Create figure with subplots (candlestick + volume)
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.7, 0.3],
+    )
+
+    # Add candlestick chart
+    fig.add_trace(
+        go.Candlestick(
+            x=times,
+            open=opens,
+            high=highs,
+            low=lows,
+            close=closes,
+            name='Price',
+            increasing_line_color='#00ff88',
+            decreasing_line_color='#ff4444',
+            increasing_fillcolor='#00ff88',
+            decreasing_fillcolor='#ff4444',
+        ),
+        row=1, col=1
+    )
+
+    # Volume bar colors based on price direction
+    volume_colors = ['#00ff88' if closes[i] >= opens[i] else '#ff4444' for i in range(len(times))]
+
+    # Add volume bars
+    fig.add_trace(
+        go.Bar(
+            x=times,
+            y=volumes,
+            name='Volume',
+            marker_color=volume_colors,
+            opacity=0.7,
+        ),
+        row=2, col=1
+    )
+
+    # Add latest price horizontal line
+    if closes:
+        latest_price = closes[-1]
+        fig.add_hline(
+            y=latest_price,
+            line_dash="dash",
+            line_color="#ffaa00",
+            opacity=0.5,
+            row=1, col=1,
+            annotation_text=f"${latest_price:.6f}",
+            annotation_position="right",
+            annotation_font_color="#ffaa00",
+        )
+
+    # Update layout with dark theme
+    pair = f"{pool_data['base_token_symbol']}/{pool_data['quote_token_symbol']}"
+    fig.update_layout(
+        title=dict(
+            text=f'{pair} - {timeframe}',
+            font=dict(color='white', size=16),
+            x=0.5,
+        ),
+        paper_bgcolor='#1a1a2e',
+        plot_bgcolor='#1a1a2e',
+        font=dict(color='white'),
+        xaxis_rangeslider_visible=False,
+        showlegend=False,
+        height=600,
+        width=900,
+        margin=dict(l=50, r=80, t=50, b=50),
+    )
+
+    # Update axes styling
+    fig.update_xaxes(
+        gridcolor='rgba(255,255,255,0.1)',
+        showgrid=True,
+        zeroline=False,
+    )
+    fig.update_yaxes(
+        gridcolor='rgba(255,255,255,0.1)',
+        showgrid=True,
+        zeroline=False,
+        side='right',
+    )
+
+    # Set y-axis titles
+    fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+
+    # Save to buffer as PNG
+    buf = io.BytesIO()
+    fig.write_image(buf, format='png', scale=2)
+    buf.seek(0)
+
+    return buf
+
+
+# ============================================
+# RECENT TRADES
+# ============================================
+
+async def show_recent_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show recent trades for selected pool"""
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    await query.answer("Loading trades...")
+
+    # Show loading
+    await query.message.edit_text(
+        r"📜 *Recent Trades*" + "\n\n" + r"_Loading\.\.\._",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        network = pool_data["network"]
+        address = pool_data["address"]
+
+        client = GeckoTerminalAsyncClient()
+        result = await client.get_trades(network, address, 20)
+
+        logger.info(f"Trades raw response type: {type(result)}")
+
+        # Handle DataFrame response
+        trades = []
+        try:
+            import pandas as pd
+            if isinstance(result, pd.DataFrame):
+                logger.info(f"Trades DataFrame columns: {list(result.columns)}")
+                if not result.empty:
+                    trades = result.to_dict('records')
+                    if trades:
+                        logger.debug(f"First trade keys: {list(trades[0].keys())}")
+        except ImportError:
+            pass
+
+        if not trades:
+            trades = _extract_pools_from_response(result, 20)
+
+        if not trades:
+            await query.message.edit_text(
+                r"📜 *Recent Trades*" + "\n\n" + "_No recent trades found_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
+
+        # Build trades message
+        pair = f"{pool_data['base_token_symbol']}/{pool_data['quote_token_symbol']}"
+        lines = [f"📜 *Recent Trades \\- {escape_markdown_v2(pair)}*\n"]
+
+        lines.append("```")
+        lines.append(f"{'Type':<6} {'Amount':<12} {'Price':<14} {'Time':<10}")
+        lines.append("-" * 44)
+
+        for trade in trades[:15]:
+            attrs = trade.get("attributes", trade)
+
+            # Get trade type - try multiple field names
+            trade_type = (
+                attrs.get("kind") or
+                attrs.get("trade_type") or
+                attrs.get("type") or
+                attrs.get("side") or
+                "?"
+            )
+            if isinstance(trade_type, str):
+                trade_type = trade_type[:5]
+            else:
+                trade_type = "?"
+
+            # Get amount - try multiple field names
+            amount = (
+                attrs.get("volume_in_usd") or
+                attrs.get("volume_usd") or
+                attrs.get("amount_usd") or
+                attrs.get("from_token_amount") or
+                attrs.get("to_token_amount")
+            )
+            if amount:
+                try:
+                    amount = float(amount)
+                    amount_str = _format_volume(amount).replace("$", "")[:11]
+                except (ValueError, TypeError):
+                    amount_str = "?"
+            else:
+                amount_str = "?"
+
+            # Get price - try multiple field names
+            price = (
+                attrs.get("price_to_in_usd") or
+                attrs.get("price_from_in_usd") or
+                attrs.get("price_usd") or
+                attrs.get("price_in_usd") or
+                attrs.get("token_price_usd")
+            )
+            if price:
+                try:
+                    price = float(price)
+                    price_str = f"${price:.6f}"[:13]
+                except (ValueError, TypeError):
+                    price_str = "?"
+            else:
+                price_str = "?"
+
+            # Get time - try multiple field names
+            timestamp = (
+                attrs.get("block_timestamp") or
+                attrs.get("timestamp") or
+                attrs.get("datetime") or
+                attrs.get("time")
+            )
+            if timestamp:
+                try:
+                    # Handle pandas Timestamp
+                    if hasattr(timestamp, 'strftime'):
+                        time_str = timestamp.strftime("%H:%M:%S")
+                    elif isinstance(timestamp, (int, float)):
+                        dt = datetime.fromtimestamp(timestamp)
+                        time_str = dt.strftime("%H:%M:%S")
+                    else:
+                        dt = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+                        time_str = dt.strftime("%H:%M:%S")
+                except Exception:
+                    time_str = "?"
+            else:
+                time_str = "?"
+
+            emoji = "🟢" if str(trade_type).lower() == "buy" else "🔴"
+            lines.append(f"{emoji}{trade_type:<5} {amount_str:<12} {price_str:<14} {time_str:<10}")
+
+        lines.append("```")
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="dex:gecko_trades"),
+                InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+            ],
+        ]
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching trades: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error loading trades: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+            ])
+        )
+
+
+# ============================================
+# UTILITY HANDLERS
+# ============================================
+
+async def handle_copy_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show pool address in a popup alert for easy copying"""
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    address = pool_data.get("address", "N/A")
+    # Show in popup alert - user can long-press to copy on mobile
+    await query.answer(f"📋 {address}", show_alert=True)
+
+
+async def handle_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Return to the previous pool list"""
+    view = context.user_data.get("gecko_view", "trending")
+    network = context.user_data.get("gecko_network")
+
+    if view == "trending":
+        await show_trending_pools(update, context, network)
+    elif view == "top":
+        await show_top_pools(update, context, network)
+    elif view == "new":
+        await show_new_pools(update, context, network)
+    elif view == "search":
+        # Re-run search
+        token = context.user_data.get("gecko_search_token")
+        if token:
+            await show_gecko_explore_menu(update, context)
+        else:
+            await show_gecko_explore_menu(update, context)
+    else:
+        await show_gecko_explore_menu(update, context)
+
+
+# ============================================
+# EXPORTS
+# ============================================
+
+__all__ = [
+    'show_gecko_explore_menu',
+    'handle_gecko_trending',
+    'show_trending_pools',
+    'handle_gecko_top',
+    'show_top_pools',
+    'handle_gecko_new',
+    'show_new_pools',
+    'handle_gecko_networks',
+    'show_network_menu',
+    'handle_gecko_search',
+    'process_gecko_search',
+    'show_pool_detail',
+    'show_ohlcv_chart',
+    'show_recent_trades',
+    'handle_copy_address',
+    'handle_back_to_list',
+]
