@@ -1098,7 +1098,7 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
         ],
         [
-            InlineKeyboardButton("📋 Show Address", callback_data="dex:gecko_copy_addr"),
+            InlineKeyboardButton("📋 Copy Address", callback_data="dex:gecko_copy_addr"),
         ],
         [
             InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_pool:{pool_index}"),
@@ -1470,26 +1470,23 @@ async def show_recent_trades(update: Update, context: ContextTypes.DEFAULT_TYPE)
         for trade in trades[:15]:
             attrs = trade.get("attributes", trade)
 
-            # Get trade type - try multiple field names
+            # Get trade type - 'side' contains buy/sell, 'type' is always "trade"
             trade_type = (
+                attrs.get("side") or
                 attrs.get("kind") or
                 attrs.get("trade_type") or
-                attrs.get("type") or
-                attrs.get("side") or
                 "?"
             )
             if isinstance(trade_type, str):
-                trade_type = trade_type[:5]
+                trade_type = trade_type[:4]  # "buy" or "sell"
             else:
                 trade_type = "?"
 
-            # Get amount - try multiple field names
+            # Get amount - 'volume_usd' is the correct field from the API
             amount = (
-                attrs.get("volume_in_usd") or
                 attrs.get("volume_usd") or
-                attrs.get("amount_usd") or
-                attrs.get("from_token_amount") or
-                attrs.get("to_token_amount")
+                attrs.get("volume_in_usd") or
+                attrs.get("amount_usd")
             )
             if amount:
                 try:
@@ -1500,14 +1497,18 @@ async def show_recent_trades(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 amount_str = "?"
 
-            # Get price - try multiple field names
-            price = (
-                attrs.get("price_to_in_usd") or
-                attrs.get("price_from_in_usd") or
-                attrs.get("price_usd") or
-                attrs.get("price_in_usd") or
-                attrs.get("token_price_usd")
-            )
+            # Get price - show base token price based on trade side
+            # buy: swapping quote→base, price_to = base price
+            # sell: swapping base→quote, price_from = base price
+            if trade_type.lower() == "buy":
+                price = attrs.get("price_to_in_usd")
+            else:
+                price = attrs.get("price_from_in_usd")
+
+            # Fallback to any available price
+            if not price:
+                price = attrs.get("price_to_in_usd") or attrs.get("price_from_in_usd")
+
             if price:
                 try:
                     price = float(price)
@@ -1574,7 +1575,7 @@ async def show_recent_trades(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ============================================
 
 async def handle_copy_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show pool address in a popup alert for easy copying"""
+    """Send pool address as a copyable message"""
     query = update.callback_query
 
     pool_data = context.user_data.get("gecko_selected_pool")
@@ -1583,8 +1584,14 @@ async def handle_copy_address(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     address = pool_data.get("address", "N/A")
-    # Show in popup alert - user can long-press to copy on mobile
-    await query.answer(f"📋 {address}", show_alert=True)
+    name = pool_data.get("name", "Pool")
+
+    await query.answer()
+    # Send address as monospace - easy to tap and copy
+    await query.message.reply_text(
+        f"📋 *{escape_markdown_v2(name)}*\n\n`{address}`",
+        parse_mode="MarkdownV2"
+    )
 
 
 async def handle_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
