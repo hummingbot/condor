@@ -586,6 +586,11 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
+    # Additional parameters
+    max_open_orders = config.get("max_open_orders", 3)
+    max_orders_per_batch = config.get("max_orders_per_batch", 1)
+    min_order_amount = config.get("min_order_amount_quote", 6)
+    min_spread = config.get("min_spread_between_orders", 0.0002)
 
     # Delete previous chart if exists
     chart_msg_id = context.user_data.get("gs_chart_message_id")
@@ -612,12 +617,24 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
         f"Limit: `{limit_price:,.6g}`",
         "",
         f"TP: `{tp*100:.2f}%` \\| Keep: `{'Y' if keep_position else 'N'}` \\| Act: `{activation_bounds*100:.0f}%`",
+        f"MaxOrd: `{max_open_orders}` \\| Batch: `{max_orders_per_batch}` \\| MinAmt: `{min_order_amount}` \\| Spread: `{min_spread}`",
     ]
 
     keyboard = [
         [
             InlineKeyboardButton("Save", callback_data="bots:gs_save"),
             InlineKeyboardButton("Edit ID", callback_data="bots:gs_edit_id"),
+        ],
+        [
+            InlineKeyboardButton("TP", callback_data="bots:gs_edit_tp"),
+            InlineKeyboardButton("Keep", callback_data="bots:gs_edit_keep"),
+            InlineKeyboardButton("Act", callback_data="bots:gs_edit_act"),
+        ],
+        [
+            InlineKeyboardButton("MaxOrd", callback_data="bots:gs_edit_max_orders"),
+            InlineKeyboardButton("Batch", callback_data="bots:gs_edit_batch"),
+            InlineKeyboardButton("MinAmt", callback_data="bots:gs_edit_min_amt"),
+            InlineKeyboardButton("Spread", callback_data="bots:gs_edit_spread"),
         ],
         [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
     ]
@@ -682,6 +699,11 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
+    # Additional parameters
+    max_open_orders = config.get("max_open_orders", 3)
+    max_orders_per_batch = config.get("max_orders_per_batch", 1)
+    min_order_amount = config.get("min_order_amount_quote", 6)
+    min_spread = config.get("min_spread_between_orders", 0.0002)
 
     # Delete previous chart if exists
     chart_msg_id = context.user_data.get("gs_chart_message_id")
@@ -705,12 +727,24 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
         f"Limit: `{limit_price:,.6g}`",
         "",
         f"TP: `{tp*100:.2f}%` \\| Keep: `{'Y' if keep_position else 'N'}` \\| Act: `{activation_bounds*100:.0f}%`",
+        f"MaxOrd: `{max_open_orders}` \\| Batch: `{max_orders_per_batch}` \\| MinAmt: `{min_order_amount}` \\| Spread: `{min_spread}`",
     ]
 
     keyboard = [
         [
             InlineKeyboardButton("Save", callback_data="bots:gs_save"),
             InlineKeyboardButton("Edit ID", callback_data="bots:gs_edit_id"),
+        ],
+        [
+            InlineKeyboardButton("TP", callback_data="bots:gs_edit_tp"),
+            InlineKeyboardButton("Keep", callback_data="bots:gs_edit_keep"),
+            InlineKeyboardButton("Act", callback_data="bots:gs_edit_act"),
+        ],
+        [
+            InlineKeyboardButton("MaxOrd", callback_data="bots:gs_edit_max_orders"),
+            InlineKeyboardButton("Batch", callback_data="bots:gs_edit_batch"),
+            InlineKeyboardButton("MinAmt", callback_data="bots:gs_edit_min_amt"),
+            InlineKeyboardButton("Spread", callback_data="bots:gs_edit_spread"),
         ],
         [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
     ]
@@ -760,6 +794,7 @@ async def handle_gs_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Allow user to edit config ID before saving"""
     query = update.callback_query
     config = get_controller_config(context)
+    chat_id = query.message.chat_id
 
     context.user_data["bots_state"] = "gs_wizard_input"
     context.user_data["gs_wizard_step"] = "edit_id"
@@ -771,13 +806,221 @@ async def handle_gs_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
     ]
 
-    await query.message.edit_text(
-        r"*Edit Config ID*" + "\n\n"
+    # Delete current message (could be photo)
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=r"*Edit Config ID*" + "\n\n"
         f"Current: `{escape_markdown_v2(current_id)}`" + "\n\n"
         r"Type a new ID or tap Keep to use current:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    context.user_data["gs_wizard_message_id"] = msg.message_id
+
+
+async def handle_gs_edit_keep(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle keep_position setting"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # Toggle the value
+    current = config.get("keep_position", True)
+    config["keep_position"] = not current
+    context.user_data["controller_config"] = config
+
+    # Go back to review
+    await _show_wizard_review_step(update, context)
+
+
+async def handle_gs_edit_tp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit take profit"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    chat_id = query.message.chat_id
+
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "edit_tp"
+
+    current_tp = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+
+    keyboard = [
+        [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
+    ]
+
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=r"*Edit Take Profit*" + "\n\n"
+        f"Current: `{current_tp*100:.4f}%`" + "\n\n"
+        r"Enter new TP \(e\.g\. 0\.03 for 0\.03%\):",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["gs_wizard_message_id"] = msg.message_id
+
+
+async def handle_gs_edit_act(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit activation bounds"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    chat_id = query.message.chat_id
+
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "edit_act"
+
+    current_act = config.get("activation_bounds", 0.01)
+
+    keyboard = [
+        [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
+    ]
+
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=r"*Edit Activation Bounds*" + "\n\n"
+        f"Current: `{current_act*100:.1f}%`" + "\n\n"
+        r"Enter new value \(e\.g\. 1 for 1%\):",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["gs_wizard_message_id"] = msg.message_id
+
+
+async def handle_gs_edit_max_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit max open orders"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    chat_id = query.message.chat_id
+
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "edit_max_orders"
+
+    current = config.get("max_open_orders", 3)
+
+    keyboard = [
+        [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
+    ]
+
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=r"*Edit Max Open Orders*" + "\n\n"
+        f"Current: `{current}`" + "\n\n"
+        r"Enter new value \(integer\):",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["gs_wizard_message_id"] = msg.message_id
+
+
+async def handle_gs_edit_batch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit max orders per batch"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    chat_id = query.message.chat_id
+
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "edit_batch"
+
+    current = config.get("max_orders_per_batch", 1)
+
+    keyboard = [
+        [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
+    ]
+
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=r"*Edit Max Orders Per Batch*" + "\n\n"
+        f"Current: `{current}`" + "\n\n"
+        r"Enter new value \(integer\):",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["gs_wizard_message_id"] = msg.message_id
+
+
+async def handle_gs_edit_min_amt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit min order amount"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    chat_id = query.message.chat_id
+
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "edit_min_amt"
+
+    current = config.get("min_order_amount_quote", 6)
+
+    keyboard = [
+        [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
+    ]
+
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=r"*Edit Min Order Amount*" + "\n\n"
+        f"Current: `{current}`" + "\n\n"
+        r"Enter new value \(e\.g\. 6\):",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["gs_wizard_message_id"] = msg.message_id
+
+
+async def handle_gs_edit_spread(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit min spread between orders"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    chat_id = query.message.chat_id
+
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "edit_spread"
+
+    current = config.get("min_spread_between_orders", 0.0002)
+
+    keyboard = [
+        [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
+    ]
+
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=r"*Edit Min Spread Between Orders*" + "\n\n"
+        f"Current: `{current}`" + "\n\n"
+        r"Enter new value \(e\.g\. 0\.0002\):",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    context.user_data["gs_wizard_message_id"] = msg.message_id
 
 
 async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -786,9 +1029,18 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     config = get_controller_config(context)
 
     config_id = config.get("id", "")
+    chat_id = query.message.chat_id
 
-    await query.message.edit_text(
-        f"Saving configuration `{escape_markdown_v2(config_id)}`\\.\\.\\.",
+    # Delete the current message (could be photo or text)
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    # Send saving status
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"Saving configuration `{escape_markdown_v2(config_id)}`\\.\\.\\.",
         parse_mode="MarkdownV2"
     )
 
@@ -804,7 +1056,7 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
         ]
 
-        await query.message.edit_text(
+        await status_msg.edit_text(
             r"*Config Saved\!*" + "\n\n"
             f"Controller `{escape_markdown_v2(config_id)}` saved successfully\\.",
             parse_mode="MarkdownV2",
@@ -817,7 +1069,7 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [InlineKeyboardButton("Try Again", callback_data="bots:gs_save")],
             [InlineKeyboardButton("Back", callback_data="bots:gs_review_back")],
         ]
-        await query.message.edit_text(
+        await status_msg.edit_text(
             format_error_message(f"Failed to save: {str(e)}"),
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -964,6 +1216,50 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             # Go back to prices step
             context.user_data["gs_wizard_step"] = "prices"
             await _update_wizard_message_for_prices_after_edit(update, context)
+
+        elif step == "edit_tp":
+            tp_input = user_input.replace("%", "").strip()
+            tp_pct = float(tp_input)
+            tp_decimal = tp_pct / 100  # Convert 0.03 -> 0.0003
+            if "triple_barrier_config" not in config:
+                config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+            config["triple_barrier_config"]["take_profit"] = tp_decimal
+            set_controller_config(context, config)
+            context.user_data["gs_wizard_step"] = "review"
+            await _update_wizard_message_for_review(update, context)
+
+        elif step == "edit_act":
+            act_input = user_input.replace("%", "").strip()
+            act_pct = float(act_input)
+            act_decimal = act_pct / 100  # Convert 1 -> 0.01
+            config["activation_bounds"] = act_decimal
+            set_controller_config(context, config)
+            context.user_data["gs_wizard_step"] = "review"
+            await _update_wizard_message_for_review(update, context)
+
+        elif step == "edit_max_orders":
+            config["max_open_orders"] = int(user_input)
+            set_controller_config(context, config)
+            context.user_data["gs_wizard_step"] = "review"
+            await _update_wizard_message_for_review(update, context)
+
+        elif step == "edit_batch":
+            config["max_orders_per_batch"] = int(user_input)
+            set_controller_config(context, config)
+            context.user_data["gs_wizard_step"] = "review"
+            await _update_wizard_message_for_review(update, context)
+
+        elif step == "edit_min_amt":
+            config["min_order_amount_quote"] = float(user_input)
+            set_controller_config(context, config)
+            context.user_data["gs_wizard_step"] = "review"
+            await _update_wizard_message_for_review(update, context)
+
+        elif step == "edit_spread":
+            config["min_spread_between_orders"] = float(user_input)
+            set_controller_config(context, config)
+            context.user_data["gs_wizard_step"] = "review"
+            await _update_wizard_message_for_review(update, context)
 
     except ValueError:
         # Send error and let user try again
