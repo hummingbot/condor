@@ -77,6 +77,8 @@ from .pools import (
     handle_pool_list_back,
     handle_pool_detail_refresh,
     handle_plot_liquidity,
+    handle_pool_ohlcv,
+    handle_pool_combined_chart,
     handle_manage_positions,
     handle_pos_view,
     handle_pos_collect_fees,
@@ -124,6 +126,8 @@ from .geckoterminal import (
     show_pool_detail,
     show_ohlcv_chart,
     show_recent_trades,
+    show_gecko_liquidity,
+    show_gecko_combined,
     handle_copy_address,
     handle_back_to_list,
 )
@@ -363,12 +367,25 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action.startswith("gecko_ohlcv:"):
             timeframe = action.split(":")[1]
             await show_ohlcv_chart(update, context, timeframe)
+        elif action == "gecko_liquidity":
+            await show_gecko_liquidity(update, context)
+        elif action.startswith("gecko_combined:"):
+            timeframe = action.split(":")[1]
+            await show_gecko_combined(update, context, timeframe)
         elif action == "gecko_trades":
             await show_recent_trades(update, context)
         elif action == "gecko_copy_addr":
             await handle_copy_address(update, context)
         elif action == "gecko_back_to_list":
             await handle_back_to_list(update, context)
+
+        # Pool OHLCV and combined chart handlers (for Meteora/CLMM pools)
+        elif action.startswith("pool_ohlcv:"):
+            timeframe = action.split(":")[1]
+            await handle_pool_ohlcv(update, context, timeframe)
+        elif action.startswith("pool_combined:"):
+            timeframe = action.split(":")[1]
+            await handle_pool_combined_chart(update, context, timeframe)
 
         # Refresh data
         elif action == "refresh":

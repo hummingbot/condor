@@ -397,17 +397,26 @@ def format_trading_rules_info(
     min_price_inc = rules.get("min_price_increment", 0)
     min_base_inc = rules.get("min_base_amount_increment", 0)
 
-    lines = []
+    items = []
     if min_order > 0:
-        lines.append(f"Min size: {min_order}")
+        items.append(f"Min size: {min_order}")
     if min_notional > 0:
-        lines.append(f"Min value: ${min_notional}")
+        items.append(f"Min value: ${min_notional}")
     if min_price_inc > 0:
-        lines.append(f"Price tick: {min_price_inc}")
+        items.append(f"Price tick: {min_price_inc}")
     if min_base_inc > 0:
-        lines.append(f"Size tick: {min_base_inc}")
+        items.append(f"Size tick: {min_base_inc}")
 
-    return " | ".join(lines) if lines else ""
+    if not items:
+        return ""
+
+    # Format in pairs (two per line) for better readability
+    lines = []
+    for i in range(0, len(items), 2):
+        pair = items[i:i+2]
+        lines.append(" │ ".join(pair))
+
+    return "\n".join(lines)
 
 
 # ============================================

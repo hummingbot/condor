@@ -247,7 +247,7 @@ class BackgroundRefreshManager:
     async def _refresh_loop(self, user_id: int, user_data: dict) -> None:
         """Background loop that refreshes data until inactivity timeout."""
         try:
-            client = await get_gateway_client()
+            client = await get_client()
         except Exception as e:
             logger.warning(f"Background refresh: couldn't get client: {e}")
             return
@@ -310,34 +310,7 @@ def with_background_refresh(func: Callable) -> Callable:
 # SERVER CLIENT HELPERS
 # ============================================
 
-async def get_gateway_client():
-    """Get the gateway client from the default server
-
-    Returns:
-        Client instance with gateway_swap and gateway_clmm attributes
-
-    Raises:
-        ValueError: If no enabled servers or gateway not available
-    """
-    from servers import server_manager
-
-    servers = server_manager.list_servers()
-    enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
-
-    if not enabled_servers:
-        raise ValueError("No enabled API servers available")
-
-    # Use default server if set, otherwise fall back to first enabled
-    default_server = server_manager.get_default_server()
-    if default_server and default_server in enabled_servers:
-        server_name = default_server
-    else:
-        server_name = enabled_servers[0]
-
-    logger.info(f"DEX using server: {server_name} (default: {default_server}, enabled: {enabled_servers})")
-    client = await server_manager.get_client(server_name)
-
-    return client
+from servers import get_client
 
 
 # ============================================

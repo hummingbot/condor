@@ -96,6 +96,8 @@ GRID_STRIKE_FIELDS = {
     "end_price": {"label": "End Price", "type": "float", "required": True, "hint": "Auto: +2% from current"},
     "limit_price": {"label": "Limit Price", "type": "float", "required": True, "hint": "Auto: -3% LONG, +3% SHORT"},
     "max_open_orders": {"label": "Max Open Orders", "type": "int", "required": False, "hint": "Default: 3"},
+    "max_orders_per_batch": {"label": "Max Orders/Batch", "type": "int", "required": False, "hint": "Default: 1"},
+    "min_order_amount_quote": {"label": "Min Order Amount", "type": "float", "required": False, "hint": "Default: 6"},
     "min_spread_between_orders": {"label": "Min Spread", "type": "float", "required": False, "hint": "Default: 0.0002"},
     "take_profit": {"label": "Take Profit", "type": "float", "required": False, "hint": "Default: 0.0001"},
     "keep_position": {"label": "Keep Position", "type": "bool", "required": False, "hint": "Keep position open after grid completion"},
@@ -106,8 +108,8 @@ GRID_STRIKE_FIELDS = {
 GRID_STRIKE_FIELD_ORDER = [
     "id", "connector_name", "trading_pair", "side", "leverage",
     "total_amount_quote", "start_price", "end_price", "limit_price",
-    "max_open_orders", "min_spread_between_orders", "take_profit",
-    "keep_position", "activation_bounds"
+    "max_open_orders", "max_orders_per_batch", "min_order_amount_quote",
+    "min_spread_between_orders", "take_profit", "keep_position", "activation_bounds"
 ]
 
 

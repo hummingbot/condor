@@ -69,6 +69,13 @@ from .controllers import (
     handle_gs_accept_prices,
     handle_gs_wizard_take_profit,
     handle_gs_edit_id,
+    handle_gs_edit_keep,
+    handle_gs_edit_tp,
+    handle_gs_edit_act,
+    handle_gs_edit_max_orders,
+    handle_gs_edit_batch,
+    handle_gs_edit_min_amt,
+    handle_gs_edit_spread,
     handle_gs_save,
     handle_gs_review_back,
     handle_gs_edit_price,
@@ -269,6 +276,27 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "gs_edit_id":
             await handle_gs_edit_id(update, context)
+
+        elif main_action == "gs_edit_keep":
+            await handle_gs_edit_keep(update, context)
+
+        elif main_action == "gs_edit_tp":
+            await handle_gs_edit_tp(update, context)
+
+        elif main_action == "gs_edit_act":
+            await handle_gs_edit_act(update, context)
+
+        elif main_action == "gs_edit_max_orders":
+            await handle_gs_edit_max_orders(update, context)
+
+        elif main_action == "gs_edit_batch":
+            await handle_gs_edit_batch(update, context)
+
+        elif main_action == "gs_edit_min_amt":
+            await handle_gs_edit_min_amt(update, context)
+
+        elif main_action == "gs_edit_spread":
+            await handle_gs_edit_spread(update, context)
 
         elif main_action == "gs_save":
             await handle_gs_save(update, context)

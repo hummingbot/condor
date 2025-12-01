@@ -279,6 +279,20 @@ class ServerManager:
 server_manager = ServerManager()
 
 
+async def get_client():
+    """Get the API client for the default server.
+
+    Convenience function that wraps server_manager.get_default_client().
+
+    Returns:
+        HummingbotAPIClient instance
+
+    Raises:
+        ValueError: If no servers are configured
+    """
+    return await server_manager.get_default_client()
+
+
 # Example usage
 async def main():
     """Example usage of ServerManager"""

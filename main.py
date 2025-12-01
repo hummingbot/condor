@@ -211,15 +211,32 @@ Configure your trading infrastructure and credentials\.
 }
 
 
-@restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the conversation and display the main menu."""
-    # Clear all pending input states to prevent interference
-    clear_all_input_states(context)
+    from utils.config import AUTHORIZED_USERS
 
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     username = update.effective_user.username or "No username"
+
+    # Check if user is authorized
+    if user_id not in AUTHORIZED_USERS:
+        reply_text = rf"""
+🔒 *Access Restricted*
+
+You are not authorized to use this bot\.
+
+🆔 *Your Chat Info*:
+📱 Chat ID: `{chat_id}`
+👤 User ID: `{user_id}`
+
+Share this information with the bot administrator to request access\.
+"""
+        await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
+        return
+
+    # Clear all pending input states to prevent interference
+    clear_all_input_states(context)
 
     reply_text = rf"""
 🚀 *Welcome to Condor\!* 🦅

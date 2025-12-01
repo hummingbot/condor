@@ -60,7 +60,7 @@ async def clob_trading_command(update: Update, context: ContextTypes.DEFAULT_TYP
 @restricted
 async def clob_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline button callbacks for CLOB trading operations"""
-    from .menu import show_clob_menu, handle_close
+    from .menu import show_clob_menu, handle_close, cancel_clob_loading_task
     from .place_order import (
         handle_place_order,
         handle_repeat_last,
@@ -93,6 +93,10 @@ async def clob_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         callback_parts = query.data.split(":", 1)
         action = callback_parts[1] if len(callback_parts) > 1 else query.data
+
+        # Cancel any pending menu loading task when navigating away
+        if action != "main_menu":
+            cancel_clob_loading_task(context)
 
         if action == "main_menu":
             await show_clob_menu(update, context)
