@@ -13,6 +13,7 @@ import logging
 from typing import Dict, Any, Optional, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_number
@@ -106,11 +107,15 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         full_message = header + status_message
 
         if query:
-            await query.message.edit_text(
-                full_message,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+            try:
+                await query.message.edit_text(
+                    full_message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise
         else:
             await msg.reply_text(
                 full_message,
@@ -266,11 +271,18 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.message.edit_text(
-            "\n".join(lines),
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        try:
+            await query.message.edit_text(
+                "\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                # Message content is the same, just answer the callback
+                pass
+            else:
+                raise
 
     except Exception as e:
         logger.error(f"Error showing bot detail: {e}", exc_info=True)
