@@ -220,7 +220,7 @@ async def fetch_liquidity_bins(
         pool_info = await client.gateway_clmm.get_pool_info(
             connector=connector,
             network=network,
-            address=pool_address
+            pool_address=pool_address
         )
 
         if not pool_info:
