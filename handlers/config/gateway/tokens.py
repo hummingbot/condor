@@ -91,9 +91,37 @@ async def handle_token_action(query, context: ContextTypes.DEFAULT_TYPE) -> None
         network_id = action_data.replace("add_", "")
         await prompt_add_token(query, context, network_id)
     elif action_data.startswith("remove_"):
-        # Show tokens to remove from network
+        # Show token list to manage (edit/remove)
         network_id = action_data.replace("remove_", "")
         await prompt_remove_token(query, context, network_id)
+    elif action_data.startswith("select_"):
+        # Show options for selected token
+        try:
+            token_idx = int(action_data.replace("select_", ""))
+            await show_token_options(query, context, token_idx)
+        except ValueError:
+            await query.answer("❌ Invalid token")
+    elif action_data.startswith("edit_"):
+        # Edit selected token
+        try:
+            token_idx = int(action_data.replace("edit_", ""))
+            await prompt_edit_token(query, context, token_idx)
+        except ValueError:
+            await query.answer("❌ Invalid token")
+    elif action_data.startswith("del_"):
+        # Delete selected token (show confirmation)
+        try:
+            token_idx = int(action_data.replace("del_", ""))
+            tokens = context.user_data.get('token_manage_list', [])
+            network_id = context.user_data.get('token_manage_network')
+            if tokens and token_idx < len(tokens) and network_id:
+                token = tokens[token_idx]
+                token_address = token.get('address', '')
+                await show_delete_token_confirmation(query, context, network_id, token_address)
+            else:
+                await query.answer("❌ Token not found")
+        except ValueError:
+            await query.answer("❌ Invalid token")
     elif action_data == "confirm_remove":
         # Get token info from user_data (stored to avoid 64-byte callback limit)
         pending_delete = context.user_data.get('pending_token_delete')
@@ -108,12 +136,26 @@ async def handle_token_action(query, context: ContextTypes.DEFAULT_TYPE) -> None
         # Back to viewing tokens for network
         network_id = action_data.replace("view_", "")
         await show_network_tokens(query, context, network_id)
+    elif action_data.startswith("page_"):
+        # Handle pagination
+        try:
+            page = int(action_data.replace("page_", ""))
+            network_id = context.user_data.get('token_view_network')
+            if network_id:
+                await show_network_tokens(query, context, network_id, page=page)
+            else:
+                await query.answer("❌ Network not found")
+        except ValueError:
+            await query.answer("❌ Invalid page")
     else:
         await query.answer("Unknown action")
 
 
-async def show_network_tokens(query, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
-    """Show tokens for a specific network"""
+async def show_network_tokens(query, context: ContextTypes.DEFAULT_TYPE, network_id: str, page: int = 0) -> None:
+    """Show tokens for a specific network with button grid and pagination"""
+    TOKENS_PER_PAGE = 16
+    COLUMNS = 4
+
     try:
         from servers import server_manager
 
@@ -147,41 +189,65 @@ async def show_network_tokens(query, context: ContextTypes.DEFAULT_TYPE, network
                 [InlineKeyboardButton("« Back", callback_data="gateway_tokens")]
             ]
         else:
-            # Display first 15 tokens
-            token_lines = []
-            for idx, token in enumerate(tokens[:15], 1):
-                symbol = token.get('symbol', 'N/A')
-                name = token.get('name', '')
-                decimals = token.get('decimals', 'N/A')
-                symbol_escaped = escape_markdown_v2(str(symbol))
-                name_escaped = escape_markdown_v2(str(name)) if name else ""
-                decimals_escaped = escape_markdown_v2(str(decimals))
+            # Store all tokens for selection
+            context.user_data['token_manage_list'] = tokens
+            context.user_data['token_manage_network'] = network_id
+            context.user_data['token_view_page'] = page
 
-                if name:
-                    token_lines.append(f"{idx}\\. *{symbol_escaped}* \\({name_escaped}\\) \\- {decimals_escaped} decimals")
-                else:
-                    token_lines.append(f"{idx}\\. *{symbol_escaped}* \\- {decimals_escaped} decimals")
+            # Calculate pagination
+            total_tokens = len(tokens)
+            total_pages = (total_tokens + TOKENS_PER_PAGE - 1) // TOKENS_PER_PAGE
+            page = max(0, min(page, total_pages - 1))  # Clamp page to valid range
 
-            tokens_text = "\n".join(token_lines)
-            token_count = escape_markdown_v2(str(len(tokens)))
+            start_idx = page * TOKENS_PER_PAGE
+            end_idx = min(start_idx + TOKENS_PER_PAGE, total_tokens)
+            page_tokens = tokens[start_idx:end_idx]
 
+            # Build page indicator
+            if total_pages > 1:
+                page_indicator = f" \\[{page + 1}/{total_pages}\\]"
+            else:
+                page_indicator = ""
+
+            token_count = escape_markdown_v2(str(total_tokens))
             message_text = (
-                f"🪙 *{network_escaped}*\n\n"
-                f"*Tokens* \\({token_count} total\\):\n"
-                f"{tokens_text}\n\n"
-                "_Manage custom tokens:_"
+                f"🪙 *{network_escaped}*{page_indicator}\n\n"
+                f"*Tokens* \\({token_count} total\\)\n"
+                "_Select a token to edit or remove:_"
             )
 
-            keyboard = [
-                [
-                    InlineKeyboardButton("➕ Add Token", callback_data=f"gateway_token_add_{network_id}"),
-                    InlineKeyboardButton("➖ Remove Token", callback_data=f"gateway_token_remove_{network_id}")
-                ],
-                [
-                    InlineKeyboardButton("🔄 Refresh", callback_data=f"gateway_token_view_{network_id}"),
-                    InlineKeyboardButton("« Back", callback_data="gateway_tokens")
-                ]
-            ]
+            # Build token buttons in grid (4 columns)
+            keyboard = []
+            row = []
+            for idx, token in enumerate(page_tokens):
+                global_idx = start_idx + idx
+                symbol = token.get('symbol', '?')[:6]  # Truncate long symbols
+                row.append(InlineKeyboardButton(symbol, callback_data=f"gateway_token_select_{global_idx}"))
+
+                if len(row) == COLUMNS:
+                    keyboard.append(row)
+                    row = []
+
+            # Add remaining buttons if any
+            if row:
+                keyboard.append(row)
+
+            # Add pagination buttons if needed
+            if total_pages > 1:
+                nav_buttons = []
+                if page > 0:
+                    nav_buttons.append(InlineKeyboardButton("« Prev", callback_data=f"gateway_token_page_{page - 1}"))
+                if page < total_pages - 1:
+                    nav_buttons.append(InlineKeyboardButton("Next »", callback_data=f"gateway_token_page_{page + 1}"))
+                if nav_buttons:
+                    keyboard.append(nav_buttons)
+
+            # Action buttons
+            keyboard.append([
+                InlineKeyboardButton("➕ Add Token", callback_data=f"gateway_token_add_{network_id}"),
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"gateway_token_view_{network_id}")
+            ])
+            keyboard.append([InlineKeyboardButton("« Back", callback_data="gateway_tokens")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -242,28 +308,112 @@ async def prompt_add_token(query, context: ContextTypes.DEFAULT_TYPE, network_id
 
 
 async def prompt_remove_token(query, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
-    """Prompt user to enter token address to remove"""
+    """Show list of tokens to select for editing or removal"""
     try:
+        from servers import server_manager
+
+        await query.answer("Loading tokens...")
+
+        client = await server_manager.get_default_client()
+
+        # Get tokens for the network
+        try:
+            if hasattr(client.gateway, 'get_network_tokens') and callable(client.gateway.get_network_tokens):
+                response = await client.gateway.get_network_tokens(network_id)
+                tokens = response.get('tokens', []) if response else []
+            else:
+                config_response = await client.gateway.get_network_config(network_id)
+                tokens = config_response.get('tokens', []) if config_response else []
+        except Exception as e:
+            logger.warning(f"Failed to get tokens for {network_id}: {e}")
+            tokens = []
+
         network_escaped = escape_markdown_v2(network_id)
 
-        # Clear any lingering states from previous operations
-        context.user_data.pop('dex_state', None)
-        context.user_data.pop('clob_state', None)
+        if not tokens:
+            message_text = (
+                f"🪙 *Manage Tokens \\- {network_escaped}*\n\n"
+                "_No tokens found to manage\\._"
+            )
+            keyboard = [[InlineKeyboardButton("« Back", callback_data=f"gateway_token_view_{network_id}")]]
+        else:
+            # Store tokens in user_data for later retrieval
+            context.user_data['token_manage_list'] = tokens[:20]
+            context.user_data['token_manage_network'] = network_id
 
-        context.user_data['awaiting_token_input'] = 'token_address_remove'
-        context.user_data['token_network'] = network_id
-        context.user_data['token_message_id'] = query.message.message_id
-        context.user_data['token_chat_id'] = query.message.chat_id
+            # Create buttons for each token (limit to 20)
+            token_buttons = []
+            for idx, token in enumerate(tokens[:20]):
+                symbol = token.get('symbol', 'Unknown')
+                token_buttons.append([
+                    InlineKeyboardButton(f"{symbol}", callback_data=f"gateway_token_select_{idx}")
+                ])
 
-        message_text = (
-            f"➖ *Remove Token from {network_escaped}*\n\n"
-            "*Enter the token address to remove:*\n\n"
-            "*Example:*\n"
-            "`9QFfgxdSqH5zT7j6rZb1y6SZhw2aFtcQu2r6BuYpump`\n\n"
-            "⚠️ _Restart Gateway after removing for changes to take effect\\._"
+            count_escaped = escape_markdown_v2(str(len(tokens)))
+            message_text = (
+                f"🪙 *Manage Tokens \\- {network_escaped}*\n\n"
+                f"_Select a token to edit or remove \\({count_escaped} total\\):_"
+            )
+
+            keyboard = token_buttons + [
+                [InlineKeyboardButton("« Back", callback_data=f"gateway_token_view_{network_id}")]
+            ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
         )
 
-        keyboard = [[InlineKeyboardButton("« Cancel", callback_data=f"gateway_token_view_{network_id}")]]
+    except Exception as e:
+        logger.error(f"Error showing token list: {e}", exc_info=True)
+        await query.answer(f"❌ Error: {str(e)[:100]}")
+
+
+async def show_token_options(query, context: ContextTypes.DEFAULT_TYPE, token_idx: int) -> None:
+    """Show edit/remove options for a selected token"""
+    try:
+        tokens = context.user_data.get('token_manage_list', [])
+        network_id = context.user_data.get('token_manage_network')
+
+        if not tokens or token_idx >= len(tokens) or not network_id:
+            await query.answer("❌ Token not found")
+            return
+
+        token = tokens[token_idx]
+        symbol = token.get('symbol', 'Unknown')
+        name = token.get('name', '')
+        decimals = token.get('decimals', 'N/A')
+        address = token.get('address', 'N/A')
+
+        network_escaped = escape_markdown_v2(network_id)
+        symbol_escaped = escape_markdown_v2(str(symbol))
+        name_escaped = escape_markdown_v2(str(name)) if name else "_Not set_"
+        decimals_escaped = escape_markdown_v2(str(decimals))
+
+        message_text = (
+            f"🪙 *{symbol_escaped}* on {network_escaped}\n\n"
+            f"*Name:* {name_escaped}\n"
+            f"*Decimals:* {decimals_escaped}\n"
+            f"*Address:*\n`{escape_markdown_v2(address)}`\n\n"
+            "_Choose an action:_"
+        )
+
+        # Store selected token info for edit/delete operations
+        context.user_data['selected_token_idx'] = token_idx
+
+        # Get current page to return to correct page
+        current_page = context.user_data.get('token_view_page', 0)
+
+        keyboard = [
+            [
+                InlineKeyboardButton("✏️ Edit", callback_data=f"gateway_token_edit_{token_idx}"),
+                InlineKeyboardButton("🗑 Remove", callback_data=f"gateway_token_del_{token_idx}")
+            ],
+            [InlineKeyboardButton("« Back", callback_data=f"gateway_token_page_{current_page}")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
@@ -274,7 +424,65 @@ async def prompt_remove_token(query, context: ContextTypes.DEFAULT_TYPE, network
         await query.answer()
 
     except Exception as e:
-        logger.error(f"Error prompting remove token: {e}", exc_info=True)
+        logger.error(f"Error showing token options: {e}", exc_info=True)
+        await query.answer(f"❌ Error: {str(e)[:100]}")
+
+
+async def prompt_edit_token(query, context: ContextTypes.DEFAULT_TYPE, token_idx: int) -> None:
+    """Prompt user to enter new values for the token"""
+    try:
+        tokens = context.user_data.get('token_manage_list', [])
+        network_id = context.user_data.get('token_manage_network')
+
+        if not tokens or token_idx >= len(tokens) or not network_id:
+            await query.answer("❌ Token not found")
+            return
+
+        token = tokens[token_idx]
+        symbol = token.get('symbol', '')
+        name = token.get('name', '')
+        decimals = token.get('decimals', '')
+        address = token.get('address', '')
+
+        network_escaped = escape_markdown_v2(network_id)
+        symbol_escaped = escape_markdown_v2(str(symbol))
+
+        # Store edit context
+        context.user_data['awaiting_token_input'] = 'token_edit'
+        context.user_data['token_network'] = network_id
+        context.user_data['token_edit_address'] = address
+        context.user_data['token_message_id'] = query.message.message_id
+        context.user_data['token_chat_id'] = query.message.chat_id
+
+        # Show current values
+        current_values = f"{symbol},{decimals}"
+        if name:
+            current_values += f",{name}"
+
+        message_text = (
+            f"✏️ *Edit Token {symbol_escaped}*\n\n"
+            f"*Current values:*\n"
+            f"`{escape_markdown_v2(current_values)}`\n\n"
+            "*Enter new values in this format:*\n"
+            "`symbol,decimals,name`\n\n"
+            "*Example:*\n"
+            "`GOLD,9,Goldcoin`\n\n"
+            "_Leave name empty if not needed \\(e\\.g\\. `GOLD,9`\\)_\n\n"
+            "⚠️ _Restart Gateway after editing for changes to take effect\\._"
+        )
+
+        keyboard = [[InlineKeyboardButton("« Cancel", callback_data=f"gateway_token_select_{token_idx}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+        await query.answer()
+
+    except Exception as e:
+        logger.error(f"Error prompting edit token: {e}", exc_info=True)
         await query.answer(f"❌ Error: {str(e)[:100]}")
 
 
@@ -542,6 +750,108 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 answer=mock_answer
             )
             await show_delete_token_confirmation(mock_query, context, network_id, token_address)
+
+        elif awaiting_field == 'token_edit':
+            # Parse edit values: symbol,decimals,name
+            token_input = update.message.text.strip()
+            parts = [p.strip() for p in token_input.split(',')]
+
+            if len(parts) < 2:
+                await update.get_bot().send_message(
+                    chat_id=chat_id,
+                    text="❌ Invalid format. Use: symbol,decimals,name"
+                )
+                return
+
+            new_symbol = parts[0]
+            new_decimals = int(parts[1])
+            new_name = parts[2] if len(parts) > 2 else None
+
+            # Get the address we're editing
+            token_address = context.user_data.get('token_edit_address')
+
+            # Clear context
+            context.user_data.pop('awaiting_token_input', None)
+            context.user_data.pop('token_network', None)
+            context.user_data.pop('token_message_id', None)
+            context.user_data.pop('token_chat_id', None)
+            context.user_data.pop('token_edit_address', None)
+            context.user_data.pop('dex_state', None)
+
+            # Show updating message
+            network_escaped = escape_markdown_v2(network_id)
+            symbol_escaped = escape_markdown_v2(new_symbol)
+
+            if message_id and chat_id:
+                await update.get_bot().edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=f"⏳ *Updating Token {symbol_escaped}*\n\nOn {network_escaped}\n\n_Please wait\\.\\.\\._",
+                    parse_mode="MarkdownV2"
+                )
+
+            try:
+                client = await server_manager.get_default_client()
+
+                # Delete old token first, then add with new values
+                await client.gateway.delete_token(network_id=network_id, token_address=token_address)
+                await client.gateway.add_token(
+                    network_id=network_id,
+                    address=token_address,
+                    symbol=new_symbol,
+                    decimals=new_decimals,
+                    name=new_name
+                )
+
+                success_text = (
+                    f"✅ *Token Updated Successfully*\n\n"
+                    f"*{symbol_escaped}* updated on {network_escaped}\n\n"
+                    "⚠️ _Restart Gateway for changes to take effect\\._"
+                )
+
+                if message_id and chat_id:
+                    await update.get_bot().edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=success_text,
+                        parse_mode="MarkdownV2"
+                    )
+
+                # Wait then refresh
+                import asyncio
+                await asyncio.sleep(2)
+
+                async def mock_answer(text=""):
+                    """Mock async answer method"""
+                    pass
+
+                mock_message = SimpleNamespace(
+                    edit_text=lambda text, parse_mode=None, reply_markup=None: update.get_bot().edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                        reply_markup=reply_markup
+                    ),
+                    chat_id=chat_id,
+                    message_id=message_id
+                )
+                mock_query = SimpleNamespace(
+                    message=mock_message,
+                    answer=mock_answer
+                )
+                await show_network_tokens(mock_query, context, network_id)
+
+            except Exception as e:
+                logger.error(f"Error updating token: {e}", exc_info=True)
+                error_text = f"❌ Error updating token: {escape_markdown_v2(str(e))}"
+                if message_id and chat_id:
+                    await update.get_bot().edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=error_text,
+                        parse_mode="MarkdownV2"
+                    )
 
     except Exception as e:
         logger.error(f"Error handling token input: {e}", exc_info=True)
