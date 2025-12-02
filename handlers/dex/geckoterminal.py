@@ -1127,13 +1127,15 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         await query.message.chat.send_message(
             "\n".join(lines),
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
         )
     else:
         await query.message.edit_text(
             "\n".join(lines),
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
         )
 
 
