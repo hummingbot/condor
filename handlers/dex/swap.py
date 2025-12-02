@@ -29,6 +29,13 @@ from ._shared import (
     get_explorer_url,
     format_relative_time,
     _format_amount,
+    get_history_filters,
+    set_history_filters,
+    HistoryFilters,
+    build_filter_buttons,
+    build_pagination_buttons,
+    build_filter_selection_keyboard,
+    HISTORY_FILTERS,
 )
 
 logger = logging.getLogger(__name__)
@@ -228,6 +235,18 @@ async def handle_swap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await show_swap_menu(update, context)
 
 
+async def handle_swap_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle swap refresh - clear cache and reload"""
+    query = update.callback_query
+    if query:
+        await query.answer("Refreshing...")
+
+    # Invalidate swap caches
+    invalidate_cache(context.user_data, "swaps")
+
+    await handle_swap(update, context)
+
+
 async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, send_new: bool = False, quote_result: dict = None) -> None:
     """Display the unified swap menu with balances and recent swaps
 
@@ -290,26 +309,31 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
     if quote_result:
         help_text += r"━━━ Quote ━━━" + "\n"
         pair = quote_result.get("trading_pair", trading_pair)
-        amount_str = quote_result.get("amount", params.get("amount", "1"))
+        amount_requested = quote_result.get("amount", params.get("amount", "1"))
 
-        # Show BUY quote (price = base/quote, display as quote/base = 1/price)
+        buy_price = None
+        sell_price = None
+
+        # API returns normalized price (quote per base) for both BUY and SELL
+        # BUY: amount_in=quote paid, amount_out=base received, price=quote/base
+        # SELL: amount_in=base sold, amount_out=quote received, price=quote/base
         buy_data = quote_result.get("buy")
         if buy_data and buy_data.get("price"):
-            raw_price = float(buy_data["price"])
-            display_price = 1 / raw_price if raw_price > 0 else 0
-            buy_price_str = _format_number(display_price, 4)
-            help_text += f"`{escape_markdown_v2(pair)} BUY {escape_markdown_v2(str(amount_str))} @{escape_markdown_v2(buy_price_str)}`\n"
+            buy_price = float(buy_data["price"])
+            amount_in = buy_data.get("amount_in", "?")
+            help_text += f"`BUY {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_in, 4)} {escape_markdown_v2(quote_token)} @{_format_number(buy_price, 4)}`\n"
 
-        # Show SELL quote (price = quote/base, display as-is)
         sell_data = quote_result.get("sell")
         if sell_data and sell_data.get("price"):
-            sell_price_str = _format_number(sell_data["price"], 4)
-            help_text += f"`{escape_markdown_v2(pair)} SELL {escape_markdown_v2(str(amount_str))} @{escape_markdown_v2(sell_price_str)}`\n"
+            sell_price = float(sell_data["price"])
+            amount_out = sell_data.get("amount_out", "?")
+            help_text += f"`SELL {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_out, 4)} {escape_markdown_v2(quote_token)} @{_format_number(sell_price, 4)}`\n"
 
-        # Show spread if available
-        if "spread_pct" in quote_result:
-            spread = quote_result["spread_pct"]
-            spread_str = f"{spread:.2f}%"
+        # Show spread if we have both prices
+        if buy_price and sell_price:
+            midpoint = (buy_price + sell_price) / 2
+            spread_pct = abs(buy_price - sell_price) / midpoint * 100 if midpoint else 0
+            spread_str = f"{spread_pct:.2f}%"
             help_text += f"📊 Spread: `{escape_markdown_v2(spread_str)}`\n"
 
         help_text += "\n"
@@ -337,19 +361,19 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
     except Exception as e:
         logger.warning(f"Could not fetch recent swaps: {e}")
 
-    # Build keyboard - compact layout
+    # Build keyboard - 3 column layout
     keyboard = [
         [
-            InlineKeyboardButton(
-                f"🔌 {params.get('connector', 'jupiter')}",
-                callback_data="dex:swap_set_connector"
-            ),
             InlineKeyboardButton(
                 f"🌐 {params.get('network', 'solana-mainnet-beta')}",
                 callback_data="dex:swap_set_network"
             )
         ],
         [
+            InlineKeyboardButton(
+                f"🔌 {params.get('connector', 'jupiter')}",
+                callback_data="dex:swap_set_connector"
+            ),
             InlineKeyboardButton(
                 f"💱 {params.get('trading_pair', 'SOL-USDC')}",
                 callback_data="dex:swap_set_pair"
@@ -367,13 +391,11 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
             InlineKeyboardButton(
                 f"📊 {params.get('slippage', '1.0')}%",
                 callback_data="dex:swap_set_slippage"
-            )
-        ],
-        [
-            InlineKeyboardButton("💰 Quote", callback_data="dex:swap_get_quote"),
+            ),
             InlineKeyboardButton("✅ Execute", callback_data="dex:swap_execute_confirm")
         ],
         [
+            InlineKeyboardButton("📋 Quote", callback_data="dex:swap_get_quote"),
             InlineKeyboardButton("🔍 History", callback_data="dex:swap_history"),
             InlineKeyboardButton("« Back", callback_data="dex:main_menu")
         ]
@@ -686,23 +708,6 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
             "sell": sell_result if isinstance(sell_result, dict) else None,
         }
 
-        # Calculate spread if we have both quotes
-        if buy_result and sell_result:
-            raw_buy = buy_result.get("price", 0)
-            raw_sell = sell_result.get("price", 0)
-            if raw_buy and raw_sell:
-                # Normalize prices to "quote per base" for comparison
-                # BUY: raw = base/quote, display = 1/raw = quote/base
-                # SELL: raw = quote/base, display = raw
-                buy_display = 1 / raw_buy if raw_buy > 0 else 0
-                sell_display = raw_sell
-                # Spread = (buy_price - sell_price) / midpoint * 100
-                # Higher buy price means you pay more to buy, lower sell means you get less selling
-                if buy_display and sell_display:
-                    midpoint = (buy_display + sell_display) / 2
-                    spread_pct = abs(buy_display - sell_display) / midpoint * 100 if midpoint else 0
-                    quote_data["spread_pct"] = spread_pct
-
         # Save params
         set_dex_last_swap(context.user_data, {
             "connector": connector,
@@ -862,9 +867,81 @@ async def process_swap_status(
         await update.message.reply_text(error_message, parse_mode="MarkdownV2")
 
 
-async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show full swap history"""
+def _format_detailed_swap_line(swap: dict) -> str:
+    """Format a swap with detailed info for history view
+
+    Shows:
+    - Status emoji, pair, side
+    - Input/Output amounts
+    - Price
+    - Connector, network, time
+    - Explorer link
+
+    Returns formatted line (not escaped)
+    """
+    pair = swap.get('trading_pair', 'N/A')
+    side = swap.get('side', '?')
+    status = swap.get('status', 'UNKNOWN')
+    network = swap.get('network', '')
+    tx_hash = swap.get('transaction_hash', '')
+    connector = swap.get('connector', '')
+    timestamp = swap.get('timestamp', '')
+
+    # Status emoji
+    status_emoji = "✅" if status == "CONFIRMED" else "⏳" if status == "PENDING" else "❌"
+
+    # Get amounts and tokens
+    input_amount = swap.get('input_amount')
+    output_amount = swap.get('output_amount')
+    base_token = swap.get('base_token', '')
+    quote_token = swap.get('quote_token', '')
+    price = swap.get('price')
+
+    # Build lines
+    lines = [f"{status_emoji} {pair} {side}"]
+
+    # Input/Output
+    if side == 'BUY':
+        if input_amount is not None and quote_token:
+            lines.append(f"   In: {_format_number(input_amount)} {quote_token}")
+        if output_amount is not None and base_token:
+            lines.append(f"   Out: {_format_number(output_amount)} {base_token}")
+    else:
+        if input_amount is not None and base_token:
+            lines.append(f"   In: {_format_number(input_amount)} {base_token}")
+        if output_amount is not None and quote_token:
+            lines.append(f"   Out: {_format_number(output_amount)} {quote_token}")
+
+    # Price
+    if price is not None and price > 0:
+        if side == 'BUY':
+            display_price = 1 / price
+        else:
+            display_price = price
+        lines.append(f"   Price: {_format_number(display_price, 4)} {quote_token}/{base_token}")
+
+    # Metadata
+    meta_parts = []
+    if connector:
+        meta_parts.append(connector)
+    age = format_relative_time(timestamp)
+    if age:
+        meta_parts.append(f"{age} ago")
+    if meta_parts:
+        lines.append(f"   {' | '.join(meta_parts)}")
+
+    return "\n".join(lines)
+
+
+async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE, reset_filters: bool = False) -> None:
+    """Show swap history with filters and pagination"""
     try:
+        # Get or initialize filters
+        if reset_filters:
+            filters = HistoryFilters(history_type="swap")
+        else:
+            filters = get_history_filters(context.user_data, "swap")
+
         client = await get_client()
 
         if not hasattr(client, 'gateway_swap'):
@@ -872,13 +949,34 @@ async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
             return
 
-        result = await client.gateway_swap.search_swaps(limit=10)
+        # Build search params from filters
+        search_params = {
+            "limit": filters.limit,
+            "offset": filters.offset,
+        }
+        if filters.trading_pair:
+            search_params["trading_pair"] = filters.trading_pair
+        if filters.connector:
+            search_params["connector"] = filters.connector
+        if filters.status:
+            search_params["status"] = filters.status
+
+        result = await client.gateway_swap.search_swaps(**search_params)
         swaps = result.get("data", [])
         pagination = result.get("pagination", {})
+        total_count = pagination.get("total_count", len(swaps))
 
-        if not swaps:
-            message = r"🔍 *Swap History*" + "\n\n" + r"No swaps found\."
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
+        # Update filters with total count
+        filters.total_count = total_count
+        set_history_filters(context.user_data, filters)
+
+        if not swaps and filters.offset == 0:
+            message = r"🔍 *Swap History*" + "\n\n" + r"_No swaps found with current filters\._"
+
+            # Build keyboard with filters
+            keyboard = build_filter_buttons(filters, "dex:swap_hist")
+            keyboard.append([InlineKeyboardButton("🔄 Clear Filters", callback_data="dex:swap_hist_clear")])
+            keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:swap_refresh")])
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.callback_query.message.edit_text(
@@ -888,14 +986,53 @@ async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
 
-        total_count = pagination.get("total_count", len(swaps))
-        message = rf"🔍 *Swap History* \({len(swaps)}/{total_count}\)" + "\n\n"
+        # Build header with filter summary
+        filter_parts = []
+        if filters.trading_pair:
+            filter_parts.append(filters.trading_pair)
+        if filters.connector:
+            filter_parts.append(filters.connector)
+        if filters.status:
+            filter_parts.append(filters.status)
+
+        if filter_parts:
+            filter_summary = escape_markdown_v2(f" [{', '.join(filter_parts)}]")
+        else:
+            filter_summary = ""
+
+        message = rf"🔍 *Swap History*{filter_summary}" + "\n"
+        message += rf"_Showing {len(swaps)} of {total_count}_" + "\n\n"
 
         for swap in swaps:
-            line = _format_compact_swap_line(swap)
-            message += line + "\n"
+            line = _format_detailed_swap_line(swap)
+            escaped_line = escape_markdown_v2(line)
 
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
+            # Add explorer link if available
+            tx_hash = swap.get('transaction_hash', '')
+            network = swap.get('network', '')
+            if tx_hash and network:
+                explorer_url = get_explorer_url(tx_hash, network)
+                if explorer_url:
+                    escaped_url = explorer_url.replace("_", "\\_").replace("*", "\\*")
+                    escaped_url = escaped_url.replace("[", "\\[").replace("]", "\\]")
+                    escaped_url = escaped_url.replace("(", "\\(").replace(")", "\\)")
+                    escaped_line += f" [🔗]({escaped_url})"
+
+            message += escaped_line + "\n\n"
+
+        # Build keyboard
+        keyboard = build_filter_buttons(filters, "dex:swap_hist")
+
+        # Pagination row
+        if total_count > filters.limit:
+            keyboard.append(build_pagination_buttons(filters, "dex:swap_hist"))
+
+        # Action buttons - use swap_refresh to ensure fresh data when going back
+        keyboard.append([
+            InlineKeyboardButton("🔄 Clear Filters", callback_data="dex:swap_hist_clear"),
+            InlineKeyboardButton("« Back", callback_data="dex:swap_refresh")
+        ])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
@@ -909,6 +1046,115 @@ async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Error fetching history: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to fetch history: {str(e)}")
         await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+
+
+# ============================================
+# SWAP HISTORY FILTER HANDLERS
+# ============================================
+
+async def handle_swap_hist_filter_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show trading pair filter options"""
+    filters = get_history_filters(context.user_data, "swap")
+    options = HISTORY_FILTERS["swap"]["trading_pair"]
+
+    message = r"💱 *Filter by Trading Pair*"
+    reply_markup = build_filter_selection_keyboard(
+        options,
+        filters.trading_pair,
+        "dex:swap_hist_set_pair",
+        "dex:swap_history"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_swap_hist_filter_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show connector filter options"""
+    filters = get_history_filters(context.user_data, "swap")
+    options = HISTORY_FILTERS["swap"]["connector"]
+
+    message = r"🔌 *Filter by DEX/Connector*"
+    reply_markup = build_filter_selection_keyboard(
+        options,
+        filters.connector,
+        "dex:swap_hist_set_connector",
+        "dex:swap_history"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_swap_hist_filter_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show status filter options"""
+    filters = get_history_filters(context.user_data, "swap")
+    options = HISTORY_FILTERS["swap"]["status"]
+
+    message = r"📊 *Filter by Status*"
+    reply_markup = build_filter_selection_keyboard(
+        options,
+        filters.status,
+        "dex:swap_hist_set_status",
+        "dex:swap_history"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_swap_hist_set_filter(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    filter_type: str,
+    value: str
+) -> None:
+    """Set a filter value and refresh history"""
+    filters = get_history_filters(context.user_data, "swap")
+
+    # Convert empty string to None (for "All" option)
+    actual_value = value if value else None
+
+    if filter_type == "pair":
+        filters.trading_pair = actual_value
+    elif filter_type == "connector":
+        filters.connector = actual_value
+    elif filter_type == "status":
+        filters.status = actual_value
+
+    # Reset pagination when filter changes
+    filters.reset_pagination()
+    set_history_filters(context.user_data, filters)
+
+    # Refresh history view
+    await handle_swap_history(update, context)
+
+
+async def handle_swap_hist_page(update: Update, context: ContextTypes.DEFAULT_TYPE, direction: str) -> None:
+    """Handle pagination for swap history"""
+    filters = get_history_filters(context.user_data, "swap")
+
+    if direction == "next" and filters.has_next:
+        filters.offset += filters.limit
+    elif direction == "prev" and filters.has_prev:
+        filters.offset -= filters.limit
+
+    set_history_filters(context.user_data, filters)
+    await handle_swap_history(update, context)
+
+
+async def handle_swap_hist_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all filters and refresh"""
+    await handle_swap_history(update, context, reset_filters=True)
 
 
 # ============================================
