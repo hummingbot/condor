@@ -221,19 +221,8 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
             if shown == 0:
                 help_text += r"_No balances found_" + "\n"
 
-            # Fetch and display trading rules for the selected pair
-            trading_rules = await get_trading_rules(
-                context.user_data,
-                client,
-                connector_name
-            )
-
-            rules_info = format_trading_rules_info(trading_rules, trading_pair)
-            if rules_info:
-                help_text += f"\n📏 *{escape_markdown_v2(trading_pair)} Rules:*\n"
-                help_text += f"```\n{rules_info}\n```\n"
-
-            # Fetch and display current market price
+            # Fetch current market price
+            current_price = None
             try:
                 prices = await client.market_data.get_prices(
                     connector_name=connector_name,
@@ -241,12 +230,22 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 current_price = prices["prices"].get(trading_pair)
                 if current_price:
-                    price_display = _format_price(current_price)
-                    help_text += f"💵 *Current Price:* `{escape_markdown_v2(price_display)}`\n"
                     # Store for use in examples
                     context.user_data["current_market_price"] = current_price
             except Exception as e:
                 logger.debug(f"Could not fetch current price: {e}")
+
+            # Fetch and display trading rules (with price included)
+            trading_rules = await get_trading_rules(
+                context.user_data,
+                client,
+                connector_name
+            )
+
+            rules_info = format_trading_rules_info(trading_rules, trading_pair, current_price)
+            if rules_info:
+                help_text += f"\n📏 *{escape_markdown_v2(trading_pair)}:*\n"
+                help_text += f"```\n{rules_info}\n```\n"
 
             # Show positions for perpetual exchanges
             if "perpetual" in connector_name.lower():
@@ -996,14 +995,8 @@ async def _update_order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if shown == 0:
                 help_text += r"_No balances found_" + "\n"
 
-            # Trading rules
-            trading_rules = await get_trading_rules(context.user_data, client, connector_name)
-            rules_info = format_trading_rules_info(trading_rules, trading_pair)
-            if rules_info:
-                help_text += f"\n📏 *{escape_markdown_v2(trading_pair)} Rules:*\n"
-                help_text += f"```\n{rules_info}\n```\n"
-
-            # Fetch and display current market price
+            # Fetch current market price
+            current_price = None
             try:
                 prices = await client.market_data.get_prices(
                     connector_name=connector_name,
@@ -1011,11 +1004,16 @@ async def _update_order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 current_price = prices["prices"].get(trading_pair)
                 if current_price:
-                    price_display = _format_price(current_price)
-                    help_text += f"💵 *Current Price:* `{escape_markdown_v2(price_display)}`\n"
                     context.user_data["current_market_price"] = current_price
             except Exception as e:
                 logger.debug(f"Could not fetch current price: {e}")
+
+            # Trading rules (with price included)
+            trading_rules = await get_trading_rules(context.user_data, client, connector_name)
+            rules_info = format_trading_rules_info(trading_rules, trading_pair, current_price)
+            if rules_info:
+                help_text += f"\n📏 *{escape_markdown_v2(trading_pair)}:*\n"
+                help_text += f"```\n{rules_info}\n```\n"
 
             # Positions for perpetual exchanges
             if "perpetual" in connector_name.lower():

@@ -66,12 +66,21 @@ def clear_cache(user_data: dict, key: Optional[str] = None) -> None:
 
     Args:
         user_data: context.user_data dict
-        key: Specific key to clear, or None to clear all
+        key: Specific key/prefix to clear, or None to clear all.
+              If key ends with '*', clears all keys starting with that prefix.
+              Otherwise clears exact key match.
     """
     if key is None:
         user_data.pop("_clob_cache", None)
     elif "_clob_cache" in user_data:
-        user_data["_clob_cache"].pop(key, None)
+        if key.endswith("*"):
+            # Prefix-based clearing
+            prefix = key[:-1]
+            keys_to_clear = [k for k in user_data["_clob_cache"] if k.startswith(prefix)]
+            for k in keys_to_clear:
+                user_data["_clob_cache"].pop(k, None)
+        else:
+            user_data["_clob_cache"].pop(key, None)
 
 
 async def cached_call(
@@ -115,11 +124,12 @@ async def cached_call(
 # ============================================
 
 # Define which cache keys should be invalidated together
+# Use '*' suffix for prefix-based clearing (e.g., "cex_balances_*" clears all account balances)
 CACHE_GROUPS = {
-    "balances": ["cex_balances", "connector_balances"],
-    "orders": ["active_orders", "order_history"],
-    "positions": ["perpetual_positions"],
-    "trading_rules": ["trading_rules"],
+    "balances": ["cex_balances_*", "connector_balances_*"],
+    "orders": ["active_orders_*", "order_history_*"],
+    "positions": ["positions_*"],
+    "trading_rules": ["trading_rules_*"],
     "all": None,  # Special: clears entire cache
 }
 
@@ -436,27 +446,19 @@ def validate_order_against_rules(
 
 def format_trading_rules_info(
     trading_rules: Dict[str, Dict[str, Any]],
-    trading_pair: str
+    trading_pair: str,
+    current_price: float = None
 ) -> str:
     """Format trading rules for display.
 
     Args:
         trading_rules: Dict of trading_pair -> rules
         trading_pair: Trading pair to format
+        current_price: Optional current market price to include
 
     Returns:
         Formatted string with rule info
     """
-    if trading_pair not in trading_rules:
-        return ""
-
-    rules = trading_rules[trading_pair]
-
-    min_order = rules.get("min_order_size", 0)
-    min_notional = rules.get("min_notional_size", 0)
-    min_price_inc = rules.get("min_price_increment", 0)
-    min_base_inc = rules.get("min_base_amount_increment", 0)
-
     def fmt_num(n):
         """Format number, removing unnecessary trailing zeros"""
         if n == int(n):
@@ -465,22 +467,44 @@ def format_trading_rules_info(
         s = f"{n:.8f}".rstrip('0').rstrip('.')
         return s
 
+    def fmt_price(p):
+        """Format price with appropriate precision"""
+        if p >= 1000:
+            return f"${p:,.2f}"
+        elif p >= 1:
+            return f"${p:.4f}".rstrip('0').rstrip('.')
+        else:
+            return f"${p:.6f}".rstrip('0').rstrip('.')
+
     items = []
-    if min_order > 0:
-        items.append(("Min size", fmt_num(min_order)))
-    if min_notional > 0:
-        items.append(("Min notional", f"${fmt_num(min_notional)}"))
-    if min_price_inc > 0:
-        items.append(("Price tick", fmt_num(min_price_inc)))
-    if min_base_inc > 0:
-        items.append(("Size tick", fmt_num(min_base_inc)))
+
+    # Add current price as first item if provided
+    if current_price:
+        items.append(("Price", fmt_price(current_price)))
+
+    # Add trading rules if available
+    if trading_pair in trading_rules:
+        rules = trading_rules[trading_pair]
+
+        min_order = rules.get("min_order_size", 0)
+        min_notional = rules.get("min_notional_size", 0)
+        min_price_inc = rules.get("min_price_increment", 0)
+        min_base_inc = rules.get("min_base_amount_increment", 0)
+
+        if min_order > 0:
+            items.append(("Min size", fmt_num(min_order)))
+        if min_notional > 0:
+            items.append(("Min notional", f"${fmt_num(min_notional)}"))
+        if min_price_inc > 0:
+            items.append(("Price tick", fmt_num(min_price_inc)))
+        if min_base_inc > 0:
+            items.append(("Size tick", fmt_num(min_base_inc)))
 
     if not items:
         return ""
 
     # Calculate column widths dynamically
     max_label = max(len(label) for label, _ in items)
-    max_value = max(len(value) for _, value in items)
 
     # Format as aligned table
     lines = []
