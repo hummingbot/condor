@@ -17,6 +17,20 @@ from handlers.config.user_preferences import (
 logger = logging.getLogger(__name__)
 
 
+def _format_price(price: float) -> str:
+    """Format price with appropriate precision, removing trailing zeros"""
+    if price >= 10000:
+        return f"${price:,.0f}"
+    elif price >= 1000:
+        return f"${price:,.2f}"
+    elif price >= 1:
+        return f"${price:.4f}".rstrip('0').rstrip('.')
+    elif price >= 0.0001:
+        return f"${price:.6f}".rstrip('0').rstrip('.')
+    else:
+        return f"${price:.8f}".rstrip('0').rstrip('.')
+
+
 async def handle_repeat_last(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle repeat last trade - opens place order menu with last order params pre-filled"""
     last_params = get_clob_last_order(context.user_data)
@@ -121,7 +135,7 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
 
     else:
         # Show main view with balances and trading rules
-        from ._shared import get_cex_balances, get_trading_rules, format_trading_rules_info
+        from ._shared import get_cex_balances, get_trading_rules, format_trading_rules_info, get_positions
 
         help_text = r"📝 *Place Order*" + "\n\n"
 
@@ -129,99 +143,188 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Fetch and display balances and trading rules
         try:
-            from servers import server_manager
+            from servers import get_client
 
-            servers = server_manager.list_servers()
-            enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+            client = await get_client()
+            account = get_clob_account(context.user_data)
 
-            if enabled_servers:
-                server_name = enabled_servers[0]
-                client = await server_manager.get_client(server_name)
-                account = get_clob_account(context.user_data)
+            # Fetch CEX balances with caching
+            cex_balances = await get_cex_balances(
+                context.user_data,
+                client,
+                account
+            )
 
-                # Fetch CEX balances with caching
-                cex_balances = await get_cex_balances(
-                    context.user_data,
-                    client,
-                    account
+            help_text += f"*💰 Balances on* `{escape_markdown_v2(connector_name)}`\n"
+
+            # Extract balances for the selected connector
+            shown = 0
+            connector_balances = cex_balances.get(connector_name, [])
+
+            if connector_balances:
+                # Calculate total for percentage
+                total_value = sum(float(h.get("value", 0)) for h in connector_balances)
+
+                # Sort by value (descending) and filter by >= 0.3% allocation
+                sorted_balances = sorted(
+                    connector_balances,
+                    key=lambda h: float(h.get("value", 0)),
+                    reverse=True
                 )
 
-                help_text += f"*💰 Balances on* `{escape_markdown_v2(connector_name)}`\n"
+                table = "```\n"
+                table += f"{'Token':<6} {'Price':<8} {'Value':<8} {'%':>5}\n"
+                table += f"{'─'*6} {'─'*8} {'─'*8} {'─'*5}\n"
 
-                # Extract balances for the selected connector
-                shown = 0
-                connector_balances = cex_balances.get(connector_name, [])
+                for holding in sorted_balances:
+                    token = holding.get("token", "")
+                    value = float(holding.get("value", 0))
+                    units = float(holding.get("units", 0))
 
-                if connector_balances:
-                    # Calculate total for percentage
-                    total_value = sum(float(h.get("value", 0)) for h in connector_balances)
+                    # Calculate percentage first to filter
+                    pct = (value / total_value * 100) if total_value > 0 else 0
 
-                    # Sort by value (descending) and filter by >= 0.3% allocation
-                    sorted_balances = sorted(
-                        connector_balances,
-                        key=lambda h: float(h.get("value", 0)),
-                        reverse=True
-                    )
+                    # Only show if >= 0.3% allocation
+                    if pct >= 0.3:
+                        # Calculate price
+                        price = value / units if units > 0 else 0
+                        # Format price
+                        if price >= 1000:
+                            price_str = f"${price:,.0f}"
+                        elif price >= 1:
+                            price_str = f"${price:.2f}"
+                        elif price >= 0.0001:
+                            price_str = f"${price:.4f}"
+                        else:
+                            price_str = f"${price:.2e}"
+                        price_str = price_str[:8]
 
-                    table = "```\n"
-                    table += f"{'Token':<6} {'Price':<8} {'Value':<8} {'%':>5}\n"
-                    table += f"{'─'*6} {'─'*8} {'─'*8} {'─'*5}\n"
+                        # Format value
+                        if value >= 1000:
+                            value_str = f"{value/1000:.2f}K"
+                        else:
+                            value_str = f"{value:.2f}"
+                        value_str = value_str[:8]
 
-                    for holding in sorted_balances:
-                        token = holding.get("token", "")
-                        value = float(holding.get("value", 0))
-                        units = float(holding.get("units", 0))
+                        # Format percentage
+                        pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
 
-                        # Calculate percentage first to filter
-                        pct = (value / total_value * 100) if total_value > 0 else 0
+                        # Truncate token name
+                        token_display = token[:5] if len(token) > 5 else token
 
-                        # Only show if >= 0.3% allocation
-                        if pct >= 0.3:
-                            # Calculate price
-                            price = value / units if units > 0 else 0
-                            # Format price
-                            if price >= 1000:
-                                price_str = f"${price:,.0f}"
-                            elif price >= 1:
-                                price_str = f"${price:.2f}"
-                            elif price >= 0.0001:
-                                price_str = f"${price:.4f}"
-                            else:
-                                price_str = f"${price:.2e}"
-                            price_str = price_str[:8]
+                        table += f"{token_display:<6} {price_str:<8} {value_str:<8} {pct_str:>5}\n"
+                        shown += 1
 
-                            # Format value
-                            if value >= 1000:
-                                value_str = f"{value/1000:.2f}K"
-                            else:
-                                value_str = f"{value:.2f}"
-                            value_str = value_str[:8]
+                table += "```"
+                help_text += table + "\n"
 
-                            # Format percentage
-                            pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
+            if shown == 0:
+                help_text += r"_No balances found_" + "\n"
 
-                            # Truncate token name
-                            token_display = token[:5] if len(token) > 5 else token
+            # Fetch and display trading rules for the selected pair
+            trading_rules = await get_trading_rules(
+                context.user_data,
+                client,
+                connector_name
+            )
 
-                            table += f"{token_display:<6} {price_str:<8} {value_str:<8} {pct_str:>5}\n"
-                            shown += 1
+            rules_info = format_trading_rules_info(trading_rules, trading_pair)
+            if rules_info:
+                help_text += f"\n📏 *{escape_markdown_v2(trading_pair)} Rules:*\n"
+                help_text += f"```\n{rules_info}\n```\n"
 
-                    table += "```"
-                    help_text += table + "\n"
+            # Fetch and display current market price
+            try:
+                prices = await client.market_data.get_prices(
+                    connector_name=connector_name,
+                    trading_pairs=trading_pair
+                )
+                current_price = prices["prices"].get(trading_pair)
+                if current_price:
+                    price_display = _format_price(current_price)
+                    help_text += f"💵 *Current Price:* `{escape_markdown_v2(price_display)}`\n"
+                    # Store for use in examples
+                    context.user_data["current_market_price"] = current_price
+            except Exception as e:
+                logger.debug(f"Could not fetch current price: {e}")
 
-                if shown == 0:
-                    help_text += r"_No balances found_" + "\n"
-
-                # Fetch and display trading rules for the selected pair
-                trading_rules = await get_trading_rules(
+            # Show positions for perpetual exchanges
+            if "perpetual" in connector_name.lower():
+                positions = await get_positions(
                     context.user_data,
                     client,
                     connector_name
                 )
 
-                rules_info = format_trading_rules_info(trading_rules, trading_pair)
-                if rules_info:
-                    help_text += f"\n📏 *{escape_markdown_v2(trading_pair)} Rules:* `{escape_markdown_v2(rules_info)}`\n"
+                if positions:
+                    help_text += f"\n📊 *Positions on* `{escape_markdown_v2(connector_name)}`\n"
+                    pos_table = "```\n"
+                    pos_table += f"{'Pair':<9} {'Side':<5} {'Size':<8} {'Entry':>8} {'PnL':>8}\n"
+                    pos_table += f"{'─'*9} {'─'*5} {'─'*8} {'─'*8} {'─'*8}\n"
+
+                    for pos in positions[:5]:  # Limit to 5 positions
+                        pair = pos.get('trading_pair', 'N/A')
+                        side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
+                        amount = pos.get('amount', 0)
+                        entry_price = pos.get('entry_price', 0)
+                        pnl = pos.get('unrealized_pnl', 0)
+
+                        # Format side
+                        side_upper = str(side).upper()
+                        if side_upper in ('LONG', 'BUY'):
+                            side_display = 'LONG'
+                        elif side_upper in ('SHORT', 'SELL'):
+                            side_display = 'SHORT'
+                        else:
+                            side_display = side_upper[:5]
+
+                        # Format amount
+                        try:
+                            amt = float(amount)
+                            if abs(amt) >= 1000:
+                                amt_str = f"{amt/1000:.2f}K"
+                            elif abs(amt) >= 1:
+                                amt_str = f"{amt:.2f}"
+                            else:
+                                amt_str = f"{amt:.4f}"
+                            amt_str = amt_str[:8]
+                        except (ValueError, TypeError):
+                            amt_str = str(amount)[:8]
+
+                        # Format entry price
+                        try:
+                            entry = float(entry_price)
+                            if entry >= 1000:
+                                entry_str = f"{entry:,.0f}"
+                            elif entry >= 1:
+                                entry_str = f"{entry:.2f}"
+                            else:
+                                entry_str = f"{entry:.4f}"
+                            entry_str = entry_str[:8]
+                        except (ValueError, TypeError):
+                            entry_str = str(entry_price)[:8]
+
+                        # Format PnL
+                        try:
+                            pnl_float = float(pnl)
+                            if pnl_float >= 0:
+                                pnl_str = f"+{pnl_float:.2f}"
+                            else:
+                                pnl_str = f"{pnl_float:.2f}"
+                            pnl_str = pnl_str[:8]
+                        except (ValueError, TypeError):
+                            pnl_str = str(pnl)[:8]
+
+                        # Truncate pair
+                        pair_display = pair[:9] if len(pair) > 9 else pair
+
+                        pos_table += f"{pair_display:<9} {side_display:<5} {amt_str:<8} {entry_str:>8} {pnl_str:>8}\n"
+
+                    pos_table += "```"
+                    help_text += pos_table + "\n"
+
+                    if len(positions) > 5:
+                        help_text += f"_\\+{len(positions) - 5} more positions_\n"
 
         except Exception as e:
             logger.error(f"Error fetching data: {e}", exc_info=True)
@@ -231,8 +334,23 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
         help_text += r"Use buttons or reply with order parameters:" + "\n\n"
         help_text += r"`connector pair side amount [type] [price] [action]`" + "\n\n"
         help_text += r"*Examples* \(tap to copy\):" + "\n"
-        help_text += r"`binance_perpetual BTC\-USDT BUY 0\.01 MARKET`" + "\n"
-        help_text += r"`binance BTC\-USDT SELL $100 LIMIT 45000 CLOSE`" + "\n"
+        # Use current trading pair in examples, escape for MarkdownV2
+        pair_escaped = escape_markdown_v2(trading_pair)
+        # First example: MARKET order on current connector
+        help_text += f"`{escape_markdown_v2(connector_name)} {pair_escaped} BUY 0\\.01 MARKET`" + "\n"
+        # Second example: LIMIT with CLOSE - use dynamic price based on current market
+        perp_connector = connector_name if "perpetual" in connector_name.lower() else "binance_perpetual"
+        example_price = context.user_data.get("current_market_price", 100)
+        # Format example price (slightly below market for a limit sell)
+        example_limit = example_price * 1.02  # 2% above for sell limit
+        if example_limit >= 1000:
+            limit_str = f"{example_limit:.0f}"
+        elif example_limit >= 1:
+            limit_str = f"{example_limit:.2f}"
+        else:
+            limit_str = f"{example_limit:.4f}"
+        limit_escaped = escape_markdown_v2(limit_str)
+        help_text += f"`{escape_markdown_v2(perp_connector)} {pair_escaped} SELL $100 LIMIT {limit_escaped} CLOSE`" + "\n"
 
     # Build keyboard with parameter buttons
     keyboard = []
@@ -297,17 +415,23 @@ async def show_place_order_menu(update: Update, context: ContextTypes.DEFAULT_TY
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if send_new or not update.callback_query:
-        await update.message.reply_text(
+        sent_msg = await update.message.reply_text(
             help_text,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
+        # Store the menu message ID for later editing
+        context.user_data["place_order_menu_msg_id"] = sent_msg.message_id
+        context.user_data["place_order_menu_chat_id"] = sent_msg.chat_id
     else:
         await update.callback_query.message.edit_text(
             help_text,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
+        # Store the menu message ID for later editing
+        context.user_data["place_order_menu_msg_id"] = update.callback_query.message.message_id
+        context.user_data["place_order_menu_chat_id"] = update.callback_query.message.chat_id
 
 
 # ============================================
@@ -331,23 +455,19 @@ async def handle_order_toggle_type(update: Update, context: ContextTypes.DEFAULT
         params["order_type"] = "LIMIT"
         # Fetch current market price when switching to LIMIT
         try:
-            from servers import server_manager
-            servers = server_manager.list_servers()
-            enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+            from servers import get_client
 
-            if enabled_servers:
-                server_name = enabled_servers[0]
-                client = await server_manager.get_client(server_name)
+            client = await get_client()
 
-                connector_name = params.get("connector", "binance_perpetual")
-                trading_pair = params.get("trading_pair", "BTC-USDT")
+            connector_name = params.get("connector", "binance_perpetual")
+            trading_pair = params.get("trading_pair", "BTC-USDT")
 
-                prices = await client.market_data.get_prices(
-                    connector_name=connector_name,
-                    trading_pairs=trading_pair
-                )
-                current_price = prices["prices"][trading_pair]
-                params["price"] = str(current_price)
+            prices = await client.market_data.get_prices(
+                connector_name=connector_name,
+                trading_pairs=trading_pair
+            )
+            current_price = prices["prices"][trading_pair]
+            params["price"] = str(current_price)
         except Exception as e:
             logger.error(f"Error fetching market price: {e}", exc_info=True)
             params["price"] = "88000"  # Fallback to default
@@ -377,33 +497,28 @@ async def handle_order_set_connector(update: Update, context: ContextTypes.DEFAU
     keyboard = []
 
     try:
-        from servers import server_manager
+        from servers import get_client
 
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        client = await get_client()
 
-        if enabled_servers:
-            server_name = enabled_servers[0]
-            client = await server_manager.get_client(server_name)
+        # Get available CEX connectors
+        cex_connectors = await get_available_cex_connectors(context.user_data, client)
 
-            # Get available CEX connectors
-            cex_connectors = await get_available_cex_connectors(context.user_data, client)
-
-            # Create buttons for each CEX connector (max 2 per row)
-            row = []
-            for connector in cex_connectors:
-                row.append(InlineKeyboardButton(
-                    connector,
-                    callback_data=f"clob:select_connector:{connector}"
-                ))
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-            if row:
+        # Create buttons for each CEX connector (max 2 per row)
+        row = []
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(
+                connector,
+                callback_data=f"clob:select_connector:{connector}"
+            ))
+            if len(row) == 2:
                 keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
 
-            if not cex_connectors:
-                help_text += "\n\n_No CEX connectors available_"
+        if not cex_connectors:
+            help_text += "\n\n_No CEX connectors available_"
 
     except Exception as e:
         logger.error(f"Error fetching connectors: {e}", exc_info=True)
@@ -429,15 +544,10 @@ async def handle_select_connector(update: Update, context: ContextTypes.DEFAULT_
 
     # Fetch and cache trading rules for this connector
     try:
-        from servers import server_manager
+        from servers import get_client
 
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
-
-        if enabled_servers:
-            server_name = enabled_servers[0]
-            client = await server_manager.get_client(server_name)
-            await get_trading_rules(context.user_data, client, connector_name)
+        client = await get_client()
+        await get_trading_rules(context.user_data, client, connector_name)
 
     except Exception as e:
         logger.error(f"Error fetching trading rules: {e}", exc_info=True)
@@ -457,17 +567,20 @@ async def handle_order_set_pair(update: Update, context: ContextTypes.DEFAULT_TY
         r"`SOL\-USDT`"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="clob:place_order")]]
+    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="clob:place_order")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["clob_state"] = "order_set_pair"
     context.user_data["clob_previous_state"] = "place_order"
 
-    await update.callback_query.message.edit_text(
+    # Send as new message so user can still see the order menu
+    prompt_msg = await update.callback_query.message.reply_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
     )
+    # Store prompt message ID for deletion later
+    context.user_data["input_prompt_msg_id"] = prompt_msg.message_id
 
 
 async def handle_order_set_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -480,19 +593,20 @@ async def handle_order_set_amount(update: Update, context: ContextTypes.DEFAULT_
         r"`$100` \- Trade $100 worth"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="clob:place_order")]]
+    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="clob:place_order")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["clob_state"] = "order_set_amount"
     context.user_data["clob_previous_state"] = "place_order"
 
-    logger.info(f"Set clob_state to: order_set_amount, user_data: {context.user_data.get('clob_state')}")
-
-    await update.callback_query.message.edit_text(
+    # Send as new message so user can still see the order menu
+    prompt_msg = await update.callback_query.message.reply_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
     )
+    # Store prompt message ID for deletion later
+    context.user_data["input_prompt_msg_id"] = prompt_msg.message_id
 
 
 async def handle_order_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -505,17 +619,20 @@ async def handle_order_set_price(update: Update, context: ContextTypes.DEFAULT_T
         r"`88000\.50`"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="clob:place_order")]]
+    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="clob:place_order")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["clob_state"] = "order_set_price"
     context.user_data["clob_previous_state"] = "place_order"
 
-    await update.callback_query.message.edit_text(
+    # Send as new message so user can still see the order menu
+    prompt_msg = await update.callback_query.message.reply_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
     )
+    # Store prompt message ID for deletion later
+    context.user_data["input_prompt_msg_id"] = prompt_msg.message_id
 
 
 async def handle_order_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -546,15 +663,9 @@ async def handle_order_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         if order_type in ["LIMIT", "LIMIT_MAKER"] and not price:
             raise ValueError("Price is required for LIMIT orders")
 
-        from servers import server_manager
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        from servers import get_client
 
-        if not enabled_servers:
-            raise ValueError("No enabled API servers available")
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Check if amount is in quote currency (USD)
         is_quote_amount = "$" in amount
@@ -695,15 +806,9 @@ async def process_place_order(
         if position_action not in ["OPEN", "CLOSE"]:
             raise ValueError("position_action must be OPEN or CLOSE")
 
-        from servers import server_manager
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        from servers import get_client
 
-        if not enabled_servers:
-            raise ValueError("No enabled API servers available")
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Handle USD amount conversion
         if "$" in amount and price is None:
@@ -795,6 +900,235 @@ async def process_order_set_connector(
         await update.message.reply_text(error_message, parse_mode="MarkdownV2")
 
 
+async def _cleanup_input_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete prompt message and user input message after processing"""
+    try:
+        chat_id = update.message.chat_id
+
+        # Delete the prompt message
+        prompt_msg_id = context.user_data.pop("input_prompt_msg_id", None)
+        if prompt_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=prompt_msg_id)
+            except Exception:
+                pass  # Message may already be deleted
+
+        # Delete the user's input message
+        try:
+            await update.message.delete()
+        except Exception:
+            pass  # May not have permission
+    except Exception as e:
+        logger.debug(f"Error cleaning up messages: {e}")
+
+
+async def _update_order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Update the original order menu message with new values"""
+    from ._shared import get_cex_balances, get_trading_rules, format_trading_rules_info, get_positions
+
+    menu_msg_id = context.user_data.get("place_order_menu_msg_id")
+    chat_id = context.user_data.get("place_order_menu_chat_id")
+
+    if menu_msg_id and chat_id:
+        # Rebuild the menu content and edit the original message
+        params = context.user_data.get("place_order_params", {})
+        connector_name = params.get("connector", "binance_perpetual")
+        trading_pair = params.get("trading_pair", "BTC-USDT")
+
+        help_text = r"📝 *Place Order*" + "\n\n"
+
+        try:
+            from servers import get_client
+            from handlers.config.user_preferences import get_clob_account
+
+            client = await get_client()
+            account = get_clob_account(context.user_data)
+
+            # Fetch CEX balances with caching
+            cex_balances = await get_cex_balances(context.user_data, client, account)
+
+            help_text += f"*💰 Balances on* `{escape_markdown_v2(connector_name)}`\n"
+
+            connector_balances = cex_balances.get(connector_name, [])
+            shown = 0
+
+            if connector_balances:
+                total_value = sum(float(h.get("value", 0)) for h in connector_balances)
+                sorted_balances = sorted(connector_balances, key=lambda h: float(h.get("value", 0)), reverse=True)
+
+                table = "```\n"
+                table += f"{'Token':<6} {'Price':<8} {'Value':<8} {'%':>5}\n"
+                table += f"{'─'*6} {'─'*8} {'─'*8} {'─'*5}\n"
+
+                for holding in sorted_balances:
+                    token = holding.get("token", "")
+                    value = float(holding.get("value", 0))
+                    units = float(holding.get("units", 0))
+                    pct = (value / total_value * 100) if total_value > 0 else 0
+
+                    if pct >= 0.3:
+                        price = value / units if units > 0 else 0
+                        if price >= 1000:
+                            price_str = f"${price:,.0f}"
+                        elif price >= 1:
+                            price_str = f"${price:.2f}"
+                        elif price >= 0.0001:
+                            price_str = f"${price:.4f}"
+                        else:
+                            price_str = f"${price:.2e}"
+                        price_str = price_str[:8]
+
+                        if value >= 1000:
+                            value_str = f"{value/1000:.2f}K"
+                        else:
+                            value_str = f"{value:.2f}"
+                        value_str = value_str[:8]
+
+                        pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
+                        token_display = token[:5] if len(token) > 5 else token
+
+                        table += f"{token_display:<6} {price_str:<8} {value_str:<8} {pct_str:>5}\n"
+                        shown += 1
+
+                table += "```"
+                help_text += table + "\n"
+
+            if shown == 0:
+                help_text += r"_No balances found_" + "\n"
+
+            # Trading rules
+            trading_rules = await get_trading_rules(context.user_data, client, connector_name)
+            rules_info = format_trading_rules_info(trading_rules, trading_pair)
+            if rules_info:
+                help_text += f"\n📏 *{escape_markdown_v2(trading_pair)} Rules:*\n"
+                help_text += f"```\n{rules_info}\n```\n"
+
+            # Fetch and display current market price
+            try:
+                prices = await client.market_data.get_prices(
+                    connector_name=connector_name,
+                    trading_pairs=trading_pair
+                )
+                current_price = prices["prices"].get(trading_pair)
+                if current_price:
+                    price_display = _format_price(current_price)
+                    help_text += f"💵 *Current Price:* `{escape_markdown_v2(price_display)}`\n"
+                    context.user_data["current_market_price"] = current_price
+            except Exception as e:
+                logger.debug(f"Could not fetch current price: {e}")
+
+            # Positions for perpetual exchanges
+            if "perpetual" in connector_name.lower():
+                positions = await get_positions(context.user_data, client, connector_name)
+                if positions:
+                    help_text += f"\n📊 *Positions on* `{escape_markdown_v2(connector_name)}`\n"
+                    pos_table = "```\n"
+                    pos_table += f"{'Pair':<9} {'Side':<5} {'Size':<8} {'Entry':>8} {'PnL':>8}\n"
+                    pos_table += f"{'─'*9} {'─'*5} {'─'*8} {'─'*8} {'─'*8}\n"
+
+                    for pos in positions[:5]:
+                        pair = pos.get('trading_pair', 'N/A')
+                        side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
+                        amount = pos.get('amount', 0)
+                        entry_price = pos.get('entry_price', 0)
+                        pnl = pos.get('unrealized_pnl', 0)
+
+                        side_upper = str(side).upper()
+                        side_display = 'LONG' if side_upper in ('LONG', 'BUY') else 'SHORT' if side_upper in ('SHORT', 'SELL') else side_upper[:5]
+
+                        try:
+                            amt = float(amount)
+                            amt_str = f"{amt/1000:.2f}K" if abs(amt) >= 1000 else f"{amt:.2f}" if abs(amt) >= 1 else f"{amt:.4f}"
+                            amt_str = amt_str[:8]
+                        except (ValueError, TypeError):
+                            amt_str = str(amount)[:8]
+
+                        try:
+                            entry = float(entry_price)
+                            entry_str = f"{entry:,.0f}" if entry >= 1000 else f"{entry:.2f}" if entry >= 1 else f"{entry:.4f}"
+                            entry_str = entry_str[:8]
+                        except (ValueError, TypeError):
+                            entry_str = str(entry_price)[:8]
+
+                        try:
+                            pnl_float = float(pnl)
+                            pnl_str = f"+{pnl_float:.2f}" if pnl_float >= 0 else f"{pnl_float:.2f}"
+                            pnl_str = pnl_str[:8]
+                        except (ValueError, TypeError):
+                            pnl_str = str(pnl)[:8]
+
+                        pair_display = pair[:9] if len(pair) > 9 else pair
+                        pos_table += f"{pair_display:<9} {side_display:<5} {amt_str:<8} {entry_str:>8} {pnl_str:>8}\n"
+
+                    pos_table += "```"
+                    help_text += pos_table + "\n"
+                    if len(positions) > 5:
+                        help_text += f"_\\+{len(positions) - 5} more positions_\n"
+
+        except Exception as e:
+            logger.error(f"Error fetching data: {e}", exc_info=True)
+            help_text += r"_Could not fetch data_" + "\n"
+
+        help_text += "\n"
+        help_text += r"Use buttons or reply with order parameters:" + "\n\n"
+        help_text += r"`connector pair side amount [type] [price] [action]`" + "\n\n"
+        help_text += r"*Examples* \(tap to copy\):" + "\n"
+        pair_escaped = escape_markdown_v2(trading_pair)
+        help_text += f"`{escape_markdown_v2(connector_name)} {pair_escaped} BUY 0\\.01 MARKET`" + "\n"
+        perp_connector = connector_name if "perpetual" in connector_name.lower() else "binance_perpetual"
+        # Use dynamic price based on current market
+        example_price = context.user_data.get("current_market_price", 100)
+        example_limit = example_price * 1.02  # 2% above for sell limit
+        if example_limit >= 1000:
+            limit_str = f"{example_limit:.0f}"
+        elif example_limit >= 1:
+            limit_str = f"{example_limit:.2f}"
+        else:
+            limit_str = f"{example_limit:.4f}"
+        limit_escaped = escape_markdown_v2(limit_str)
+        help_text += f"`{escape_markdown_v2(perp_connector)} {pair_escaped} SELL $100 LIMIT {limit_escaped} CLOSE`" + "\n"
+
+        # Build keyboard
+        keyboard = []
+        keyboard.append([
+            InlineKeyboardButton(f"{params.get('connector', 'binance_perpetual')}", callback_data="clob:order_set_connector"),
+            InlineKeyboardButton(f"{params.get('trading_pair', 'BTC-USDT')}", callback_data="clob:order_set_pair")
+        ])
+        keyboard.append([
+            InlineKeyboardButton(f"{params.get('side', 'BUY')}", callback_data="clob:order_toggle_side"),
+            InlineKeyboardButton(f"{params.get('order_type', 'MARKET')}", callback_data="clob:order_toggle_type")
+        ])
+        keyboard.append([
+            InlineKeyboardButton(f"{params.get('position_mode', 'OPEN')}", callback_data="clob:order_toggle_position"),
+            InlineKeyboardButton(f"{params.get('amount', '$10')}", callback_data="clob:order_set_amount")
+        ])
+        if params.get('order_type') in ['LIMIT', 'LIMIT_MAKER']:
+            keyboard.append([InlineKeyboardButton(f"{params.get('price', '88000')}", callback_data="clob:order_set_price")])
+        keyboard.append([
+            InlineKeyboardButton("✅ Execute", callback_data="clob:order_execute"),
+            InlineKeyboardButton("❓ Help", callback_data="clob:order_help"),
+            InlineKeyboardButton("« Menu", callback_data="clob:main_menu")
+        ])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=menu_msg_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error editing menu message: {e}")
+            # Fall back to sending new message
+            await update.message.reply_text(help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+    else:
+        # No stored message ID, send new
+        await show_place_order_menu(update, context, send_new=True)
+
+
 async def process_order_set_pair(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -803,16 +1137,16 @@ async def process_order_set_pair(
     """Process order set trading pair input"""
     try:
         params = context.user_data.get("place_order_params", {})
-        params["trading_pair"] = user_input.strip()
+        params["trading_pair"] = user_input.strip().upper()
 
         # Restore place_order state for text input
         context.user_data["clob_state"] = "place_order"
 
-        success_msg = escape_markdown_v2(f"✅ Trading pair set to: {user_input}")
-        await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
+        # Clean up prompt and input messages
+        await _cleanup_input_messages(update, context)
 
-        # Return to order menu by sending a new message
-        await show_place_order_menu(update, context, send_new=True)
+        # Update the original menu message
+        await _update_order_menu(update, context)
 
     except Exception as e:
         logger.error(f"Error setting trading pair: {e}", exc_info=True)
@@ -833,11 +1167,11 @@ async def process_order_set_amount(
         # Restore place_order state for text input
         context.user_data["clob_state"] = "place_order"
 
-        success_msg = escape_markdown_v2(f"✅ Amount set to: {user_input}")
-        await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
+        # Clean up prompt and input messages
+        await _cleanup_input_messages(update, context)
 
-        # Return to order menu by sending a new message
-        await show_place_order_menu(update, context, send_new=True)
+        # Update the original menu message
+        await _update_order_menu(update, context)
 
     except Exception as e:
         logger.error(f"Error setting amount: {e}", exc_info=True)
@@ -858,11 +1192,11 @@ async def process_order_set_price(
         # Restore place_order state for text input
         context.user_data["clob_state"] = "place_order"
 
-        success_msg = escape_markdown_v2(f"✅ Price set to: {user_input}")
-        await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
+        # Clean up prompt and input messages
+        await _cleanup_input_messages(update, context)
 
-        # Return to order menu by sending a new message
-        await show_place_order_menu(update, context, send_new=True)
+        # Update the original menu message
+        await _update_order_menu(update, context)
 
     except Exception as e:
         logger.error(f"Error setting price: {e}", exc_info=True)

@@ -13,7 +13,8 @@ from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, resolve_token_symbol, KNOWN_TOKENS
 from handlers.config.user_preferences import get_dex_last_swap
-from ._shared import get_gateway_client, cached_call, invalidate_cache
+from servers import get_client
+from ._shared import cached_call, invalidate_cache
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +102,11 @@ def _format_price(price) -> str:
 
 
 async def _fetch_balances(client) -> dict:
-    """Fetch gateway balances only (fast)"""
+    """Fetch gateway/DEX balances (blockchain wallets like solana, ethereum)"""
     from collections import defaultdict
+
+    # Gateway/blockchain connectors contain these keywords
+    GATEWAY_KEYWORDS = ["solana", "ethereum", "polygon", "arbitrum", "base", "avalanche", "optimism"]
 
     data = {
         "balances_by_network": defaultdict(list),
@@ -111,31 +115,30 @@ async def _fetch_balances(client) -> dict:
 
     try:
         if not hasattr(client, 'portfolio'):
+            logger.warning("Client has no portfolio attribute")
             return data
 
         result = await client.portfolio.get_state()
         if not result:
+            logger.info("Portfolio get_state returned empty result")
             return data
 
         logger.info(f"Processing portfolio state with {len(result)} accounts")
         for account_name, account_data in result.items():
             logger.info(f"Account: {account_name}, connectors: {list(account_data.keys())}")
             for connector_name, balances in account_data.items():
-                # Only show DEX/blockchain connectors, not CEX
                 connector_lower = connector_name.lower()
-                is_dex_connector = (
-                    connector_lower.startswith("solana") or
-                    connector_lower.startswith("ethereum") or
-                    connector_lower in ["polygon", "arbitrum", "optimism", "base", "avalanche"]
-                )
 
-                if not is_dex_connector:
-                    logger.debug(f"Skipping non-DEX connector: {connector_name}")
+                # Only include gateway/blockchain connectors (contain solana, ethereum, etc.)
+                is_gateway = any(keyword in connector_lower for keyword in GATEWAY_KEYWORDS)
+                if not is_gateway:
+                    logger.debug(f"Skipping non-gateway connector: {connector_name}")
                     continue
 
                 if balances:
+                    # Use connector name as network identifier
                     network = connector_lower
-                    logger.info(f"Processing DEX connector: {connector_name}, balances: {len(balances)}")
+                    logger.info(f"Processing gateway connector: {connector_name}, balances: {len(balances)}")
 
                     for balance in balances:
                         token = balance.get("token", "???")
@@ -155,6 +158,8 @@ async def _fetch_balances(client) -> dict:
             for balance in data["balances_by_network"][network]:
                 balance["percentage"] = (balance["value"] / data["total_value"] * 100) if data["total_value"] > 0 else 0
             data["balances_by_network"][network].sort(key=lambda x: x["value"], reverse=True)
+
+        logger.info(f"Gateway balances: {len(data['balances_by_network'])} networks, total: ${data['total_value']:.2f}")
 
     except Exception as e:
         logger.error(f"Error fetching balances: {e}", exc_info=True)
@@ -281,19 +286,27 @@ def _build_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def _build_loading_message() -> str:
+def _build_loading_message(server_name: str = None) -> str:
     """Build the initial loading message"""
+    if server_name:
+        title = f"🔄 *DEX Trading* \\| _Server: {escape_markdown_v2(server_name)}_"
+    else:
+        title = r"🔄 *DEX Trading*"
+
     return (
-        r"🔄 *DEX Trading*" + "\n\n"
+        title + "\n\n"
         r"💰 *Gateway Balances:*" + "\n"
         r"⏳ _Loading\.\.\._" + "\n\n"
         "Select operation:"
     )
 
 
-def _build_menu_with_data(gateway_data: dict, last_swap: dict = None) -> str:
+def _build_menu_with_data(gateway_data: dict, last_swap: dict = None, server_name: str = None) -> str:
     """Build the menu message with gateway data"""
-    header = r"🔄 *DEX Trading*" + "\n\n"
+    if server_name:
+        header = f"🔄 *DEX Trading* \\| _Server: {escape_markdown_v2(server_name)}_\n\n"
+    else:
+        header = r"🔄 *DEX Trading*" + "\n\n"
 
     # Show gateway balances organized by network if available
     if gateway_data.get("balances_by_network") and len(gateway_data["balances_by_network"]) > 0:
@@ -354,7 +367,8 @@ async def _load_menu_data_background(
     message,
     context: ContextTypes.DEFAULT_TYPE,
     reply_markup,
-    last_swap
+    last_swap,
+    server_name: str = None
 ) -> None:
     """Background task to load gateway data and update the menu progressively.
 
@@ -364,7 +378,7 @@ async def _load_menu_data_background(
     gateway_data = {"balances_by_network": {}, "lp_positions": [], "total_value": 0, "token_cache": {}}
 
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         # Step 2: Fetch balances first (usually fast) and update UI immediately
         balances_data = await cached_call(
@@ -380,7 +394,7 @@ async def _load_menu_data_background(
 
         # Update UI with balances (show "Loading positions..." for LP)
         if gateway_data["balances_by_network"]:
-            balances_message = _build_menu_with_data(gateway_data, last_swap)
+            balances_message = _build_menu_with_data(gateway_data, last_swap, server_name)
             # Add loading indicator for positions
             balances_message = balances_message.replace(
                 "Select operation:",
@@ -416,7 +430,7 @@ async def _load_menu_data_background(
         logger.warning(f"Could not fetch gateway data for menu: {e}")
 
     # Step 4: Final update with all data
-    final_message = _build_menu_with_data(gateway_data, last_swap)
+    final_message = _build_menu_with_data(gateway_data, last_swap, server_name)
 
     try:
         await message.edit_text(
@@ -441,13 +455,18 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     Uses progressive loading: shows menu immediately, then loads data in background.
     User can navigate away without waiting for data to load.
     """
+    from servers import server_manager
+
     # Cancel any existing loading task first
     cancel_dex_loading_task(context)
+
+    # Get server name for display
+    server_name = server_manager.default_server or "unknown"
 
     reply_markup = _build_menu_keyboard()
 
     # Step 1: Show menu immediately with loading indicator
-    loading_message = _build_loading_message()
+    loading_message = _build_loading_message(server_name)
 
     if update.callback_query:
         query_message = update.callback_query.message
@@ -488,7 +507,7 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Spawn background task to load data - user can navigate away without waiting
     task = asyncio.create_task(
-        _load_menu_data_background(message, context, reply_markup, last_swap)
+        _load_menu_data_background(message, context, reply_markup, last_swap, server_name)
     )
     context.user_data[DEX_LOADING_TASK_KEY] = task
 

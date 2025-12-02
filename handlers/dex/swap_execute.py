@@ -21,7 +21,8 @@ from handlers.config.user_preferences import (
     set_dex_last_swap,
     DEFAULT_DEX_NETWORK,
 )
-from ._shared import get_gateway_client, get_cached, set_cached, DEFAULT_CACHE_TTL
+from servers import get_client
+from ._shared import get_cached, set_cached, invalidate_cache, DEFAULT_CACHE_TTL
 
 logger = logging.getLogger(__name__)
 
@@ -308,7 +309,7 @@ async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAUL
     network = params.get("network", "solana-mainnet-beta")
 
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         # Fetch router connectors (cached)
         cache_key = "router_connectors"
@@ -395,7 +396,7 @@ async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_
     current_connector = params.get("connector", "jupiter")
 
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         # Fetch networks (cached)
         networks_cache_key = "gateway_networks"
@@ -594,7 +595,7 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
         except Exception:
             raise ValueError("Slippage must be a valid number greater than 0%")
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -610,6 +611,9 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
 
         if result is None:
             raise ValueError("Gateway returned no response. The swap execution may have failed.")
+
+        # Invalidate balance cache since we just swapped tokens
+        invalidate_cache(context.user_data, "balances")
 
         # Save parameters
         set_dex_last_swap(context.user_data, {
@@ -709,7 +713,7 @@ async def process_quick_swap(
         network = last_params["network"]
         trading_pair = last_params["trading_pair"]
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -725,6 +729,9 @@ async def process_quick_swap(
 
         if result is None:
             raise ValueError("Gateway returned no response.")
+
+        # Invalidate balance cache since we just swapped tokens
+        invalidate_cache(context.user_data, "balances")
 
         swap_info = escape_markdown_v2(
             f"✅ Quick Swap Executed!\n\n"
@@ -776,7 +783,7 @@ async def process_swap_execute(
             amount = parts[2]
             slippage = parts[3] if len(parts) > 3 else "1.0"
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -792,6 +799,9 @@ async def process_swap_execute(
 
         if result is None:
             raise ValueError("Gateway returned no response.")
+
+        # Invalidate balance cache since we just swapped tokens
+        invalidate_cache(context.user_data, "balances")
 
         set_dex_last_swap(context.user_data, {
             "connector": connector,

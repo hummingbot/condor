@@ -22,6 +22,8 @@ from telegram.ext import ContextTypes
 from geckoterminal_py import GeckoTerminalAsyncClient
 from utils.telegram_formatters import escape_markdown_v2
 from ._shared import cached_call, set_cached, get_cached, clear_cache
+from .visualizations import generate_ohlcv_chart, generate_liquidity_chart, generate_combined_chart
+from .pool_data import can_fetch_liquidity, get_connector_for_dex, fetch_liquidity_bins
 
 logger = logging.getLogger(__name__)
 
@@ -1013,14 +1015,16 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     if pool_data["base_token_price_usd"]:
         try:
             price = float(pool_data["base_token_price_usd"])
-            lines.append(f"• {pool_data['base_token_symbol']}: {escape_markdown_v2(_format_price(price))}")
+            symbol = escape_markdown_v2(pool_data['base_token_symbol'])
+            lines.append(f"• {symbol}: {escape_markdown_v2(_format_price(price))}")
         except (ValueError, TypeError):
             pass
 
     if pool_data["quote_token_price_usd"]:
         try:
             price = float(pool_data["quote_token_price_usd"])
-            lines.append(f"• {pool_data['quote_token_symbol']}: {escape_markdown_v2(_format_price(price))}")
+            symbol = escape_markdown_v2(pool_data['quote_token_symbol'])
+            lines.append(f"• {symbol}: {escape_markdown_v2(_format_price(price))}")
         except (ValueError, TypeError):
             pass
 
@@ -1085,26 +1089,34 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     lines.append("")
     addr = pool_data.get("address", "")
     if addr:
-        lines.append(f"📍 Address: `{escape_markdown_v2(addr[:16])}...`")
+        lines.append(f"📍 Address: `{escape_markdown_v2(addr[:16])}`\\.\\.\\.")
 
     # Build keyboard
     keyboard = [
         [
             InlineKeyboardButton("📈 OHLCV 1h", callback_data="dex:gecko_ohlcv:1m"),
             InlineKeyboardButton("📈 OHLCV 1d", callback_data="dex:gecko_ohlcv:1h"),
-        ],
-        [
             InlineKeyboardButton("📈 OHLCV 7d", callback_data="dex:gecko_ohlcv:1d"),
-            InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
         ],
         [
+            InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
             InlineKeyboardButton("📋 Copy Address", callback_data="dex:gecko_copy_addr"),
         ],
-        [
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_pool:{pool_index}"),
-            InlineKeyboardButton("« Back", callback_data="dex:gecko_back_to_list"),
-        ],
     ]
+
+    # Add liquidity button if DEX supports it (Meteora, Raydium, Orca on Solana)
+    dex_id = pool_data.get("dex_id", "")
+    network = pool_data.get("network", "")
+    if can_fetch_liquidity(dex_id, network):
+        keyboard.append([
+            InlineKeyboardButton("📊 Liquidity", callback_data="dex:gecko_liquidity"),
+            InlineKeyboardButton("📊 Combined", callback_data="dex:gecko_combined:1h"),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_pool:{pool_index}"),
+        InlineKeyboardButton("« Back", callback_data="dex:gecko_back_to_list"),
+    ])
 
     # Handle case when returning from photo (OHLCV chart) - can't edit photo to text
     if query.message.photo:
@@ -1209,13 +1221,33 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             )
             return
 
-        # Generate chart image
-        chart_buffer = _generate_ohlcv_chart(ohlcv_data, pool_data, timeframe)
+        # Generate chart image using visualization module
+        pair_name = pool_data.get('name', 'Pool')
+        base_symbol = pool_data.get('base_token_symbol')
+        quote_symbol = pool_data.get('quote_token_symbol')
+
+        chart_buffer = generate_ohlcv_chart(
+            ohlcv_data=ohlcv_data,
+            pair_name=pair_name,
+            timeframe=_format_timeframe_label(timeframe),
+            base_symbol=base_symbol,
+            quote_symbol=quote_symbol
+        )
+
+        if not chart_buffer:
+            await loading_msg.edit_text(
+                "📈 *OHLCV Chart*\n\n_Failed to generate chart_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
 
         # Build caption
         caption_lines = [
             f"📈 *{escape_markdown_v2(pool_data['name'])}*",
-            f"Timeframe: {escape_markdown_v2(timeframe)}",
+            f"Timeframe: {escape_markdown_v2(_format_timeframe_label(timeframe))}",
             f"Data points: {len(ohlcv_data)}",
         ]
 
@@ -1231,17 +1263,26 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
         caption = "\n".join(caption_lines)
 
-        # Build keyboard
+        # Build keyboard - add combined view if supported DEX
+        dex_id = pool_data.get("dex_id", "")
+        network = pool_data.get("network", "")
+
         keyboard = [
             [
-                InlineKeyboardButton("1h", callback_data="dex:gecko_ohlcv:1m"),
-                InlineKeyboardButton("1d", callback_data="dex:gecko_ohlcv:1h"),
-                InlineKeyboardButton("7d", callback_data="dex:gecko_ohlcv:1d"),
-            ],
-            [
-                InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_ohlcv:1m"),
+                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_ohlcv:1h"),
+                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_ohlcv:1d"),
             ],
         ]
+
+        if can_fetch_liquidity(dex_id, network):
+            keyboard.append([
+                InlineKeyboardButton("📊 Combined View", callback_data=f"dex:gecko_combined:{timeframe}"),
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+        ])
 
         # Delete loading message and send photo
         await loading_msg.delete()
@@ -1263,144 +1304,280 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         )
 
 
-def _generate_ohlcv_chart(ohlcv_data: List, pool_data: dict, timeframe: str) -> io.BytesIO:
-    """Generate OHLCV candlestick chart using plotly"""
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    from datetime import datetime
+def _format_timeframe_label(timeframe: str) -> str:
+    """Convert API timeframe to display label"""
+    labels = {
+        "1m": "1 Hour (1m candles)",
+        "5m": "5 Hours (5m candles)",
+        "15m": "15 Hours (15m candles)",
+        "1h": "1 Day (1h candles)",
+        "4h": "4 Days (4h candles)",
+        "1d": "7 Days (1d candles)",
+    }
+    return labels.get(timeframe, timeframe)
 
-    # Parse OHLCV data
-    # Format: [timestamp, open, high, low, close, volume]
-    times = []
-    opens = []
-    highs = []
-    lows = []
-    closes = []
-    volumes = []
 
-    for candle in reversed(ohlcv_data):  # Reverse to get chronological order
-        if len(candle) >= 5:
-            ts, o, h, l, c = candle[:5]
-            v = candle[5] if len(candle) > 5 else 0
+# ============================================
+# LIQUIDITY CHART (for supported DEXes)
+# ============================================
 
-            # Handle timestamp - could be Unix int, datetime, or pandas Timestamp
-            if isinstance(ts, (int, float)):
-                times.append(datetime.fromtimestamp(ts))
-            elif hasattr(ts, 'to_pydatetime'):  # pandas Timestamp
-                times.append(ts.to_pydatetime())
-            elif isinstance(ts, datetime):
-                times.append(ts)
-            else:
-                # Try to parse as string or skip
-                try:
-                    times.append(datetime.fromisoformat(str(ts).replace('Z', '+00:00')))
-                except Exception:
-                    continue
+async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show liquidity distribution chart for selected pool (Meteora/Raydium/Orca only)"""
+    query = update.callback_query
 
-            opens.append(float(o))
-            highs.append(float(h))
-            lows.append(float(l))
-            closes.append(float(c))
-            volumes.append(float(v) if v else 0)
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
 
-    if not times:
-        raise ValueError("No valid OHLCV data")
+    dex_id = pool_data.get("dex_id", "")
+    network = pool_data.get("network", "")
 
-    # Create figure with subplots (candlestick + volume)
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.7, 0.3],
-    )
+    if not can_fetch_liquidity(dex_id, network):
+        await query.answer(f"Liquidity data not available for {dex_id}")
+        return
 
-    # Add candlestick chart
-    fig.add_trace(
-        go.Candlestick(
-            x=times,
-            open=opens,
-            high=highs,
-            low=lows,
-            close=closes,
-            name='Price',
-            increasing_line_color='#00ff88',
-            decreasing_line_color='#ff4444',
-            increasing_fillcolor='#00ff88',
-            decreasing_fillcolor='#ff4444',
-        ),
-        row=1, col=1
-    )
+    await query.answer("Loading liquidity chart...")
 
-    # Volume bar colors based on price direction
-    volume_colors = ['#00ff88' if closes[i] >= opens[i] else '#ff4444' for i in range(len(times))]
+    # Show loading
+    if query.message.photo:
+        await query.message.delete()
+        loading_msg = await query.message.chat.send_message(
+            f"📊 *Liquidity Distribution*\n\n_Loading\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+    else:
+        await query.message.edit_text(
+            f"📊 *Liquidity Distribution*\n\n_Loading\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+        loading_msg = query.message
 
-    # Add volume bars
-    fig.add_trace(
-        go.Bar(
-            x=times,
-            y=volumes,
-            name='Volume',
-            marker_color=volume_colors,
-            opacity=0.7,
-        ),
-        row=2, col=1
-    )
+    try:
+        address = pool_data["address"]
+        connector = get_connector_for_dex(dex_id)
 
-    # Add latest price horizontal line
-    if closes:
-        latest_price = closes[-1]
-        fig.add_hline(
-            y=latest_price,
-            line_dash="dash",
-            line_color="#ffaa00",
-            opacity=0.5,
-            row=1, col=1,
-            annotation_text=f"${latest_price:.6f}",
-            annotation_position="right",
-            annotation_font_color="#ffaa00",
+        # Fetch liquidity bins via gateway
+        bins, pool_info, error = await fetch_liquidity_bins(
+            pool_address=address,
+            connector=connector,
+            user_data=context.user_data
         )
 
-    # Update layout with dark theme
-    pair = f"{pool_data['base_token_symbol']}/{pool_data['quote_token_symbol']}"
-    fig.update_layout(
-        title=dict(
-            text=f'{pair} - {timeframe}',
-            font=dict(color='white', size=16),
-            x=0.5,
-        ),
-        paper_bgcolor='#1a1a2e',
-        plot_bgcolor='#1a1a2e',
-        font=dict(color='white'),
-        xaxis_rangeslider_visible=False,
-        showlegend=False,
-        height=600,
-        width=900,
-        margin=dict(l=50, r=80, t=50, b=50),
-    )
+        if error or not bins:
+            await loading_msg.edit_text(
+                f"📊 *Liquidity Distribution*\n\n_No liquidity data available_\n\n{escape_markdown_v2(error or 'No bins found')}",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
 
-    # Update axes styling
-    fig.update_xaxes(
-        gridcolor='rgba(255,255,255,0.1)',
-        showgrid=True,
-        zeroline=False,
-    )
-    fig.update_yaxes(
-        gridcolor='rgba(255,255,255,0.1)',
-        showgrid=True,
-        zeroline=False,
-        side='right',
-    )
+        # Get current price
+        current_price = None
+        if pool_info:
+            current_price = pool_info.get('price') or pool_info.get('current_price')
+            if current_price:
+                current_price = float(current_price)
 
-    # Set y-axis titles
-    fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
-    fig.update_yaxes(title_text="Volume", row=2, col=1)
+        # Generate chart
+        pair_name = pool_data.get('name', 'Pool')
+        chart_bytes = generate_liquidity_chart(
+            bins=bins,
+            current_price=current_price,
+            pair_name=pair_name
+        )
 
-    # Save to buffer as PNG
-    buf = io.BytesIO()
-    fig.write_image(buf, format='png', scale=2)
-    buf.seek(0)
+        if not chart_bytes:
+            await loading_msg.edit_text(
+                "📊 *Liquidity Distribution*\n\n_Failed to generate chart_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
 
-    return buf
+        # Build caption
+        caption = f"📊 *{escape_markdown_v2(pair_name)}* \\- Liquidity Distribution\n"
+        caption += f"_{escape_markdown_v2(f'{len(bins)} bins')}_"
+
+        # Build keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Combined 1h", callback_data="dex:gecko_combined:1m"),
+                InlineKeyboardButton("📊 Combined 1d", callback_data="dex:gecko_combined:1h"),
+            ],
+            [
+                InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+            ],
+        ]
+
+        # Delete loading and send photo
+        await loading_msg.delete()
+        await loading_msg.chat.send_photo(
+            photo=io.BytesIO(chart_bytes),
+            caption=caption,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating liquidity chart: {e}", exc_info=True)
+        await loading_msg.edit_text(
+            f"❌ Error: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+            ])
+        )
+
+
+async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str) -> None:
+    """Show combined OHLCV + Liquidity chart for selected pool"""
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    dex_id = pool_data.get("dex_id", "")
+    network = pool_data.get("network", "")
+
+    if not can_fetch_liquidity(dex_id, network):
+        await query.answer(f"Combined view not available for {dex_id}")
+        return
+
+    await query.answer("Loading combined chart...")
+
+    # Show loading
+    if query.message.photo:
+        await query.message.delete()
+        loading_msg = await query.message.chat.send_message(
+            f"📊 *Combined View*\n\n_Loading OHLCV \\+ Liquidity\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+    else:
+        await query.message.edit_text(
+            f"📊 *Combined View*\n\n_Loading OHLCV \\+ Liquidity\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+        loading_msg = query.message
+
+    try:
+        address = pool_data["address"]
+        connector = get_connector_for_dex(dex_id)
+
+        # Fetch OHLCV data
+        client = GeckoTerminalAsyncClient()
+        ohlcv_result = await client.get_ohlcv(network, address, timeframe)
+
+        # Parse OHLCV response
+        ohlcv_data = []
+        try:
+            import pandas as pd
+            if isinstance(ohlcv_result, pd.DataFrame) and not ohlcv_result.empty:
+                if ohlcv_result.index.name == 'datetime' or 'datetime' not in ohlcv_result.columns:
+                    ohlcv_result = ohlcv_result.reset_index()
+                ohlcv_data = ohlcv_result.values.tolist()
+        except ImportError:
+            pass
+
+        if not ohlcv_data:
+            if isinstance(ohlcv_result, list):
+                ohlcv_data = ohlcv_result
+            elif isinstance(ohlcv_result, dict):
+                ohlcv_data = ohlcv_result.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+
+        # Fetch liquidity bins
+        bins, pool_info, _ = await fetch_liquidity_bins(
+            pool_address=address,
+            connector=connector,
+            user_data=context.user_data
+        )
+
+        if not ohlcv_data and not bins:
+            await loading_msg.edit_text(
+                "📊 *Combined View*\n\n_No data available_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
+
+        # Get current price
+        current_price = None
+        if pool_info:
+            current_price = pool_info.get('price') or pool_info.get('current_price')
+            if current_price:
+                current_price = float(current_price)
+
+        # Generate combined chart
+        pair_name = pool_data.get('name', 'Pool')
+        base_symbol = pool_data.get('base_token_symbol')
+        quote_symbol = pool_data.get('quote_token_symbol')
+
+        chart_buf = generate_combined_chart(
+            ohlcv_data=ohlcv_data or [],
+            bins=bins or [],
+            pair_name=pair_name,
+            timeframe=_format_timeframe_label(timeframe),
+            current_price=current_price,
+            base_symbol=base_symbol,
+            quote_symbol=quote_symbol
+        )
+
+        if not chart_buf:
+            await loading_msg.edit_text(
+                "📊 *Combined View*\n\n_Failed to generate chart_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
+
+        # Build caption
+        caption = f"📊 *{escape_markdown_v2(pair_name)}* \\- Combined View\n"
+        caption += f"_OHLCV \\({escape_markdown_v2(_format_timeframe_label(timeframe))}\\) \\+ Liquidity_"
+
+        # Build keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_combined:1m"),
+                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_combined:1h"),
+                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_combined:1d"),
+            ],
+            [
+                InlineKeyboardButton("📈 OHLCV Only", callback_data=f"dex:gecko_ohlcv:{timeframe}"),
+                InlineKeyboardButton("📊 Liquidity Only", callback_data="dex:gecko_liquidity"),
+            ],
+            [
+                InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+            ],
+        ]
+
+        # Delete loading and send photo
+        await loading_msg.delete()
+        await loading_msg.chat.send_photo(
+            photo=chart_buf,
+            caption=caption,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating combined chart: {e}", exc_info=True)
+        await loading_msg.edit_text(
+            f"❌ Error: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+            ])
+        )
 
 
 # ============================================

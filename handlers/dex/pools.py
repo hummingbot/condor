@@ -15,7 +15,10 @@ from telegram.error import BadRequest
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
 from handlers.config.user_preferences import set_dex_last_pool, get_dex_last_pool
-from ._shared import get_gateway_client, get_cached, set_cached, cached_call, DEFAULT_CACHE_TTL
+from servers import get_client
+from ._shared import get_cached, set_cached, cached_call, DEFAULT_CACHE_TTL
+from .visualizations import generate_liquidity_chart, generate_ohlcv_chart, generate_combined_chart, generate_aggregated_liquidity_chart
+from .pool_data import fetch_ohlcv, fetch_liquidity_bins, get_gecko_network
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta") -> 
     token_cache = dict(KNOWN_TOKENS)  # Start with known tokens
 
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         # Try to get tokens from Gateway
         if hasattr(client, 'gateway'):
@@ -206,7 +209,7 @@ async def process_pool_info(
         if connector not in ["meteora", "raydium"]:
             raise ValueError(f"Unsupported connector '{connector}'. Use 'meteora' or 'raydium'.")
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -541,7 +544,7 @@ async def process_pool_list(
         # Request more from API to have enough after filtering
         api_limit = max(requested_limit * 3, 100)
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -630,383 +633,6 @@ async def process_pool_list(
         await update.message.reply_text(error_message, parse_mode="MarkdownV2")
 
 
-def _generate_liquidity_chart(
-    bins: list,
-    active_bin_id: int = None,
-    current_price: float = None,
-    pair_name: str = "Pool"
-) -> bytes:
-    """Generate liquidity distribution chart image using Plotly
-
-    Args:
-        bins: List of bin data with bin_id, base_token_amount, quote_token_amount, price
-        active_bin_id: The current active bin ID
-        current_price: Current pool price for vertical line
-        pair_name: Trading pair name for title
-
-    Returns:
-        PNG image bytes or None if failed
-    """
-    try:
-        import plotly.graph_objects as go
-        from io import BytesIO
-
-        if not bins:
-            return None
-
-        # Process bin data - convert base token to quote value for comparison
-        bin_data = []
-        for b in bins:
-            base = float(b.get('base_token_amount', 0) or 0)
-            quote = float(b.get('quote_token_amount', 0) or 0)
-            price = float(b.get('price', 0) or 0)
-            bin_id = b.get('bin_id')
-
-            if price > 0:
-                # Convert base token amount to quote token value
-                base_value_in_quote = base * price
-                bin_data.append({
-                    'bin_id': bin_id,
-                    'base_value': base_value_in_quote,  # Base token value in quote terms
-                    'quote': quote,
-                    'price': price,
-                    'is_active': bin_id == active_bin_id
-                })
-
-        if not bin_data:
-            return None
-
-        # Sort by price
-        bin_data.sort(key=lambda x: x['price'])
-
-        # Extract data for plotting (both now in quote token value)
-        prices = [b['price'] for b in bin_data]
-        base_values = [b['base_value'] for b in bin_data]  # Base value in quote terms
-        quote_amounts = [b['quote'] for b in bin_data]
-
-        # Create figure with stacked bars
-        fig = go.Figure()
-
-        # Quote token bars (bottom)
-        fig.add_trace(go.Bar(
-            x=prices,
-            y=quote_amounts,
-            name='Quote Token',
-            marker_color='#22c55e',  # Green
-            hovertemplate='Price: %{x:.6f}<br>Quote Value: %{y:,.2f}<extra></extra>'
-        ))
-
-        # Base token bars (top) - now showing value in quote terms
-        fig.add_trace(go.Bar(
-            x=prices,
-            y=base_values,
-            name='Base Token (in Quote)',
-            marker_color='#3b82f6',  # Blue
-            hovertemplate='Price: %{x:.6f}<br>Base Value: %{y:,.2f}<extra></extra>'
-        ))
-
-        # Add current price line
-        if current_price:
-            fig.add_vline(
-                x=current_price,
-                line_dash="dash",
-                line_color="#ef4444",
-                line_width=2,
-                annotation_text=f"Current: {current_price:.6f}",
-                annotation_position="top",
-                annotation_font_color="#ef4444"
-            )
-
-        # Update layout
-        fig.update_layout(
-            title=dict(
-                text=f"📊 {pair_name} Liquidity Distribution",
-                font=dict(size=16, color='white'),
-                x=0.5
-            ),
-            xaxis_title="Price",
-            yaxis_title="Liquidity (Quote Value)",
-            barmode='stack',
-            template='plotly_dark',
-            paper_bgcolor='#1a1a2e',
-            plot_bgcolor='#16213e',
-            font=dict(color='white'),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            ),
-            margin=dict(l=60, r=40, t=80, b=60),
-            width=800,
-            height=500
-        )
-
-        # Update axes
-        fig.update_xaxes(
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)',
-            tickformat='.4f'
-        )
-        fig.update_yaxes(
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)'
-        )
-
-        # Export to bytes
-        img_bytes = fig.to_image(format="png", scale=2)
-        return img_bytes
-
-    except ImportError as e:
-        logger.warning(f"Plotly not available for chart generation: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error generating liquidity chart: {e}", exc_info=True)
-        return None
-
-
-def _generate_aggregated_liquidity_chart(
-    pools_data: list,
-    pair_name: str = "Aggregated"
-) -> bytes:
-    """Generate aggregated liquidity distribution chart from multiple pools
-
-    Collects all bins from all pools, buckets them into price ranges,
-    and creates a stacked bar chart showing liquidity distribution.
-
-    Args:
-        pools_data: List of dicts with 'pool', 'pool_info', 'bins' data
-        pair_name: Trading pair name for title
-
-    Returns:
-        PNG image bytes or None if failed
-    """
-    try:
-        import plotly.graph_objects as go
-        from io import BytesIO
-        from collections import defaultdict
-        import numpy as np
-
-        if not pools_data:
-            logger.warning("No pools_data provided to aggregated chart")
-            return None
-
-        # Filter pools that have bins data
-        valid_pools = [p for p in pools_data if p.get('bins')]
-        if not valid_pools:
-            logger.warning("No valid pools with bins data")
-            return None
-
-        # Collect all bin data from all pools
-        all_bins = []
-        total_tvl = 0
-        weighted_price_sum = 0
-
-        for pool_data in valid_pools:
-            pool = pool_data.get('pool', {})
-            pool_info = pool_data.get('pool_info', {})
-            bins = pool_data.get('bins', [])
-
-            # Get pool TVL and current price for weighted average
-            tvl = float(pool.get('liquidity', 0) or pool_info.get('liquidity', 0) or 0)
-            current_price = float(pool_info.get('price', 0) or pool.get('current_price', 0) or 0)
-
-            if tvl > 0 and current_price > 0:
-                total_tvl += tvl
-                weighted_price_sum += current_price * tvl
-
-            # Process each bin
-            for b in bins:
-                base = float(b.get('base_token_amount', 0) or 0)
-                quote = float(b.get('quote_token_amount', 0) or 0)
-                price = float(b.get('price', 0) or 0)
-
-                if price > 0:
-                    base_value_in_quote = base * price
-                    total_value = base_value_in_quote + quote
-
-                    if total_value > 0:  # Only include bins with liquidity
-                        all_bins.append({
-                            'price': price,
-                            'base_value': base_value_in_quote,
-                            'quote': quote,
-                            'total': total_value
-                        })
-
-        if not all_bins:
-            logger.warning("No bins with liquidity collected from pools")
-            return None
-
-        # Calculate weighted average current price
-        avg_current_price = weighted_price_sum / total_tvl if total_tvl > 0 else None
-
-        # Find price range where most liquidity is (trim outliers)
-        prices = [b['price'] for b in all_bins]
-        values = [b['total'] for b in all_bins]
-
-        # Calculate cumulative liquidity to find range containing 95% of value
-        sorted_by_price = sorted(zip(prices, values, all_bins), key=lambda x: x[0])
-        total_value = sum(values)
-
-        # Find price range containing middle 95% of liquidity by value
-        cumsum = 0
-        price_min = sorted_by_price[0][0]
-        price_max = sorted_by_price[-1][0]
-
-        for price, value, _ in sorted_by_price:
-            cumsum += value
-            if cumsum >= total_value * 0.025:  # 2.5% threshold
-                price_min = price
-                break
-
-        cumsum = 0
-        for price, value, _ in reversed(sorted_by_price):
-            cumsum += value
-            if cumsum >= total_value * 0.025:  # 2.5% threshold
-                price_max = price
-                break
-
-        # Add some padding (10%)
-        price_range = price_max - price_min
-        price_min = max(0, price_min - price_range * 0.1)
-        price_max = price_max + price_range * 0.1
-
-        # Filter bins to this range
-        filtered_bins = [b for b in all_bins if price_min <= b['price'] <= price_max]
-
-        if not filtered_bins:
-            filtered_bins = all_bins  # Fallback to all if filtering removed everything
-
-        logger.info(f"Price range: {price_min:.6f} to {price_max:.6f}, "
-                   f"filtered to {len(filtered_bins)} bins from {len(all_bins)}")
-
-        # Create buckets for histogram-style bars (50-80 buckets for visibility)
-        num_buckets = min(80, max(30, len(filtered_bins) // 5))
-        bucket_size = (price_max - price_min) / num_buckets
-
-        # Aggregate into buckets
-        buckets = defaultdict(lambda: {'base_value': 0.0, 'quote': 0.0})
-
-        for b in filtered_bins:
-            bucket_idx = int((b['price'] - price_min) / bucket_size)
-            bucket_idx = max(0, min(bucket_idx, num_buckets - 1))
-            bucket_center = price_min + (bucket_idx + 0.5) * bucket_size
-
-            buckets[bucket_center]['base_value'] += b['base_value']
-            buckets[bucket_center]['quote'] += b['quote']
-
-        # Sort buckets by price
-        sorted_buckets = sorted(buckets.keys())
-        chart_prices = sorted_buckets
-        base_values = [buckets[p]['base_value'] for p in sorted_buckets]
-        quote_amounts = [buckets[p]['quote'] for p in sorted_buckets]
-
-        total_base = sum(base_values)
-        total_quote = sum(quote_amounts)
-
-        logger.info(f"Created {len(chart_prices)} buckets. "
-                   f"Total base_value={total_base:.2f}, quote={total_quote:.2f}")
-
-        if total_base == 0 and total_quote == 0:
-            logger.warning("All bucket values are zero")
-            return None
-
-        # Create figure with stacked bars
-        fig = go.Figure()
-
-        # Calculate bar width based on bucket size
-        bar_width = bucket_size * 0.85
-
-        # Quote token bars (bottom) - Green
-        fig.add_trace(go.Bar(
-            x=chart_prices,
-            y=quote_amounts,
-            name='SOL (Quote)',
-            marker_color='#22c55e',
-            width=bar_width,
-            hovertemplate='Price: %{x:.6f}<br>SOL: %{y:,.2f}<extra></extra>'
-        ))
-
-        # Base token bars (top) - Blue
-        fig.add_trace(go.Bar(
-            x=chart_prices,
-            y=base_values,
-            name='ORE in SOL (Base)',
-            marker_color='#3b82f6',
-            width=bar_width,
-            hovertemplate='Price: %{x:.6f}<br>ORE (SOL value): %{y:,.2f}<extra></extra>'
-        ))
-
-        # Add weighted average current price line
-        if avg_current_price and price_min <= avg_current_price <= price_max:
-            fig.add_vline(
-                x=avg_current_price,
-                line_dash="dash",
-                line_color="#ef4444",
-                line_width=2,
-                annotation_text=f"Current: {avg_current_price:.4f}",
-                annotation_position="top",
-                annotation_font_color="#ef4444",
-                annotation_font_size=12
-            )
-
-        # Update layout
-        fig.update_layout(
-            title=dict(
-                text=f"📊 {pair_name} Aggregated Liquidity ({len(valid_pools)} pools)",
-                font=dict(size=16, color='white'),
-                x=0.5
-            ),
-            xaxis_title="Price (ORE/SOL)",
-            yaxis_title="Liquidity (SOL Value)",
-            barmode='stack',
-            template='plotly_dark',
-            paper_bgcolor='#1a1a2e',
-            plot_bgcolor='#16213e',
-            font=dict(color='white'),
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.5,
-                font=dict(size=11)
-            ),
-            margin=dict(l=70, r=40, t=80, b=60),
-            width=900,
-            height=500,
-            bargap=0.05
-        )
-
-        # Update axes
-        fig.update_xaxes(
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)',
-            range=[price_min, price_max],
-            tickformat='.4f'
-        )
-        fig.update_yaxes(
-            showgrid=True,
-            gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)'
-        )
-
-        # Export to bytes
-        img_bytes = fig.to_image(format="png", scale=2)
-        return img_bytes
-
-    except ImportError as e:
-        logger.warning(f"Plotly not available for aggregated chart generation: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error generating aggregated liquidity chart: {e}", exc_info=True)
-        return None
-
-
 async def handle_plot_liquidity(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1068,7 +694,7 @@ async def handle_plot_liquidity(
     )
 
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         # Fetch all pool infos in parallel
         async def fetch_pool_with_info(pool):
@@ -1126,7 +752,7 @@ async def handle_plot_liquidity(
 
         # Generate aggregated chart
         pair_name = search_term if search_term else "Multi-Pool"
-        chart_bytes = _generate_aggregated_liquidity_chart(pools_data, pair_name)
+        chart_bytes = generate_aggregated_liquidity_chart(pools_data, pair_name)
 
         if not chart_bytes:
             # Try to give more info about what went wrong
@@ -1244,7 +870,7 @@ async def _show_pool_detail(
     cache_key = f"pool_info_{connector}_{pool_address}"
     pool_info = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
     if pool_info is None:
-        client = await get_gateway_client()
+        client = await get_client()
         pool_info = await _fetch_pool_info(client, pool_address, connector)
         set_cached(context.user_data, cache_key, pool_info)
 
@@ -1373,7 +999,15 @@ async def _show_pool_detail(
     # Build keyboard - show different back button based on context
     keyboard = [
         [
+            InlineKeyboardButton("📈 OHLCV 1h", callback_data="dex:pool_ohlcv:1m"),
+            InlineKeyboardButton("📈 OHLCV 1d", callback_data="dex:pool_ohlcv:1h"),
+            InlineKeyboardButton("📈 OHLCV 7d", callback_data="dex:pool_ohlcv:1d"),
+        ],
+        [
+            InlineKeyboardButton("📊 Combined", callback_data="dex:pool_combined:1h"),
             InlineKeyboardButton("➕ Add Liquidity", callback_data="dex:add_position_from_pool"),
+        ],
+        [
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pool_detail_refresh"),
             InlineKeyboardButton("📋 Copy Address", callback_data=f"dex:copy_pool:{pool_address[:20]}")
         ]
@@ -1396,7 +1030,7 @@ async def _show_pool_detail(
     if bins:
         try:
             price_float = float(current_price) if current_price else None
-            chart_bytes = _generate_liquidity_chart(
+            chart_bytes = generate_liquidity_chart(
                 bins=bins,
                 active_bin_id=active_bin,
                 current_price=price_float,
@@ -1532,6 +1166,214 @@ async def handle_pool_list_back(update: Update, context: ContextTypes.DEFAULT_TY
     # Store message ID for future navigation
     context.user_data["pool_list_message_id"] = sent_msg.message_id
     context.user_data["pool_list_chat_id"] = chat.id
+
+
+# ============================================
+# POOL OHLCV CHARTS (via GeckoTerminal)
+# ============================================
+
+async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str) -> None:
+    """Show OHLCV chart for the selected pool using GeckoTerminal
+
+    Args:
+        update: Telegram update
+        context: Bot context
+        timeframe: OHLCV timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+    """
+    from io import BytesIO
+
+    query = update.callback_query
+    await query.answer("Loading OHLCV chart...")
+
+    pool = context.user_data.get("selected_pool", {})
+    pool_info = context.user_data.get("selected_pool_info", {})
+
+    if not pool:
+        await query.message.reply_text("No pool selected. Please select a pool first.")
+        return
+
+    pool_address = pool.get('pool_address', pool.get('address', ''))
+    pair = pool.get('trading_pair') or pool.get('name', 'Pool')
+
+    # Get network - default to Solana for CLMM pools
+    network = pool.get('network', 'solana')
+
+    # Show loading message
+    loading_msg = await query.message.reply_text(
+        f"📈 Loading OHLCV chart for {pair}...",
+        parse_mode=None
+    )
+
+    try:
+        # Fetch OHLCV data via GeckoTerminal
+        ohlcv_data, error = await fetch_ohlcv(
+            pool_address=pool_address,
+            network=network,
+            timeframe=timeframe,
+            user_data=context.user_data
+        )
+
+        if error or not ohlcv_data:
+            await loading_msg.edit_text(
+                f"❌ Failed to load OHLCV data: {error or 'No data available'}"
+            )
+            return
+
+        # Generate chart
+        chart_buf = generate_ohlcv_chart(
+            ohlcv_data=ohlcv_data,
+            pair_name=pair,
+            timeframe=_format_timeframe_label(timeframe)
+        )
+
+        if not chart_buf:
+            await loading_msg.edit_text("❌ Failed to generate chart")
+            return
+
+        # Delete loading message
+        await loading_msg.delete()
+
+        # Build timeframe buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:pool_ohlcv:1m"),
+                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:pool_ohlcv:1h"),
+                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:pool_ohlcv:1d"),
+            ],
+            [
+                InlineKeyboardButton("📊 Combined View", callback_data=f"dex:pool_combined:{timeframe}"),
+                InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh"),
+            ]
+        ]
+
+        # Build caption
+        caption = f"📈 *{escape_markdown_v2(pair)}* \\- {escape_markdown_v2(_format_timeframe_label(timeframe))}\n"
+        caption += f"_{escape_markdown_v2(f'{len(ohlcv_data)} candles')}_"
+
+        # Send chart
+        await query.message.chat.send_photo(
+            photo=chart_buf,
+            caption=caption,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating OHLCV chart: {e}", exc_info=True)
+        await loading_msg.edit_text(f"❌ Error: {str(e)}")
+
+
+async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str) -> None:
+    """Show combined OHLCV + Liquidity chart for the selected pool
+
+    Args:
+        update: Telegram update
+        context: Bot context
+        timeframe: OHLCV timeframe
+    """
+    from io import BytesIO
+
+    query = update.callback_query
+    await query.answer("Loading combined chart...")
+
+    pool = context.user_data.get("selected_pool", {})
+    pool_info = context.user_data.get("selected_pool_info", {})
+
+    if not pool:
+        await query.message.reply_text("No pool selected. Please select a pool first.")
+        return
+
+    pool_address = pool.get('pool_address', pool.get('address', ''))
+    pair = pool.get('trading_pair') or pool.get('name', 'Pool')
+    connector = pool.get('connector', 'meteora')
+    network = pool.get('network', 'solana')
+    current_price = pool_info.get('price') or pool.get('current_price')
+
+    # Show loading message
+    loading_msg = await query.message.reply_text(
+        f"📊 Loading combined chart for {pair}...",
+        parse_mode=None
+    )
+
+    try:
+        # Fetch OHLCV data
+        ohlcv_data, ohlcv_error = await fetch_ohlcv(
+            pool_address=pool_address,
+            network=network,
+            timeframe=timeframe,
+            user_data=context.user_data
+        )
+
+        # Get bins from cached pool_info or fetch
+        bins = pool_info.get('bins', [])
+        if not bins:
+            bins, _, _ = await fetch_liquidity_bins(
+                pool_address=pool_address,
+                connector=connector,
+                user_data=context.user_data
+            )
+
+        if not ohlcv_data and not bins:
+            await loading_msg.edit_text("❌ No data available for this pool")
+            return
+
+        # Generate combined chart
+        chart_buf = generate_combined_chart(
+            ohlcv_data=ohlcv_data or [],
+            bins=bins or [],
+            pair_name=pair,
+            timeframe=_format_timeframe_label(timeframe),
+            current_price=float(current_price) if current_price else None
+        )
+
+        if not chart_buf:
+            await loading_msg.edit_text("❌ Failed to generate combined chart")
+            return
+
+        # Delete loading message
+        await loading_msg.delete()
+
+        # Build keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:pool_combined:1m"),
+                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:pool_combined:1h"),
+                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:pool_combined:1d"),
+            ],
+            [
+                InlineKeyboardButton("📈 OHLCV Only", callback_data=f"dex:pool_ohlcv:{timeframe}"),
+                InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh"),
+            ]
+        ]
+
+        # Build caption
+        caption = f"📊 *{escape_markdown_v2(pair)}* \\- Combined View\n"
+        caption += f"_OHLCV \\({escape_markdown_v2(_format_timeframe_label(timeframe))}\\) \\+ Liquidity Distribution_"
+
+        # Send chart
+        await query.message.chat.send_photo(
+            photo=chart_buf,
+            caption=caption,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating combined chart: {e}", exc_info=True)
+        await loading_msg.edit_text(f"❌ Error: {str(e)}")
+
+
+def _format_timeframe_label(timeframe: str) -> str:
+    """Convert API timeframe to display label"""
+    labels = {
+        "1m": "1 Hour (1m candles)",
+        "5m": "5 Hours (5m candles)",
+        "15m": "15 Hours (15m candles)",
+        "1h": "1 Day (1h candles)",
+        "4h": "4 Days (4h candles)",
+        "1d": "7 Days (1d candles)",
+    }
+    return labels.get(timeframe, timeframe)
 
 
 # ============================================
@@ -1692,7 +1534,7 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
 async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display manage positions menu with all active LP positions"""
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -1892,7 +1734,7 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=None
         )
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2026,7 +1868,7 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
             parse_mode="MarkdownV2"
         )
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2112,7 +1954,7 @@ async def process_position_list(
         network = parts[1]
         pool_address = parts[2]
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2556,7 +2398,7 @@ async def show_add_position_menu(
             balance_cache_key = f"token_balances_{network}_{base_token}_{quote_token}"
             balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
             if balances is None:
-                client = await get_gateway_client()
+                client = await get_client()
                 balances = await _fetch_token_balances(client, network, base_token, quote_token)
                 set_cached(context.user_data, balance_cache_key, balances)
 
@@ -2794,7 +2636,7 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Refetch pool info
     if pool_address:
-        client = await get_gateway_client()
+        client = await get_client()
         pool_info = await _fetch_pool_info(client, pool_address, connector)
         set_cached(context.user_data, pool_cache_key, pool_info)
         context.user_data["selected_pool_info"] = pool_info
@@ -3053,7 +2895,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         if not amount_base_str and not amount_quote_str:
             raise ValueError("Need at least one amount (base or quote)")
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -3245,7 +3087,7 @@ async def process_add_position(
         connector = params.get("connector", "meteora")
         network = params.get("network", "solana-mainnet-beta")
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")

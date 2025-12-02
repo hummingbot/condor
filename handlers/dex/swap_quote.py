@@ -19,7 +19,7 @@ from handlers.config.user_preferences import (
     set_dex_last_swap,
     DEFAULT_DEX_NETWORK,
 )
-from ._shared import get_gateway_client
+from servers import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -280,7 +280,7 @@ async def handle_quote_get_confirm(update: Update, context: ContextTypes.DEFAULT
         if not all([connector, network, trading_pair, side, amount]):
             raise ValueError("Missing required parameters")
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         result = await client.gateway_swap.get_swap_quote(
             connector=connector,
@@ -378,7 +378,7 @@ async def process_swap_quote(
             amount = parts[2]
             slippage = parts[3] if len(parts) > 3 else "1.0"
 
-        client = await get_gateway_client()
+        client = await get_client()
 
         result = await client.gateway_swap.get_swap_quote(
             connector=connector,

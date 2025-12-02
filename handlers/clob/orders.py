@@ -15,18 +15,9 @@ logger = logging.getLogger(__name__)
 async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, status: str = "OPEN") -> None:
     """Handle search orders operation"""
     try:
-        from servers import server_manager
+        from servers import get_client
 
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
-
-        if not enabled_servers:
-            error_message = format_error_message("No enabled API servers available")
-            await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
-            return
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Search for orders with specified status
         if status == "OPEN":
@@ -170,15 +161,9 @@ async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFA
         if not client_order_id:
             raise ValueError("Order ID not found")
 
-        from servers import server_manager
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        from servers import get_client
 
-        if not enabled_servers:
-            raise ValueError("No enabled API servers available")
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Cancel the order
         result = await client.trading.cancel_order(

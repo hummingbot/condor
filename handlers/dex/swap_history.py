@@ -12,8 +12,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message
+from servers import get_client
 from ._shared import (
-    get_gateway_client,
     get_explorer_url,
     get_explorer_name,
     format_swap_summary,
@@ -56,7 +56,7 @@ async def process_swap_status(
 ) -> None:
     """Process swap status check"""
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -85,7 +85,7 @@ async def process_swap_status(
 async def handle_swap_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle swap history search"""
     try:
-        client = await get_gateway_client()
+        client = await get_client()
 
         if not hasattr(client, 'gateway_swap'):
             error_message = format_error_message("Gateway swap not available")

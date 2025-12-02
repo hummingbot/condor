@@ -15,18 +15,9 @@ logger = logging.getLogger(__name__)
 async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle get positions operation"""
     try:
-        from servers import server_manager
+        from servers import get_client
 
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
-
-        if not enabled_servers:
-            error_message = format_error_message("No enabled API servers available")
-            await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
-            return
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Get all positions
         result = await client.trading.get_positions(limit=100)
@@ -243,15 +234,9 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
         # Determine the opposite side to close the position
         close_side = "SELL" if side in ["LONG", "BUY"] else "BUY"
 
-        from servers import server_manager
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        from servers import get_client
 
-        if not enabled_servers:
-            raise ValueError("No enabled API servers available")
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Place market order to close position
         result = await client.trading.place_order(

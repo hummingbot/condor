@@ -84,29 +84,25 @@ async def handle_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     perp_connectors = []
 
     try:
-        from servers import server_manager
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        from servers import get_client
 
-        if enabled_servers:
-            server_name = enabled_servers[0]
-            client = await server_manager.get_client(server_name)
+        client = await get_client()
 
-            # Get connected connectors
-            accounts_result = await client.accounts.get_accounts()
-            accounts = accounts_result.get("accounts", {})
+        # Get connected connectors
+        accounts_result = await client.accounts.get_accounts()
+        accounts = accounts_result.get("accounts", {})
 
-            if account in accounts:
-                account_data = accounts[account]
-                connected_connectors = list(account_data.get("connectors", {}).keys())
-                perp_connectors = [c for c in connected_connectors if "perpetual" in c.lower()]
+        if account in accounts:
+            account_data = accounts[account]
+            connected_connectors = list(account_data.get("connectors", {}).keys())
+            perp_connectors = [c for c in connected_connectors if "perpetual" in c.lower()]
 
-                # Store for later use
-                context.user_data["perp_connectors"] = perp_connectors
+            # Store for later use
+            context.user_data["perp_connectors"] = perp_connectors
 
-                # Try to fetch position modes
-                position_modes = await _get_connector_position_modes(client, account)
-                context.user_data["position_modes"] = position_modes
+            # Try to fetch position modes
+            position_modes = await _get_connector_position_modes(client, account)
+            context.user_data["position_modes"] = position_modes
 
     except Exception as e:
         logger.error(f"Error fetching account data: {e}", exc_info=True)
@@ -177,15 +173,9 @@ async def handle_toggle_position_mode(
         # Toggle mode
         new_mode = "ONE-WAY" if current_mode == "HEDGE" else "HEDGE"
 
-        from servers import server_manager
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        from servers import get_client
 
-        if not enabled_servers:
-            raise ValueError("No enabled API servers available")
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Set new position mode
         result = await client.trading.set_position_mode(
@@ -235,15 +225,9 @@ async def process_leverage(
         if leverage <= 0:
             raise ValueError("Leverage must be a positive integer")
 
-        from servers import server_manager
-        servers = server_manager.list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        from servers import get_client
 
-        if not enabled_servers:
-            raise ValueError("No enabled API servers available")
-
-        server_name = enabled_servers[0]
-        client = await server_manager.get_client(server_name)
+        client = await get_client()
 
         # Set leverage
         result = await client.trading.set_leverage(
