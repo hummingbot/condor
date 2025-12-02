@@ -13,6 +13,33 @@ from handlers.config.user_preferences import get_clob_account
 logger = logging.getLogger(__name__)
 
 
+def _format_amount(value: float) -> str:
+    """Format token amounts with appropriate precision"""
+    if value == 0:
+        return "0"
+    elif abs(value) >= 1000000:
+        return f"{value/1000000:.2f}M"
+    elif abs(value) >= 1000:
+        return f"{value/1000:.1f}K"
+    elif abs(value) < 0.0001:
+        return f"{value:.2e}"
+    elif abs(value) < 1:
+        return f"{value:.6f}".rstrip('0').rstrip('.')
+    else:
+        formatted = f"{value:.4f}".rstrip('0').rstrip('.')
+        return formatted if '.' in f"{value:.4f}" else f"{value:.0f}"
+
+
+def _format_value(value: float) -> str:
+    """Format USD values"""
+    if value >= 1000000:
+        return f"${value/1000000:.2f}M"
+    elif value >= 1000:
+        return f"${value/1000:.2f}K"
+    else:
+        return f"${value:.2f}"
+
+
 def format_cex_balances_compact(balances: dict) -> str:
     """Format CEX balances in a compact table format.
 
@@ -26,6 +53,12 @@ def format_cex_balances_compact(balances: dict) -> str:
         return "_No CEX balances found_\n"
 
     message = ""
+
+    # Calculate grand total across all connectors
+    grand_total = 0
+    for connector_balances in balances.values():
+        if connector_balances:
+            grand_total += sum(float(b.get("value", 0)) for b in connector_balances)
 
     for connector_name, connector_balances in balances.items():
         if not connector_balances:
@@ -44,47 +77,46 @@ def format_cex_balances_compact(balances: dict) -> str:
         if not significant_balances:
             continue
 
+        # Calculate percentages for each balance
+        for bal in significant_balances:
+            bal["percentage"] = (float(bal.get("value", 0)) / grand_total * 100) if grand_total > 0 else 0
+
         # Connector header with total
-        total_str = format_number(total_value)
+        total_str = _format_value(total_value)
         message += f"🏦 *{escape_markdown_v2(connector_name)}* \\- `{escape_markdown_v2(total_str)}`\n"
 
-        # Build compact table
+        # Build table with percentage column
         table = "```\n"
-        table += f"{'Token':<6} {'Amount':<10} {'Value':>8}\n"
-        table += f"{'─'*6} {'─'*10} {'─'*8}\n"
+        table += f"{'Token':<10} {'Amount':<12} {'Value':<10} {'%':>6}\n"
+        table += f"{'─'*10} {'─'*12} {'─'*10} {'─'*6}\n"
 
         for balance in significant_balances[:5]:  # Show top 5
             token = balance.get("token", "???")
             units = float(balance.get("units", 0))
             value = float(balance.get("value", 0))
+            pct = balance.get("percentage", 0)
 
             # Truncate token name
-            token_display = token[:5] if len(token) > 5 else token
+            token_display = token[:9] if len(token) > 9 else token
 
             # Format units
-            if units >= 1000:
-                units_str = f"{units:,.0f}"[:9]
-            elif units >= 1:
-                units_str = f"{units:.2f}"[:9]
-            elif units >= 0.0001:
-                units_str = f"{units:.4f}"[:9]
-            else:
-                units_str = f"{units:.2e}"[:9]
+            units_str = _format_amount(units)[:11]
 
-            # Format value
-            if value >= 1000:
-                value_str = f"${value/1000:.1f}K"
-            else:
-                value_str = f"${value:.2f}"
-            value_str = value_str[:8]
+            # Format value (without $ for table alignment)
+            value_str = _format_value(value).replace('$', '')[:9]
 
-            table += f"{token_display:<6} {units_str:<10} {value_str:>8}\n"
+            table += f"{token_display:<10} {units_str:<12} {value_str:<10} {pct:>5.1f}%\n"
 
         if len(significant_balances) > 5:
             table += f"... +{len(significant_balances) - 5} more\n"
 
         table += "```\n"
         message += table
+
+    # Show grand total if multiple connectors
+    if len(balances) > 1 and grand_total > 0:
+        total_str = _format_value(grand_total)
+        message += f"💵 *Total:* `{escape_markdown_v2(total_str)}`\n"
 
     return message
 
