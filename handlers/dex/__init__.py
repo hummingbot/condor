@@ -10,12 +10,13 @@ Supports:
 
 Structure:
 - menu.py: Main DEX menu and help
-- swap_quote.py: Quote functionality
-- swap_execute.py: Swap execution and quick swap
-- swap_history.py: Swap history and status
-- pools.py: Pool and position management
+- swap.py: Unified swap (quote, execute, history with filters/pagination)
+- liquidity.py: Unified liquidity pools (balances, positions, history with filters/pagination)
+- pools.py: Pool info, position management (add, close, collect fees)
+- pool_data.py: Pool data fetching utilities (OHLCV, liquidity bins)
 - geckoterminal.py: GeckoTerminal pool explorer with charts
-- _shared.py: Shared utilities
+- visualizations.py: Chart generation (liquidity distribution, OHLCV candlesticks)
+- _shared.py: Shared utilities (caching, formatters, history filters)
 """
 
 import logging
@@ -27,26 +28,11 @@ from handlers import clear_all_input_states
 
 # Import submodule handlers
 from .menu import show_dex_menu, handle_close, handle_refresh, cancel_dex_loading_task
-from .swap_quote import (
-    handle_swap_quote,
-    show_swap_quote_menu,
-    handle_quote_toggle_side,
-    handle_quote_set_connector,
-    handle_quote_set_network,
-    handle_quote_set_pair,
-    handle_quote_set_amount,
-    handle_quote_set_slippage,
-    handle_quote_get_confirm,
-    process_swap_quote,
-    process_quote_set_connector,
-    process_quote_set_network,
-    process_quote_set_pair,
-    process_quote_set_amount,
-    process_quote_set_slippage,
-)
-from .swap_execute import (
-    handle_swap_execute,
-    show_swap_execute_menu,
+# Unified swap module
+from .swap import (
+    handle_swap,
+    handle_swap_refresh,
+    show_swap_menu,
     handle_swap_toggle_side,
     handle_swap_set_connector,
     handle_swap_connector_select,
@@ -55,19 +41,20 @@ from .swap_execute import (
     handle_swap_set_pair,
     handle_swap_set_amount,
     handle_swap_set_slippage,
+    handle_swap_get_quote,
     handle_swap_execute_confirm,
-    handle_quick_swap,
-    process_quick_swap,
-    process_swap_execute,
-    process_swap_set_connector,
-    process_swap_set_network,
+    handle_swap_history,
+    handle_swap_status,
+    handle_swap_hist_filter_pair,
+    handle_swap_hist_filter_connector,
+    handle_swap_hist_filter_status,
+    handle_swap_hist_set_filter,
+    handle_swap_hist_page,
+    handle_swap_hist_clear,
+    process_swap,
     process_swap_set_pair,
     process_swap_set_amount,
     process_swap_set_slippage,
-)
-from .swap_history import (
-    handle_swap_status,
-    handle_swap_search,
     process_swap_status,
 )
 from .pools import (
@@ -131,6 +118,22 @@ from .geckoterminal import (
     handle_copy_address,
     handle_back_to_list,
 )
+# Unified liquidity module
+from .liquidity import (
+    handle_liquidity,
+    show_liquidity_menu,
+    handle_lp_refresh,
+    handle_lp_pos_view,
+    handle_lp_collect_all,
+    handle_lp_history,
+    handle_lp_hist_filter_pair,
+    handle_lp_hist_filter_connector,
+    handle_lp_hist_filter_status,
+    handle_lp_hist_set_filter,
+    handle_lp_hist_page,
+    handle_lp_hist_clear,
+    handle_explore_pools,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -180,39 +183,29 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             cancel_dex_loading_task(context)
 
         # Only show typing for slow operations that need network calls
-        slow_actions = {"main_menu", "swap_execute_confirm", "pool_info", "pool_list",
-                        "manage_positions", "pos_add_confirm", "pos_close_exec",
+        slow_actions = {"main_menu", "swap", "swap_refresh", "swap_get_quote", "swap_execute_confirm", "swap_history",
+                        "swap_hist_clear", "swap_hist_filter_pair", "swap_hist_filter_connector", "swap_hist_filter_status",
+                        "swap_hist_page_prev", "swap_hist_page_next",
+                        "liquidity", "lp_refresh", "lp_history", "lp_collect_all", "explore_pools",
+                        "lp_hist_clear", "lp_hist_filter_pair", "lp_hist_filter_connector", "lp_hist_filter_status",
+                        "lp_hist_page_prev", "lp_hist_page_next",
+                        "pool_info", "pool_list", "manage_positions", "pos_add_confirm", "pos_close_exec",
                         "gecko_networks", "gecko_trades"}
-        # Also show typing for gecko actions that start with these prefixes
-        gecko_slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:")
-        if action in slow_actions or action.startswith(gecko_slow_prefixes):
+        # Also show typing for actions that start with these prefixes
+        slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:",
+                         "swap_hist_set_", "lp_hist_set_")
+        if action in slow_actions or action.startswith(slow_prefixes):
             await query.message.reply_chat_action("typing")
 
         # Menu
         if action == "main_menu":
             await show_dex_menu(update, context)
 
-        # Quote handlers
-        elif action == "swap_quote":
-            await handle_swap_quote(update, context)
-        elif action == "quote_toggle_side":
-            await handle_quote_toggle_side(update, context)
-        elif action == "quote_set_connector":
-            await handle_quote_set_connector(update, context)
-        elif action == "quote_set_network":
-            await handle_quote_set_network(update, context)
-        elif action == "quote_set_pair":
-            await handle_quote_set_pair(update, context)
-        elif action == "quote_set_amount":
-            await handle_quote_set_amount(update, context)
-        elif action == "quote_set_slippage":
-            await handle_quote_set_slippage(update, context)
-        elif action == "quote_get_confirm":
-            await handle_quote_get_confirm(update, context)
-
-        # Execute handlers
-        elif action == "swap_execute":
-            await handle_swap_execute(update, context)
+        # Unified swap handlers
+        elif action == "swap":
+            await handle_swap(update, context)
+        elif action == "swap_refresh":
+            await handle_swap_refresh(update, context)
         elif action == "swap_toggle_side":
             await handle_swap_toggle_side(update, context)
         elif action == "swap_set_connector":
@@ -231,18 +224,90 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_swap_set_amount(update, context)
         elif action == "swap_set_slippage":
             await handle_swap_set_slippage(update, context)
+        elif action == "swap_get_quote":
+            await handle_swap_get_quote(update, context)
         elif action == "swap_execute_confirm":
             await handle_swap_execute_confirm(update, context)
+        elif action == "swap_history":
+            await handle_swap_history(update, context)
 
-        # Quick swap
-        elif action == "quick_swap":
-            await handle_quick_swap(update, context)
+        # Swap history filter handlers
+        elif action == "swap_hist_filter_pair":
+            await handle_swap_hist_filter_pair(update, context)
+        elif action == "swap_hist_filter_connector":
+            await handle_swap_hist_filter_connector(update, context)
+        elif action == "swap_hist_filter_status":
+            await handle_swap_hist_filter_status(update, context)
+        elif action.startswith("swap_hist_set_pair_"):
+            value = action.replace("swap_hist_set_pair_", "")
+            await handle_swap_hist_set_filter(update, context, "pair", value)
+        elif action.startswith("swap_hist_set_connector_"):
+            value = action.replace("swap_hist_set_connector_", "")
+            await handle_swap_hist_set_filter(update, context, "connector", value)
+        elif action.startswith("swap_hist_set_status_"):
+            value = action.replace("swap_hist_set_status_", "")
+            await handle_swap_hist_set_filter(update, context, "status", value)
+        elif action == "swap_hist_page_prev":
+            await handle_swap_hist_page(update, context, "prev")
+        elif action == "swap_hist_page_next":
+            await handle_swap_hist_page(update, context, "next")
+        elif action == "swap_hist_clear":
+            await handle_swap_hist_clear(update, context)
 
-        # History/Status handlers
+        # Legacy swap handlers (redirect to unified)
+        elif action == "swap_quote":
+            await handle_swap(update, context)
+        elif action == "swap_execute":
+            await handle_swap(update, context)
+        elif action == "swap_search":
+            await handle_swap_history(update, context)
+
+        # Status handler (still separate)
         elif action == "swap_status":
             await handle_swap_status(update, context)
-        elif action == "swap_search":
-            await handle_swap_search(update, context)
+
+        # Unified liquidity handlers
+        elif action == "liquidity":
+            await handle_liquidity(update, context)
+        elif action == "lp_refresh":
+            await handle_lp_refresh(update, context)
+        elif action.startswith("lp_pos_view:"):
+            pos_index = int(action.split(":")[1])
+            await handle_lp_pos_view(update, context, pos_index)
+        elif action == "lp_collect_all":
+            await handle_lp_collect_all(update, context)
+        elif action == "lp_history":
+            await handle_lp_history(update, context)
+
+        # LP history filter handlers
+        elif action == "lp_hist_filter_pair":
+            await handle_lp_hist_filter_pair(update, context)
+        elif action == "lp_hist_filter_connector":
+            await handle_lp_hist_filter_connector(update, context)
+        elif action == "lp_hist_filter_status":
+            await handle_lp_hist_filter_status(update, context)
+        elif action.startswith("lp_hist_set_pair_"):
+            value = action.replace("lp_hist_set_pair_", "")
+            await handle_lp_hist_set_filter(update, context, "pair", value)
+        elif action.startswith("lp_hist_set_connector_"):
+            value = action.replace("lp_hist_set_connector_", "")
+            await handle_lp_hist_set_filter(update, context, "connector", value)
+        elif action.startswith("lp_hist_set_status_"):
+            value = action.replace("lp_hist_set_status_", "")
+            await handle_lp_hist_set_filter(update, context, "status", value)
+        elif action == "lp_hist_page_prev":
+            await handle_lp_hist_page(update, context, "prev")
+        elif action == "lp_hist_page_next":
+            await handle_lp_hist_page(update, context, "next")
+        elif action == "lp_hist_clear":
+            await handle_lp_hist_clear(update, context)
+
+        # No-op handler for page indicator buttons
+        elif action == "noop":
+            pass  # Do nothing, just acknowledge the callback
+
+        elif action == "explore_pools":
+            await handle_explore_pools(update, context)
 
         # Pool handlers
         elif action == "pool_info":
@@ -430,34 +495,12 @@ async def dex_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         # Only remove state for operations that complete (not parameter setting)
-        if dex_state in ["quick_swap", "swap_quote", "swap_execute", "swap_status", "pool_info", "pool_list", "position_list", "add_position"]:
+        if dex_state in ["swap", "swap_status", "pool_info", "pool_list", "position_list", "add_position"]:
             context.user_data.pop("dex_state", None)
 
-        # Quick swap
-        if dex_state == "quick_swap":
-            await process_quick_swap(update, context, user_input)
-
-        # Quote handlers
-        elif dex_state == "swap_quote":
-            await process_swap_quote(update, context, user_input)
-        elif dex_state == "quote_set_connector":
-            await process_quote_set_connector(update, context, user_input)
-        elif dex_state == "quote_set_network":
-            await process_quote_set_network(update, context, user_input)
-        elif dex_state == "quote_set_pair":
-            await process_quote_set_pair(update, context, user_input)
-        elif dex_state == "quote_set_amount":
-            await process_quote_set_amount(update, context, user_input)
-        elif dex_state == "quote_set_slippage":
-            await process_quote_set_slippage(update, context, user_input)
-
-        # Execute handlers
-        elif dex_state == "swap_execute":
-            await process_swap_execute(update, context, user_input)
-        elif dex_state == "swap_set_connector":
-            await process_swap_set_connector(update, context, user_input)
-        elif dex_state == "swap_set_network":
-            await process_swap_set_network(update, context, user_input)
+        # Unified swap handlers
+        if dex_state == "swap":
+            await process_swap(update, context, user_input)
         elif dex_state == "swap_set_pair":
             await process_swap_set_pair(update, context, user_input)
         elif dex_state == "swap_set_amount":

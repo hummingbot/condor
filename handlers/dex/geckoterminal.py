@@ -346,38 +346,77 @@ def _extract_pool_data(pool: dict) -> dict:
 
 
 # ============================================
+# STATE MANAGEMENT
+# ============================================
+
+DEFAULT_GECKO_NETWORK = "solana"
+DEFAULT_GECKO_VIEW = "trending"  # trending, top, new
+
+VIEW_LABELS = {
+    "trending": "🔥 Trending",
+    "top": "📈 Top Pools",
+    "new": "🆕 New Pools",
+}
+
+VIEW_CYCLE = ["trending", "top", "new"]
+
+
+def get_gecko_state(user_data: dict) -> tuple:
+    """Get current network and view from user state"""
+    network = user_data.get("gecko_selected_network", DEFAULT_GECKO_NETWORK)
+    view = user_data.get("gecko_selected_view", DEFAULT_GECKO_VIEW)
+    return network, view
+
+
+def set_gecko_network(user_data: dict, network: str) -> None:
+    """Set selected network"""
+    user_data["gecko_selected_network"] = network
+
+
+def set_gecko_view(user_data: dict, view: str) -> None:
+    """Set selected view type"""
+    user_data["gecko_selected_view"] = view
+
+
+def cycle_gecko_view(user_data: dict) -> str:
+    """Cycle to next view type and return the new view"""
+    current_view = user_data.get("gecko_selected_view", DEFAULT_GECKO_VIEW)
+    current_idx = VIEW_CYCLE.index(current_view) if current_view in VIEW_CYCLE else 0
+    next_idx = (current_idx + 1) % len(VIEW_CYCLE)
+    new_view = VIEW_CYCLE[next_idx]
+    user_data["gecko_selected_view"] = new_view
+    return new_view
+
+
+# ============================================
 # MAIN EXPLORE MENU
 # ============================================
 
 async def show_gecko_explore_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display the main GeckoTerminal explore menu"""
+    """Display the main GeckoTerminal explore menu with network selector and view toggle"""
+    network, view = get_gecko_state(context.user_data)
+    network_display = NETWORK_NAMES.get(network, network.title())
+
     keyboard = [
         [
-            InlineKeyboardButton("🔥 Trending", callback_data="dex:gecko_trending"),
-            InlineKeyboardButton("📈 Top Pools", callback_data="dex:gecko_top"),
+            InlineKeyboardButton(f"🌐 {network_display}", callback_data="dex:gecko_select_network"),
+            InlineKeyboardButton(VIEW_LABELS.get(view, "🔥 Trending"), callback_data="dex:gecko_toggle_view"),
         ],
         [
-            InlineKeyboardButton("🆕 New Pools", callback_data="dex:gecko_new"),
+            InlineKeyboardButton("▶️ Show Pools", callback_data="dex:gecko_show_pools"),
             InlineKeyboardButton("🔍 Search Token", callback_data="dex:gecko_search"),
         ],
         [
-            InlineKeyboardButton("🌐 By Network", callback_data="dex:gecko_networks"),
-            InlineKeyboardButton("📋 Meteora Pools", callback_data="dex:pool_list"),
-        ],
-        [
-            InlineKeyboardButton("« Back", callback_data="dex:main_menu"),
+            InlineKeyboardButton("« Back", callback_data="dex:explore_pools"),
         ],
     ]
 
     message = (
         r"🦎 *GeckoTerminal Explorer*" + "\n\n"
-        "Explore pools across all DEXes:\n\n"
-        "• 🔥 *Trending* \\- Hot pools by activity\n"
-        "• 📈 *Top Pools* \\- Highest volume pools\n"
-        "• 🆕 *New Pools* \\- Recently created\n"
-        "• 🔍 *Search* \\- Find by token\n"
-        "• 🌐 *By Network* \\- Filter by chain\n"
-        "• 📋 *Meteora Pools* \\- List Meteora CLMM pools\n"
+        f"🌐 Network: *{escape_markdown_v2(network_display)}*\n"
+        f"📊 View: *{escape_markdown_v2(VIEW_LABELS.get(view, 'Trending'))}*\n\n"
+        "_Tap network/view to change, then Show Pools_\n"
+        "_Or search by token address_"
     )
 
     if update.callback_query:
@@ -392,6 +431,70 @@ async def show_gecko_explore_menu(update: Update, context: ContextTypes.DEFAULT_
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+
+async def handle_gecko_toggle_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle between trending/top/new views"""
+    new_view = cycle_gecko_view(context.user_data)
+    await update.callback_query.answer(f"Switched to {VIEW_LABELS.get(new_view, new_view)}")
+    await show_gecko_explore_menu(update, context)
+
+
+async def handle_gecko_select_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show network selection menu"""
+    keyboard = []
+
+    # Add popular networks in rows of 3
+    row = []
+    for network in POPULAR_NETWORKS:
+        display = NETWORK_NAMES.get(network, network.title())
+        row.append(InlineKeyboardButton(display, callback_data=f"dex:gecko_set_network:{network}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    # Add more networks option and back
+    keyboard.append([
+        InlineKeyboardButton("🌍 More Networks", callback_data="dex:gecko_networks"),
+    ])
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")])
+
+    current_network, _ = get_gecko_state(context.user_data)
+    current_display = NETWORK_NAMES.get(current_network, current_network.title())
+
+    message = (
+        r"🌐 *Select Network*" + "\n\n"
+        f"Current: *{escape_markdown_v2(current_display)}*\n\n"
+        "_Choose a network:_"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_gecko_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE, network: str) -> None:
+    """Set the selected network and return to explore menu"""
+    set_gecko_network(context.user_data, network)
+    display = NETWORK_NAMES.get(network, network.title())
+    await update.callback_query.answer(f"Network: {display}")
+    await show_gecko_explore_menu(update, context)
+
+
+async def handle_gecko_show_pools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show pools based on current network and view selection"""
+    network, view = get_gecko_state(context.user_data)
+
+    if view == "trending":
+        await show_trending_pools(update, context, network)
+    elif view == "top":
+        await show_top_pools(update, context, network)
+    elif view == "new":
+        await show_new_pools(update, context, network)
 
 
 # ============================================
@@ -865,14 +968,20 @@ async def handle_gecko_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Prompt user to enter token address for search"""
     context.user_data["dex_state"] = "gecko_search"
 
+    # Get selected network
+    network, _ = get_gecko_state(context.user_data)
+    network_display = NETWORK_NAMES.get(network, network.title())
+
     keyboard = [
+        [InlineKeyboardButton(f"🌐 {network_display}", callback_data="dex:gecko_search_network")],
         [InlineKeyboardButton("« Cancel", callback_data="dex:gecko_explore")]
     ]
 
     message = (
         r"🔍 *Token Search*" + "\n\n"
+        f"Network: *{escape_markdown_v2(network_display)}*\n\n"
         "Enter a token address to find pools:\n\n"
-        "_Example: Enter a Solana or Ethereum token address_"
+        "_Tap network button to change_"
     )
 
     await update.callback_query.message.edit_text(
@@ -882,45 +991,74 @@ async def handle_gecko_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+async def handle_gecko_search_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show network selection for token search"""
+    keyboard = []
+
+    # Add popular networks in rows of 3
+    row = []
+    for network in POPULAR_NETWORKS:
+        display = NETWORK_NAMES.get(network, network.title())
+        row.append(InlineKeyboardButton(display, callback_data=f"dex:gecko_search_set_net:{network}"))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:gecko_search")])
+
+    current_network, _ = get_gecko_state(context.user_data)
+    current_display = NETWORK_NAMES.get(current_network, current_network.title())
+
+    message = (
+        r"🌐 *Select Network for Search*" + "\n\n"
+        f"Current: *{escape_markdown_v2(current_display)}*\n\n"
+        "_Choose a network:_"
+    )
+
+    await update.callback_query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_gecko_search_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE, network: str) -> None:
+    """Set network for search and return to search prompt"""
+    set_gecko_network(context.user_data, network)
+    display = NETWORK_NAMES.get(network, network.title())
+    await update.callback_query.answer(f"Network: {display}")
+    await handle_gecko_search(update, context)
+
+
 async def process_gecko_search(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
-    """Process token search input"""
+    """Process token search input - uses selected network"""
     context.user_data.pop("dex_state", None)
+
+    # Get the selected network
+    selected_network, _ = get_gecko_state(context.user_data)
+    network_display = NETWORK_NAMES.get(selected_network, selected_network.title())
 
     # Show loading message
     loading_msg = await update.message.reply_text(
-        r"🔍 *Searching\.\.\.*",
+        f"🔍 *Searching on {escape_markdown_v2(network_display)}\\.\\.\\.*",
         parse_mode="MarkdownV2"
     )
 
     try:
-        # Determine network from address format
         token_address = user_input.strip()
 
-        # Try to detect network
-        if token_address.startswith("0x"):
-            networks = ["eth", "base", "arbitrum", "bsc", "polygon_pos"]
-        else:
-            networks = ["solana"]  # Assume Solana for non-0x addresses
-
-        pools = []
-        found_network = None
-
+        # Use the selected network directly
         client = GeckoTerminalAsyncClient()
-        for network in networks:
-            try:
-                result = await client.get_top_pools_by_network_token(network, token_address)
-                data = _extract_pools_from_response(result, 10)
-                if data:
-                    pools = data
-                    found_network = network
-                    break
-            except Exception:
-                continue
+        result = await client.get_top_pools_by_network_token(selected_network, token_address)
+        pools = _extract_pools_from_response(result, 10)
 
         if not pools:
             await loading_msg.edit_text(
                 r"❌ *No pools found*" + "\n\n"
-                "Could not find any pools for this token address\\.",
+                f"No pools found for this token on {escape_markdown_v2(network_display)}\\.\n\n"
+                "_Try a different network or token address_",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔍 Try Again", callback_data="dex:gecko_search")],
@@ -932,13 +1070,16 @@ async def process_gecko_search(update: Update, context: ContextTypes.DEFAULT_TYP
         # Store pools for selection
         context.user_data["gecko_pools"] = pools
         context.user_data["gecko_view"] = "search"
-        context.user_data["gecko_network"] = found_network
+        context.user_data["gecko_network"] = selected_network
         context.user_data["gecko_search_token"] = token_address
 
         # Build message
-        network_name = NETWORK_NAMES.get(found_network, found_network)
-        lines = [f"🔍 *Pools for Token \\- {escape_markdown_v2(network_name)}*\n"]
-        lines.append(f"Token: `{escape_markdown_v2(token_address[:20])}...`\n")
+        lines = [f"🔍 *Pools for Token \\- {escape_markdown_v2(network_display)}*\n"]
+        # Show truncated or full address
+        if len(token_address) > 24:
+            lines.append(f"Token: `{escape_markdown_v2(token_address[:12])}...{escape_markdown_v2(token_address[-8:])}`\n")
+        else:
+            lines.append(f"Token: `{escape_markdown_v2(token_address)}`\n")
 
         for i, pool in enumerate(pools, 1):
             line = _format_pool_line(pool, i)

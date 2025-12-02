@@ -114,7 +114,7 @@ async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         r"`raydium 7Xy...def`"
     )
 
-    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:main_menu")]]
+    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:explore_pools")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pool_info"
@@ -232,7 +232,7 @@ async def process_pool_info(
 
         if not result:
             message = escape_markdown_v2(f"❌ Pool not found: {pool_address[:16]}...")
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:main_menu")]]
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
                 message,
@@ -337,7 +337,7 @@ async def handle_pool_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         r"_\(Uses Meteora connector\)_"
     )
 
-    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:main_menu")]]
+    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:explore_pools")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pool_list"
@@ -505,7 +505,7 @@ def _build_pool_selection_keyboard(pools: list, search_term: str = None, is_pair
     # Add search again and back buttons
     keyboard.append([
         InlineKeyboardButton("🔍 New Search", callback_data="dex:pool_list"),
-        InlineKeyboardButton("« Back", callback_data="dex:main_menu")
+        InlineKeyboardButton("« Back", callback_data="dex:explore_pools")
     ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -561,7 +561,7 @@ async def process_pool_list(
         if not pools:
             message = escape_markdown_v2("📋 No pools found")
             context.user_data["pool_list_cache"] = []
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:main_menu")]]
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
             # Sort by APR% descending, filter out zero TVL
@@ -799,7 +799,7 @@ async def handle_plot_liquidity(
         keyboard = [
             [
                 InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-                InlineKeyboardButton("« Main Menu", callback_data="dex:main_menu")
+                InlineKeyboardButton("« Explore", callback_data="dex:explore_pools")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -841,7 +841,27 @@ async def _fetch_pool_info(client, pool_address: str, connector: str = "meteora"
             )
             return result or {}
     except Exception as e:
-        logger.warning(f"Failed to fetch pool info: {e}")
+        error_str = str(e)
+        # If get_pool_info fails with validation error (pool not in DLMM list),
+        # try finding via get_pools search as fallback
+        if "validation error" in error_str.lower() or "Field required" in error_str:
+            logger.info(f"Pool {pool_address[:12]}... not found via get_pool_info, trying get_pools search")
+            try:
+                search_result = await client.gateway_clmm.get_pools(
+                    connector=connector,
+                    search_term=pool_address,
+                    limit=1
+                )
+                pools = search_result.get("pools", [])
+                if pools:
+                    pool_info = pools[0]
+                    pool_info['address'] = pool_address
+                    logger.info(f"Found pool via get_pools: {pool_info.get('trading_pair', 'Unknown')}")
+                    return pool_info
+            except Exception as search_e:
+                logger.warning(f"get_pools search also failed: {search_e}")
+        else:
+            logger.warning(f"Failed to fetch pool info: {e}")
     return {}
 
 
@@ -1016,11 +1036,11 @@ async def _show_pool_detail(
     if has_list_context:
         keyboard.append([
             InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-            InlineKeyboardButton("« Main Menu", callback_data="dex:main_menu")
+            InlineKeyboardButton("« Explore", callback_data="dex:explore_pools")
         ])
     else:
         keyboard.append([
-            InlineKeyboardButton("« Main Menu", callback_data="dex:main_menu")
+            InlineKeyboardButton("« Explore Pools", callback_data="dex:explore_pools")
         ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1625,7 +1645,7 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
         # Add new position and back buttons
         keyboard.append([
             InlineKeyboardButton("➕ New Position", callback_data="dex:add_position"),
-            InlineKeyboardButton("« Back", callback_data="dex:main_menu")
+            InlineKeyboardButton("« Back", callback_data="dex:liquidity")
         ])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1643,7 +1663,7 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         logger.error(f"Error loading positions: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to load positions: {str(e)}")
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:main_menu")]]
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.callback_query.message.edit_text(
             error_message,
@@ -2970,7 +2990,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
             if 'position_address' in result:
                 pos_info += escape_markdown_v2(f"\nPosition: {result['position_address'][:16]}...")
 
-        keyboard = [[InlineKeyboardButton("« Back to DEX Trading", callback_data="dex:main_menu")]]
+        keyboard = [[InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.reply_text(
@@ -3122,7 +3142,7 @@ async def process_add_position(
         if isinstance(result, dict) and 'tx_hash' in result:
             pos_info += escape_markdown_v2(f"\nTx: {result['tx_hash'][:16]}...")
 
-        keyboard = [[InlineKeyboardButton("« Back to DEX Trading", callback_data="dex:main_menu")]]
+        keyboard = [[InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(

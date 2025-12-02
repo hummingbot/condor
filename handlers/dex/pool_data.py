@@ -217,11 +217,46 @@ async def fetch_liquidity_bins(
         if not client:
             return None, None, "Gateway client not available"
 
-        pool_info = await client.gateway_clmm.get_pool_info(
-            connector=connector,
-            network=network,
-            pool_address=pool_address
-        )
+        pool_info = None
+
+        # First try get_pool_info (works for pools known to gateway)
+        try:
+            pool_info = await client.gateway_clmm.get_pool_info(
+                connector=connector,
+                network=network,
+                pool_address=pool_address
+            )
+        except Exception as e:
+            # If get_pool_info fails (e.g., pool not in gateway config or not a DLMM pool),
+            # try finding the pool via get_pools search
+            error_str = str(e)
+            if "validation error" in error_str.lower() or "Field required" in error_str:
+                logger.info(f"Pool {pool_address[:12]}... not found via get_pool_info, trying get_pools search")
+                try:
+                    # Search for pool by address using get_pools
+                    search_result = await client.gateway_clmm.get_pools(
+                        connector=connector,
+                        search_term=pool_address,
+                        limit=1
+                    )
+                    pools = search_result.get("pools", [])
+                    if pools:
+                        # Found the pool, but get_pools doesn't include bins
+                        # Return pool info without bins - caller can handle this
+                        pool_info = pools[0]
+                        pool_info['address'] = pool_address
+                        logger.info(f"Found pool via get_pools: {pool_info.get('trading_pair', 'Unknown')}")
+                    else:
+                        # Pool not found in DLMM pools - might be an AMM pool or non-existent
+                        logger.info(f"Pool {pool_address[:12]}... not found in {connector} DLMM pools")
+                        return None, None, f"Pool not found in {connector} DLMM pools. This may be an AMM pool or not a {connector} pool."
+                except Exception as search_e:
+                    logger.warning(f"get_pools search also failed: {search_e}")
+                    return None, None, f"Could not fetch pool info. Pool may not be a {connector} DLMM pool."
+
+            if pool_info is None:
+                # Re-raise with a cleaner message for non-validation errors
+                return None, None, f"Failed to fetch pool: {str(e)[:100]}"
 
         if not pool_info:
             return None, None, "Pool not found"

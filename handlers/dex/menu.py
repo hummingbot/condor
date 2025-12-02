@@ -269,14 +269,8 @@ def _build_menu_keyboard() -> InlineKeyboardMarkup:
     """Build the DEX menu keyboard"""
     keyboard = [
         [
-            InlineKeyboardButton("💰 Quote", callback_data="dex:swap_quote"),
-            InlineKeyboardButton("✅ Swap", callback_data="dex:swap_execute"),
-            InlineKeyboardButton("🔍 History", callback_data="dex:swap_search")
-        ],
-        [
-            InlineKeyboardButton("🦎 Explore Pools", callback_data="dex:gecko_explore"),
-            InlineKeyboardButton("🔍 Pool Info", callback_data="dex:pool_info"),
-            InlineKeyboardButton("📍 Positions", callback_data="dex:manage_positions")
+            InlineKeyboardButton("💱 Swap", callback_data="dex:swap"),
+            InlineKeyboardButton("💧 Liquidity Pools", callback_data="dex:liquidity"),
         ],
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:refresh"),

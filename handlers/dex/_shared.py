@@ -556,6 +556,73 @@ def _format_price(price: float) -> str:
 
 
 # ============================================
+# RELATIVE TIME FORMATTER
+# ============================================
+
+def format_relative_time(timestamp: str) -> str:
+    """Format timestamp as relative time (e.g., '53s', '22m', '1h', '2d')
+
+    Args:
+        timestamp: ISO format timestamp string
+
+    Returns:
+        Relative time string
+    """
+    from datetime import datetime, timezone
+
+    if not timestamp:
+        return ""
+
+    try:
+        # Parse ISO timestamp
+        if 'T' in timestamp:
+            # Handle various ISO formats
+            ts_str = timestamp.replace('Z', '+00:00')
+            if '.' in ts_str:
+                # Remove microseconds if present
+                parts = ts_str.split('.')
+                if '+' in parts[1]:
+                    ts_str = parts[0] + '+' + parts[1].split('+')[1]
+                elif '-' in parts[1]:
+                    ts_str = parts[0] + '-' + parts[1].split('-', 1)[1]
+                else:
+                    ts_str = parts[0]
+
+            # Parse with timezone
+            try:
+                dt = datetime.fromisoformat(ts_str)
+            except ValueError:
+                # Fallback: try without timezone
+                dt = datetime.fromisoformat(timestamp.split('+')[0].split('.')[0])
+                dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            return ""
+
+        # Calculate difference
+        now = datetime.now(timezone.utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        diff = now - dt
+        seconds = int(diff.total_seconds())
+
+        if seconds < 0:
+            return "now"
+        elif seconds < 60:
+            return f"{seconds}s"
+        elif seconds < 3600:
+            return f"{seconds // 60}m"
+        elif seconds < 86400:
+            return f"{seconds // 3600}h"
+        else:
+            return f"{seconds // 86400}d"
+
+    except Exception as e:
+        logger.debug(f"Error formatting relative time: {e}")
+        return ""
+
+
+# ============================================
 # STATE HELPERS
 # ============================================
 
@@ -569,3 +636,217 @@ def clear_dex_state(context) -> None:
     context.user_data.pop("dex_previous_state", None)
     context.user_data.pop("quote_swap_params", None)
     context.user_data.pop("execute_swap_params", None)
+
+
+# ============================================
+# HISTORY FILTER & PAGINATION HELPERS
+# ============================================
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+HistoryType = Literal["swap", "position"]
+
+# Available filter options per history type
+HISTORY_FILTERS = {
+    "swap": {
+        "trading_pair": ["All", "SOL-USDC", "SOL-ORE", "ORE-USDC", "ETH-USDC"],
+        "connector": ["All", "jupiter", "uniswap"],
+        "status": ["All", "CONFIRMED", "PENDING", "FAILED"],
+    },
+    "position": {
+        "trading_pair": ["All", "SOL-USDC", "ORE-SOL", "METv-SOL"],
+        "connector": ["All", "meteora", "orca", "raydium"],
+        "status": ["All", "OPEN", "CLOSED"],
+    },
+}
+
+DEFAULT_PAGE_SIZE = 10
+
+
+@dataclass
+class HistoryFilters:
+    """Stores filter and pagination state for history views"""
+    history_type: HistoryType = "swap"
+    trading_pair: Optional[str] = None  # None = All
+    connector: Optional[str] = None     # None = All
+    status: Optional[str] = None        # None = All
+    network: Optional[str] = None       # None = All
+    offset: int = 0
+    limit: int = DEFAULT_PAGE_SIZE
+    total_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "history_type": self.history_type,
+            "trading_pair": self.trading_pair,
+            "connector": self.connector,
+            "status": self.status,
+            "network": self.network,
+            "offset": self.offset,
+            "limit": self.limit,
+            "total_count": self.total_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "HistoryFilters":
+        return cls(
+            history_type=data.get("history_type", "swap"),
+            trading_pair=data.get("trading_pair"),
+            connector=data.get("connector"),
+            status=data.get("status"),
+            network=data.get("network"),
+            offset=data.get("offset", 0),
+            limit=data.get("limit", DEFAULT_PAGE_SIZE),
+            total_count=data.get("total_count", 0),
+        )
+
+    def reset_pagination(self) -> None:
+        """Reset pagination when filters change"""
+        self.offset = 0
+
+    @property
+    def current_page(self) -> int:
+        return (self.offset // self.limit) + 1
+
+    @property
+    def total_pages(self) -> int:
+        if self.total_count == 0:
+            return 1
+        return (self.total_count + self.limit - 1) // self.limit
+
+    @property
+    def has_next(self) -> bool:
+        return self.offset + self.limit < self.total_count
+
+    @property
+    def has_prev(self) -> bool:
+        return self.offset > 0
+
+
+def get_history_filters(user_data: dict, history_type: HistoryType) -> HistoryFilters:
+    """Get current history filters from user data"""
+    key = f"history_filters_{history_type}"
+    data = user_data.get(key)
+    if data:
+        return HistoryFilters.from_dict(data)
+    return HistoryFilters(history_type=history_type)
+
+
+def set_history_filters(user_data: dict, filters: HistoryFilters) -> None:
+    """Save history filters to user data"""
+    key = f"history_filters_{filters.history_type}"
+    user_data[key] = filters.to_dict()
+
+
+def build_filter_buttons(
+    filters: HistoryFilters,
+    callback_prefix: str
+) -> List[List["InlineKeyboardButton"]]:
+    """Build filter button rows for history views
+
+    Args:
+        filters: Current filter state
+        callback_prefix: Prefix for callback data (e.g., "dex:swap_hist" or "dex:lp_hist")
+
+    Returns:
+        List of button rows
+    """
+    from telegram import InlineKeyboardButton
+
+    rows = []
+
+    # Trading pair filter
+    pair_label = filters.trading_pair or "All Pairs"
+    rows.append([
+        InlineKeyboardButton(f"💱 {pair_label}", callback_data=f"{callback_prefix}_filter_pair"),
+    ])
+
+    # Connector & Status filters (same row)
+    connector_label = filters.connector or "All DEX"
+    status_label = filters.status or "All Status"
+    rows.append([
+        InlineKeyboardButton(f"🔌 {connector_label}", callback_data=f"{callback_prefix}_filter_connector"),
+        InlineKeyboardButton(f"📊 {status_label}", callback_data=f"{callback_prefix}_filter_status"),
+    ])
+
+    return rows
+
+
+def build_pagination_buttons(
+    filters: HistoryFilters,
+    callback_prefix: str
+) -> List["InlineKeyboardButton"]:
+    """Build pagination buttons for history views
+
+    Args:
+        filters: Current filter state with pagination info
+        callback_prefix: Prefix for callback data
+
+    Returns:
+        List of buttons for a single row
+    """
+    from telegram import InlineKeyboardButton
+
+    buttons = []
+
+    # Previous button
+    if filters.has_prev:
+        buttons.append(InlineKeyboardButton("« Prev", callback_data=f"{callback_prefix}_page_prev"))
+    else:
+        buttons.append(InlineKeyboardButton(" ", callback_data="dex:noop"))
+
+    # Page indicator
+    page_text = f"{filters.current_page}/{filters.total_pages}"
+    buttons.append(InlineKeyboardButton(page_text, callback_data="dex:noop"))
+
+    # Next button
+    if filters.has_next:
+        buttons.append(InlineKeyboardButton("Next »", callback_data=f"{callback_prefix}_page_next"))
+    else:
+        buttons.append(InlineKeyboardButton(" ", callback_data="dex:noop"))
+
+    return buttons
+
+
+def build_filter_selection_keyboard(
+    options: List[str],
+    current_value: Optional[str],
+    callback_prefix: str,
+    back_callback: str
+) -> "InlineKeyboardMarkup":
+    """Build a keyboard for selecting a filter value
+
+    Args:
+        options: List of available options
+        current_value: Currently selected value (None = All)
+        callback_prefix: Prefix for callback data
+        back_callback: Callback for back button
+
+    Returns:
+        InlineKeyboardMarkup with option buttons
+    """
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    buttons = []
+    row = []
+
+    for opt in options:
+        # Check if this option is currently selected
+        is_selected = (opt == "All" and current_value is None) or (opt == current_value)
+        label = f"✓ {opt}" if is_selected else opt
+
+        # Use None for "All" option
+        value = "" if opt == "All" else opt
+        row.append(InlineKeyboardButton(label, callback_data=f"{callback_prefix}_{value}"))
+
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+
+    if row:
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton("« Back", callback_data=back_callback)])
+
+    return InlineKeyboardMarkup(buttons)
