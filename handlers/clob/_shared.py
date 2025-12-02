@@ -286,6 +286,66 @@ async def get_cex_balances(
 
 
 # ============================================
+# POSITIONS FETCHING
+# ============================================
+
+async def fetch_positions(client, connector_name: str = None) -> List[Dict[str, Any]]:
+    """Fetch positions, optionally filtered by connector.
+
+    Args:
+        client: API client
+        connector_name: Optional connector name to filter by
+
+    Returns:
+        List of position dictionaries
+    """
+    try:
+        result = await client.trading.get_positions(limit=100)
+        positions = result.get("data", [])
+
+        # Filter by connector if specified
+        if connector_name and positions:
+            positions = [
+                p for p in positions
+                if p.get("connector_name") == connector_name
+            ]
+
+        return positions
+
+    except Exception as e:
+        logger.error(f"Error fetching positions: {e}", exc_info=True)
+        return []
+
+
+async def get_positions(
+    user_data: dict,
+    client,
+    connector_name: str = None,
+    ttl: int = DEFAULT_CACHE_TTL
+) -> List[Dict[str, Any]]:
+    """Get positions with caching.
+
+    Args:
+        user_data: context.user_data dict
+        client: API client
+        connector_name: Optional connector name to filter by
+        ttl: Cache TTL in seconds
+
+    Returns:
+        List of position dictionaries
+    """
+    cache_key = f"positions_{connector_name or 'all'}"
+    return await cached_call(
+        user_data,
+        cache_key,
+        fetch_positions,
+        ttl,
+        client,
+        connector_name
+    )
+
+
+# ============================================
 # TRADING RULES FETCHING
 # ============================================
 
@@ -397,24 +457,35 @@ def format_trading_rules_info(
     min_price_inc = rules.get("min_price_increment", 0)
     min_base_inc = rules.get("min_base_amount_increment", 0)
 
+    def fmt_num(n):
+        """Format number, removing unnecessary trailing zeros"""
+        if n == int(n):
+            return str(int(n))
+        # Format with enough precision, then strip trailing zeros
+        s = f"{n:.8f}".rstrip('0').rstrip('.')
+        return s
+
     items = []
     if min_order > 0:
-        items.append(f"Min size: {min_order}")
+        items.append(("Min size", fmt_num(min_order)))
     if min_notional > 0:
-        items.append(f"Min value: ${min_notional}")
+        items.append(("Min notional", f"${fmt_num(min_notional)}"))
     if min_price_inc > 0:
-        items.append(f"Price tick: {min_price_inc}")
+        items.append(("Price tick", fmt_num(min_price_inc)))
     if min_base_inc > 0:
-        items.append(f"Size tick: {min_base_inc}")
+        items.append(("Size tick", fmt_num(min_base_inc)))
 
     if not items:
         return ""
 
-    # Format in pairs (two per line) for better readability
+    # Calculate column widths dynamically
+    max_label = max(len(label) for label, _ in items)
+    max_value = max(len(value) for _, value in items)
+
+    # Format as aligned table
     lines = []
-    for i in range(0, len(items), 2):
-        pair = items[i:i+2]
-        lines.append(" │ ".join(pair))
+    for label, value in items:
+        lines.append(f"{label:<{max_label}}: {value}")
 
     return "\n".join(lines)
 
