@@ -1085,22 +1085,25 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             lines.append(r"🔄 *24h Transactions:*")
             lines.append(f"• Buys: {buys} | Sells: {sells}")
 
-    # Pool address
+    # Pool address and link
     lines.append("")
     addr = pool_data.get("address", "")
+    network = pool_data.get("network", "")
     if addr:
-        lines.append(f"📍 Address: `{escape_markdown_v2(addr[:16])}`\\.\\.\\.")
+        lines.append(f"📍 Address:\n`{addr}`")
+        if network:
+            gecko_url = f"https://www.geckoterminal.com/{network}/pools/{addr}"
+            lines.append(f"\n🦎 [View on GeckoTerminal]({escape_markdown_v2(gecko_url)})")
 
     # Build keyboard
     keyboard = [
         [
-            InlineKeyboardButton("📈 OHLCV 1h", callback_data="dex:gecko_ohlcv:1m"),
-            InlineKeyboardButton("📈 OHLCV 1d", callback_data="dex:gecko_ohlcv:1h"),
-            InlineKeyboardButton("📈 OHLCV 7d", callback_data="dex:gecko_ohlcv:1d"),
+            InlineKeyboardButton("📈 Candles 1h", callback_data="dex:gecko_ohlcv:1m"),
+            InlineKeyboardButton("📈 Candles 1d", callback_data="dex:gecko_ohlcv:1h"),
+            InlineKeyboardButton("📈 Candles 7d", callback_data="dex:gecko_ohlcv:1d"),
         ],
         [
             InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
-            InlineKeyboardButton("📋 Copy Address", callback_data="dex:gecko_copy_addr"),
         ],
     ]
 
@@ -1269,9 +1272,9 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
         keyboard = [
             [
-                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_ohlcv:1m"),
-                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_ohlcv:1h"),
-                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_ohlcv:1d"),
+                InlineKeyboardButton("Candles 1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_ohlcv:1m"),
+                InlineKeyboardButton("Candles 1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_ohlcv:1h"),
+                InlineKeyboardButton("Candles 7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_ohlcv:1d"),
             ],
         ]
 
@@ -1547,12 +1550,12 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Build keyboard
         keyboard = [
             [
-                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_combined:1m"),
-                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_combined:1h"),
-                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_combined:1d"),
+                InlineKeyboardButton("Candles 1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_combined:1m"),
+                InlineKeyboardButton("Candles 1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_combined:1h"),
+                InlineKeyboardButton("Candles 7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_combined:1d"),
             ],
             [
-                InlineKeyboardButton("📈 OHLCV Only", callback_data=f"dex:gecko_ohlcv:{timeframe}"),
+                InlineKeyboardButton("📈 Candles Only", callback_data=f"dex:gecko_ohlcv:{timeframe}"),
                 InlineKeyboardButton("📊 Liquidity Only", callback_data="dex:gecko_liquidity"),
             ],
             [
