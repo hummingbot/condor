@@ -47,8 +47,12 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
 
     # Action buttons
     keyboard.append([
-        InlineKeyboardButton("Controller Configs", callback_data="bots:controller_configs"),
+        InlineKeyboardButton("➕ New Grid Strike", callback_data="bots:new_grid_strike"),
         InlineKeyboardButton("Deploy", callback_data="bots:deploy_menu"),
+    ])
+
+    keyboard.append([
+        InlineKeyboardButton("📁 Configs", callback_data="bots:controller_configs"),
     ])
 
     keyboard.append([

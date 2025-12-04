@@ -429,39 +429,6 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
         set_controller_config(context, config)
 
-        # Generate and send chart
-        if candles:
-            chart_bytes = generate_candles_chart(
-                candles, pair,
-                start_price=start,
-                end_price=end,
-                limit_price=limit,
-                current_price=current_price
-            )
-
-            # Delete old message and send chart
-            try:
-                await query.message.delete()
-            except:
-                pass
-
-            # Send chart as photo
-            photo_msg = await context.bot.send_photo(
-                chat_id=query.message.chat_id,
-                photo=chart_bytes,
-                caption=(
-                    f"*{escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
-                    f"Current: `{current_price:,.6g}`\n"
-                    f"Start: `{start:,.6g}` \\(\\-2%\\)\n"
-                    f"End: `{end:,.6g}` \\(\\+2%\\)\n"
-                    f"Limit: `{limit:,.6g}` \\(\\-3%\\)"
-                ),
-                parse_mode="MarkdownV2"
-            )
-
-            # Store photo message ID for later cleanup
-            context.user_data["gs_chart_message_id"] = photo_msg.message_id
-
         # Show price edit options
         side_str = "LONG" if side == SIDE_LONG else "SHORT"
 
@@ -475,27 +442,50 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
         ]
 
-        msg = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=(
-                r"*Grid Strike \- New Config*" + "\n\n"
-                f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-                f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n"
-                f"*Side:* `{side_str}` \\| *Leverage:* `{config.get('leverage', 1)}x`" + "\n"
-                f"*Amount:* `{config.get('total_amount_quote', 0):,.0f}`" + "\n\n"
-                r"*Step 6/7:* Grid Prices" + "\n\n"
-                f"Start: `{start:,.6g}`\n"
-                f"End: `{end:,.6g}`\n"
-                f"Limit: `{limit:,.6g}`\n\n"
-                r"_Type `start,end,limit` to edit \(e\.g\. `0\.32,0\.34,0\.31`\)_" + "\n"
-                r"_Or tap Accept to continue_"
-            ),
+        # Format example with current values
+        example_prices = f"{start:,.6g},{end:,.6g},{limit:,.6g}"
+
+        # Build the combined caption/message
+        config_text = (
+            f"*{escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
+            f"*Connector:* `{escape_markdown_v2(connector)}`\n"
+            f"*Side:* `{side_str}` \\| *Leverage:* `{config.get('leverage', 1)}x`\n"
+            f"*Amount:* `{config.get('total_amount_quote', 0):,.0f}`\n\n"
+            f"Current: `{current_price:,.6g}`\n"
+            f"Start: `{start:,.6g}` \\(\\-2%\\)\n"
+            f"End: `{end:,.6g}` \\(\\+2%\\)\n"
+            f"Limit: `{limit:,.6g}` \\(\\-3%\\)\n\n"
+            f"_Type `start,end,limit` to edit_\n"
+            f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
+        )
+
+        # Edit existing message to show config (no delete/recreate flicker)
+        await query.message.edit_text(
+            text=config_text,
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
         # Update wizard message ID
-        context.user_data["gs_wizard_message_id"] = msg.message_id
+        context.user_data["gs_wizard_message_id"] = query.message.message_id
+
+        # Send chart as separate photo (visual reference only)
+        if candles:
+            chart_bytes = generate_candles_chart(
+                candles, pair,
+                start_price=start,
+                end_price=end,
+                limit_price=limit,
+                current_price=current_price
+            )
+
+            photo_msg = await context.bot.send_photo(
+                chat_id=query.message.chat_id,
+                photo=chart_bytes
+            )
+
+            # Store photo message ID for cleanup
+            context.user_data["gs_chart_message_id"] = photo_msg.message_id
 
     except Exception as e:
         logger.error(f"Error in prices step: {e}", exc_info=True)
@@ -510,14 +500,81 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 async def handle_gs_accept_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Accept prices and move to take profit step"""
     query = update.callback_query
+    config = get_controller_config(context)
+
+    side = config.get("side", SIDE_LONG)
+    start_price = config.get("start_price", 0)
+    end_price = config.get("end_price", 0)
+    limit_price = config.get("limit_price", 0)
+
+    # Validate price ordering based on side
+    # LONG: limit_price < start_price < end_price
+    # SHORT: start_price < end_price < limit_price
+    validation_error = None
+    if side == SIDE_LONG:
+        if not (limit_price < start_price < end_price):
+            validation_error = (
+                "Invalid prices for LONG position\\.\n\n"
+                "Required: `limit < start < end`\n"
+                f"Current: `{limit_price:,.6g}` < `{start_price:,.6g}` < `{end_price:,.6g}`"
+            )
+    else:  # SHORT
+        if not (start_price < end_price < limit_price):
+            validation_error = (
+                "Invalid prices for SHORT position\\.\n\n"
+                "Required: `start < end < limit`\n"
+                f"Current: `{start_price:,.6g}` < `{end_price:,.6g}` < `{limit_price:,.6g}`"
+            )
+
+    if validation_error:
+        await query.answer("Invalid price configuration", show_alert=True)
+        # Clean up the chart photo if it exists
+        chart_msg_id = context.user_data.pop("gs_chart_message_id", None)
+        if chart_msg_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=query.message.chat_id,
+                    message_id=chart_msg_id
+                )
+            except Exception:
+                pass
+        # Show error in message
+        keyboard = [
+            [InlineKeyboardButton("Edit Prices", callback_data="bots:gs_back_to_prices")],
+            [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+        ]
+        await query.message.edit_text(
+            text=f"⚠️ *Price Validation Error*\n\n{validation_error}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
     context.user_data["gs_wizard_step"] = "take_profit"
     await _show_wizard_take_profit_step(update, context)
+
+
+async def handle_gs_back_to_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go back to prices step from validation error"""
+    context.user_data["gs_wizard_step"] = "prices"
+    await _show_wizard_prices_step(update, context)
 
 
 async def _show_wizard_take_profit_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Wizard Step 7: Take Profit Configuration"""
     query = update.callback_query
     config = get_controller_config(context)
+
+    # Clean up the chart photo if it exists
+    chart_msg_id = context.user_data.pop("gs_chart_message_id", None)
+    if chart_msg_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=query.message.chat_id,
+                message_id=chart_msg_id
+            )
+        except Exception:
+            pass  # Ignore if already deleted
 
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
@@ -570,7 +627,7 @@ async def handle_gs_wizard_take_profit(update: Update, context: ContextTypes.DEF
 
 
 async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Final Review Step with chart and all configuration in one message"""
+    """Final Review Step with copyable config format"""
     query = update.callback_query
     config = get_controller_config(context)
 
@@ -586,14 +643,13 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
-    # Additional parameters
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
     min_order_amount = config.get("min_order_amount_quote", 6)
     min_spread = config.get("min_spread_between_orders", 0.0002)
 
     # Delete previous chart if exists
-    chart_msg_id = context.user_data.get("gs_chart_message_id")
+    chart_msg_id = context.user_data.pop("gs_chart_message_id", None)
     if chart_msg_id:
         try:
             await context.bot.delete_message(
@@ -603,82 +659,56 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
         except:
             pass
 
-    # Build caption with all config info
-    caption_lines = [
-        f"*{escape_markdown_v2(pair)}* \\- Review Config",
-        "",
-        f"ID: `{escape_markdown_v2(config_id)}`",
-        f"Connector: `{escape_markdown_v2(connector)}`",
-        f"Side: `{side}` \\| Leverage: `{leverage}x`",
-        f"Amount: `{amount:,.0f}`",
-        "",
-        f"Start: `{start_price:,.6g}`",
-        f"End: `{end_price:,.6g}`",
-        f"Limit: `{limit_price:,.6g}`",
-        "",
-        f"TP: `{tp*100:.2f}%` \\| Keep: `{'Y' if keep_position else 'N'}` \\| Act: `{activation_bounds*100:.0f}%`",
-        f"MaxOrd: `{max_open_orders}` \\| Batch: `{max_orders_per_batch}` \\| MinAmt: `{min_order_amount}` \\| Spread: `{min_spread}`",
-    ]
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "review"
+
+    # Build copyable config block
+    config_block = (
+        f"id={config_id}\n"
+        f"connector={connector}\n"
+        f"pair={pair}\n"
+        f"side={side}\n"
+        f"leverage={leverage}\n"
+        f"amount={amount:.0f}\n"
+        f"start={start_price:.6g}\n"
+        f"end={end_price:.6g}\n"
+        f"limit={limit_price:.6g}\n"
+        f"tp={tp}\n"
+        f"keep={keep_position}\n"
+        f"activation={activation_bounds}\n"
+        f"max_orders={max_open_orders}\n"
+        f"batch={max_orders_per_batch}\n"
+        f"min_amount={min_order_amount}\n"
+        f"spread={min_spread}"
+    )
+
+    message_text = (
+        f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
+        f"```\n{config_block}\n```\n\n"
+        f"_To edit, send one or more lines:_\n"
+        f"`leverage=75`\n"
+        f"`amount=1000`\n"
+        f"`tp=0.001`"
+    )
 
     keyboard = [
         [
-            InlineKeyboardButton("Save", callback_data="bots:gs_save"),
-            InlineKeyboardButton("Edit ID", callback_data="bots:gs_edit_id"),
+            InlineKeyboardButton("✅ Save Config", callback_data="bots:gs_save"),
         ],
         [
-            InlineKeyboardButton("TP", callback_data="bots:gs_edit_tp"),
-            InlineKeyboardButton("Keep", callback_data="bots:gs_edit_keep"),
-            InlineKeyboardButton("Act", callback_data="bots:gs_edit_act"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs"),
         ],
-        [
-            InlineKeyboardButton("MaxOrd", callback_data="bots:gs_edit_max_orders"),
-            InlineKeyboardButton("Batch", callback_data="bots:gs_edit_batch"),
-            InlineKeyboardButton("MinAmt", callback_data="bots:gs_edit_min_amt"),
-            InlineKeyboardButton("Spread", callback_data="bots:gs_edit_spread"),
-        ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
     ]
 
-    # Generate chart and send as photo with config in caption
-    candles = context.user_data.get("gs_candles")
-    current_price = context.user_data.get("gs_current_price")
-
-    if candles:
-        chart_bytes = generate_candles_chart(
-            candles, pair,
-            start_price=start_price,
-            end_price=end_price,
-            limit_price=limit_price,
-            current_price=current_price
-        )
-
-        # Delete current message and send photo with caption + buttons
-        try:
-            await query.message.delete()
-        except:
-            pass
-
-        msg = await context.bot.send_photo(
-            chat_id=query.message.chat_id,
-            photo=chart_bytes,
-            caption="\n".join(caption_lines),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        # Update wizard message ID
-        context.user_data["gs_wizard_message_id"] = msg.message_id
-    else:
-        # No chart, just show text
-        await query.message.edit_text(
-            "\n".join(caption_lines),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    await query.message.edit_text(
+        message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 async def _update_wizard_message_for_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Update wizard to show review step (for text input flow)"""
+    """Update wizard to show review step with copyable config format"""
     message_id = context.user_data.get("gs_wizard_message_id")
     chat_id = context.user_data.get("gs_wizard_chat_id")
 
@@ -699,95 +729,59 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
-    # Additional parameters
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
     min_order_amount = config.get("min_order_amount_quote", 6)
     min_spread = config.get("min_spread_between_orders", 0.0002)
 
-    # Delete previous chart if exists
-    chart_msg_id = context.user_data.get("gs_chart_message_id")
-    if chart_msg_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=chart_msg_id)
-        except:
-            pass
+    # Build copyable config block
+    config_block = (
+        f"id={config_id}\n"
+        f"connector={connector}\n"
+        f"pair={pair}\n"
+        f"side={side}\n"
+        f"leverage={leverage}\n"
+        f"amount={amount:.0f}\n"
+        f"start={start_price:.6g}\n"
+        f"end={end_price:.6g}\n"
+        f"limit={limit_price:.6g}\n"
+        f"tp={tp}\n"
+        f"keep={keep_position}\n"
+        f"activation={activation_bounds}\n"
+        f"max_orders={max_open_orders}\n"
+        f"batch={max_orders_per_batch}\n"
+        f"min_amount={min_order_amount}\n"
+        f"spread={min_spread}"
+    )
 
-    # Build caption
-    caption_lines = [
-        f"*{escape_markdown_v2(pair)}* \\- Review Config",
-        "",
-        f"ID: `{escape_markdown_v2(config_id)}`",
-        f"Connector: `{escape_markdown_v2(connector)}`",
-        f"Side: `{side}` \\| Leverage: `{leverage}x`",
-        f"Amount: `{amount:,.0f}`",
-        "",
-        f"Start: `{start_price:,.6g}`",
-        f"End: `{end_price:,.6g}`",
-        f"Limit: `{limit_price:,.6g}`",
-        "",
-        f"TP: `{tp*100:.2f}%` \\| Keep: `{'Y' if keep_position else 'N'}` \\| Act: `{activation_bounds*100:.0f}%`",
-        f"MaxOrd: `{max_open_orders}` \\| Batch: `{max_orders_per_batch}` \\| MinAmt: `{min_order_amount}` \\| Spread: `{min_spread}`",
-    ]
+    message_text = (
+        f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
+        f"```\n{config_block}\n```\n\n"
+        f"_To edit, send one or more lines:_\n"
+        f"`leverage=75`\n"
+        f"`amount=1000`\n"
+        f"`tp=0.001`"
+    )
 
     keyboard = [
         [
-            InlineKeyboardButton("Save", callback_data="bots:gs_save"),
-            InlineKeyboardButton("Edit ID", callback_data="bots:gs_edit_id"),
+            InlineKeyboardButton("✅ Save Config", callback_data="bots:gs_save"),
         ],
         [
-            InlineKeyboardButton("TP", callback_data="bots:gs_edit_tp"),
-            InlineKeyboardButton("Keep", callback_data="bots:gs_edit_keep"),
-            InlineKeyboardButton("Act", callback_data="bots:gs_edit_act"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs"),
         ],
-        [
-            InlineKeyboardButton("MaxOrd", callback_data="bots:gs_edit_max_orders"),
-            InlineKeyboardButton("Batch", callback_data="bots:gs_edit_batch"),
-            InlineKeyboardButton("MinAmt", callback_data="bots:gs_edit_min_amt"),
-            InlineKeyboardButton("Spread", callback_data="bots:gs_edit_spread"),
-        ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
     ]
 
-    # Generate chart
-    candles = context.user_data.get("gs_candles")
-    current_price = context.user_data.get("gs_current_price")
-
-    if candles:
-        chart_bytes = generate_candles_chart(
-            candles, pair,
-            start_price=start_price,
-            end_price=end_price,
-            limit_price=limit_price,
-            current_price=current_price
-        )
-
-        # Delete current message and send photo
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except:
-            pass
-
-        msg = await context.bot.send_photo(
+    try:
+        await context.bot.edit_message_text(
             chat_id=chat_id,
-            photo=chart_bytes,
-            caption="\n".join(caption_lines),
+            message_id=message_id,
+            text=message_text,
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-        context.user_data["gs_wizard_message_id"] = msg.message_id
-    else:
-        try:
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text="\n".join(caption_lines),
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except Exception as e:
-            logger.error(f"Error updating review message: {e}")
+    except Exception as e:
+        logger.error(f"Error updating review message: {e}")
 
 
 async def handle_gs_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1261,6 +1255,67 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             context.user_data["gs_wizard_step"] = "review"
             await _update_wizard_message_for_review(update, context)
 
+        elif step == "review":
+            # Parse key=value pairs (one or more lines)
+            field_map = {
+                "id": "id",
+                "connector": "connector_name",
+                "pair": "trading_pair",
+                "side": "side",
+                "leverage": "leverage",
+                "amount": "total_amount_quote",
+                "start": "start_price",
+                "end": "end_price",
+                "limit": "limit_price",
+                "tp": "triple_barrier_config.take_profit",
+                "keep": "keep_position",
+                "activation": "activation_bounds",
+                "max_orders": "max_open_orders",
+                "batch": "max_orders_per_batch",
+                "min_amount": "min_order_amount_quote",
+                "spread": "min_spread_between_orders",
+            }
+
+            updated_fields = []
+            lines = user_input.strip().split("\n")
+            for line in lines:
+                line = line.strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip()
+
+                if key not in field_map:
+                    continue
+
+                field = field_map[key]
+
+                # Handle special cases
+                if key == "side":
+                    config["side"] = SIDE_LONG if value.upper() == "LONG" else SIDE_SHORT
+                elif key == "keep":
+                    config["keep_position"] = value.lower() in ("true", "yes", "y", "1")
+                elif key == "tp":
+                    if "triple_barrier_config" not in config:
+                        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+                    config["triple_barrier_config"]["take_profit"] = float(value)
+                elif field in ["leverage", "max_open_orders", "max_orders_per_batch"]:
+                    config[field] = int(value)
+                elif field in ["total_amount_quote", "start_price", "end_price", "limit_price",
+                              "activation_bounds", "min_order_amount_quote", "min_spread_between_orders"]:
+                    config[field] = float(value)
+                else:
+                    config[field] = value
+
+                updated_fields.append(key)
+
+            if updated_fields:
+                set_controller_config(context, config)
+                await _update_wizard_message_for_review(update, context)
+            else:
+                raise ValueError("No valid fields found")
+
     except ValueError:
         # Send error and let user try again
         error_msg = await update.message.reply_text(
@@ -1369,6 +1424,9 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
         [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
     ]
 
+    # Format example with current values
+    example_prices = f"{start:,.6g},{end:,.6g},{limit:,.6g}"
+
     try:
         await context.bot.edit_message_text(
             chat_id=chat_id,
@@ -1383,8 +1441,8 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
                 f"Start: `{start:,.6g}`\n"
                 f"End: `{end:,.6g}`\n"
                 f"Limit: `{limit:,.6g}`\n\n"
-                r"_Type `start,end,limit` to edit \(e\.g\. `0\.32,0\.34,0\.31`\)_" + "\n"
-                r"_Or tap Accept to continue_"
+                f"_Type `start,end,limit` to edit_\n"
+                f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
             ),
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)

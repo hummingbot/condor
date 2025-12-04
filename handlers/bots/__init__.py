@@ -67,6 +67,7 @@ from .controllers import (
     handle_gs_wizard_leverage,
     handle_gs_wizard_amount,
     handle_gs_accept_prices,
+    handle_gs_back_to_prices,
     handle_gs_wizard_take_profit,
     handle_gs_edit_id,
     handle_gs_edit_keep,
@@ -263,6 +264,9 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "gs_accept_prices":
             await handle_gs_accept_prices(update, context)
+
+        elif main_action == "gs_back_to_prices":
+            await handle_gs_back_to_prices(update, context)
 
         elif main_action == "gs_edit_price":
             if len(action_parts) > 1:
