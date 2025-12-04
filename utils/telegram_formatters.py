@@ -367,21 +367,18 @@ def format_active_bots(
 
         # Truncate long bot names for display
         display_name = bot_name[:40] + "..." if len(bot_name) > 40 else bot_name
-        message += f"{status_emoji} *{escape_markdown_v2(display_name)}*\n"
+        message += f"{status_emoji} `{escape_markdown_v2(display_name)}`\n"
 
         # Performance is a dict of controller_name -> controller_info
         performance = bot_info.get("performance", {})
 
         if performance:
-            # Build controller table - compact format with numbers
-            message += "```\n"
-
             total_pnl = 0
             total_volume = 0
 
             for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())[:5]):
                 if isinstance(ctrl_info, dict):
-                    ctrl_status = ctrl_info.get("status", "")
+                    ctrl_status = ctrl_info.get("status", "running")
                     ctrl_perf = ctrl_info.get("performance", {})
                     realized = ctrl_perf.get("realized_pnl_quote", 0) or 0
                     unrealized = ctrl_perf.get("unrealized_pnl_quote", 0) or 0
@@ -392,31 +389,35 @@ def format_active_bots(
                     total_volume += volume
 
                     # Shorten controller name intelligently
-                    short_name = _shorten_controller_for_table(ctrl_name, 26)
+                    short_name = _shorten_controller_for_table(ctrl_name, 20)
 
-                    # Format numbers compactly
-                    pnl_str = f"{pnl:+.1f}"
+                    # Format PnL with emoji
+                    pnl_emoji = "📈" if pnl >= 0 else "📉"
+                    pnl_str = f"{pnl:+.2f}"
+
+                    # Format volume
                     vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
 
-                    message += f"{idx+1}.{short_name} {pnl_str} v:{vol_str}\n"
+                    # Controller status indicator
+                    ctrl_emoji = "⚡" if ctrl_status == "running" else "⏸"
+
+                    message += f"  {ctrl_emoji} *{escape_markdown_v2(short_name)}*\n"
+                    message += f"      {pnl_emoji} PnL: `{escape_markdown_v2(pnl_str)}` \\| 📊 Vol: `{escape_markdown_v2(vol_str)}`\n"
 
             # Show totals only if multiple controllers
             if len(performance) > 1:
+                total_pnl_emoji = "📈" if total_pnl >= 0 else "📉"
                 vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-                message += f"{'─'*38}\n"
-                message += f"TOTAL: {total_pnl:+.1f} v:{vol_total}\n"
-
-            message += "```\n"
+                message += f"\n  {total_pnl_emoji} *Total:* `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\| 📊 `{escape_markdown_v2(vol_total)}`\n"
 
         # Show error indicator if there are errors
         error_logs = bot_info.get("error_logs", [])
         if error_logs:
-            message += f"⚠️ _{len(error_logs)} error\\(s\\)_\n"
+            message += f"  ⚠️ _{len(error_logs)} error\\(s\\)_\n"
 
         message += "\n"
 
-    message += f"*Total:* {len(bots_dict)} bot\\(s\\)\n"
-    message += "_Tap a bot for details_"
+    message += f"_{len(bots_dict)} bot\\(s\\) running_ • _Tap for details_"
 
     # Add server footer at the bottom right
     if server_name:
@@ -428,8 +429,7 @@ def format_active_bots(
         elif server_status == "error":
             status_emoji = "⚠️"
 
-        message += f"\n{'⎯' * 30}\n"
-        message += f"{' ' * 15}_Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+        message += f"\n\n_Server: {escape_markdown_v2(server_name)} {status_emoji}_"
 
     return message
 
