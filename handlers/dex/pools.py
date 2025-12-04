@@ -100,7 +100,7 @@ def get_dex_pool_url(connector: str, pool_address: str) -> str:
 
 
 # ============================================
-# POOL INFO (by address - supports meteora + raydium)
+# POOL INFO (by address - supports meteora, raydium, orca)
 # ============================================
 
 async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -111,7 +111,8 @@ async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         r"`connector pool_address`" + "\n\n"
         r"*Examples:*" + "\n"
         r"`meteora 5Q5...abc`" + "\n"
-        r"`raydium 7Xy...def`"
+        r"`raydium 7Xy...def`" + "\n"
+        r"`orca 3Ab...ghi`"
     )
 
     keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:liquidity")]]
@@ -205,9 +206,10 @@ async def process_pool_info(
         connector = parts[0].lower()
         pool_address = parts[1]
 
-        # Validate connector
-        if connector not in ["meteora", "raydium"]:
-            raise ValueError(f"Unsupported connector '{connector}'. Use 'meteora' or 'raydium'.")
+        # Validate connector - must be a supported CLMM connector
+        supported_connectors = ["meteora", "raydium", "orca"]
+        if connector not in supported_connectors:
+            raise ValueError(f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}")
 
         client = await get_client()
 
