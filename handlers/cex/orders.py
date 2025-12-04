@@ -1,5 +1,5 @@
 """
-CLOB Trading - Orders search functionality
+CEX Trading - Orders search functionality
 """
 
 import logging
@@ -55,21 +55,21 @@ async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYP
                     side = order.get('trade_type', order.get('side', 'N/A'))
                     order_type = order.get('order_type', 'N/A')
                     button_label = f"❌ Cancel {pair} {side} {order_type}"
-                    keyboard.append([InlineKeyboardButton(button_label, callback_data=f"clob:cancel_order:{i}")])
+                    keyboard.append([InlineKeyboardButton(button_label, callback_data=f"cex:cancel_order:{i}")])
 
                 if len(orders) > 5:
-                    keyboard.append([InlineKeyboardButton("⋯ More Orders", callback_data="clob:orders_list")])
+                    keyboard.append([InlineKeyboardButton("⋯ More Orders", callback_data="cex:orders_list")])
 
         # Filter buttons
         keyboard.append([
-            InlineKeyboardButton("Open Orders", callback_data="clob:search_orders"),
-            InlineKeyboardButton("All Orders", callback_data="clob:search_all"),
+            InlineKeyboardButton("Open Orders", callback_data="cex:search_orders"),
+            InlineKeyboardButton("All Orders", callback_data="cex:search_all"),
         ])
         keyboard.append([
-            InlineKeyboardButton("Filled", callback_data="clob:search_filled"),
-            InlineKeyboardButton("Cancelled", callback_data="clob:search_cancelled")
+            InlineKeyboardButton("Filled", callback_data="cex:search_filled"),
+            InlineKeyboardButton("Cancelled", callback_data="cex:search_cancelled")
         ])
-        keyboard.append([InlineKeyboardButton("« Back", callback_data="clob:main_menu")])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="cex:trade")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -120,8 +120,8 @@ async def handle_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         keyboard = [
             [
-                InlineKeyboardButton("✅ Confirm Cancel", callback_data=f"clob:confirm_cancel:{order_index}"),
-                InlineKeyboardButton("❌ Back", callback_data="clob:search_orders")
+                InlineKeyboardButton("✅ Confirm Cancel", callback_data=f"cex:confirm_cancel:{order_index}"),
+                InlineKeyboardButton("❌ Back", callback_data="cex:search_orders")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -184,8 +184,8 @@ async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFA
 
         keyboard = [
             [
-                InlineKeyboardButton("🔍 View Orders", callback_data="clob:search_orders"),
-                InlineKeyboardButton("« Back to Menu", callback_data="clob:main_menu")
+                InlineKeyboardButton("🔍 View Orders", callback_data="cex:search_orders"),
+                InlineKeyboardButton("« Back", callback_data="cex:trade")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)

@@ -1,5 +1,5 @@
 """
-CLOB Trading - Positions management
+CEX Trading - Positions management
 """
 
 import logging
@@ -28,8 +28,8 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             message = r"📊 *Perpetual Positions*" + "\n\n" + r"No positions found\."
             keyboard = [
                 [
-                    InlineKeyboardButton("🔄 Refresh", callback_data="clob:positions"),
-                    InlineKeyboardButton("« Back", callback_data="clob:main_menu")
+                    InlineKeyboardButton("🔄 Refresh", callback_data="cex:positions"),
+                    InlineKeyboardButton("« Back", callback_data="cex:trade")
                 ]
             ]
         else:
@@ -45,22 +45,23 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
             # Add close position buttons (max 5 positions shown)
             for i, pos in enumerate(positions[:5]):
+                connector = pos.get('connector_name', '')
                 pair = pos.get('trading_pair', 'N/A')
                 side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'LONG')
 
-                # Format button label
-                button_label = f"❌ Close {pair} {side}"
-                callback_data = f"clob:close_position:{i}"
+                # Format button label with connector name
+                button_label = f"❌ Close {connector} {pair} {side}"
+                callback_data = f"cex:close_position:{i}"
 
                 keyboard.append([InlineKeyboardButton(button_label, callback_data=callback_data)])
 
             if len(positions) > 5:
-                keyboard.append([InlineKeyboardButton("⋯ Show More Positions", callback_data="clob:positions_list")])
+                keyboard.append([InlineKeyboardButton("⋯ Show More Positions", callback_data="cex:positions_list")])
 
             # Add refresh and back buttons
             keyboard.append([
-                InlineKeyboardButton("🔄 Refresh", callback_data="clob:positions"),
-                InlineKeyboardButton("« Back", callback_data="clob:main_menu")
+                InlineKeyboardButton("🔄 Refresh", callback_data="cex:positions"),
+                InlineKeyboardButton("« Back", callback_data="cex:trade")
             ])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -78,8 +79,8 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def handle_trade_position(update: Update, context: ContextTypes.DEFAULT_TYPE, position_index: int) -> None:
-    """Handle quick trade for a specific position - opens place order menu with position details pre-filled"""
-    from .place_order import show_place_order_menu
+    """Handle quick trade for a specific position - opens trade menu with position details pre-filled"""
+    from .trade import show_trade_menu
 
     try:
         positions = context.user_data.get("current_positions", [])
@@ -101,9 +102,9 @@ async def handle_trade_position(update: Update, context: ContextTypes.DEFAULT_TY
         # Determine the opposite side for closing
         opposite_side = "SELL" if side in ["LONG", "BUY"] else "BUY"
 
-        # Pre-fill order parameters with position details
+        # Pre-fill trade parameters with position details
         # Default to closing the position (opposite side)
-        context.user_data["place_order_params"] = {
+        context.user_data["trade_params"] = {
             "connector": connector_name,
             "trading_pair": trading_pair,
             "side": opposite_side,  # Default to close side
@@ -113,11 +114,11 @@ async def handle_trade_position(update: Update, context: ContextTypes.DEFAULT_TY
             "price": str(entry_price),
         }
 
-        # Set state to allow text input for direct order placement
-        context.user_data["clob_state"] = "place_order"
+        # Set state to trade
+        context.user_data["cex_state"] = "trade"
 
-        # Show the place order menu with pre-filled parameters (edit current message)
-        await show_place_order_menu(update, context, send_new=False)
+        # Show the trade menu with pre-filled parameters
+        await show_trade_menu(update, context)
 
     except Exception as e:
         logger.error(f"Error preparing trade for position: {e}", exc_info=True)
@@ -192,8 +193,8 @@ async def handle_close_position(update: Update, context: ContextTypes.DEFAULT_TY
 
         keyboard = [
             [
-                InlineKeyboardButton("✅ Confirm Close", callback_data=f"clob:confirm_close:{position_index}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="clob:positions")
+                InlineKeyboardButton("✅ Confirm Close", callback_data=f"cex:confirm_close:{position_index}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cex:positions")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -266,8 +267,8 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
 
         keyboard = [
             [
-                InlineKeyboardButton("📊 View Positions", callback_data="clob:positions"),
-                InlineKeyboardButton("« Back to Menu", callback_data="clob:main_menu")
+                InlineKeyboardButton("📊 Positions", callback_data="cex:positions"),
+                InlineKeyboardButton("« Back", callback_data="cex:trade")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)

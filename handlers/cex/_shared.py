@@ -1,5 +1,5 @@
 """
-Shared utilities for CLOB trading handlers
+Shared utilities for CEX trading handlers
 
 Contains:
 - Caching utilities for CEX balances and trading rules
@@ -33,7 +33,7 @@ def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optio
     Returns:
         Cached value or None if expired/missing
     """
-    cache = user_data.get("_clob_cache", {})
+    cache = user_data.get("_cex_cache", {})
     entry = cache.get(key)
 
     if entry is None:
@@ -55,10 +55,10 @@ def set_cached(user_data: dict, key: str, value: Any) -> None:
         key: Cache key
         value: Value to cache
     """
-    if "_clob_cache" not in user_data:
-        user_data["_clob_cache"] = {}
+    if "_cex_cache" not in user_data:
+        user_data["_cex_cache"] = {}
 
-    user_data["_clob_cache"][key] = (value, time.time())
+    user_data["_cex_cache"][key] = (value, time.time())
 
 
 def clear_cache(user_data: dict, key: Optional[str] = None) -> None:
@@ -71,16 +71,16 @@ def clear_cache(user_data: dict, key: Optional[str] = None) -> None:
               Otherwise clears exact key match.
     """
     if key is None:
-        user_data.pop("_clob_cache", None)
-    elif "_clob_cache" in user_data:
+        user_data.pop("_cex_cache", None)
+    elif "_cex_cache" in user_data:
         if key.endswith("*"):
             # Prefix-based clearing
             prefix = key[:-1]
-            keys_to_clear = [k for k in user_data["_clob_cache"] if k.startswith(prefix)]
+            keys_to_clear = [k for k in user_data["_cex_cache"] if k.startswith(prefix)]
             for k in keys_to_clear:
-                user_data["_clob_cache"].pop(k, None)
+                user_data["_cex_cache"].pop(k, None)
         else:
-            user_data["_clob_cache"].pop(key, None)
+            user_data["_cex_cache"].pop(key, None)
 
 
 async def cached_call(
@@ -106,11 +106,11 @@ async def cached_call(
     # Check cache first
     cached = get_cached(user_data, key, ttl)
     if cached is not None:
-        logger.debug(f"CLOB cache hit for '{key}'")
+        logger.debug(f"CEX cache hit for '{key}'")
         return cached
 
     # Cache miss - fetch fresh data
-    logger.debug(f"CLOB cache miss for '{key}', fetching...")
+    logger.debug(f"CEX cache miss for '{key}', fetching...")
     result = await fetch_func(*args, **kwargs)
 
     # Store in cache
@@ -144,7 +144,7 @@ def invalidate_cache(user_data: dict, *groups: str) -> None:
     for group in groups:
         if group == "all":
             clear_cache(user_data)
-            logger.debug("CLOB cache fully cleared")
+            logger.debug("CEX cache fully cleared")
             return
 
         keys = CACHE_GROUPS.get(group, [group])  # Fallback to group as key
@@ -570,14 +570,14 @@ async def get_available_cex_connectors(
 # STATE HELPERS
 # ============================================
 
-def clear_clob_state(context) -> None:
-    """Clear all CLOB-related state from user context
+def clear_cex_state(context) -> None:
+    """Clear all CEX-related state from user context
 
     Args:
         context: Telegram context object
     """
-    context.user_data.pop("clob_state", None)
-    context.user_data.pop("clob_previous_state", None)
+    context.user_data.pop("cex_state", None)
+    context.user_data.pop("cex_previous_state", None)
     context.user_data.pop("place_order_params", None)
     context.user_data.pop("current_positions", None)
     context.user_data.pop("current_orders", None)
