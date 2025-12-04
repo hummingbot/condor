@@ -215,19 +215,19 @@ async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFA
         keyboard = []
         row = []
         for connector in cex_connectors:
-            row.append(InlineKeyboardButton(connector, callback_data=f"bots:gs_connector:{connector}"))
+            row.append(InlineKeyboardButton(f"🏦 {connector}", callback_data=f"bots:gs_connector:{connector}"))
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
         if row:
             keyboard.append(row)
 
-        keyboard.append([InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")])
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")])
 
         await query.message.edit_text(
-            r"*Grid Strike \- New Config*" + "\n\n"
-            r"*Step 1/7:* Select Connector" + "\n\n"
-            r"Choose the exchange for this grid:               \.",
+            r"*📈 Grid Strike \- New Config*" + "\n\n"
+            r"*Step 1/7:* 🏦 Select Connector" + "\n\n"
+            r"Choose the exchange for this grid:",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -255,6 +255,22 @@ async def handle_gs_wizard_connector(update: Update, context: ContextTypes.DEFAU
     await _show_wizard_pair_step(update, context)
 
 
+async def handle_gs_wizard_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str) -> None:
+    """Handle trading pair selection from button in wizard"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    config["trading_pair"] = pair.upper()
+    set_controller_config(context, config)
+
+    # Start background fetch of market data
+    asyncio.create_task(_background_fetch_market_data(context, config))
+
+    # Move to side step
+    context.user_data["gs_wizard_step"] = "side"
+    await _show_wizard_side_step(update, context)
+
+
 async def _show_wizard_pair_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Wizard Step 2: Enter Trading Pair"""
     query = update.callback_query
@@ -263,13 +279,41 @@ async def _show_wizard_pair_step(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["bots_state"] = "gs_wizard_input"
     context.user_data["gs_wizard_step"] = "trading_pair"
 
-    keyboard = [[InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")]]
+    # Get recent pairs from existing configs (max 6)
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen_pairs = set()
+    for cfg in reversed(existing_configs):  # Most recent first
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen_pairs:
+            seen_pairs.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    # Build keyboard with recent pairs (2 per row) + cancel
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:gs_pair:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")])
+
+    recent_hint = ""
+    if recent_pairs:
+        recent_hint = "\n\n_Or type a custom pair below:_"
 
     await query.message.edit_text(
-        r"*Grid Strike \- New Config*" + "\n\n"
+        r"*📈 Grid Strike \- New Config*" + "\n\n"
         f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n\n"
-        r"*Step 2/7:* Trading Pair" + "\n\n"
-        r"Enter the trading pair \(e\.g\. SOL\-USDT, BTC\-FDUSD\):",
+        r"*Step 2/7:* 🔗 Trading Pair" + "\n\n"
+        r"Select a recent pair or enter a new one:" + escape_markdown_v2(recent_hint),
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -285,17 +329,17 @@ async def _show_wizard_side_step(update: Update, context: ContextTypes.DEFAULT_T
 
     keyboard = [
         [
-            InlineKeyboardButton("LONG", callback_data="bots:gs_side:long"),
-            InlineKeyboardButton("SHORT", callback_data="bots:gs_side:short"),
+            InlineKeyboardButton("📈 LONG", callback_data="bots:gs_side:long"),
+            InlineKeyboardButton("📉 SHORT", callback_data="bots:gs_side:short"),
         ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
     ]
 
     await query.message.edit_text(
-        r"*Grid Strike \- New Config*" + "\n\n"
-        f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-        f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n\n"
-        r"*Step 3/7:* Side" + "\n\n"
+        r"*📈 Grid Strike \- New Config*" + "\n\n"
+        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
+        f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n\n"
+        r"*Step 3/7:* 🎯 Side" + "\n\n"
         r"Select trading side:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -322,7 +366,7 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
 
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
-    side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
+    side = "📈 LONG" if config.get("side") == SIDE_LONG else "📉 SHORT"
 
     keyboard = [
         [
@@ -335,15 +379,15 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
             InlineKeyboardButton("50x", callback_data="bots:gs_leverage:50"),
             InlineKeyboardButton("75x", callback_data="bots:gs_leverage:75"),
         ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
     ]
 
     await query.message.edit_text(
-        r"*Grid Strike \- New Config*" + "\n\n"
-        f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-        f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n"
-        f"*Side:* `{side}`" + "\n\n"
-        r"*Step 4/7:* Leverage" + "\n\n"
+        r"*📈 Grid Strike \- New Config*" + "\n\n"
+        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
+        f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n"
+        f"🎯 *Side:* `{side}`" + "\n\n"
+        r"*Step 4/7:* ⚡ Leverage" + "\n\n"
         r"Select leverage:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -370,7 +414,7 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
 
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
-    side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
+    side = "📈 LONG" if config.get("side") == SIDE_LONG else "📉 SHORT"
     leverage = config.get("leverage", 1)
 
     context.user_data["bots_state"] = "gs_wizard_input"
@@ -378,23 +422,23 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
 
     keyboard = [
         [
-            InlineKeyboardButton("100", callback_data="bots:gs_amount:100"),
-            InlineKeyboardButton("500", callback_data="bots:gs_amount:500"),
-            InlineKeyboardButton("1000", callback_data="bots:gs_amount:1000"),
+            InlineKeyboardButton("💵 100", callback_data="bots:gs_amount:100"),
+            InlineKeyboardButton("💵 500", callback_data="bots:gs_amount:500"),
+            InlineKeyboardButton("💵 1000", callback_data="bots:gs_amount:1000"),
         ],
         [
-            InlineKeyboardButton("2000", callback_data="bots:gs_amount:2000"),
-            InlineKeyboardButton("5000", callback_data="bots:gs_amount:5000"),
+            InlineKeyboardButton("💰 2000", callback_data="bots:gs_amount:2000"),
+            InlineKeyboardButton("💰 5000", callback_data="bots:gs_amount:5000"),
         ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
     ]
 
     await query.message.edit_text(
-        r"*Grid Strike \- New Config*" + "\n\n"
-        f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-        f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n"
-        f"*Side:* `{side}` \\| *Leverage:* `{leverage}x`" + "\n\n"
-        r"*Step 5/7:* Total Amount \(Quote\)" + "\n\n"
+        r"*📈 Grid Strike \- New Config*" + "\n\n"
+        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
+        f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n"
+        f"🎯 *Side:* `{side}` \\| ⚡ *Leverage:* `{leverage}x`" + "\n\n"
+        r"*Step 5/7:* 💰 Total Amount \(Quote\)" + "\n\n"
         r"Select or type amount in quote currency:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -409,12 +453,25 @@ async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_
     config["total_amount_quote"] = amount
     set_controller_config(context, config)
 
+    # Check if market data is ready (pre-fetched in background)
+    market_data_ready = context.user_data.get("gs_market_data_ready", False)
+    pair = config.get("trading_pair", "")
+
+    # Show loading indicator if market data is not ready yet
+    if not market_data_ready:
+        await query.message.edit_text(
+            r"*📈 Grid Strike \- New Config*" + "\n\n"
+            f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\." + "\n\n"
+            r"_Fetching market data and generating chart\\._",
+            parse_mode="MarkdownV2"
+        )
+
     # Move to prices step - this will fetch OHLC and show chart
     context.user_data["gs_wizard_step"] = "prices"
     await _show_wizard_prices_step(update, context)
 
 
-async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str = None) -> None:
     """Wizard Step 6: Price Configuration with OHLC chart"""
     query = update.callback_query
     config = get_controller_config(context)
@@ -423,6 +480,11 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
     pair = config.get("trading_pair", "")
     side = config.get("side", SIDE_LONG)
 
+    # Get current interval (default 5m)
+    if interval is None:
+        interval = context.user_data.get("gs_chart_interval", "5m")
+    context.user_data["gs_chart_interval"] = interval
+
     # Check if we have pre-cached data from background fetch
     current_price = context.user_data.get("gs_current_price")
     candles = context.user_data.get("gs_candles")
@@ -430,11 +492,14 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
     market_data_error = context.user_data.get("gs_market_data_error")
 
     try:
-        # If no cached data, fetch now (fallback)
-        if not current_price:
+        # If no cached data or interval changed, fetch now
+        cached_interval = context.user_data.get("gs_candles_interval", "5m")
+        need_refetch = interval != cached_interval
+
+        if not current_price or need_refetch:
             await query.message.edit_text(
-                r"*Grid Strike \- New Config*" + "\n\n"
-                f"Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                r"*📈 Grid Strike \- New Config*" + "\n\n"
+                f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
                 parse_mode="MarkdownV2"
             )
 
@@ -443,13 +508,14 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
             if current_price:
                 context.user_data["gs_current_price"] = current_price
-                candles = await fetch_candles(client, connector, pair, interval="5m", max_records=2000)
+                candles = await fetch_candles(client, connector, pair, interval=interval, max_records=500)
                 context.user_data["gs_candles"] = candles
+                context.user_data["gs_candles_interval"] = interval
 
         if not current_price:
-            keyboard = [[InlineKeyboardButton("Back", callback_data="bots:controller_configs")]]
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:controller_configs")]]
             await query.message.edit_text(
-                r"*Error*" + "\n\n"
+                r"*❌ Error*" + "\n\n"
                 f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
                 r"Please check the trading pair and try again\\.",
                 parse_mode="MarkdownV2",
@@ -457,29 +523,43 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             )
             return
 
-        # Calculate auto prices
-        start, end, limit = calculate_auto_prices(current_price, side)
-        config["start_price"] = start
-        config["end_price"] = end
-        config["limit_price"] = limit
+        # Calculate auto prices only if not already set (preserve user edits)
+        if not config.get("start_price") or not config.get("end_price"):
+            start, end, limit = calculate_auto_prices(current_price, side)
+            config["start_price"] = start
+            config["end_price"] = end
+            config["limit_price"] = limit
+        else:
+            start = config.get("start_price")
+            end = config.get("end_price")
+            limit = config.get("limit_price")
 
-        # Generate config ID with sequence number
-        existing_configs = context.user_data.get("controller_configs_list", [])
-        config["id"] = generate_config_id(connector, pair, existing_configs=existing_configs)
+        # Generate config ID with sequence number (if not already set)
+        if not config.get("id"):
+            existing_configs = context.user_data.get("controller_configs_list", [])
+            config["id"] = generate_config_id(connector, pair, existing_configs=existing_configs)
 
         set_controller_config(context, config)
 
         # Show price edit options
-        side_str = "LONG" if side == SIDE_LONG else "SHORT"
+        side_str = "📈 LONG" if side == SIDE_LONG else "📉 SHORT"
 
         context.user_data["bots_state"] = "gs_wizard_input"
         context.user_data["gs_wizard_step"] = "prices"
 
+        # Build interval buttons with current one highlighted
+        interval_options = ["5m", "15m", "1h", "4h"]
+        interval_row = []
+        for opt in interval_options:
+            label = f"✓ {opt}" if opt == interval else opt
+            interval_row.append(InlineKeyboardButton(label, callback_data=f"bots:gs_interval:{opt}"))
+
         keyboard = [
+            interval_row,
             [
-                InlineKeyboardButton("Accept Prices", callback_data="bots:gs_accept_prices"),
+                InlineKeyboardButton("✅ Accept Prices", callback_data="bots:gs_accept_prices"),
             ],
-            [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
         ]
 
         # Format example with current values
@@ -487,14 +567,14 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
         # Build the caption
         config_text = (
-            f"*{escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
-            f"*Connector:* `{escape_markdown_v2(connector)}`\n"
-            f"*Side:* `{side_str}` \\| *Leverage:* `{config.get('leverage', 1)}x`\n"
-            f"*Amount:* `{config.get('total_amount_quote', 0):,.0f}`\n\n"
-            f"Current: `{current_price:,.6g}`\n"
-            f"Start: `{start:,.6g}` \\(\\-2%\\)\n"
-            f"End: `{end:,.6g}` \\(\\+2%\\)\n"
-            f"Limit: `{limit:,.6g}` \\(\\-3%\\)\n\n"
+            f"*📊 {escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
+            f"🏦 *Connector:* `{escape_markdown_v2(connector)}`\n"
+            f"🎯 *Side:* `{side_str}` \\| ⚡ *Leverage:* `{config.get('leverage', 1)}x`\n"
+            f"💰 *Amount:* `{config.get('total_amount_quote', 0):,.0f}`\n\n"
+            f"📍 Current: `{current_price:,.6g}`\n"
+            f"🟢 Start: `{start:,.6g}`\n"
+            f"🔵 End: `{end:,.6g}`\n"
+            f"🔴 Limit: `{limit:,.6g}`\n\n"
             f"_Type `start,end,limit` to edit_\n"
             f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
         )
@@ -606,6 +686,18 @@ async def handle_gs_back_to_prices(update: Update, context: ContextTypes.DEFAULT
     await _show_wizard_prices_step(update, context)
 
 
+async def handle_gs_interval_change(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str) -> None:
+    """Handle interval change for chart - refetch candles with new interval"""
+    query = update.callback_query
+
+    # Clear cached candles to force refetch
+    context.user_data.pop("gs_candles", None)
+    context.user_data["gs_chart_interval"] = interval
+
+    # Redisplay prices step with new interval
+    await _show_wizard_prices_step(update, context, interval=interval)
+
+
 async def _show_wizard_take_profit_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Wizard Step 7: Take Profit Configuration"""
     query = update.callback_query
@@ -613,7 +705,7 @@ async def _show_wizard_take_profit_step(update: Update, context: ContextTypes.DE
 
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
-    side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
+    side = "📈 LONG" if config.get("side") == SIDE_LONG else "📉 SHORT"
 
     context.user_data["bots_state"] = "gs_wizard_input"
     context.user_data["gs_wizard_step"] = "take_profit"
@@ -629,17 +721,17 @@ async def _show_wizard_take_profit_step(update: Update, context: ContextTypes.DE
             InlineKeyboardButton("0.2%", callback_data="bots:gs_tp:0.002"),
             InlineKeyboardButton("0.5%", callback_data="bots:gs_tp:0.005"),
         ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
     ]
 
     message_text = (
-        r"*Grid Strike \- New Config*" + "\n\n"
-        f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-        f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n"
-        f"*Side:* `{side}` \\| *Leverage:* `{config.get('leverage', 1)}x`" + "\n"
-        f"*Amount:* `{config.get('total_amount_quote', 0):,.0f}`" + "\n"
-        f"*Grid:* `{config.get('start_price', 0):,.6g}` \\- `{config.get('end_price', 0):,.6g}`" + "\n\n"
-        r"*Step 7/7:* Take Profit" + "\n\n"
+        r"*📈 Grid Strike \- New Config*" + "\n\n"
+        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
+        f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n"
+        f"🎯 *Side:* `{side}` \\| ⚡ *Leverage:* `{config.get('leverage', 1)}x`" + "\n"
+        f"💰 *Amount:* `{config.get('total_amount_quote', 0):,.0f}`" + "\n"
+        f"📊 *Grid:* `{config.get('start_price', 0):,.6g}` \\- `{config.get('end_price', 0):,.6g}`" + "\n\n"
+        r"*Step 7/7:* 🎯 Take Profit" + "\n\n"
         r"Select or type take profit % \(e\.g\. `0\.4` for 0\.4%\):"
     )
 
@@ -1129,7 +1221,8 @@ def _cleanup_wizard_state(context) -> None:
     keys_to_remove = [
         "gs_wizard_step", "gs_wizard_message_id", "gs_wizard_chat_id",
         "gs_current_price", "gs_candles", "gs_chart_message_id",
-        "gs_market_data_ready", "gs_market_data_error"
+        "gs_market_data_ready", "gs_market_data_error",
+        "gs_chart_interval", "gs_candles_interval"
     ]
     for key in keys_to_remove:
         context.user_data.pop(key, None)
@@ -1401,10 +1494,10 @@ async def _update_wizard_message_for_side(update: Update, context: ContextTypes.
 
     keyboard = [
         [
-            InlineKeyboardButton("LONG", callback_data="bots:gs_side:long"),
-            InlineKeyboardButton("SHORT", callback_data="bots:gs_side:short"),
+            InlineKeyboardButton("📈 LONG", callback_data="bots:gs_side:long"),
+            InlineKeyboardButton("📉 SHORT", callback_data="bots:gs_side:short"),
         ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
     ]
 
     try:
@@ -1412,10 +1505,10 @@ async def _update_wizard_message_for_side(update: Update, context: ContextTypes.
             chat_id=chat_id,
             message_id=message_id,
             text=(
-                r"*Grid Strike \- New Config*" + "\n\n"
-                f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-                f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n\n"
-                r"*Step 3/7:* Side" + "\n\n"
+                r"*📈 Grid Strike \- New Config*" + "\n\n"
+                f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
+                f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n\n"
+                r"*Step 3/7:* 🎯 Side" + "\n\n"
                 r"Select trading side:"
             ),
             parse_mode="MarkdownV2",
@@ -1460,7 +1553,7 @@ async def _update_wizard_message_for_prices(update: Update, context: ContextType
 
 
 async def _update_wizard_message_for_prices_after_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Update prices display after editing prices"""
+    """Update prices display after editing prices - regenerate chart with new prices"""
     config = get_controller_config(context)
     message_id = context.user_data.get("gs_wizard_message_id")
     chat_id = context.user_data.get("gs_wizard_chat_id")
@@ -1470,43 +1563,87 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
 
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
-    side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
+    side = config.get("side", SIDE_LONG)
+    side_str = "📈 LONG" if side == SIDE_LONG else "📉 SHORT"
     start = config.get("start_price", 0)
     end = config.get("end_price", 0)
     limit = config.get("limit_price", 0)
+    current_price = context.user_data.get("gs_current_price", 0)
+    candles = context.user_data.get("gs_candles")
+    interval = context.user_data.get("gs_chart_interval", "5m")
+
+    # Build interval buttons with current one highlighted
+    interval_options = ["5m", "15m", "1h", "4h"]
+    interval_row = []
+    for opt in interval_options:
+        label = f"✓ {opt}" if opt == interval else opt
+        interval_row.append(InlineKeyboardButton(label, callback_data=f"bots:gs_interval:{opt}"))
 
     keyboard = [
+        interval_row,
         [
-            InlineKeyboardButton("Accept Prices", callback_data="bots:gs_accept_prices"),
+            InlineKeyboardButton("✅ Accept Prices", callback_data="bots:gs_accept_prices"),
         ],
-        [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
     ]
 
     # Format example with current values
     example_prices = f"{start:,.6g},{end:,.6g},{limit:,.6g}"
 
+    # Build the caption
+    config_text = (
+        f"*📊 {escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
+        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`\n"
+        f"🎯 *Side:* `{side_str}` \\| ⚡ *Leverage:* `{config.get('leverage', 1)}x`\n"
+        f"💰 *Amount:* `{config.get('total_amount_quote', 0):,.0f}`\n\n"
+        f"📍 Current: `{current_price:,.6g}`\n"
+        f"🟢 Start: `{start:,.6g}`\n"
+        f"🔵 End: `{end:,.6g}`\n"
+        f"🔴 Limit: `{limit:,.6g}`\n\n"
+        f"_Type `start,end,limit` to edit_\n"
+        f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
+    )
+
     try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=(
-                r"*Grid Strike \- New Config*" + "\n\n"
-                f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-                f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n"
-                f"*Side:* `{side}` \\| *Leverage:* `{config.get('leverage', 1)}x`" + "\n"
-                f"*Amount:* `{config.get('total_amount_quote', 0):,.0f}`" + "\n\n"
-                r"*Step 6/7:* Grid Prices" + "\n\n"
-                f"Start: `{start:,.6g}`\n"
-                f"End: `{end:,.6g}`\n"
-                f"Limit: `{limit:,.6g}`\n\n"
-                f"_Type `start,end,limit` to edit_\n"
-                f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
-            ),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        # Delete old message (which is a photo)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            pass
+
+        # Generate new chart with updated prices
+        if candles:
+            chart_bytes = generate_candles_chart(
+                candles, pair,
+                start_price=start,
+                end_price=end,
+                limit_price=limit,
+                current_price=current_price
+            )
+
+            # Send new photo with updated caption
+            msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_bytes,
+                caption=config_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+            # Update stored message ID
+            context.user_data["gs_wizard_message_id"] = msg.message_id
+        else:
+            # No chart - send text message
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=config_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["gs_wizard_message_id"] = msg.message_id
+
     except Exception as e:
-        logger.error(f"Error updating prices message: {e}")
+        logger.error(f"Error updating prices message: {e}", exc_info=True)
 
 
 async def handle_gs_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE, price_type: str) -> None:
@@ -2832,7 +2969,7 @@ async def _get_available_credentials(client) -> List[str]:
 
 
 async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show streamlined deploy configuration with clickable buttons for credentials and image"""
+    """Show streamlined deploy configuration with clickable buttons for name, credentials, and image"""
     query = update.callback_query
 
     selected = context.user_data.get("selected_controllers", set())
@@ -2851,10 +2988,12 @@ async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_
     # Initialize or get deploy params
     deploy_params = context.user_data.get("deploy_params", {})
     if not deploy_params.get("controllers_config"):
+        creds_default = "master_account"
         deploy_params = {
             "controllers_config": controller_names,
-            "credentials_profile": "master_account",
+            "credentials_profile": creds_default,
             "image": "hummingbot/hummingbot:latest",
+            "instance_name": creds_default,  # Default name = credentials profile
         }
     context.user_data["deploy_params"] = deploy_params
     context.user_data["deploy_message_id"] = query.message.message_id
@@ -2863,9 +3002,11 @@ async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_
     # Build message
     creds = deploy_params.get("credentials_profile", "master_account")
     image = deploy_params.get("image", "hummingbot/hummingbot:latest")
+    instance_name = deploy_params.get("instance_name", creds)
 
     # Build controllers list in code block for readability
     controllers_block = "\n".join(controller_names)
+    image_short = image.split("/")[-1] if "/" in image else image
 
     lines = [
         r"*🚀 Deploy Controllers*",
@@ -2874,21 +3015,28 @@ async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_
         controllers_block,
         "```",
         "",
+        f"*Name:*     `{escape_markdown_v2(instance_name)}`",
         f"*Account:*  `{escape_markdown_v2(creds)}`",
-        f"*Image:*    `{escape_markdown_v2(image)}`",
+        f"*Image:*    `{escape_markdown_v2(image_short)}`",
         "",
         r"_Tap buttons below to change settings_",
     ]
 
     # Build keyboard - one button per row for better readability
     keyboard = [
+        [InlineKeyboardButton(f"📝 Name: {instance_name[:25]}", callback_data="bots:select_name:_show")],
         [InlineKeyboardButton(f"👤 Account: {creds}", callback_data="bots:select_creds:_show")],
-        [InlineKeyboardButton(f"🐳 Image: {image}", callback_data="bots:select_image:_show")],
-        [InlineKeyboardButton("✅ Deploy Now", callback_data="bots:deploy_confirm")],
+        [InlineKeyboardButton(f"🐳 Image: {image_short}", callback_data="bots:select_image:_show")],
+        [InlineKeyboardButton("✅ Deploy Now", callback_data="bots:execute_deploy")],
         [InlineKeyboardButton("« Back", callback_data="bots:deploy_menu")],
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Set drawdowns to None (skip them)
+    deploy_params["max_global_drawdown_quote"] = None
+    deploy_params["max_controller_drawdown_quote"] = None
+    context.user_data["deploy_params"] = deploy_params
 
     await query.message.edit_text(
         "\n".join(lines),
@@ -2993,6 +3141,113 @@ async def handle_select_image(update: Update, context: ContextTypes.DEFAULT_TYPE
         await show_deploy_config_step(update, context)
 
 
+async def handle_select_instance_name(update: Update, context: ContextTypes.DEFAULT_TYPE, name: str) -> None:
+    """Handle instance name selection/editing"""
+    query = update.callback_query
+
+    if name == "_show":
+        # Show name editing prompt
+        deploy_params = context.user_data.get("deploy_params", {})
+        creds = deploy_params.get("credentials_profile", "master_account")
+        current = deploy_params.get("instance_name", creds)
+
+        lines = [
+            r"*Edit Instance Name*",
+            "",
+            f"Current: `{escape_markdown_v2(current)}`",
+            "",
+            r"_Send a new name or choose an option:_",
+        ]
+
+        keyboard = [
+            [InlineKeyboardButton(f"✓ Use: {creds}", callback_data=f"bots:select_name:{creds}")],
+            [InlineKeyboardButton("« Back", callback_data="bots:deploy_config")],
+        ]
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        # Set state to allow custom name input
+        context.user_data["bots_state"] = "deploy_edit_name"
+    else:
+        # Set the selected name
+        deploy_params = context.user_data.get("deploy_params", {})
+        deploy_params["instance_name"] = name
+        context.user_data["deploy_params"] = deploy_params
+        context.user_data["bots_state"] = None
+
+        await query.answer(f"Name set to {name[:25]}")
+        await show_deploy_config_step(update, context)
+
+
+async def process_instance_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
+    """Process custom instance name input from user text message"""
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    custom_name = user_input.strip()
+    if not custom_name:
+        return
+
+    # Set the custom name
+    deploy_params = context.user_data.get("deploy_params", {})
+    deploy_params["instance_name"] = custom_name
+    context.user_data["deploy_params"] = deploy_params
+    context.user_data["bots_state"] = None
+
+    # Update the config step message
+    message_id = context.user_data.get("deploy_message_id")
+    chat_id = context.user_data.get("deploy_chat_id")
+
+    if message_id and chat_id:
+        # Create a fake update/query to reuse show_deploy_config_step logic
+        # We need to update the existing message, so we'll do it manually
+        creds = deploy_params.get("credentials_profile", "master_account")
+        image = deploy_params.get("image", "hummingbot/hummingbot:latest")
+        controllers = deploy_params.get("controllers_config", [])
+
+        controllers_block = "\n".join(controllers)
+        image_short = image.split("/")[-1] if "/" in image else image
+
+        lines = [
+            r"*🚀 Deploy Controllers*",
+            "",
+            "```",
+            controllers_block,
+            "```",
+            "",
+            f"*Name:*     `{escape_markdown_v2(custom_name)}`",
+            f"*Account:*  `{escape_markdown_v2(creds)}`",
+            f"*Image:*    `{escape_markdown_v2(image_short)}`",
+            "",
+            r"_Tap buttons below to change settings_",
+        ]
+
+        keyboard = [
+            [InlineKeyboardButton(f"📝 Name: {custom_name[:25]}", callback_data="bots:select_name:_show")],
+            [InlineKeyboardButton(f"👤 Account: {creds}", callback_data="bots:select_creds:_show")],
+            [InlineKeyboardButton(f"🐳 Image: {image_short}", callback_data="bots:select_image:_show")],
+            [InlineKeyboardButton("✅ Deploy Now", callback_data="bots:execute_deploy")],
+            [InlineKeyboardButton("« Back", callback_data="bots:deploy_menu")],
+        ]
+
+        try:
+            await update.get_bot().edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            logger.error(f"Error updating deploy config message: {e}")
+
+
 async def handle_deploy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show deployment confirmation with auto-generated instance name"""
     query = update.callback_query
@@ -3006,10 +3261,8 @@ async def handle_deploy_confirm(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("No controllers selected", show_alert=True)
         return
 
-    # Generate instance name: {credentials_profile}_{timestamp}
-    import time
-    timestamp = int(time.time())
-    generated_name = f"{creds}_{timestamp}"
+    # Instance name is just the credentials profile - API adds timestamp
+    generated_name = creds
 
     # Store for later use
     context.user_data["deploy_generated_name"] = generated_name

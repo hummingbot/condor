@@ -72,16 +72,20 @@ from .controller_handlers import (
     show_deploy_config_step,
     handle_select_credentials,
     handle_select_image,
+    handle_select_instance_name,
+    process_instance_name_input,
     handle_deploy_confirm,
     handle_deploy_custom_name,
     process_deploy_custom_name_input,
     # Progressive Grid Strike wizard
     handle_gs_wizard_connector,
+    handle_gs_wizard_pair,
     handle_gs_wizard_side,
     handle_gs_wizard_leverage,
     handle_gs_wizard_amount,
     handle_gs_accept_prices,
     handle_gs_back_to_prices,
+    handle_gs_interval_change,
     handle_gs_wizard_take_profit,
     handle_gs_edit_id,
     handle_gs_edit_keep,
@@ -274,6 +278,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 image = action_parts[1]
                 await handle_select_image(update, context, image)
 
+        elif main_action == "select_name":
+            if len(action_parts) > 1:
+                name = action_parts[1]
+                await handle_select_instance_name(update, context, name)
+
         elif main_action == "deploy_confirm":
             await handle_deploy_confirm(update, context)
 
@@ -285,6 +294,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if len(action_parts) > 1:
                 connector = action_parts[1]
                 await handle_gs_wizard_connector(update, context, connector)
+
+        elif main_action == "gs_pair":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_gs_wizard_pair(update, context, pair)
 
         elif main_action == "gs_side":
             if len(action_parts) > 1:
@@ -306,6 +320,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "gs_back_to_prices":
             await handle_gs_back_to_prices(update, context)
+
+        elif main_action == "gs_interval":
+            if len(action_parts) > 1:
+                interval = action_parts[1]
+                await handle_gs_interval_change(update, context, interval)
 
         elif main_action == "gs_edit_price":
             if len(action_parts) > 1:
@@ -452,6 +471,9 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle custom instance name input for streamlined deploy
         elif bots_state == "deploy_custom_name":
             await process_deploy_custom_name_input(update, context, user_input)
+        # Handle instance name edit in config step
+        elif bots_state == "deploy_edit_name":
+            await process_instance_name_input(update, context, user_input)
         # Handle Grid Strike wizard input
         elif bots_state == "gs_wizard_input":
             await process_gs_wizard_input(update, context, user_input)

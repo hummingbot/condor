@@ -210,11 +210,9 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
             total_realized = 0
             total_unrealized = 0
 
-            # Create table with header
+            # List controllers with full names
             lines.append("")
             lines.append("```")
-            lines.append(f"{'#':<2} {'Controller':<18} {'PnL':>8} {'Vol':>7}")
-            lines.append(f"{'─'*2} {'─'*18} {'─'*8} {'─'*7}")
 
             for idx, (ctrl_name, ctrl_info) in enumerate(performance.items()):
                 if isinstance(ctrl_info, dict):
@@ -231,23 +229,21 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                     total_realized += realized
                     total_unrealized += unrealized
 
-                    # Shortened name with status prefix
-                    short_name = _shorten_controller_name(ctrl_name, 16)
+                    # Full name with status prefix
                     status_prefix = "▶" if ctrl_status == "running" else "⏸"
-                    ctrl_display = f"{status_prefix}{short_name}"[:17]
 
                     # Format numbers compactly
-                    pnl_str = f"{pnl:+.2f}"[:8]
+                    pnl_str = f"{pnl:+.2f}"
                     vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
-                    vol_str = vol_str[:7]
 
-                    lines.append(f"{idx+1:<2} {ctrl_display:<18} {pnl_str:>8} {vol_str:>7}")
+                    lines.append(f"{idx+1}. {status_prefix}{ctrl_name}")
+                    lines.append(f"   PnL: {pnl_str}  Vol: {vol_str}")
 
             # Totals row
-            lines.append(f"{'─'*2} {'─'*18} {'─'*8} {'─'*7}")
+            lines.append("─" * 30)
             vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-            pnl_total_str = f"{total_pnl:+.2f}"[:8]
-            lines.append(f"   {'TOTAL':<18} {pnl_total_str:>8} {vol_total:>7}")
+            pnl_total_str = f"{total_pnl:+.2f}"
+            lines.append(f"TOTAL  PnL: {pnl_total_str}  Vol: {vol_total}")
             lines.append("```")
 
             # Add PnL breakdown

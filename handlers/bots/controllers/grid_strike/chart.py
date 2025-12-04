@@ -82,6 +82,7 @@ def generate_chart(
     else:
         # Extract OHLCV data
         timestamps = []
+        datetime_objs = []  # Store datetime objects for intelligent tick labeling
         opens = []
         highs = []
         lows = []
@@ -89,7 +90,8 @@ def generate_chart(
 
         for candle in data:
             raw_ts = candle.get("timestamp", "")
-            # Parse and format timestamp to show day (e.g., "Dec 1 12:00")
+            # Parse timestamp
+            dt = None
             try:
                 if isinstance(raw_ts, (int, float)):
                     # Unix timestamp (seconds or milliseconds)
@@ -97,20 +99,22 @@ def generate_chart(
                         dt = datetime.fromtimestamp(raw_ts / 1000)
                     else:
                         dt = datetime.fromtimestamp(raw_ts)
-                    formatted_ts = dt.strftime("%b %d %H:%M")
                 elif isinstance(raw_ts, str) and raw_ts:
                     # Try parsing ISO format
                     if "T" in raw_ts:
                         dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
                     else:
                         dt = datetime.fromisoformat(raw_ts)
-                    formatted_ts = dt.strftime("%b %d %H:%M")
-                else:
-                    formatted_ts = str(raw_ts)
             except Exception:
-                formatted_ts = str(raw_ts)
+                dt = None
 
-            timestamps.append(formatted_ts)
+            if dt:
+                datetime_objs.append(dt)
+                timestamps.append(dt)  # Use datetime directly for x-axis
+            else:
+                timestamps.append(str(raw_ts))
+                datetime_objs.append(None)
+
             opens.append(candle.get("open", 0))
             highs.append(candle.get("high", 0))
             lows.append(candle.get("low", 0))
@@ -214,7 +218,10 @@ def generate_chart(
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
             rangeslider_visible=False,
-            showgrid=True
+            showgrid=True,
+            nticks=8,  # Limit number of ticks to prevent crowding
+            tickformat="%b %d\n%H:%M",  # Multi-line format: "Dec 4" on first line, "20:00" on second
+            tickangle=0,  # Keep labels horizontal
         ),
         yaxis=dict(
             gridcolor=DARK_THEME["grid_color"],
@@ -225,7 +232,7 @@ def generate_chart(
         showlegend=False,
         width=900,
         height=500,
-        margin=dict(l=10, r=120, t=50, b=30)
+        margin=dict(l=10, r=120, t=50, b=50)  # Increased bottom margin for multi-line x-axis labels
     )
 
     # Convert to PNG bytes
