@@ -163,7 +163,11 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
 
         # For OPEN status, filter to only show active positions with liquidity
         if status == "OPEN":
-            def has_liquidity(pos):
+            def is_active_with_liquidity(pos):
+                # Must not be closed
+                if pos.get('status') == 'CLOSED':
+                    return False
+                # Check liquidity
                 liq = pos.get('liquidity') or pos.get('current_liquidity')
                 if liq is not None:
                     try:
@@ -179,7 +183,7 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
                         pass
                 return True
 
-            positions = [p for p in positions if has_liquidity(p)]
+            positions = [p for p in positions if is_active_with_liquidity(p)]
 
         # For CLOSED status, only include positions that are actually closed
         if status == "CLOSED":
@@ -460,6 +464,11 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
         closed_positions = closed_data.get("positions", [])
+
+        # Merge token cache from closed positions (in case no open positions exist)
+        closed_token_cache = closed_data.get("token_cache", {})
+        token_cache = {**token_cache, **closed_token_cache}
+        context.user_data["token_cache"] = token_cache
 
         # Sort by closed_at date (most recent first)
         def get_closed_time(pos):

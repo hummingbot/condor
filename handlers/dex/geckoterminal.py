@@ -676,7 +676,7 @@ def _build_pool_list_keyboard(pools: list, user_data: dict) -> InlineKeyboardMar
 
     # Back button
     keyboard.append([
-        InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh"),
+        InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity"),
     ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -791,7 +791,7 @@ async def show_trending_pools(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
-                [InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]
+                [InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")]
             ])
         )
 
@@ -883,7 +883,7 @@ async def show_top_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
-                [InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]
+                [InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")]
             ])
         )
 
@@ -983,7 +983,7 @@ async def show_new_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
-                [InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]
+                [InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")]
             ])
         )
 

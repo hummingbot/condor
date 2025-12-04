@@ -406,10 +406,10 @@ def _format_pool_table(pools: list) -> str:
 
     lines = []
 
-    # Header - balanced for mobile (~40 chars)
+    # Header - balanced for mobile (~42 chars)
     lines.append("```")
-    lines.append(f"{'#':>2} {'Pair':<10} {'APR%':>6} {'Bin':>3} {'Fee':>4} {'TVL':>5} {'V/T':>5}")
-    lines.append("─" * 41)
+    lines.append(f"{'#':>2} {'Pair':<10} {'APR%':>5} {'Bin':>3} {'Fee':>5} {'TVL':>5} {'V/T':>5}")
+    lines.append("─" * 42)
 
     for i, pool in enumerate(pools):
         idx = str(i + 1)
@@ -443,12 +443,12 @@ def _format_pool_table(pools: list) -> str:
         else:
             ratio_str = "—"
 
-        # Base fee percentage - compact
+        # Base fee percentage - 2 decimal places
         base_fee = pool.get('base_fee_percentage')
         if base_fee:
             try:
                 fee_val = float(base_fee)
-                fee_str = f"{fee_val:.1f}" if fee_val >= 1 else f"{fee_val:.1f}"
+                fee_str = f"{fee_val:.2f}"
             except (ValueError, TypeError):
                 fee_str = "—"
         else:
@@ -468,7 +468,7 @@ def _format_pool_table(pools: list) -> str:
         # Bin step
         bin_step = pool.get('bin_step', '—')
 
-        lines.append(f"{idx:>2} {pair:<10} {apr_str:>6} {bin_step:>3} {fee_str:>4} {tvl:>5} {ratio_str:>5}")
+        lines.append(f"{idx:>2} {pair:<10} {apr_str:>5} {bin_step:>3} {fee_str:>5} {tvl:>5} {ratio_str:>5}")
 
     lines.append("```")
 
@@ -528,7 +528,7 @@ def _build_pool_selection_keyboard(pools: list, search_term: str = None, is_pair
     # Add search again and back buttons
     keyboard.append([
         InlineKeyboardButton("🔍 New Search", callback_data="dex:pool_list"),
-        InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
+        InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
     ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -615,7 +615,7 @@ async def process_pool_list(
         if not pools:
             message = escape_markdown_v2("📋 No pools found")
             context.user_data["pool_list_cache"] = []
-            keyboard = [[InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]]
+            keyboard = [[InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
             # Sort by APR% descending, filter out zero TVL
@@ -634,10 +634,11 @@ async def process_pool_list(
             context.user_data["pool_list_limit"] = display_limit
             context.user_data["pool_list_is_pair_search"] = is_pair_search
 
-            total = result.get("total", len(pools))
+            # Use actual pool count (active_pools or pools), not API total which may be inaccurate
+            actual_total = len(active_pools) if active_pools else len(pools)
             search_info = f" for '{search_term}'" if search_term else ""
 
-            header = rf"📋 *CLMM Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {total}\)" + "\n\n"
+            header = rf"📋 *CLMM Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {actual_total}\)" + "\n\n"
 
             table = _format_pool_table(display_pools)
             message = header + table + "\n\n_Select pool number:_"
@@ -842,7 +843,7 @@ async def handle_plot_liquidity(
         keyboard = [
             [
                 InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-                InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
+                InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1149,11 +1150,11 @@ async def _show_pool_detail(
     if has_list_context:
         keyboard.append([
             InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-            InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
+            InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
         ])
     else:
         keyboard.append([
-            InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
+            InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
         ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
