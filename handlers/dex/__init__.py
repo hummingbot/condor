@@ -69,6 +69,7 @@ from .pools import (
     handle_pool_combined_chart,
     handle_manage_positions,
     handle_pos_view,
+    handle_pos_view_pool,
     handle_pos_collect_fees,
     handle_pos_close_confirm,
     handle_pos_close_execute,
@@ -367,6 +368,9 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action.startswith("pos_view:"):
             pos_index = action.split(":")[1]
             await handle_pos_view(update, context, pos_index)
+        elif action.startswith("pos_view_pool:"):
+            pos_index = action.split(":")[1]
+            await handle_pos_view_pool(update, context, pos_index)
         elif action.startswith("pos_collect:"):
             pos_index = action.split(":")[1]
             await handle_pos_collect_fees(update, context, pos_index)

@@ -181,6 +181,10 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
 
             positions = [p for p in positions if has_liquidity(p)]
 
+        # For CLOSED status, only include positions that are actually closed
+        if status == "CLOSED":
+            positions = [p for p in positions if p.get('status') == 'CLOSED' or p.get('closed_at')]
+
         data["positions"] = positions
 
         # Fetch tokens for symbol resolution
@@ -500,20 +504,38 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Position action buttons (if positions exist)
     positions = context.user_data.get("lp_positions_cache", [])
     if positions:
-        # Row of position numbers (1-5)
-        pos_buttons = []
-        for i in range(min(5, len(positions))):
-            pos_buttons.append(
-                InlineKeyboardButton(f"#{i+1}", callback_data=f"dex:lp_pos_view:{i}")
-            )
-        if pos_buttons:
-            keyboard.append(pos_buttons)
+        # Initialize positions_cache for action handlers
+        if "positions_cache" not in context.user_data:
+            context.user_data["positions_cache"] = {}
 
-        # Quick actions row
-        keyboard.append([
-            InlineKeyboardButton("💰 Collect All Fees", callback_data="dex:lp_collect_all"),
-            InlineKeyboardButton("📊 View All", callback_data="dex:manage_positions"),
-        ])
+        # Each position gets its own row: [Pair | 💰 Fees | ❌ Close]
+        for i, pos in enumerate(positions[:5]):
+            # Store position for action handlers
+            context.user_data["positions_cache"][str(i)] = pos
+
+            # Get pair name for button label
+            base_token = pos.get('base_token', pos.get('token_a', ''))
+            quote_token = pos.get('quote_token', pos.get('token_b', ''))
+            base_sym = resolve_token_symbol(base_token, token_cache)[:5] if base_token else '?'
+            quote_sym = resolve_token_symbol(quote_token, token_cache)[:5] if quote_token else '?'
+            pair_label = f"{i+1}. {base_sym}-{quote_sym}"
+
+            keyboard.append([
+                InlineKeyboardButton(pair_label, callback_data=f"dex:lp_pos_view:{i}"),
+                InlineKeyboardButton("💰", callback_data=f"dex:pos_collect:{i}"),
+                InlineKeyboardButton("❌", callback_data=f"dex:pos_close:{i}"),
+            ])
+
+        # Quick actions row (only if more than shown)
+        if len(positions) > 5:
+            keyboard.append([
+                InlineKeyboardButton("💰 Collect All", callback_data="dex:lp_collect_all"),
+                InlineKeyboardButton("📊 View All", callback_data="dex:manage_positions"),
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton("💰 Collect All Fees", callback_data="dex:lp_collect_all"),
+            ])
 
     # Explore pools row - direct access to pool discovery
     keyboard.append([
@@ -577,7 +599,15 @@ async def handle_lp_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Handle position view button - shows detailed position info"""
     from .pools import handle_pos_view
 
-    # Convert to string index as expected by handle_pos_view
+    # Get position from lp_positions_cache (list) and copy to positions_cache (dict)
+    positions = context.user_data.get("lp_positions_cache", [])
+    if pos_index < len(positions):
+        pos = positions[pos_index]
+        # Copy to positions_cache dict for handle_pos_view
+        if "positions_cache" not in context.user_data:
+            context.user_data["positions_cache"] = {}
+        context.user_data["positions_cache"][str(pos_index)] = pos
+
     await handle_pos_view(update, context, str(pos_index))
 
 
@@ -1029,9 +1059,22 @@ async def handle_explore_pools(update: Update, context: ContextTypes.DEFAULT_TYP
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
+    msg = update.callback_query.message
 
-    await update.callback_query.message.edit_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
-    )
+    # Handle photo messages (from pool detail view) by deleting and sending new
+    if msg.photo:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await msg.chat.send_message(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+    else:
+        await msg.edit_text(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )

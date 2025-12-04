@@ -1772,7 +1772,7 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
     if detailed:
         # Full detailed view
         if pool_address:
-            lines.append(f"   Pool: {pool_address[:12]}...")
+            lines.append(f"📍 Pool: {pool_address[:16]}...")
 
         # Range with status indicator
         if lower and upper:
@@ -1783,41 +1783,107 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
                     range_str = f"{lower_f:.2f} - {upper_f:.2f}"
                 else:
                     range_str = f"{lower_f:.4f} - {upper_f:.4f}"
-                lines.append(f"   {range_emoji} Range: [{range_str}]")
+                lines.append(f"{range_emoji} Range: [{range_str}]")
             except (ValueError, TypeError):
-                lines.append(f"   {range_emoji} Range: [{lower} - {upper}]")
+                lines.append(f"{range_emoji} Range: [{lower} - {upper}]")
 
-        # Current amounts
+        # Current price and entry price from pnl_summary
+        entry_price = pnl_summary.get('entry_price')
+        current_price = pnl_summary.get('current_price') or pos.get('current_price')
+        if entry_price and current_price:
+            try:
+                price_change = pnl_summary.get('price_change_pct', 0) or 0
+                sign = "+" if price_change >= 0 else ""
+                lines.append(f"💱 Price: {float(current_price):.6f} (entry: {float(entry_price):.6f}, {sign}{price_change:.2f}%)")
+            except (ValueError, TypeError):
+                pass
+
+        lines.append("")  # Separator
+
+        # Current holdings
         if base_amount or quote_amount:
             try:
                 base_amt_str = format_amount(float(base_amount))
                 quote_amt_str = format_amount(float(quote_amount))
-                lines.append(f"   💰 Holdings: {base_amt_str} {base_symbol} / {quote_amt_str} {quote_symbol}")
+                lines.append(f"━━━ Holdings ━━━")
+                lines.append(f"💰 {base_amt_str} {base_symbol} / {quote_amt_str} {quote_symbol}")
             except (ValueError, TypeError):
-                lines.append(f"   💰 Holdings: {base_amount} {base_symbol} / {quote_amount} {quote_symbol}")
+                pass
 
-        # PNL info
-        if base_pnl is not None or quote_pnl is not None:
-            pnl_parts = []
-            if base_pnl is not None:
-                sign = "+" if base_pnl >= 0 else ""
-                pnl_parts.append(f"{sign}{format_amount(base_pnl)} {base_symbol}")
-            if quote_pnl is not None:
-                sign = "+" if quote_pnl >= 0 else ""
-                pnl_parts.append(f"{sign}{format_amount(quote_pnl)} {quote_symbol}")
-            if pnl_parts:
-                lines.append(f"   📊 PNL: {' / '.join(pnl_parts)}")
+        # Value information from pnl_summary
+        initial_value = pnl_summary.get('initial_value_quote')
+        current_value = pnl_summary.get('current_lp_value_quote') or pnl_summary.get('current_total_value_quote')
+        if initial_value and current_value:
+            try:
+                lines.append(f"💵 Value: ${float(current_value):.2f} (initial: ${float(initial_value):.2f})")
+            except (ValueError, TypeError):
+                pass
 
-        # Pending fees - always show in detailed view
+        lines.append("")  # Separator
+        lines.append("━━━ Performance ━━━")
+
+        # PnL from pnl_summary
+        total_pnl = pnl_summary.get('total_pnl_quote')
+        total_pnl_pct = pnl_summary.get('total_pnl_pct')
+        if total_pnl is not None:
+            try:
+                pnl_val = float(total_pnl)
+                pnl_pct = float(total_pnl_pct) if total_pnl_pct else 0
+                emoji = "📈" if pnl_val >= 0 else "📉"
+                sign = "+" if pnl_val >= 0 else ""
+                lines.append(f"{emoji} PnL: {sign}${pnl_val:.4f} ({sign}{pnl_pct:.4f}%)")
+            except (ValueError, TypeError):
+                pass
+
+        # Impermanent loss
+        il = pnl_summary.get('impermanent_loss_quote')
+        if il is not None:
+            try:
+                il_val = float(il)
+                if il_val != 0:
+                    lines.append(f"⚠️ IL: ${il_val:.4f}")
+            except (ValueError, TypeError):
+                pass
+
+        # Fees earned
+        total_fees = pnl_summary.get('total_fees_value_quote')
+        if total_fees is not None:
+            try:
+                fees_val = float(total_fees)
+                lines.append(f"🎁 Fees earned: ${fees_val:.4f}")
+            except (ValueError, TypeError):
+                pass
+
+        # Pending fees
         try:
             base_fee_f = float(base_fee) if base_fee else 0
             quote_fee_f = float(quote_fee) if quote_fee else 0
             if base_fee_f > 0 or quote_fee_f > 0:
-                lines.append(f"   🎁 Pending Fees: {format_amount(base_fee_f)} {base_symbol} / {format_amount(quote_fee_f)} {quote_symbol}")
-            else:
-                lines.append(f"   🎁 Pending Fees: None")
+                lines.append(f"⏳ Pending: {format_amount(base_fee_f)} {base_symbol} / {format_amount(quote_fee_f)} {quote_symbol}")
         except (ValueError, TypeError):
-            lines.append(f"   🎁 Pending Fees: N/A")
+            pass
+
+        # Duration and APR
+        duration_hours = pnl_summary.get('duration_hours')
+        fee_apr = pnl_summary.get('fee_apr_estimate')
+        if duration_hours is not None:
+            try:
+                hours = float(duration_hours)
+                if hours < 24:
+                    duration_str = f"{hours:.1f}h"
+                else:
+                    days = hours / 24
+                    duration_str = f"{days:.1f}d"
+                lines.append(f"⏱️ Duration: {duration_str}")
+            except (ValueError, TypeError):
+                pass
+
+        if fee_apr is not None:
+            try:
+                apr_val = float(fee_apr)
+                lines.append(f"📊 APR estimate: {apr_val:.2f}%")
+            except (ValueError, TypeError):
+                pass
 
     else:
         # Compact summary view
@@ -2024,14 +2090,20 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
             ],
         ]
 
+        # Add View Pool button to see pool details with chart
+        if pool_address and connector:
+            keyboard.append([
+                InlineKeyboardButton("📊 View Pool", callback_data=f"dex:pos_view_pool:{pos_index}"),
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")])
+
         # Add DEX link if available
         if dex_url:
             keyboard.append([InlineKeyboardButton(f"🌐 View on {connector.title()}", url=dex_url)])
 
-        keyboard.extend([
-            [InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")],
-            [InlineKeyboardButton("« Back", callback_data="dex:manage_positions")]
-        ])
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:liquidity")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
@@ -2042,6 +2114,44 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
 
     except Exception as e:
         logger.error(f"Error viewing position: {e}", exc_info=True)
+        await update.callback_query.answer(f"Error: {str(e)[:100]}")
+
+
+async def handle_pos_view_pool(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
+    """View pool details from a position - shows pool with liquidity chart"""
+    try:
+        positions_cache = context.user_data.get("positions_cache", {})
+        pos = positions_cache.get(pos_index)
+
+        if not pos:
+            await update.callback_query.answer("Position not found. Please refresh.")
+            return
+
+        pool_address = pos.get('pool_address', '')
+        connector = pos.get('connector', 'meteora')
+
+        if not pool_address:
+            await update.callback_query.answer("Pool address not available", show_alert=True)
+            return
+
+        # Build pool dict for _show_pool_detail
+        pool = {
+            'pool_address': pool_address,
+            'address': pool_address,
+            'connector': connector,
+            'trading_pair': pos.get('trading_pair'),
+            'mint_x': pos.get('base_token'),
+            'mint_y': pos.get('quote_token'),
+        }
+
+        # Store reference back to position
+        context.user_data["viewing_position_index"] = pos_index
+
+        await update.callback_query.answer("Loading pool details...")
+        await _show_pool_detail(update, context, pool, from_callback=True, has_list_context=False)
+
+    except Exception as e:
+        logger.error(f"Error viewing pool from position: {e}", exc_info=True)
         await update.callback_query.answer(f"Error: {str(e)[:100]}")
 
 
@@ -2098,7 +2208,7 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
 
         # Build back button
         back_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("« Back to Positions", callback_data="dex:manage_positions")]
+            [InlineKeyboardButton("« Back", callback_data="dex:liquidity")]
         ])
 
         if result:
@@ -2132,7 +2242,7 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
 
         back_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 Retry", callback_data=f"dex:pos_collect:{pos_index}")],
-            [InlineKeyboardButton("« Back to Positions", callback_data="dex:manage_positions")]
+            [InlineKeyboardButton("« Back", callback_data="dex:liquidity")]
         ])
 
         try:
@@ -2166,7 +2276,7 @@ async def handle_pos_close_confirm(update: Update, context: ContextTypes.DEFAULT
         keyboard = [
             [
                 InlineKeyboardButton("✅ Yes, Close", callback_data=f"dex:pos_close_exec:{pos_index}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="dex:manage_positions")
+                InlineKeyboardButton("❌ Cancel", callback_data="dex:liquidity")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2235,7 +2345,7 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
             if isinstance(result, dict) and result.get('tx_hash'):
                 success_msg += f"\n\nTx: `{escape_markdown_v2(result['tx_hash'][:20])}...`"
 
-            keyboard = [[InlineKeyboardButton("« Back to Positions", callback_data="dex:manage_positions")]]
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.callback_query.message.edit_text(
@@ -2266,7 +2376,7 @@ async def handle_position_list(update: Update, context: ContextTypes.DEFAULT_TYP
         r"`meteora solana\-mainnet\-beta POOL_ADDRESS`"
     )
 
-    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:manage_positions")]]
+    keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:liquidity")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "position_list"
