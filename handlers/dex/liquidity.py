@@ -484,6 +484,12 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 help_text += escape_markdown_v2(line) + "\n"
             help_text += "\n"
 
+        # Add explore pools section
+        help_text += r"━━━ 🔍 Explore Pools ━━━" + "\n"
+        help_text += r"🦎 Gecko \- Trending, top, new pools" + "\n"
+        help_text += r"🔍 Pool Info \- Look up pool by address" + "\n"
+        help_text += r"📋 Meteora \- Search Meteora DLMM pools" + "\n"
+
     except Exception as e:
         logger.warning(f"Could not fetch data: {e}")
         help_text += r"⚠️ _Could not load data_" + "\n\n"
@@ -509,15 +515,21 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
             InlineKeyboardButton("📊 View All", callback_data="dex:manage_positions"),
         ])
 
-    # Utility buttons - Explore, History, Refresh
+    # Explore pools row - direct access to pool discovery
     keyboard.append([
-        InlineKeyboardButton("🔍 Explore", callback_data="dex:explore_pools"),
+        InlineKeyboardButton("🦎 Gecko", callback_data="dex:gecko_explore"),
+        InlineKeyboardButton("🔍 Pool Info", callback_data="dex:pool_info"),
+        InlineKeyboardButton("📋 Meteora", callback_data="dex:pool_list"),
+    ])
+
+    # Utility buttons - History, Refresh
+    keyboard.append([
         InlineKeyboardButton("📜 History", callback_data="dex:lp_history"),
         InlineKeyboardButton("🔄 Refresh", callback_data="dex:lp_refresh"),
     ])
 
     keyboard.append([
-        InlineKeyboardButton("« Back", callback_data="dex:main_menu")
+        InlineKeyboardButton("✕ Close", callback_data="dex:close")
     ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)

@@ -19,7 +19,9 @@ def generate_liquidity_chart(
     bins: list,
     active_bin_id: int = None,
     current_price: float = None,
-    pair_name: str = "Pool"
+    pair_name: str = "Pool",
+    lower_price: float = None,
+    upper_price: float = None
 ) -> Optional[bytes]:
     """Generate liquidity distribution chart image using Plotly
 
@@ -28,6 +30,8 @@ def generate_liquidity_chart(
         active_bin_id: The current active bin ID
         current_price: Current pool price for vertical line
         pair_name: Trading pair name for title
+        lower_price: Lower bound of position range (optional, for vertical line)
+        upper_price: Upper bound of position range (optional, for vertical line)
 
     Returns:
         PNG image bytes or None if failed
@@ -101,6 +105,30 @@ def generate_liquidity_chart(
                 annotation_font_color="#ef4444"
             )
 
+        # Add lower price range line
+        if lower_price:
+            fig.add_vline(
+                x=lower_price,
+                line_dash="dot",
+                line_color="#f59e0b",
+                line_width=2,
+                annotation_text=f"L: {lower_price:.6f}",
+                annotation_position="bottom left",
+                annotation_font_color="#f59e0b"
+            )
+
+        # Add upper price range line
+        if upper_price:
+            fig.add_vline(
+                x=upper_price,
+                line_dash="dot",
+                line_color="#f59e0b",
+                line_width=2,
+                annotation_text=f"U: {upper_price:.6f}",
+                annotation_position="bottom right",
+                annotation_font_color="#f59e0b"
+            )
+
         # Update layout
         fig.update_layout(
             title=dict(
@@ -132,7 +160,7 @@ def generate_liquidity_chart(
             showgrid=True,
             gridwidth=1,
             gridcolor='rgba(255,255,255,0.1)',
-            tickformat='.4f'
+            tickformat='.5f'
         )
         fig.update_yaxes(
             showgrid=True,
@@ -472,6 +500,13 @@ def generate_combined_chart(
             liq_quote = [b['quote'] for b in bin_data]
             liq_base = [b['base_value'] for b in bin_data]
 
+            # Calculate bar width for proper spacing
+            if len(liq_prices) > 1:
+                price_diffs = [liq_prices[i+1] - liq_prices[i] for i in range(len(liq_prices)-1)]
+                bar_width = min(price_diffs) * 0.8 if price_diffs else None
+            else:
+                bar_width = None
+
             # Quote token bars (horizontal, price on Y-axis)
             fig.add_trace(
                 go.Bar(
@@ -479,7 +514,10 @@ def generate_combined_chart(
                     y=liq_prices,
                     name='Quote Liquidity',
                     marker_color='#22c55e',
+                    marker_line_color='#16a34a',
+                    marker_line_width=1,
                     orientation='h',
+                    width=bar_width,
                     hovertemplate='Price: %{y:.6f}<br>Quote: %{x:,.2f}<extra></extra>'
                 ),
                 row=1, col=2
@@ -492,7 +530,10 @@ def generate_combined_chart(
                     y=liq_prices,
                     name='Base Liquidity',
                     marker_color='#3b82f6',
+                    marker_line_color='#2563eb',
+                    marker_line_width=1,
                     orientation='h',
+                    width=bar_width,
                     hovertemplate='Price: %{y:.6f}<br>Base: %{x:,.2f}<extra></extra>'
                 ),
                 row=1, col=2
@@ -537,11 +578,20 @@ def generate_combined_chart(
             plot_bgcolor='#1a1a2e',
             font=dict(color='white'),
             xaxis_rangeslider_visible=False,
-            showlegend=False,
-            height=650,
-            width=1100,
-            margin=dict(l=50, r=50, t=60, b=50),
+            showlegend=has_liquidity,  # Show legend when liquidity panel exists
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.85,
+                font=dict(size=10),
+            ) if has_liquidity else None,
+            height=700,
+            width=1200,
+            margin=dict(l=50, r=50, t=70, b=50),
             barmode='stack',
+            bargap=0.1,  # Gap between bars
         )
 
         # Update axes styling
@@ -751,7 +801,7 @@ def generate_aggregated_liquidity_chart(
             showgrid=True,
             gridwidth=1,
             gridcolor='rgba(255,255,255,0.1)',
-            tickformat='.4f'
+            tickformat='.5f'
         )
         fig.update_yaxes(
             showgrid=True,

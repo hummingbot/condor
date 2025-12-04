@@ -63,6 +63,7 @@ from .pools import (
     handle_pool_select,
     handle_pool_list_back,
     handle_pool_detail_refresh,
+    handle_add_to_gateway,
     handle_plot_liquidity,
     handle_pool_ohlcv,
     handle_pool_combined_chart,
@@ -100,6 +101,11 @@ from .pools import (
 )
 from .geckoterminal import (
     show_gecko_explore_menu,
+    handle_gecko_toggle_view,
+    handle_gecko_select_network,
+    handle_gecko_set_network,
+    handle_gecko_show_pools,
+    handle_gecko_refresh,
     handle_gecko_trending,
     show_trending_pools,
     handle_gecko_top,
@@ -109,6 +115,8 @@ from .geckoterminal import (
     handle_gecko_networks,
     show_network_menu,
     handle_gecko_search,
+    handle_gecko_search_network,
+    handle_gecko_search_set_network,
     process_gecko_search,
     show_pool_detail,
     show_ohlcv_chart,
@@ -116,6 +124,9 @@ from .geckoterminal import (
     show_gecko_liquidity,
     show_gecko_combined,
     handle_copy_address,
+    handle_gecko_token_info,
+    handle_gecko_token_search,
+    handle_gecko_token_add,
     handle_back_to_list,
 )
 # Unified liquidity module
@@ -139,16 +150,16 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================
-# MAIN DEX TRADING COMMAND
+# MAIN DEX COMMANDS
 # ============================================
 
 @restricted
-async def dex_trading_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle /dex_trading command - DEX trading interface
+    Handle /swap command - Quick market swaps via DEX routers
 
     Usage:
-        /dex_trading - Show DEX trading menu
+        /swap - Show swap menu for token exchanges
     """
     # Clear all pending input states to prevent interference
     clear_all_input_states(context)
@@ -156,11 +167,32 @@ async def dex_trading_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Get the appropriate message object for replies
     msg = update.message or (update.callback_query.message if update.callback_query else None)
     if not msg:
-        logger.error("No message object available for dex_trading_command")
+        logger.error("No message object available for swap_command")
         return
 
     await msg.reply_chat_action("typing")
-    await show_dex_menu(update, context)
+    await handle_swap(update, context)
+
+
+@restricted
+async def lp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle /lp command - Liquidity pool management
+
+    Usage:
+        /lp - Show liquidity pools menu (positions, pools, explorer)
+    """
+    # Clear all pending input states to prevent interference
+    clear_all_input_states(context)
+
+    # Get the appropriate message object for replies
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        logger.error("No message object available for lp_command")
+        return
+
+    await msg.reply_chat_action("typing")
+    await handle_liquidity(update, context)
 
 
 # ============================================
@@ -190,16 +222,18 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         "lp_hist_clear", "lp_hist_filter_pair", "lp_hist_filter_connector", "lp_hist_filter_status",
                         "lp_hist_page_prev", "lp_hist_page_next",
                         "pool_info", "pool_list", "manage_positions", "pos_add_confirm", "pos_close_exec",
-                        "gecko_networks", "gecko_trades"}
+                        "add_to_gateway", "pool_detail_refresh",
+                        "gecko_networks", "gecko_trades", "gecko_show_pools", "gecko_refresh", "gecko_token_search", "gecko_token_add",
+                        "gecko_explore"}
         # Also show typing for actions that start with these prefixes
         slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:",
-                         "swap_hist_set_", "lp_hist_set_")
+                         "gecko_token:", "swap_hist_set_", "lp_hist_set_")
         if action in slow_actions or action.startswith(slow_prefixes):
             await query.message.reply_chat_action("typing")
 
-        # Menu
+        # Menu (legacy - redirect to swap)
         if action == "main_menu":
-            await show_dex_menu(update, context)
+            await handle_swap(update, context)
 
         # Unified swap handlers
         elif action == "swap":
@@ -321,6 +355,8 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pool_list_back(update, context)
         elif action == "pool_detail_refresh":
             await handle_pool_detail_refresh(update, context)
+        elif action == "add_to_gateway":
+            await handle_add_to_gateway(update, context)
         elif action.startswith("plot_liquidity:"):
             percentile = int(action.split(":")[1])
             await handle_plot_liquidity(update, context, percentile)
@@ -402,6 +438,17 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # GeckoTerminal explore handlers
         elif action == "gecko_explore":
             await show_gecko_explore_menu(update, context)
+        elif action == "gecko_toggle_view":
+            await handle_gecko_toggle_view(update, context)
+        elif action == "gecko_select_network":
+            await handle_gecko_select_network(update, context)
+        elif action.startswith("gecko_set_network:"):
+            network = action.split(":")[1]
+            await handle_gecko_set_network(update, context, network)
+        elif action == "gecko_show_pools":
+            await handle_gecko_show_pools(update, context)
+        elif action == "gecko_refresh":
+            await handle_gecko_refresh(update, context)
         elif action == "gecko_trending":
             await handle_gecko_trending(update, context)
         elif action.startswith("gecko_trending_"):
@@ -426,9 +473,21 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await show_network_menu(update, context, network)
         elif action == "gecko_search":
             await handle_gecko_search(update, context)
+        elif action == "gecko_search_network":
+            await handle_gecko_search_network(update, context)
+        elif action.startswith("gecko_search_set_net:"):
+            network = action.split(":")[1]
+            await handle_gecko_search_set_network(update, context, network)
         elif action.startswith("gecko_pool:"):
             pool_index = int(action.split(":")[1])
             await show_pool_detail(update, context, pool_index)
+        elif action.startswith("gecko_token:"):
+            token_type = action.split(":")[1]
+            await handle_gecko_token_info(update, context, token_type)
+        elif action == "gecko_token_search":
+            await handle_gecko_token_search(update, context)
+        elif action == "gecko_token_add":
+            await handle_gecko_token_add(update, context)
         elif action.startswith("gecko_ohlcv:"):
             timeframe = action.split(":")[1]
             await show_ohlcv_chart(update, context, timeframe)
@@ -573,7 +632,8 @@ def get_dex_message_handler():
 
 
 __all__ = [
-    'dex_trading_command',
+    'swap_command',
+    'lp_command',
     'dex_callback_handler',
     'dex_message_handler',
     'get_dex_callback_handler',

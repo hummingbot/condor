@@ -227,6 +227,138 @@ def _format_pool_line(pool: dict, index: int = None) -> str:
     return " | ".join(parts)
 
 
+def _format_compact(value) -> str:
+    """Format number compactly for mobile display"""
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+        if num == 0:
+            return "0"
+        if abs(num) >= 1_000_000:
+            return f"{num/1_000_000:.1f}M"
+        if abs(num) >= 1_000:
+            return f"{num/1_000:.0f}K"
+        if abs(num) >= 1:
+            return f"{num:.0f}"
+        return f"{num:.2f}"
+    except (ValueError, TypeError):
+        return "—"
+
+
+def _get_dex_short_name(dex_id: str) -> str:
+    """Convert dex_id to short display name with pool type indicator"""
+    if not dex_id:
+        return "?"
+
+    dex_id = dex_id.lower()
+
+    # CLMM/Concentrated liquidity pools
+    if "clmm" in dex_id or "dlmm" in dex_id or "whirlpool" in dex_id:
+        if "raydium" in dex_id:
+            return "Ray-CL"
+        if "meteora" in dex_id:
+            return "Met-CL"
+        if "orca" in dex_id:
+            return "Orc-CL"
+        return "CLMM"
+
+    # AMM pools
+    if "raydium" in dex_id:
+        return "Ray"
+    if "meteora" in dex_id:
+        return "Met"
+    if "orca" in dex_id:
+        return "Orca"
+    if "pump" in dex_id:
+        return "Pump"
+    if "jupiter" in dex_id:
+        return "Jup"
+    if "moonshot" in dex_id:
+        return "Moon"
+
+    # Truncate unknown DEX names
+    return dex_id[:6].title()
+
+
+def _format_gecko_pool_table(pools: list) -> str:
+    """Format pools as a compact table optimized for mobile
+
+    Shows: #, Pair, DEX, Chg%, V/TVL, TVL
+    Similar to CLMM pools format.
+    """
+    if not pools:
+        return "_No pools found_"
+
+    lines = []
+
+    # Header - balanced for mobile (~44 chars)
+    lines.append("```")
+    lines.append(f"{'#':>2} {'Pair':<10} {'DEX':<6} {'Chg%':>5} {'V/T':>5} {'TVL':>6}")
+    lines.append("─" * 44)
+
+    for i, pool in enumerate(pools, 1):
+        attrs = pool.get("attributes", pool) if isinstance(pool, dict) else pool
+
+        # Get symbols
+        base_symbol = _get_nested_value(attrs, "base_token_symbol") or "?"
+        quote_symbol = _get_nested_value(attrs, "quote_token_symbol") or "?"
+        if not base_symbol or base_symbol == "?":
+            name = attrs.get("name", "") if isinstance(attrs, dict) else ""
+            parsed_base, parsed_quote = _parse_symbols_from_name(name)
+            base_symbol = parsed_base or base_symbol
+            quote_symbol = parsed_quote or quote_symbol
+
+        pair = f"{base_symbol[:6]}/{quote_symbol[:3]}"[:10]
+
+        # DEX/Pool type
+        dex_id = _get_nested_value(attrs, "dex_id") or _get_nested_value(attrs, "dex", "id") or ""
+        dex_str = _get_dex_short_name(dex_id)
+
+        # Price change 24h
+        change = _get_nested_value(attrs, "price_change_percentage", "h24") or _get_nested_value(attrs, "price_change_percentage_h24")
+        if change is not None:
+            try:
+                change_val = float(change)
+                change_str = f"{change_val:+.0f}" if abs(change_val) >= 10 else f"{change_val:+.1f}"
+            except (ValueError, TypeError):
+                change_str = "—"
+        else:
+            change_str = "—"
+
+        # Volume 24h and TVL for V/TVL ratio
+        vol = _get_nested_value(attrs, "volume_usd", "h24") or _get_nested_value(attrs, "volume_usd_h24") or 0
+        tvl = _get_nested_value(attrs, "reserve_in_usd") or _get_nested_value(attrs, "reserve_usd") or 0
+
+        try:
+            vol_val = float(vol)
+            tvl_val = float(tvl)
+        except (ValueError, TypeError):
+            vol_val = 0
+            tvl_val = 0
+
+        # V/TVL ratio (volume/tvl) - good proxy for activity/potential returns
+        if tvl_val > 0 and vol_val > 0:
+            ratio = vol_val / tvl_val
+            if ratio >= 10:
+                ratio_str = f"{ratio:.0f}x"
+            elif ratio >= 1:
+                ratio_str = f"{ratio:.1f}x"
+            else:
+                ratio_str = f".{int(ratio*100):02d}x"
+        else:
+            ratio_str = "—"
+
+        # TVL
+        tvl_str = _format_compact(tvl_val)
+
+        lines.append(f"{i:>2} {pair:<10} {dex_str:<6} {change_str:>5} {ratio_str:>5} {tvl_str:>6}")
+
+    lines.append("```")
+
+    return "\n".join(lines)
+
+
 def _extract_pools_from_response(result, limit: int = 10) -> list:
     """Extract pools list from various response formats.
 
@@ -248,9 +380,16 @@ def _extract_pools_from_response(result, limit: int = 10) -> list:
         if isinstance(result, pd.DataFrame):
             # Convert DataFrame rows to list of dicts
             pools = result.to_dict('records')
-            logger.info(f"Converted DataFrame with {len(pools)} rows, columns: {list(result.columns)[:10]}")
-            if pools:
-                logger.debug(f"First pool keys: {list(pools[0].keys())[:15]}")
+            # Log ALL columns for debugging
+            logger.info(f"GeckoTerminal DataFrame columns ({len(result.columns)}): {list(result.columns)}")
+            if pools and len(pools) > 0:
+                # Log first pool's data to see available fields
+                first_pool = pools[0]
+                logger.info(f"GeckoTerminal first pool sample data:")
+                for key, value in first_pool.items():
+                    # Truncate long values
+                    val_str = str(value)[:100] if value is not None else "None"
+                    logger.info(f"  {key}: {val_str}")
             return pools[:limit] if pools else []
     except ImportError:
         pass
@@ -282,8 +421,41 @@ def _extract_pools_from_response(result, limit: int = 10) -> list:
             except (TypeError, ValueError):
                 logger.error(f"Cannot extract pools from response: {result}")
 
+    # Log pool structure for dict/list responses
+    if pools and len(pools) > 0:
+        first_pool = pools[0]
+        if isinstance(first_pool, dict):
+            # Check if it has 'attributes' (API JSON response format)
+            if 'attributes' in first_pool:
+                attrs = first_pool.get('attributes', {})
+                rels = first_pool.get('relationships', {})
+                logger.info(f"GeckoTerminal pool attributes keys: {list(attrs.keys()) if isinstance(attrs, dict) else 'N/A'}")
+                logger.info(f"GeckoTerminal pool relationships keys: {list(rels.keys()) if isinstance(rels, dict) else 'N/A'}")
+                logger.info(f"GeckoTerminal first pool sample:")
+                for key, value in attrs.items():
+                    val_str = str(value)[:80] if value is not None else "None"
+                    logger.info(f"  attr.{key}: {val_str}")
+                # Log DEX info specifically (might indicate pool type)
+                dex_data = rels.get('dex', {}).get('data', {})
+                logger.info(f"  DEX: {dex_data}")
+            else:
+                # Flat dict (DataFrame-converted)
+                logger.info(f"GeckoTerminal pool keys: {list(first_pool.keys())}")
+
     logger.debug(f"Extracted {len(pools)} pools from response")
     return pools[:limit] if pools else []
+
+
+def _parse_token_address_from_id(token_id: str) -> str:
+    """Parse token address from GeckoTerminal token ID.
+
+    Token IDs are in format: network_address (e.g., solana_So11111111111111...)
+    """
+    if not token_id:
+        return ""
+    # Split on first underscore to handle addresses that might contain underscores
+    parts = token_id.split("_", 1)
+    return parts[1] if len(parts) > 1 else token_id
 
 
 def _extract_pool_data(pool: dict) -> dict:
@@ -309,6 +481,13 @@ def _extract_pool_data(pool: dict) -> dict:
         base_symbol = base_symbol or parsed_base
         quote_symbol = quote_symbol or parsed_quote
 
+    # Extract token addresses from relationships
+    # GeckoTerminal returns token IDs in format: network_address
+    base_token_id = _get_nested_value(relationships, "base_token", "data", "id") or ""
+    quote_token_id = _get_nested_value(relationships, "quote_token", "data", "id") or ""
+    base_token_address = _parse_token_address_from_id(base_token_id)
+    quote_token_address = _parse_token_address_from_id(quote_token_id)
+
     # For flattened DataFrames, try direct keys first
     return {
         "id": pool.get("id", ""),
@@ -316,6 +495,8 @@ def _extract_pool_data(pool: dict) -> dict:
         "address": _get_nested_value(attrs, "address") or "",
         "base_token_symbol": base_symbol,
         "quote_token_symbol": quote_symbol,
+        "base_token_address": base_token_address,
+        "quote_token_address": quote_token_address,
         "base_token_price_usd": _get_nested_value(attrs, "base_token_price_usd"),
         "quote_token_price_usd": _get_nested_value(attrs, "quote_token_price_usd"),
         "base_token_price_native": _get_nested_value(attrs, "base_token_price_native_currency"),
@@ -393,44 +574,9 @@ def cycle_gecko_view(user_data: dict) -> str:
 # ============================================
 
 async def show_gecko_explore_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display the main GeckoTerminal explore menu with network selector and view toggle"""
-    network, view = get_gecko_state(context.user_data)
-    network_display = NETWORK_NAMES.get(network, network.title())
-
-    keyboard = [
-        [
-            InlineKeyboardButton(f"🌐 {network_display}", callback_data="dex:gecko_select_network"),
-            InlineKeyboardButton(VIEW_LABELS.get(view, "🔥 Trending"), callback_data="dex:gecko_toggle_view"),
-        ],
-        [
-            InlineKeyboardButton("▶️ Show Pools", callback_data="dex:gecko_show_pools"),
-            InlineKeyboardButton("🔍 Search Token", callback_data="dex:gecko_search"),
-        ],
-        [
-            InlineKeyboardButton("« Back", callback_data="dex:explore_pools"),
-        ],
-    ]
-
-    message = (
-        r"🦎 *GeckoTerminal Explorer*" + "\n\n"
-        f"🌐 Network: *{escape_markdown_v2(network_display)}*\n"
-        f"📊 View: *{escape_markdown_v2(VIEW_LABELS.get(view, 'Trending'))}*\n\n"
-        "_Tap network/view to change, then Show Pools_\n"
-        "_Or search by token address_"
-    )
-
-    if update.callback_query:
-        await update.callback_query.message.edit_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    else:
-        await update.message.reply_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    """Display GeckoTerminal pools directly with network/view controls"""
+    # Directly show pools based on current settings
+    await handle_gecko_show_pools(update, context)
 
 
 async def handle_gecko_toggle_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -497,6 +643,58 @@ async def handle_gecko_show_pools(update: Update, context: ContextTypes.DEFAULT_
         await show_new_pools(update, context, network)
 
 
+def _build_pool_list_keyboard(pools: list, user_data: dict) -> InlineKeyboardMarkup:
+    """Build keyboard with pool buttons and network/view controls"""
+    network, view = get_gecko_state(user_data)
+    network_display = NETWORK_NAMES.get(network, network.title())
+
+    keyboard = []
+
+    # Pool selection buttons (2 per row)
+    row = []
+    for i, pool in enumerate(pools):
+        base, quote = _get_pool_symbols(pool)
+        btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
+        row.append(btn)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    # Network and View controls
+    keyboard.append([
+        InlineKeyboardButton(f"🌐 {network_display}", callback_data="dex:gecko_select_network"),
+        InlineKeyboardButton(VIEW_LABELS.get(view, "🔥 Trending"), callback_data="dex:gecko_toggle_view"),
+    ])
+
+    # Search and Refresh
+    keyboard.append([
+        InlineKeyboardButton("🔍 Search", callback_data="dex:gecko_search"),
+        InlineKeyboardButton("🔄 Refresh", callback_data="dex:gecko_refresh"),
+    ])
+
+    # Back button
+    keyboard.append([
+        InlineKeyboardButton("« Back", callback_data="dex:explore_pools"),
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def handle_gecko_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Refresh current pool list by invalidating cache"""
+    network, view = get_gecko_state(context.user_data)
+
+    # Invalidate cache for current view
+    cache_key = f"gecko_{view}_{network or 'all'}"
+    if cache_key in context.user_data:
+        del context.user_data[cache_key]
+
+    await update.callback_query.answer("Refreshing...")
+    await handle_gecko_show_pools(update, context)
+
+
 # ============================================
 # TRENDING POOLS
 # ============================================
@@ -538,9 +736,11 @@ async def show_trending_pools(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Fetch and display trending pools"""
     query = update.callback_query
 
+    network_name = NETWORK_NAMES.get(network, network.title()) if network else "All Networks"
+
     # Show loading
     await query.message.edit_text(
-        r"🔥 *Trending Pools*" + "\n\n" + r"_Loading\.\.\._",
+        f"🔥 *Trending \\- {escape_markdown_v2(network_name)}*\n\n_Loading\\.\\.\\._",
         parse_mode="MarkdownV2"
     )
 
@@ -563,47 +763,25 @@ async def show_trending_pools(update: Update, context: ContextTypes.DEFAULT_TYPE
             TRENDING_CACHE_TTL
         )
 
-        # Store pools for selection
+        # Store pools for selection and update state
         context.user_data["gecko_pools"] = pools
         context.user_data["gecko_view"] = "trending"
-        context.user_data["gecko_network"] = network
+        set_gecko_view(context.user_data, "trending")
+        if network:
+            set_gecko_network(context.user_data, network)
 
-        # Build message
-        network_name = NETWORK_NAMES.get(network, network.title()) if network else "All Networks"
-        lines = [f"🔥 *Trending Pools \\- {escape_markdown_v2(network_name)}*\n"]
+        # Build message with table format
+        header = f"🔥 *Trending \\- {escape_markdown_v2(network_name)}* \\({len(pools)}\\)\n"
+        table = _format_gecko_pool_table(pools)
+        footer = "\n_Select pool number:_"
 
-        if not pools:
-            lines.append("\n_No trending pools found_")
-        else:
-            lines.append("")
-            for i, pool in enumerate(pools, 1):
-                line = _format_pool_line(pool, i)
-                lines.append(escape_markdown_v2(line))
-
-        lines.append("\n_Select a pool for details:_")
-
-        # Build keyboard with pool buttons
-        keyboard = []
-        row = []
-        for i, pool in enumerate(pools):
-            base, quote = _get_pool_symbols(pool)
-            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
-            row.append(btn)
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-
-        keyboard.append([
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_trending_{network or 'all'}"),
-            InlineKeyboardButton("« Back", callback_data="dex:gecko_trending"),
-        ])
+        # Build keyboard with network/view controls
+        reply_markup = _build_pool_list_keyboard(pools, context.user_data)
 
         await query.message.edit_text(
-            "\n".join(lines),
+            header + table + footer,
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=reply_markup
         )
 
     except Exception as e:
@@ -612,7 +790,8 @@ async def show_trending_pools(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"❌ Error fetching trending pools: {escape_markdown_v2(str(e))}",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("« Back", callback_data="dex:gecko_trending")]
+                [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
+                [InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]
             ])
         )
 
@@ -654,9 +833,11 @@ async def show_top_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
     """Fetch and display top pools by volume"""
     query = update.callback_query
 
+    network_name = NETWORK_NAMES.get(network, network.title())
+
     # Show loading
     await query.message.edit_text(
-        r"📈 *Top Pools*" + "\n\n" + r"_Loading\.\.\._",
+        f"📈 *Top Pools \\- {escape_markdown_v2(network_name)}*\n\n_Loading\\.\\.\\._",
         parse_mode="MarkdownV2"
     )
 
@@ -675,47 +856,24 @@ async def show_top_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             TRENDING_CACHE_TTL
         )
 
-        # Store pools for selection
+        # Store pools for selection and update state
         context.user_data["gecko_pools"] = pools
         context.user_data["gecko_view"] = "top"
-        context.user_data["gecko_network"] = network
+        set_gecko_view(context.user_data, "top")
+        set_gecko_network(context.user_data, network)
 
-        # Build message
-        network_name = NETWORK_NAMES.get(network, network.title())
-        lines = [f"📈 *Top Pools \\- {escape_markdown_v2(network_name)}*\n"]
+        # Build message with table format
+        header = f"📈 *Top Pools \\- {escape_markdown_v2(network_name)}* \\({len(pools)}\\)\n"
+        table = _format_gecko_pool_table(pools)
+        footer = "\n_Select pool number:_"
 
-        if not pools:
-            lines.append("\n_No pools found_")
-        else:
-            lines.append("")
-            for i, pool in enumerate(pools, 1):
-                line = _format_pool_line(pool, i)
-                lines.append(escape_markdown_v2(line))
-
-        lines.append("\n_Select a pool for details:_")
-
-        # Build keyboard with pool buttons
-        keyboard = []
-        row = []
-        for i, pool in enumerate(pools):
-            base, quote = _get_pool_symbols(pool)
-            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
-            row.append(btn)
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-
-        keyboard.append([
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_top_{network}"),
-            InlineKeyboardButton("« Back", callback_data="dex:gecko_top"),
-        ])
+        # Build keyboard with network/view controls
+        reply_markup = _build_pool_list_keyboard(pools, context.user_data)
 
         await query.message.edit_text(
-            "\n".join(lines),
+            header + table + footer,
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=reply_markup
         )
 
     except Exception as e:
@@ -724,7 +882,8 @@ async def show_top_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             f"❌ Error fetching top pools: {escape_markdown_v2(str(e))}",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("« Back", callback_data="dex:gecko_top")]
+                [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
+                [InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]
             ])
         )
 
@@ -770,9 +929,11 @@ async def show_new_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
     """Fetch and display new pools"""
     query = update.callback_query
 
+    network_name = NETWORK_NAMES.get(network, network.title()) if network else "All Networks"
+
     # Show loading
     await query.message.edit_text(
-        r"🆕 *New Pools*" + "\n\n" + r"_Loading\.\.\._",
+        f"🆕 *New Pools \\- {escape_markdown_v2(network_name)}*\n\n_Loading\\.\\.\\._",
         parse_mode="MarkdownV2"
     )
 
@@ -794,63 +955,25 @@ async def show_new_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             TRENDING_CACHE_TTL
         )
 
-        # Store pools for selection
+        # Store pools for selection and update state
         context.user_data["gecko_pools"] = pools
         context.user_data["gecko_view"] = "new"
-        context.user_data["gecko_network"] = network
+        set_gecko_view(context.user_data, "new")
+        if network:
+            set_gecko_network(context.user_data, network)
 
-        # Build message
-        network_name = NETWORK_NAMES.get(network, network.title()) if network else "All Networks"
-        lines = [f"🆕 *New Pools \\- {escape_markdown_v2(network_name)}*\n"]
+        # Build message with table format
+        header = f"🆕 *New Pools \\- {escape_markdown_v2(network_name)}* \\({len(pools)}\\)\n"
+        table = _format_gecko_pool_table(pools)
+        footer = "\n_Select pool number:_"
 
-        if not pools:
-            lines.append("\n_No new pools found_")
-        else:
-            lines.append("")
-            for i, pool in enumerate(pools, 1):
-                attrs = pool.get("attributes", pool)
-                line = _format_pool_line(pool, i)
-                # Add creation time if available
-                created = attrs.get("pool_created_at")
-                if created:
-                    try:
-                        created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                        age = datetime.now(created_dt.tzinfo) - created_dt
-                        if age.days > 0:
-                            age_str = f"{age.days}d ago"
-                        elif age.seconds >= 3600:
-                            age_str = f"{age.seconds // 3600}h ago"
-                        else:
-                            age_str = f"{age.seconds // 60}m ago"
-                        line += f" | {age_str}"
-                    except Exception:
-                        pass
-                lines.append(escape_markdown_v2(line))
-
-        lines.append("\n_Select a pool for details:_")
-
-        # Build keyboard with pool buttons
-        keyboard = []
-        row = []
-        for i, pool in enumerate(pools):
-            base, quote = _get_pool_symbols(pool)
-            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote[:4]}", callback_data=f"dex:gecko_pool:{i}")
-            row.append(btn)
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
-
-        keyboard.append([
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:gecko_new_{network or 'all'}"),
-            InlineKeyboardButton("« Back", callback_data="dex:gecko_new"),
-        ])
+        # Build keyboard with network/view controls
+        reply_markup = _build_pool_list_keyboard(pools, context.user_data)
 
         await query.message.edit_text(
-            "\n".join(lines),
+            header + table + footer,
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=reply_markup
         )
 
     except Exception as e:
@@ -859,7 +982,8 @@ async def show_new_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             f"❌ Error fetching new pools: {escape_markdown_v2(str(e))}",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("« Back", callback_data="dex:gecko_new")]
+                [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
+                [InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]
             ])
         )
 
@@ -1243,10 +1367,26 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             InlineKeyboardButton("📈 Candles 1d", callback_data="dex:gecko_ohlcv:1h"),
             InlineKeyboardButton("📈 Candles 7d", callback_data="dex:gecko_ohlcv:1d"),
         ],
-        [
-            InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
-        ],
     ]
+
+    # Add token info buttons if addresses are available
+    base_addr = pool_data.get("base_token_address", "")
+    quote_addr = pool_data.get("quote_token_address", "")
+    base_sym = pool_data.get("base_token_symbol", "Base")[:6]
+    quote_sym = pool_data.get("quote_token_symbol", "Quote")[:6]
+
+    if base_addr or quote_addr:
+        token_row = []
+        if base_addr:
+            token_row.append(InlineKeyboardButton(f"🪙 {base_sym}", callback_data="dex:gecko_token:base"))
+        if quote_addr:
+            token_row.append(InlineKeyboardButton(f"🪙 {quote_sym}", callback_data="dex:gecko_token:quote"))
+        if token_row:
+            keyboard.append(token_row)
+
+    keyboard.append([
+        InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
+    ])
 
     # Add liquidity button if DEX supports it (Meteora, Raydium, Orca on Solana)
     dex_id = pool_data.get("dex_id", "")
@@ -1598,19 +1738,22 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.answer("Loading combined chart...")
 
-    # Show loading
+    # Show loading - keep the message reference for editing
+    loading_msg = query.message
     if query.message.photo:
-        await query.message.delete()
-        loading_msg = await query.message.chat.send_message(
-            f"📊 *Combined View*\n\n_Loading OHLCV \\+ Liquidity\\.\\.\\._",
-            parse_mode="MarkdownV2"
-        )
+        # Edit photo caption to show loading (keeps the existing photo)
+        try:
+            await query.message.edit_caption(
+                caption=f"📊 *Combined View*\n\n_Loading OHLCV \\+ Liquidity\\.\\.\\._",
+                parse_mode="MarkdownV2"
+            )
+        except Exception:
+            pass  # Caption might be the same, ignore
     else:
         await query.message.edit_text(
             f"📊 *Combined View*\n\n_Loading OHLCV \\+ Liquidity\\.\\.\\._",
             parse_mode="MarkdownV2"
         )
-        loading_msg = query.message
 
     try:
         address = pool_data["address"]
@@ -1706,14 +1849,23 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
             ],
         ]
 
-        # Delete loading and send photo
-        await loading_msg.delete()
-        await loading_msg.chat.send_photo(
-            photo=chart_buf,
-            caption=caption,
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        # Edit or send photo
+        from telegram import InputMediaPhoto
+        if loading_msg.photo:
+            # Edit existing photo message
+            await loading_msg.edit_media(
+                media=InputMediaPhoto(media=chart_buf, caption=caption, parse_mode="MarkdownV2"),
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            # Replace text with photo
+            await loading_msg.delete()
+            await loading_msg.chat.send_photo(
+                photo=chart_buf,
+                caption=caption,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
     except Exception as e:
         logger.error(f"Error generating combined chart: {e}", exc_info=True)
@@ -1917,6 +2069,344 @@ async def handle_copy_address(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+# ============================================
+# TOKEN INFO
+# ============================================
+
+async def handle_gecko_token_info(update: Update, context: ContextTypes.DEFAULT_TYPE, token_type: str) -> None:
+    """Show detailed token info using get_specific_token_on_network"""
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    # Get token info based on type
+    if token_type == "base":
+        token_address = pool_data.get("base_token_address", "")
+        token_symbol = pool_data.get("base_token_symbol", "Unknown")
+    else:
+        token_address = pool_data.get("quote_token_address", "")
+        token_symbol = pool_data.get("quote_token_symbol", "Unknown")
+
+    network = pool_data.get("network", "")
+
+    if not token_address or not network:
+        await query.answer("Token address not available")
+        return
+
+    await query.answer("Loading token info...")
+
+    # Show loading
+    await query.message.edit_text(
+        f"🪙 *Loading {escape_markdown_v2(token_symbol)} info\\.\\.\\.*",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        client = GeckoTerminalAsyncClient()
+        result = await client.get_specific_token_on_network(network, token_address)
+
+        # Extract token data
+        token_data = {}
+        if isinstance(result, dict):
+            data = result.get("data", result)
+            if isinstance(data, dict):
+                token_data = data.get("attributes", data)
+            elif isinstance(data, list) and data:
+                token_data = data[0].get("attributes", data[0])
+        elif hasattr(result, 'data'):
+            attrs = getattr(result.data, 'attributes', result.data)
+            if hasattr(attrs, '__dict__'):
+                token_data = attrs.__dict__
+            else:
+                token_data = attrs
+
+        # Check for pandas DataFrame
+        try:
+            import pandas as pd
+            if isinstance(result, pd.DataFrame) and not result.empty:
+                token_data = result.to_dict('records')[0]
+        except ImportError:
+            pass
+
+        if not token_data:
+            await query.message.edit_text(
+                f"❌ *Token Info Not Found*\n\n"
+                f"Could not fetch info for `{escape_markdown_v2(token_address[:20])}...`",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                ])
+            )
+            return
+
+        # Store token data for add-to-gateway
+        context.user_data["gecko_current_token"] = {
+            "address": token_address,
+            "symbol": token_data.get("symbol", token_symbol),
+            "name": token_data.get("name", ""),
+            "decimals": token_data.get("decimals"),
+            "network": network,
+        }
+
+        # Build token info display
+        name = token_data.get("name", "Unknown")
+        symbol = token_data.get("symbol", token_symbol)
+        decimals = token_data.get("decimals", "N/A")
+
+        lines = [
+            f"🪙 *{escape_markdown_v2(symbol)}* \\- {escape_markdown_v2(name)}\n",
+            f"🌐 Network: {escape_markdown_v2(NETWORK_NAMES.get(network, network))}",
+        ]
+
+        # Price info
+        price_usd = token_data.get("price_usd")
+        if price_usd:
+            try:
+                price = float(price_usd)
+                lines.append(f"💰 Price: {escape_markdown_v2(_format_price(price))}")
+            except (ValueError, TypeError):
+                pass
+
+        # Market data
+        fdv = token_data.get("fdv_usd")
+        if fdv:
+            try:
+                lines.append(f"📈 FDV: {escape_markdown_v2(_format_volume(float(fdv)))}")
+            except (ValueError, TypeError):
+                pass
+
+        market_cap = token_data.get("market_cap_usd")
+        if market_cap:
+            try:
+                lines.append(f"💎 Market Cap: {escape_markdown_v2(_format_volume(float(market_cap)))}")
+            except (ValueError, TypeError):
+                pass
+
+        total_supply = token_data.get("total_supply")
+        if total_supply:
+            try:
+                lines.append(f"📊 Total Supply: {escape_markdown_v2(_format_volume(float(total_supply)))}")
+            except (ValueError, TypeError):
+                pass
+
+        # Volume
+        vol_24h = token_data.get("volume_usd", {})
+        if isinstance(vol_24h, dict):
+            h24 = vol_24h.get("h24")
+        else:
+            h24 = vol_24h
+        if h24:
+            try:
+                lines.append(f"📈 Vol 24h: {escape_markdown_v2(_format_volume(float(h24)))}")
+            except (ValueError, TypeError):
+                pass
+
+        lines.append("")
+        lines.append(f"🔢 Decimals: {escape_markdown_v2(str(decimals))}")
+        lines.append(f"\n📍 Address:\n`{token_address}`")
+
+        # GeckoTerminal link
+        gecko_url = f"https://www.geckoterminal.com/{network}/tokens/{token_address}"
+        lines.append(f"\n🦎 [View on GeckoTerminal]({escape_markdown_v2(gecko_url)})")
+
+        # Build keyboard
+        keyboard = [
+            [
+                InlineKeyboardButton("🔍 Search Pools", callback_data="dex:gecko_token_search"),
+                InlineKeyboardButton("➕ Add to Gateway", callback_data="dex:gecko_token_add"),
+            ],
+            [
+                InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+            ],
+        ]
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        logger.error(f"Error fetching token info: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+            ])
+        )
+
+
+async def handle_gecko_token_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Search for pools using the current token"""
+    query = update.callback_query
+
+    token_info = context.user_data.get("gecko_current_token")
+    if not token_info:
+        await query.answer("No token selected")
+        return
+
+    # Set the network and trigger search with the token address
+    network = token_info.get("network", "solana")
+    set_gecko_network(context.user_data, network)
+
+    # Store token address for search
+    context.user_data["gecko_search_token"] = token_info.get("address", "")
+    context.user_data["gecko_view"] = "search"
+
+    # Simulate search
+    await query.answer("Searching pools...")
+
+    try:
+        client = GeckoTerminalAsyncClient()
+        result = await client.get_top_pools_by_network_token(network, token_info.get("address", ""))
+        pools = _extract_pools_from_response(result, 10)
+
+        if not pools:
+            await query.message.edit_text(
+                r"❌ *No pools found*" + "\n\n"
+                f"No pools found for this token on {escape_markdown_v2(NETWORK_NAMES.get(network, network))}\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")]
+                ])
+            )
+            return
+
+        # Store pools for selection
+        context.user_data["gecko_pools"] = pools
+        context.user_data["gecko_network"] = network
+
+        # Build message
+        symbol = token_info.get("symbol", "Token")
+        lines = [f"🔍 *Pools for {escape_markdown_v2(symbol)}*\n"]
+
+        for i, pool in enumerate(pools, 1):
+            line = _format_pool_line(pool, i)
+            lines.append(escape_markdown_v2(line))
+
+        lines.append("\n_Select a pool for details:_")
+
+        # Build keyboard
+        keyboard = []
+        row = []
+        for i, pool in enumerate(pools):
+            base, quote_sym = _get_pool_symbols(pool)
+            btn = InlineKeyboardButton(f"{i+1}. {base[:6]}/{quote_sym[:4]}", callback_data=f"dex:gecko_pool:{i}")
+            row.append(btn)
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_explore"),
+        ])
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error searching token pools: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error: {escape_markdown_v2(str(e))}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_explore")]
+            ])
+        )
+
+
+async def handle_gecko_token_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add token to Gateway"""
+    query = update.callback_query
+
+    token_info = context.user_data.get("gecko_current_token")
+    if not token_info:
+        await query.answer("No token selected")
+        return
+
+    # Map GeckoTerminal network to Gateway network
+    network_mapping = {
+        "solana": "solana-mainnet-beta",
+        "eth": "ethereum-mainnet",
+        "base": "base-mainnet",
+        "arbitrum": "arbitrum-one",
+        "bsc": "bsc-mainnet",
+        "polygon_pos": "polygon-mainnet",
+    }
+
+    gecko_network = token_info.get("network", "solana")
+    gateway_network = network_mapping.get(gecko_network, gecko_network)
+    symbol = token_info.get("symbol", "")
+    name = token_info.get("name", "")
+    address = token_info.get("address", "")
+    decimals = token_info.get("decimals")
+
+    # If decimals is missing, we need to prompt or use default
+    if decimals is None:
+        # Default decimals based on network
+        if gecko_network == "solana":
+            decimals = 9  # Most SPL tokens
+        else:
+            decimals = 18  # Most ERC20 tokens
+
+    await query.answer("Adding token to Gateway...")
+
+    try:
+        from servers import server_manager
+
+        client = await server_manager.get_default_client()
+        await client.gateway.add_token(
+            network_id=gateway_network,
+            address=address,
+            symbol=symbol,
+            decimals=decimals,
+            name=name if name else None
+        )
+
+        success_text = (
+            f"✅ *Token Added*\n\n"
+            f"*{escape_markdown_v2(symbol)}* added to {escape_markdown_v2(gateway_network)}\n\n"
+            "⚠️ _Restart Gateway for changes to take effect\\._"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")],
+        ]
+
+        await query.message.edit_text(
+            success_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error adding token to Gateway: {e}", exc_info=True)
+
+        error_msg = str(e)
+        if "already exists" in error_msg.lower():
+            error_text = f"⚠️ *Token Already Exists*\n\n{escape_markdown_v2(symbol)} is already in Gateway\\."
+        else:
+            error_text = f"❌ Error adding token: {escape_markdown_v2(error_msg)}"
+
+        await query.message.edit_text(
+            error_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+            ])
+        )
+
+
 async def handle_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Return to the previous pool list"""
     view = context.user_data.get("gecko_view", "trending")
@@ -1945,6 +2435,10 @@ async def handle_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 __all__ = [
     'show_gecko_explore_menu',
+    'handle_gecko_toggle_view',
+    'handle_gecko_select_network',
+    'handle_gecko_set_network',
+    'handle_gecko_show_pools',
     'handle_gecko_trending',
     'show_trending_pools',
     'handle_gecko_top',
@@ -1954,10 +2448,18 @@ __all__ = [
     'handle_gecko_networks',
     'show_network_menu',
     'handle_gecko_search',
+    'handle_gecko_search_network',
+    'handle_gecko_search_set_network',
     'process_gecko_search',
+    'handle_gecko_refresh',
     'show_pool_detail',
     'show_ohlcv_chart',
+    'show_gecko_liquidity',
+    'show_gecko_combined',
     'show_recent_trades',
     'handle_copy_address',
+    'handle_gecko_token_info',
+    'handle_gecko_token_search',
+    'handle_gecko_token_add',
     'handle_back_to_list',
 ]

@@ -37,6 +37,7 @@ from ._shared import (
     build_filter_selection_keyboard,
     HISTORY_FILTERS,
 )
+from .menu import _fetch_balances
 
 logger = logging.getLogger(__name__)
 
@@ -247,122 +248,120 @@ async def handle_swap_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE
     await handle_swap(update, context)
 
 
-async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, send_new: bool = False, quote_result: dict = None) -> None:
-    """Display the unified swap menu with balances and recent swaps
-
-    Args:
-        update: The update object
-        context: The context object
-        send_new: If True, always send a new message instead of editing
-        quote_result: Optional quote result to display inline
-    """
-    params = context.user_data.get("swap_params", {})
-
-    # Get trading pair tokens for balance display
-    trading_pair = params.get('trading_pair', 'SOL-USDC')
-    network = params.get('network', 'solana-mainnet-beta')
-
-    # Parse trading pair
-    if '-' in trading_pair:
-        base_token, quote_token = trading_pair.split('-', 1)
-    else:
-        base_token, quote_token = trading_pair, 'USDC'
-
-    # Build header
-    help_text = r"💱 *Swap*" + "\n\n"
-
-    # Show wallet balances from cache
+async def _fetch_quotes_background(
+    context: ContextTypes.DEFAULT_TYPE,
+    message,
+    params: dict
+) -> None:
+    """Fetch BUY/SELL quotes and balances in background and update the message"""
     try:
-        gateway_data = get_cached(context.user_data, "gateway_balances", ttl=120)
-        if gateway_data and gateway_data.get("balances_by_network"):
-            network_key = network.split("-")[0].lower() if network else ""
-            balances_found = {}
+        connector = params.get("connector")
+        network = params.get("network")
+        trading_pair = params.get("trading_pair")
+        amount = params.get("amount")
+        slippage = params.get("slippage", "1.0")
 
-            for net_name, balances_list in gateway_data["balances_by_network"].items():
-                if network_key in net_name.lower():
-                    for bal in balances_list:
-                        token = bal.get("token", "").upper()
-                        if token == base_token.upper():
-                            balances_found["base_balance"] = bal.get("units", 0)
-                            balances_found["base_value"] = bal.get("value", 0)
-                        elif token == quote_token.upper():
-                            balances_found["quote_balance"] = bal.get("units", 0)
-                            balances_found["quote_value"] = bal.get("value", 0)
+        if not all([connector, network, trading_pair, amount]):
+            return
 
-            if balances_found.get("base_balance", 0) > 0 or balances_found.get("quote_balance", 0) > 0:
-                if balances_found.get("base_balance", 0) > 0:
-                    base_bal_str = _format_number(balances_found["base_balance"])
-                    base_val_str = f"${_format_number(balances_found.get('base_value', 0))}" if balances_found.get("base_value", 0) > 0 else ""
-                    help_text += f"💰 `{escape_markdown_v2(base_token)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
+        client = await get_client()
 
-                if balances_found.get("quote_balance", 0) > 0:
-                    quote_bal_str = _format_number(balances_found["quote_balance"])
-                    quote_val_str = f"${_format_number(balances_found.get('quote_value', 0))}" if balances_found.get("quote_value", 0) > 0 else ""
-                    help_text += f"💵 `{escape_markdown_v2(quote_token)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
+        # Fetch balances in parallel with quotes
+        async def fetch_balances_safe():
+            try:
+                balances = await _fetch_balances(client)
+                if balances:
+                    set_cached(context.user_data, "gateway_balances", balances)
+                return balances
+            except Exception as e:
+                logger.warning(f"Background balance fetch failed: {e}")
+                return None
 
-                help_text += "\n"
+        # Handle $ prefix (quote-denominated amount)
+        amount_str = str(amount)
+        is_quote_amount = amount_str.startswith("$")
+        numeric_amount = Decimal(amount_str.lstrip("$").strip())
+
+        # If quote-denominated, first get price to convert
+        if is_quote_amount:
+            try:
+                # Get a quote for 1 unit to determine price
+                price_quote = await client.gateway_swap.get_swap_quote(
+                    connector=connector,
+                    network=network,
+                    trading_pair=trading_pair,
+                    side="BUY",
+                    amount=Decimal("1"),
+                    slippage_pct=Decimal(slippage)
+                )
+                if price_quote and isinstance(price_quote, dict):
+                    # Price is quote per base (e.g., USDC per SOL)
+                    price = Decimal(str(price_quote.get("price", 1)))
+                    if price > 0:
+                        numeric_amount = numeric_amount / price
+            except Exception as e:
+                logger.warning(f"Could not get price for $ conversion: {e}")
+                # Fall back to using numeric value as-is
+
+        async def get_quote_safe(side: str):
+            try:
+                return await client.gateway_swap.get_swap_quote(
+                    connector=connector,
+                    network=network,
+                    trading_pair=trading_pair,
+                    side=side,
+                    amount=numeric_amount,
+                    slippage_pct=Decimal(slippage)
+                )
+            except Exception as e:
+                logger.warning(f"Background quote failed for {side}: {e}")
+                return None
+
+        # Fetch quotes and balances in parallel
+        buy_result, sell_result, _ = await asyncio.gather(
+            get_quote_safe("BUY"),
+            get_quote_safe("SELL"),
+            fetch_balances_safe()
+        )
+
+        if buy_result is None and sell_result is None:
+            return
+
+        quote_data = {
+            "trading_pair": trading_pair,
+            "amount": amount,
+            "buy": buy_result if isinstance(buy_result, dict) else None,
+            "sell": sell_result if isinstance(sell_result, dict) else None,
+        }
+
+        # Store quote in cache for display
+        set_cached(context.user_data, "swap_quote", quote_data)
+
+        # Rebuild and update the message with quote
+        # Only update if still in swap state
+        if context.user_data.get("dex_state") == "swap":
+            help_text = _build_swap_menu_text(context.user_data, params, quote_data)
+            keyboard = _build_swap_keyboard(params)
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            try:
+                await message.edit_text(
+                    help_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                # Message may have been deleted or changed
+                logger.debug(f"Could not update message with quote: {e}")
 
     except Exception as e:
-        logger.warning(f"Could not get cached balances: {e}")
+        logger.warning(f"Background quote fetch failed: {e}")
 
-    # Show quote result if available
-    if quote_result:
-        help_text += r"━━━ Quote ━━━" + "\n"
-        pair = quote_result.get("trading_pair", trading_pair)
-        amount_requested = quote_result.get("amount", params.get("amount", "1"))
 
-        buy_price = None
-        sell_price = None
-
-        # API returns normalized price (quote per base) for both BUY and SELL
-        # BUY: amount_in=quote paid, amount_out=base received, price=quote/base
-        # SELL: amount_in=base sold, amount_out=quote received, price=quote/base
-        buy_data = quote_result.get("buy")
-        if buy_data and buy_data.get("price"):
-            buy_price = float(buy_data["price"])
-            amount_in = buy_data.get("amount_in", "?")
-            help_text += f"`BUY {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_in, 4)} {escape_markdown_v2(quote_token)} @{_format_number(buy_price, 4)}`\n"
-
-        sell_data = quote_result.get("sell")
-        if sell_data and sell_data.get("price"):
-            sell_price = float(sell_data["price"])
-            amount_out = sell_data.get("amount_out", "?")
-            help_text += f"`SELL {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_out, 4)} {escape_markdown_v2(quote_token)} @{_format_number(sell_price, 4)}`\n"
-
-        # Show spread if we have both prices
-        if buy_price and sell_price:
-            midpoint = (buy_price + sell_price) / 2
-            spread_pct = abs(buy_price - sell_price) / midpoint * 100 if midpoint else 0
-            spread_str = f"{spread_pct:.2f}%"
-            help_text += f"📊 Spread: `{escape_markdown_v2(spread_str)}`\n"
-
-        help_text += "\n"
-
-    # Type directly hint
-    help_text += r"⌨️ `pair side amount [slippage]`" + "\n"
-    example_pair = escape_markdown_v2(params.get('trading_pair', 'SOL-USDC'))
-    example_side = params.get('side', 'BUY')
-    example_amount = escape_markdown_v2(str(params.get('amount', '1.0')))
-    help_text += f"*Ex:* `{example_pair} {example_side} {example_amount}`\n\n"
-
-    # Fetch and show recent swaps (compact format)
-    try:
-        swaps = get_cached(context.user_data, "recent_swaps", ttl=60)
-        if swaps is None:
-            client = await get_client()
-            swaps = await _fetch_recent_swaps(client, limit=5)
-            set_cached(context.user_data, "recent_swaps", swaps)
-
-        if swaps:
-            help_text += r"━━━ Recent ━━━" + "\n"
-            for swap in swaps[:5]:
-                line = _format_compact_swap_line(swap)
-                help_text += line + "\n"
-    except Exception as e:
-        logger.warning(f"Could not fetch recent swaps: {e}")
-
-    # Build keyboard - 3 column layout
-    keyboard = [
+def _build_swap_keyboard(params: dict) -> list:
+    """Build the swap menu keyboard"""
+    return [
         [
             InlineKeyboardButton(
                 f"🌐 {params.get('network', 'solana-mainnet-beta')}",
@@ -397,14 +396,146 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
         [
             InlineKeyboardButton("📋 Quote", callback_data="dex:swap_get_quote"),
             InlineKeyboardButton("🔍 History", callback_data="dex:swap_history"),
-            InlineKeyboardButton("« Back", callback_data="dex:main_menu")
+            InlineKeyboardButton("✕ Close", callback_data="dex:close")
         ]
     ]
 
+
+def _build_swap_menu_text(user_data: dict, params: dict, quote_result: dict = None) -> str:
+    """Build the swap menu text content"""
+    trading_pair = params.get('trading_pair', 'SOL-USDC')
+    network = params.get('network', 'solana-mainnet-beta')
+
+    # Parse trading pair
+    if '-' in trading_pair:
+        base_token, quote_token = trading_pair.split('-', 1)
+    else:
+        base_token, quote_token = trading_pair, 'USDC'
+
+    # Build header
+    help_text = r"💱 *Swap*" + "\n\n"
+
+    # Show wallet balances from cache
+    help_text += r"━━━ Balance ━━━" + "\n"
+    try:
+        gateway_data = get_cached(user_data, "gateway_balances", ttl=120)
+        if gateway_data and gateway_data.get("balances_by_network"):
+            network_key = network.split("-")[0].lower() if network else ""
+            balances_found = {"base_balance": 0, "base_value": 0, "quote_balance": 0, "quote_value": 0}
+
+            for net_name, balances_list in gateway_data["balances_by_network"].items():
+                if network_key in net_name.lower():
+                    for bal in balances_list:
+                        token = bal.get("token", "").upper()
+                        if token == base_token.upper():
+                            balances_found["base_balance"] = bal.get("units", 0)
+                            balances_found["base_value"] = bal.get("value", 0)
+                        elif token == quote_token.upper():
+                            balances_found["quote_balance"] = bal.get("units", 0)
+                            balances_found["quote_value"] = bal.get("value", 0)
+
+            # Always show both tokens
+            base_bal_str = _format_number(balances_found["base_balance"])
+            base_val_str = f"(${_format_number(balances_found['base_value'])})" if balances_found["base_value"] > 0 else ""
+            help_text += f"💰 `{escape_markdown_v2(base_token)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
+
+            quote_bal_str = _format_number(balances_found["quote_balance"])
+            quote_val_str = f"(${_format_number(balances_found['quote_value'])})" if balances_found["quote_value"] > 0 else ""
+            help_text += f"💵 `{escape_markdown_v2(quote_token)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
+        else:
+            help_text += "⏳ _Loading\\.\\.\\._\n"
+
+    except Exception as e:
+        logger.warning(f"Could not get cached balances: {e}")
+        help_text += "_Error loading balances_\n"
+
+    help_text += "\n"
+
+    # Show quote result if available
+    if quote_result:
+        help_text += r"━━━ Quote ━━━" + "\n"
+        amount_requested = quote_result.get("amount", params.get("amount", "1"))
+
+        buy_price = None
+        sell_price = None
+
+        buy_data = quote_result.get("buy")
+        if buy_data and buy_data.get("price"):
+            buy_price = float(buy_data["price"])
+            amount_in = buy_data.get("amount_in", "?")
+            help_text += f"`BUY {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_in, 4)} {escape_markdown_v2(quote_token)} @{_format_number(buy_price, 4)}`\n"
+
+        sell_data = quote_result.get("sell")
+        if sell_data and sell_data.get("price"):
+            sell_price = float(sell_data["price"])
+            amount_out = sell_data.get("amount_out", "?")
+            help_text += f"`SELL {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_out, 4)} {escape_markdown_v2(quote_token)} @{_format_number(sell_price, 4)}`\n"
+
+        if buy_price and sell_price:
+            midpoint = (buy_price + sell_price) / 2
+            spread_pct = abs(buy_price - sell_price) / midpoint * 100 if midpoint else 0
+            spread_str = f"{spread_pct:.2f}%"
+            help_text += f"📊 Spread: `{escape_markdown_v2(spread_str)}`\n"
+
+        help_text += "\n"
+
+    # Type directly hint
+    help_text += r"━━━ Quick Trade ━━━" + "\n"
+    help_text += r"⌨️ `pair side amount [slippage]`" + "\n"
+    example_pair = escape_markdown_v2(params.get('trading_pair', 'SOL-USDC'))
+    example_side = params.get('side', 'BUY')
+    example_amount = escape_markdown_v2(str(params.get('amount', '1.0')))
+    help_text += f"*Ex:* `{example_pair} {example_side} {example_amount}`\n\n"
+
+    # Fetch and show recent swaps (compact format)
+    try:
+        swaps = get_cached(user_data, "recent_swaps", ttl=60)
+        if swaps:
+            help_text += r"━━━ Recent ━━━" + "\n"
+            for swap in swaps[:5]:
+                line = _format_compact_swap_line(swap)
+                help_text += line + "\n"
+    except Exception as e:
+        logger.warning(f"Could not get cached swaps: {e}")
+
+    return help_text
+
+
+async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, send_new: bool = False, quote_result: dict = None, auto_quote: bool = True) -> None:
+    """Display the unified swap menu with balances and recent swaps
+
+    Args:
+        update: The update object
+        context: The context object
+        send_new: If True, always send a new message instead of editing
+        quote_result: Optional quote result to display inline
+        auto_quote: If True, fetch quote in background automatically
+    """
+    params = context.user_data.get("swap_params", {})
+
+    # Fetch recent swaps if not cached
+    swaps = get_cached(context.user_data, "recent_swaps", ttl=60)
+    if swaps is None:
+        try:
+            client = await get_client()
+            swaps = await _fetch_recent_swaps(client, limit=5)
+            set_cached(context.user_data, "recent_swaps", swaps)
+        except Exception as e:
+            logger.warning(f"Could not fetch recent swaps: {e}")
+
+    # Use cached quote if available and no explicit quote_result provided
+    if quote_result is None:
+        quote_result = get_cached(context.user_data, "swap_quote", ttl=30)
+
+    # Build text and keyboard
+    help_text = _build_swap_menu_text(context.user_data, params, quote_result)
+    keyboard = _build_swap_keyboard(params)
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Send or edit message
+    message = None
     if send_new or not update.callback_query:
-        await update.message.reply_text(
+        message = await update.message.reply_text(
             help_text,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup,
@@ -417,18 +548,31 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
+        message = update.callback_query.message
+
+    # Launch background quote fetch if no quote yet and auto_quote is enabled
+    if auto_quote and quote_result is None and message:
+        asyncio.create_task(_fetch_quotes_background(context, message, params))
 
 
 # ============================================
 # PARAMETER HANDLERS
 # ============================================
 
+def _invalidate_swap_quote(user_data: dict) -> None:
+    """Invalidate cached quote when params change"""
+    cache = user_data.get("_cache", {})
+    if "swap_quote" in cache:
+        del cache["swap_quote"]
+
+
 async def handle_swap_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Toggle between BUY and SELL"""
     params = context.user_data.get("swap_params", {})
     current_side = params.get("side", "BUY")
     params["side"] = "SELL" if current_side == "BUY" else "BUY"
-    await show_swap_menu(update, context)
+    # Don't invalidate quote for side toggle - prices are the same
+    await show_swap_menu(update, context, auto_quote=False)
 
 
 async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -501,6 +645,7 @@ async def handle_swap_connector_select(update: Update, context: ContextTypes.DEF
                     params["network"] = f"ethereum-{networks[0]}"
                 break
 
+    _invalidate_swap_quote(context.user_data)
     context.user_data["dex_state"] = "swap"
     await show_swap_menu(update, context)
 
@@ -584,6 +729,7 @@ async def handle_swap_network_select(update: Update, context: ContextTypes.DEFAU
                 params["connector"] = c.get('name')
                 break
 
+    _invalidate_swap_quote(context.user_data)
     context.user_data["dex_state"] = "swap"
     await show_swap_menu(update, context)
 
@@ -677,6 +823,41 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
 
         client = await get_client()
 
+        # Fetch balances in parallel with quotes
+        async def fetch_balances_safe():
+            try:
+                balances = await _fetch_balances(client)
+                if balances:
+                    set_cached(context.user_data, "gateway_balances", balances)
+                return balances
+            except Exception as e:
+                logger.warning(f"Balance fetch failed: {e}")
+                return None
+
+        # Handle $ prefix (quote-denominated amount)
+        amount_str = str(amount)
+        is_quote_amount = amount_str.startswith("$")
+        numeric_amount = Decimal(amount_str.lstrip("$").strip())
+
+        # If quote-denominated, first get price to convert
+        if is_quote_amount:
+            try:
+                # Get a quote for 1 unit to determine price
+                price_quote = await client.gateway_swap.get_swap_quote(
+                    connector=connector,
+                    network=network,
+                    trading_pair=trading_pair,
+                    side="BUY",
+                    amount=Decimal("1"),
+                    slippage_pct=Decimal(slippage)
+                )
+                if price_quote and isinstance(price_quote, dict):
+                    price = Decimal(str(price_quote.get("price", 1)))
+                    if price > 0:
+                        numeric_amount = numeric_amount / price
+            except Exception as e:
+                logger.warning(f"Could not get price for $ conversion: {e}")
+
         # Fetch BUY and SELL quotes in parallel
         async def get_quote_safe(side: str):
             try:
@@ -685,16 +866,18 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
                     network=network,
                     trading_pair=trading_pair,
                     side=side,
-                    amount=Decimal(amount),
+                    amount=numeric_amount,
                     slippage_pct=Decimal(slippage)
                 )
             except Exception as e:
                 logger.warning(f"Quote failed for {side}: {e}")
                 return None
 
-        buy_result, sell_result = await asyncio.gather(
+        # Fetch quotes and balances in parallel
+        buy_result, sell_result, _ = await asyncio.gather(
             get_quote_safe("BUY"),
-            get_quote_safe("SELL")
+            get_quote_safe("SELL"),
+            fetch_balances_safe()
         )
 
         if buy_result is None and sell_result is None:
@@ -708,6 +891,9 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
             "sell": sell_result if isinstance(sell_result, dict) else None,
         }
 
+        # Cache the quote
+        set_cached(context.user_data, "swap_quote", quote_data)
+
         # Save params
         set_dex_last_swap(context.user_data, {
             "connector": connector,
@@ -717,8 +903,8 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
             "slippage": slippage
         })
 
-        # Show menu with quote result inline
-        await show_swap_menu(update, context, quote_result=quote_data)
+        # Show menu with quote result inline (disable auto_quote since we already have it)
+        await show_swap_menu(update, context, quote_result=quote_data, auto_quote=False)
 
     except Exception as e:
         logger.error(f"Error getting quote: {e}", exc_info=True)
@@ -741,9 +927,13 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
         if not all([connector, network, trading_pair, side, amount]):
             raise ValueError("Missing required parameters")
 
+        # Handle $ prefix (quote-denominated amount)
+        amount_str = str(amount)
+        is_quote_amount = amount_str.startswith("$")
+        numeric_amount = Decimal(amount_str.lstrip("$").strip())
+
         # Validate amount > 0
-        amount_val = Decimal(str(amount))
-        if amount_val <= 0:
+        if numeric_amount <= 0:
             raise ValueError("Amount must be greater than 0")
 
         # Validate slippage > 0
@@ -752,18 +942,51 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
         if slippage_val <= 0:
             raise ValueError("Slippage must be greater than 0%")
 
+        # Show loading state immediately to prevent duplicate actions
+        loading_text = escape_markdown_v2(
+            f"⏳ Executing swap...\n\n"
+            f"Pair: {trading_pair}\n"
+            f"Side: {side}\n"
+            f"Amount: {amount}\n"
+            f"Slippage: {slippage}%\n\n"
+            f"Please wait..."
+        )
+        await update.callback_query.message.edit_text(
+            loading_text,
+            parse_mode="MarkdownV2"
+        )
+
         client = await get_client()
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
+
+        # If quote-denominated, convert to base amount
+        if is_quote_amount:
+            try:
+                # Get a quote for 1 unit to determine price
+                price_quote = await client.gateway_swap.get_swap_quote(
+                    connector=connector,
+                    network=network,
+                    trading_pair=trading_pair,
+                    side="BUY",
+                    amount=Decimal("1"),
+                    slippage_pct=Decimal(slippage_str)
+                )
+                if price_quote and isinstance(price_quote, dict):
+                    price = Decimal(str(price_quote.get("price", 1)))
+                    if price > 0:
+                        numeric_amount = numeric_amount / price
+            except Exception as e:
+                logger.warning(f"Could not get price for $ conversion: {e}")
 
         result = await client.gateway_swap.execute_swap(
             connector=connector,
             network=network,
             trading_pair=trading_pair,
             side=side,
-            amount=Decimal(amount),
-            slippage_pct=Decimal(slippage)
+            amount=numeric_amount,
+            slippage_pct=Decimal(slippage_str)
         )
 
         if result is None:
@@ -781,11 +1004,13 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
             "slippage": slippage
         })
 
+        # Build success message
+        display_amount = amount if is_quote_amount else f"{numeric_amount}"
         swap_info = escape_markdown_v2(
             f"✅ Swap executed!\n\n"
             f"Pair: {trading_pair}\n"
             f"Side: {side}\n"
-            f"Amount: {amount}\n"
+            f"Amount: {display_amount}\n"
             f"Slippage: {slippage}%"
         )
 
@@ -808,7 +1033,13 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
     except Exception as e:
         logger.error(f"Error executing swap: {e}", exc_info=True)
         error_message = format_error_message(f"Swap failed: {str(e)}")
-        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+        keyboard = [[InlineKeyboardButton("« Back to Swap", callback_data="dex:swap")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.message.edit_text(
+            error_message,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
 
 
 # ============================================
@@ -1215,6 +1446,7 @@ async def process_swap_set_pair(
         params = context.user_data.get("swap_params", {})
         params["trading_pair"] = user_input.strip()
 
+        _invalidate_swap_quote(context.user_data)
         context.user_data["dex_state"] = "swap"
 
         success_msg = escape_markdown_v2(f"✅ Pair: {user_input}")
@@ -1232,21 +1464,30 @@ async def process_swap_set_amount(
     context: ContextTypes.DEFAULT_TYPE,
     user_input: str
 ) -> None:
-    """Process amount input"""
+    """Process amount input. Supports $ prefix for quote-denominated amounts."""
     try:
         amount_str = user_input.strip()
 
-        # Validate
-        amount_val = Decimal(amount_str)
+        # Check for $ prefix (quote-denominated amount)
+        is_quote_amount = amount_str.startswith("$")
+        numeric_str = amount_str.lstrip("$").strip()
+
+        # Validate numeric part
+        amount_val = Decimal(numeric_str)
         if amount_val <= 0:
             raise ValueError("Amount must be > 0")
 
         params = context.user_data.get("swap_params", {})
+        # Store with $ prefix if provided (will be converted during quote/execute)
         params["amount"] = amount_str
 
+        _invalidate_swap_quote(context.user_data)
         context.user_data["dex_state"] = "swap"
 
-        success_msg = escape_markdown_v2(f"✅ Amount: {amount_str}")
+        if is_quote_amount:
+            success_msg = escape_markdown_v2(f"✅ Amount: {amount_str} (quote)")
+        else:
+            success_msg = escape_markdown_v2(f"✅ Amount: {amount_str}")
         await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
         await show_swap_menu(update, context, send_new=True)
 
