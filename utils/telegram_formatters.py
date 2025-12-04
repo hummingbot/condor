@@ -277,8 +277,11 @@ def format_portfolio_state(
 def _shorten_controller_for_table(name: str, max_len: int = 28) -> str:
     """Shorten controller name for table display
 
+    Example: gs_binance_SOL-USDT_1252
+    Result:  binance_SOL-USDT_1252
+
     Example: grid_strike_binance_perpetual_SOL-FDUSD_long_0.0001_0.0002_1
-    Result:  binance_SOL-FDUSD_L
+    Result:  binance_SOL-FDUSD_L_1
     """
     if len(name) <= max_len:
         return name
@@ -287,6 +290,7 @@ def _shorten_controller_for_table(name: str, max_len: int = 28) -> str:
     connector = ""
     pair = ""
     side = ""
+    seq_num = ""
 
     for p in parts:
         p_lower = p.lower()
@@ -297,9 +301,16 @@ def _shorten_controller_for_table(name: str, max_len: int = 28) -> str:
             pair = p.upper()  # SOL-FDUSD
         elif p_lower in ("binance", "hyperliquid", "kucoin", "okx", "bybit", "gate", "mexc"):
             connector = p_lower[:7]  # max 7 chars
+        elif p.isdigit() and len(p) <= 5:
+            # Capture sequence number (last numeric part)
+            seq_num = p
 
     if pair:
-        if connector and side:
+        if connector and side and seq_num:
+            short = f"{connector}_{pair}_{side}_{seq_num}"
+        elif connector and seq_num:
+            short = f"{connector}_{pair}_{seq_num}"
+        elif connector and side:
             short = f"{connector}_{pair}_{side}"
         elif connector:
             short = f"{connector}_{pair}"
@@ -322,7 +333,7 @@ def format_active_bots(
     server_status: Optional[str] = None
 ) -> str:
     """
-    Format active bots status for Telegram
+    Format active bots status for Telegram with clean table layout.
 
     Args:
         bots_data: Active bots data from client.bot_orchestration.get_active_bots_status()
@@ -376,7 +387,12 @@ def format_active_bots(
             total_pnl = 0
             total_volume = 0
 
-            for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())[:5]):
+            # Create table for controllers
+            message += "```\n"
+            message += f"{'Controller':<22} {'PnL':>8} {'Vol':>8}\n"
+            message += f"{'─'*22} {'─'*8} {'─'*8}\n"
+
+            for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())[:6]):
                 if isinstance(ctrl_info, dict):
                     ctrl_status = ctrl_info.get("status", "running")
                     ctrl_perf = ctrl_info.get("performance", {})
@@ -391,29 +407,31 @@ def format_active_bots(
                     # Shorten controller name intelligently
                     short_name = _shorten_controller_for_table(ctrl_name, 20)
 
-                    # Format PnL with emoji
-                    pnl_emoji = "📈" if pnl >= 0 else "📉"
-                    pnl_str = f"{pnl:+.2f}"
+                    # Status prefix
+                    status_prefix = "▶" if ctrl_status == "running" else "⏸"
+                    ctrl_display = f"{status_prefix}{short_name}"[:21]
 
-                    # Format volume
+                    # Format PnL and volume compactly
+                    pnl_str = f"{pnl:+.2f}"[:8]
                     vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
+                    vol_str = vol_str[:8]
 
-                    # Controller status indicator
-                    ctrl_emoji = "⚡" if ctrl_status == "running" else "⏸"
+                    message += f"{ctrl_display:<22} {pnl_str:>8} {vol_str:>8}\n"
 
-                    message += f"  {ctrl_emoji} *{escape_markdown_v2(short_name)}*\n"
-                    message += f"      {pnl_emoji} PnL: `{escape_markdown_v2(pnl_str)}` \\| 📊 Vol: `{escape_markdown_v2(vol_str)}`\n"
-
-            # Show totals only if multiple controllers
-            if len(performance) > 1:
-                total_pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+            # Show totals row
+            if len(performance) >= 1:
+                message += f"{'─'*22} {'─'*8} {'─'*8}\n"
+                pnl_total_str = f"{total_pnl:+.2f}"[:8]
                 vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-                message += f"\n  {total_pnl_emoji} *Total:* `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\| 📊 `{escape_markdown_v2(vol_total)}`\n"
+                vol_total = vol_total[:8]
+                message += f"{'TOTAL':<22} {pnl_total_str:>8} {vol_total:>8}\n"
+
+            message += "```\n"
 
         # Show error indicator if there are errors
         error_logs = bot_info.get("error_logs", [])
         if error_logs:
-            message += f"  ⚠️ _{len(error_logs)} error\\(s\\)_\n"
+            message += f"⚠️ _{len(error_logs)} error\\(s\\)_\n"
 
         message += "\n"
 
