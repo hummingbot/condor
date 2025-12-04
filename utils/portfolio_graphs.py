@@ -643,7 +643,7 @@ def generate_portfolio_dashboard(
     )
 
     # === LEFT COLUMN: EVOLUTION DATA ===
-    data_points = history_data.get("data", [])
+    data_points = history_data.get("data", []) if history_data else []
 
     # Initialize y_min/y_max for Y-axis range
     y_min, y_max = None, None
