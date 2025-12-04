@@ -16,7 +16,7 @@ from telegram.error import BadRequest
 from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
 from handlers.config.user_preferences import set_dex_last_pool, get_dex_last_pool
 from servers import get_client
-from ._shared import get_cached, set_cached, cached_call, DEFAULT_CACHE_TTL
+from ._shared import get_cached, set_cached, cached_call, DEFAULT_CACHE_TTL, invalidate_cache
 from .visualizations import generate_liquidity_chart, generate_ohlcv_chart, generate_combined_chart, generate_aggregated_liquidity_chart
 from .pool_data import fetch_ohlcv, fetch_liquidity_bins, get_gecko_network
 
@@ -526,7 +526,7 @@ def _build_pool_selection_keyboard(pools: list, search_term: str = None, is_pair
     # Add search again and back buttons
     keyboard.append([
         InlineKeyboardButton("🔍 New Search", callback_data="dex:pool_list"),
-        InlineKeyboardButton("« Back", callback_data="dex:explore_pools")
+        InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
     ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -613,7 +613,7 @@ async def process_pool_list(
         if not pools:
             message = escape_markdown_v2("📋 No pools found")
             context.user_data["pool_list_cache"] = []
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]]
+            keyboard = [[InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
             # Sort by APR% descending, filter out zero TVL
@@ -840,7 +840,7 @@ async def handle_plot_liquidity(
         keyboard = [
             [
                 InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-                InlineKeyboardButton("« Explore", callback_data="dex:explore_pools")
+                InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1147,11 +1147,11 @@ async def _show_pool_detail(
     if has_list_context:
         keyboard.append([
             InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-            InlineKeyboardButton("« Explore", callback_data="dex:explore_pools")
+            InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
         ])
     else:
         keyboard.append([
-            InlineKeyboardButton("« Explore Pools", callback_data="dex:explore_pools")
+            InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")
         ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2212,6 +2212,13 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
         ])
 
         if result:
+            # Invalidate position cache so next view fetches fresh data with 0 fees
+            # Also invalidate balances since collected fees go to wallet
+            invalidate_cache(context.user_data, "positions", "balances")
+            # Also clear the local position caches used for quick lookups
+            context.user_data.pop("positions_cache", None)
+            context.user_data.pop("lp_positions_cache", None)
+
             success_msg = f"✅ *Fees collected from {escape_markdown_v2(pair)}\\!*"
             if isinstance(result, dict):
                 tx_hash = result.get('tx_hash') or result.get('txHash') or result.get('signature')

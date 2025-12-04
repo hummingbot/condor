@@ -120,6 +120,7 @@ from .geckoterminal import (
     handle_gecko_search_set_network,
     process_gecko_search,
     show_pool_detail,
+    show_gecko_charts_menu,
     show_ohlcv_chart,
     show_recent_trades,
     show_gecko_liquidity,
@@ -129,6 +130,7 @@ from .geckoterminal import (
     handle_gecko_token_search,
     handle_gecko_token_add,
     handle_back_to_list,
+    handle_gecko_add_liquidity,
 )
 # Unified liquidity module
 from .liquidity import (
@@ -144,7 +146,6 @@ from .liquidity import (
     handle_lp_hist_set_filter,
     handle_lp_hist_page,
     handle_lp_hist_clear,
-    handle_explore_pools,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,7 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         slow_actions = {"main_menu", "swap", "swap_refresh", "swap_get_quote", "swap_execute_confirm", "swap_history",
                         "swap_hist_clear", "swap_hist_filter_pair", "swap_hist_filter_connector", "swap_hist_filter_status",
                         "swap_hist_page_prev", "swap_hist_page_next",
-                        "liquidity", "lp_refresh", "lp_history", "lp_collect_all", "explore_pools",
+                        "liquidity", "lp_refresh", "lp_history", "lp_collect_all",
                         "lp_hist_clear", "lp_hist_filter_pair", "lp_hist_filter_connector", "lp_hist_filter_status",
                         "lp_hist_page_prev", "lp_hist_page_next",
                         "pool_info", "pool_list", "manage_positions", "pos_add_confirm", "pos_close_exec",
@@ -341,8 +342,9 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action == "noop":
             pass  # Do nothing, just acknowledge the callback
 
+        # Legacy - redirect to main LP menu
         elif action == "explore_pools":
-            await handle_explore_pools(update, context)
+            await handle_lp_refresh(update, context)
 
         # Pool handlers
         elif action == "pool_info":
@@ -485,6 +487,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action.startswith("gecko_pool:"):
             pool_index = int(action.split(":")[1])
             await show_pool_detail(update, context, pool_index)
+        elif action == "gecko_charts":
+            await show_gecko_charts_menu(update, context)
+        elif action == "gecko_add_liquidity":
+            await handle_gecko_add_liquidity(update, context)
         elif action.startswith("gecko_token:"):
             token_type = action.split(":")[1]
             await handle_gecko_token_info(update, context, token_type)

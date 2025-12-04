@@ -676,7 +676,7 @@ def _build_pool_list_keyboard(pools: list, user_data: dict) -> InlineKeyboardMar
 
     # Back button
     keyboard.append([
-        InlineKeyboardButton("« Back", callback_data="dex:explore_pools"),
+        InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh"),
     ])
 
     return InlineKeyboardMarkup(keyboard)
@@ -791,7 +791,7 @@ async def show_trending_pools(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
-                [InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]
+                [InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]
             ])
         )
 
@@ -883,7 +883,7 @@ async def show_top_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
-                [InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]
+                [InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]
             ])
         )
 
@@ -983,7 +983,7 @@ async def show_new_pools(update: Update, context: ContextTypes.DEFAULT_TYPE, net
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Retry", callback_data="dex:gecko_refresh")],
-                [InlineKeyboardButton("« Back", callback_data="dex:explore_pools")]
+                [InlineKeyboardButton("« LP Menu", callback_data="dex:lp_refresh")]
             ])
         )
 
@@ -1360,16 +1360,20 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             gecko_url = f"https://www.geckoterminal.com/{network}/pools/{addr}"
             lines.append(f"\n🦎 [View on GeckoTerminal]({escape_markdown_v2(gecko_url)})")
 
-    # Build keyboard
-    keyboard = [
-        [
-            InlineKeyboardButton("📈 Candles 1h", callback_data="dex:gecko_ohlcv:1m"),
-            InlineKeyboardButton("📈 Candles 1d", callback_data="dex:gecko_ohlcv:1h"),
-            InlineKeyboardButton("📈 Candles 7d", callback_data="dex:gecko_ohlcv:1d"),
-        ],
-    ]
+    # Build keyboard - compressed menu like Meteora
+    dex_id = pool_data.get("dex_id", "")
+    network = pool_data.get("network", "")
+    supports_liquidity = can_fetch_liquidity(dex_id, network)
 
-    # Add token info buttons if addresses are available
+    keyboard = []
+
+    # Row 1: Charts button + Trades
+    keyboard.append([
+        InlineKeyboardButton("📈 Charts", callback_data="dex:gecko_charts"),
+        InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
+    ])
+
+    # Row 2: Token info buttons if addresses are available
     base_addr = pool_data.get("base_token_address", "")
     quote_addr = pool_data.get("quote_token_address", "")
     base_sym = pool_data.get("base_token_symbol", "Base")[:6]
@@ -1384,17 +1388,10 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         if token_row:
             keyboard.append(token_row)
 
-    keyboard.append([
-        InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
-    ])
-
-    # Add liquidity button if DEX supports it (Meteora, Raydium, Orca on Solana)
-    dex_id = pool_data.get("dex_id", "")
-    network = pool_data.get("network", "")
-    if can_fetch_liquidity(dex_id, network):
+    # Row 3: Add Liquidity button - only for supported DEXes (Meteora, Raydium, Orca on Solana)
+    if supports_liquidity:
         keyboard.append([
-            InlineKeyboardButton("📊 Liquidity", callback_data="dex:gecko_liquidity"),
-            InlineKeyboardButton("📊 Combined", callback_data="dex:gecko_combined:1h"),
+            InlineKeyboardButton("➕ Add Liquidity", callback_data="dex:gecko_add_liquidity"),
         ])
 
     keyboard.append([
@@ -1417,6 +1414,74 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard),
             disable_web_page_preview=True
+        )
+
+
+# ============================================
+# CHARTS SUB-MENU
+# ============================================
+
+async def show_gecko_charts_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show charts sub-menu with all chart options (candles, liquidity, combined)"""
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    await query.answer()
+
+    dex_id = pool_data.get("dex_id", "")
+    network = pool_data.get("network", "")
+    pool_name = pool_data.get("name", "Pool")
+    supports_liquidity = can_fetch_liquidity(dex_id, network)
+
+    # Build charts menu
+    lines = [
+        f"📈 *Charts for {escape_markdown_v2(pool_name)}*",
+        "",
+        "Select a chart type:",
+    ]
+
+    keyboard = [
+        # Candle timeframes row
+        [
+            InlineKeyboardButton("📈 1h", callback_data="dex:gecko_ohlcv:1m"),
+            InlineKeyboardButton("📈 1d", callback_data="dex:gecko_ohlcv:1h"),
+            InlineKeyboardButton("📈 7d", callback_data="dex:gecko_ohlcv:1d"),
+        ],
+    ]
+
+    # Add liquidity and combined buttons only for supported DEXes
+    if supports_liquidity:
+        keyboard.append([
+            InlineKeyboardButton("📊 Liquidity", callback_data="dex:gecko_liquidity"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📊 Combined 1h", callback_data="dex:gecko_combined:1m"),
+            InlineKeyboardButton("📊 Combined 1d", callback_data="dex:gecko_combined:1h"),
+        ])
+
+    # Back to pool detail
+    pool_index = context.user_data.get("gecko_selected_pool_index", 0)
+    keyboard.append([
+        InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{pool_index}"),
+    ])
+
+    # Handle photo messages - can't edit photo to text
+    if query.message.photo:
+        await query.message.delete()
+        await query.message.chat.send_message(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 
@@ -1502,7 +1567,7 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 "📈 *OHLCV Chart*\n\n_No data available for this timeframe_",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
                 ])
             )
             return
@@ -1525,7 +1590,7 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
                 "📈 *OHLCV Chart*\n\n_Failed to generate chart_",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
                 ])
             )
             return
@@ -1555,19 +1620,19 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 
         keyboard = [
             [
-                InlineKeyboardButton("Candles 1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_ohlcv:1m"),
-                InlineKeyboardButton("Candles 1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_ohlcv:1h"),
-                InlineKeyboardButton("Candles 7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_ohlcv:1d"),
+                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_ohlcv:1m"),
+                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_ohlcv:1h"),
+                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_ohlcv:1d"),
             ],
         ]
 
         if can_fetch_liquidity(dex_id, network):
             keyboard.append([
-                InlineKeyboardButton("📊 Combined View", callback_data=f"dex:gecko_combined:{timeframe}"),
+                InlineKeyboardButton("📊 + Liquidity", callback_data=f"dex:gecko_combined:{timeframe}"),
             ])
 
         keyboard.append([
-            InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_charts"),
         ])
 
         # Delete loading message and send photo
@@ -1585,7 +1650,7 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
             f"❌ Error loading chart: {escape_markdown_v2(str(e))}",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
             ])
         )
 
@@ -1655,7 +1720,7 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"📊 *Liquidity Distribution*\n\n_No liquidity data available_\n\n{escape_markdown_v2(error or 'No bins found')}",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
                 ])
             )
             return
@@ -1680,7 +1745,7 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
                 "📊 *Liquidity Distribution*\n\n_Failed to generate chart_",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
                 ])
             )
             return
@@ -1696,7 +1761,7 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
                 InlineKeyboardButton("📊 Combined 1d", callback_data="dex:gecko_combined:1h"),
             ],
             [
-                InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+                InlineKeyboardButton("« Back", callback_data="dex:gecko_charts"),
             ],
         ]
 
@@ -1715,7 +1780,7 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
             f"❌ Error: {escape_markdown_v2(str(e))}",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
             ])
         )
 
@@ -1792,7 +1857,7 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "📊 *Combined View*\n\n_No data available_",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
                 ])
             )
             return
@@ -1824,7 +1889,7 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "📊 *Combined View*\n\n_Failed to generate chart_",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                    [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
                 ])
             )
             return
@@ -1836,16 +1901,16 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Build keyboard
         keyboard = [
             [
-                InlineKeyboardButton("Candles 1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_combined:1m"),
-                InlineKeyboardButton("Candles 1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_combined:1h"),
-                InlineKeyboardButton("Candles 7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_combined:1d"),
+                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_combined:1m"),
+                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_combined:1h"),
+                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_combined:1d"),
             ],
             [
                 InlineKeyboardButton("📈 Candles Only", callback_data=f"dex:gecko_ohlcv:{timeframe}"),
                 InlineKeyboardButton("📊 Liquidity Only", callback_data="dex:gecko_liquidity"),
             ],
             [
-                InlineKeyboardButton("« Back to Pool", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}"),
+                InlineKeyboardButton("« Back", callback_data="dex:gecko_charts"),
             ],
         ]
 
@@ -1873,7 +1938,7 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"❌ Error: {escape_markdown_v2(str(e))}",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("« Back", callback_data=f"dex:gecko_pool:{context.user_data.get('gecko_selected_pool_index', 0)}")]
+                [InlineKeyboardButton("« Back", callback_data="dex:gecko_charts")]
             ])
         )
 
@@ -2430,6 +2495,80 @@ async def handle_back_to_list(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ============================================
+# ADD LIQUIDITY FROM GECKOTERMINAL
+# ============================================
+
+async def handle_gecko_add_liquidity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle add liquidity from GeckoTerminal pool detail - bridges to pools.py flow"""
+    from .pools import _show_pool_detail
+    from .pool_data import get_connector_for_dex
+
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    dex_id = pool_data.get("dex_id", "")
+    network = pool_data.get("network", "")
+
+    # Verify DEX supports liquidity
+    if not can_fetch_liquidity(dex_id, network):
+        await query.answer(f"Liquidity not supported for {dex_id}")
+        return
+
+    await query.answer("Loading pool for liquidity...")
+
+    # Get the connector name (e.g., "meteora", "raydium", "orca")
+    connector = get_connector_for_dex(dex_id)
+    if not connector:
+        await query.answer(f"Unknown connector for {dex_id}")
+        return
+
+    # Convert GeckoTerminal pool data to pools.py format
+    pool = {
+        "pool_address": pool_data.get("address", ""),
+        "address": pool_data.get("address", ""),
+        "connector": connector,
+        "network": "solana-mainnet-beta",  # Currently all supported DEXes are Solana
+        "trading_pair": pool_data.get("name", ""),
+        "name": pool_data.get("name", ""),
+        "mint_x": pool_data.get("base_token_address", ""),
+        "mint_y": pool_data.get("quote_token_address", ""),
+        "base_token_symbol": pool_data.get("base_token_symbol", ""),
+        "quote_token_symbol": pool_data.get("quote_token_symbol", ""),
+        # Pool metrics from GeckoTerminal
+        "liquidity": pool_data.get("reserve_usd"),
+        "volume_24h": pool_data.get("volume_24h"),
+    }
+
+    # Store for pools.py flow
+    context.user_data["selected_pool"] = pool
+    context.user_data["selected_pool_info"] = {}  # Will be fetched by _show_pool_detail
+    context.user_data["add_position_params"] = {
+        "connector": connector,
+        "network": "solana-mainnet-beta",
+        "pool_address": pool_data.get("address", ""),
+    }
+
+    # Store for back navigation
+    context.user_data["gecko_add_liquidity_source"] = True
+
+    # Delete the current message and show the pool detail with add liquidity controls
+    try:
+        if query.message.photo:
+            await query.message.delete()
+        else:
+            await query.message.delete()
+    except Exception:
+        pass
+
+    # Call pools.py flow
+    await _show_pool_detail(update, context, pool, from_callback=True)
+
+
+# ============================================
 # EXPORTS
 # ============================================
 
@@ -2453,6 +2592,7 @@ __all__ = [
     'process_gecko_search',
     'handle_gecko_refresh',
     'show_pool_detail',
+    'show_gecko_charts_menu',
     'show_ohlcv_chart',
     'show_gecko_liquidity',
     'show_gecko_combined',
@@ -2462,4 +2602,5 @@ __all__ = [
     'handle_gecko_token_search',
     'handle_gecko_token_add',
     'handle_back_to_list',
+    'handle_gecko_add_liquidity',
 ]
