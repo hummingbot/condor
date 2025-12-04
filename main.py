@@ -15,8 +15,8 @@ from telegram.ext import (
 
 from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
 from handlers.bots import bots_command, bots_callback_handler
-from handlers.clob import clob_trading_command, clob_callback_handler
-from handlers.dex import dex_trading_command, dex_callback_handler
+from handlers.cex import trade_command, cex_callback_handler
+from handlers.dex import swap_command, lp_command, dex_callback_handler
 from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
 from handlers import clear_all_input_states
 from utils.auth import restricted
@@ -37,8 +37,9 @@ def _get_start_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🤖 Bots", callback_data="start:bots"),
         ],
         [
-            InlineKeyboardButton("🏦 CLOB Trading", callback_data="start:clob_trading"),
-            InlineKeyboardButton("🔄 DEX Trading", callback_data="start:dex_trading"),
+            InlineKeyboardButton("💱 Swap", callback_data="start:swap"),
+            InlineKeyboardButton("📊 Trade", callback_data="start:trade"),
+            InlineKeyboardButton("💧 LP", callback_data="start:lp"),
         ],
         [
             InlineKeyboardButton("⚙️ Config", callback_data="start:config"),
@@ -56,8 +57,9 @@ def _get_help_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🤖 Bots", callback_data="help:bots"),
         ],
         [
-            InlineKeyboardButton("🏦 CLOB Trading", callback_data="help:clob_trading"),
-            InlineKeyboardButton("🔄 DEX Trading", callback_data="help:dex_trading"),
+            InlineKeyboardButton("💱 Swap", callback_data="help:swap"),
+            InlineKeyboardButton("📊 Trade", callback_data="help:trade"),
+            InlineKeyboardButton("💧 LP", callback_data="help:lp"),
         ],
         [
             InlineKeyboardButton("⚙️ Config", callback_data="help:config"),
@@ -77,8 +79,9 @@ Select a command below to learn more about its features and usage:
 
 📊 *Portfolio* \- View holdings and performance
 🤖 *Bots* \- Monitor trading bot status
-🏦 *CLOB Trading* \- Central limit order book trading
-🔄 *DEX Trading* \- Decentralized exchange operations
+💱 *Swap* \- Quick token swaps via DEX
+📊 *Trade* \- Order book trading \(CEX/CLOB\)
+💧 *LP* \- Liquidity pool management
 ⚙️ *Config* \- System configuration
 """,
     "portfolio": r"""
@@ -121,8 +124,8 @@ Monitor the status of all your active trading bots\.
 • Ensure your API servers are properly configured in Config
 • Bots must be running on connected Hummingbot instances
 """,
-    "clob_trading": r"""
-🏦 *CLOB Trading Command*
+    "trade": r"""
+📊 *Trade Command*
 
 Trade on Central Limit Order Book exchanges \(Spot \& Perpetual\)\.
 
@@ -134,7 +137,7 @@ Trade on Central Limit Order Book exchanges \(Spot \& Perpetual\)\.
 • Quick account switching
 
 *Usage:*
-• Tap the button or type `/clob_trading`
+• Tap the button or type `/trade`
 • Select an account and connector
 • Use the menu to place orders or view positions
 
@@ -148,33 +151,57 @@ Trade on Central Limit Order Book exchanges \(Spot \& Perpetual\)\.
 • Always verify the selected account before trading
 • Use limit orders for better price control
 """,
-    "dex_trading": r"""
-🔄 *DEX Trading Command*
+    "swap": r"""
+💱 *Swap Command*
 
-Trade on Decentralized Exchanges via Gateway\.
+Quick token swaps on Decentralized Exchanges via Gateway\.
 
 *Features:*
-• Token swaps with price quotes
-• CLMM pool management
-• Liquidity position tracking
-• Swap history lookup
+• Token swaps with real\-time quotes
+• Multiple DEX router support
+• Slippage configuration
+• Swap history with status tracking
 
 *Usage:*
-• Tap the button or type `/dex_trading`
-• Ensure Gateway is configured and running
-• Select chain and network
+• Tap the button or type `/swap`
+• Select network and token pair
+• Get quote and execute
 
 *Operations:*
 • 💰 *Quote* \- Get swap price estimates
-• ✅ *Swap* \- Execute token swaps
+• ✅ *Execute* \- Execute token swaps
 • 🔍 *History* \- View past swaps
-• 📋 *List Pools* \- Browse liquidity pools
-• 📍 *Positions* \- Manage LP positions
 
 *Tips:*
 • Always check quotes before executing swaps
 • Gateway must be running for DEX operations
-• Configure Gateway in Config menu first
+""",
+    "lp": r"""
+💧 *LP Command*
+
+Manage liquidity positions on CLMM pools\.
+
+*Features:*
+• View LP positions with PnL
+• Collect fees from positions
+• Add/close positions
+• Pool explorer with GeckoTerminal
+• OHLCV charts and pool analytics
+
+*Usage:*
+• Tap the button or type `/lp`
+• View your positions or explore pools
+• Manage fees and positions
+
+*Operations:*
+• 📍 *Positions* \- View and manage LP positions
+• 📋 *Pools* \- Browse available pools
+• 🦎 *Explorer* \- GeckoTerminal pool discovery
+• 📊 *Charts* \- View pool OHLCV data
+
+*Tips:*
+• Monitor V/TVL ratio for pool activity
+• Check APR and fee tiers before adding liquidity
 """,
     "config": r"""
 ⚙️ *Config Command*
@@ -269,10 +296,12 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await portfolio_command(update, context)
         elif action == "bots":
             await bots_command(update, context)
-        elif action == "clob_trading":
-            await clob_trading_command(update, context)
-        elif action == "dex_trading":
-            await dex_trading_command(update, context)
+        elif action == "trade":
+            await trade_command(update, context)
+        elif action == "swap":
+            await swap_command(update, context)
+        elif action == "lp":
+            await lp_command(update, context)
         elif action == "config":
             await config_command(update, context)
         elif action == "help":
@@ -325,13 +354,12 @@ def reload_handlers():
         'handlers.bots.menu',
         'handlers.bots.controllers',
         'handlers.bots._shared',
-        'handlers.clob',
-        'handlers.clob.menu',
-        'handlers.clob.place_order',
-        'handlers.clob.leverage',
-        'handlers.clob.orders',
-        'handlers.clob.positions',
-        'handlers.clob.account',
+        'handlers.cex',
+        'handlers.cex.menu',
+        'handlers.cex.trade',
+        'handlers.cex.orders',
+        'handlers.cex.positions',
+        'handlers.cex._shared',
         'handlers.dex',
         'handlers.dex.menu',
         'handlers.dex.swap_quote',
@@ -359,8 +387,8 @@ def register_handlers(application: Application) -> None:
     # Import fresh versions after reload
     from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
     from handlers.bots import bots_command, bots_callback_handler
-    from handlers.clob import clob_trading_command, clob_callback_handler
-    from handlers.dex import dex_trading_command, dex_callback_handler
+    from handlers.cex import trade_command, cex_callback_handler
+    from handlers.dex import swap_command, lp_command, dex_callback_handler
     from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
 
     # Clear existing handlers
@@ -370,15 +398,16 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("bots", bots_command))
-    application.add_handler(CommandHandler("clob_trading", clob_trading_command))
-    application.add_handler(CommandHandler("dex_trading", dex_trading_command))
+    application.add_handler(CommandHandler("swap", swap_command))
+    application.add_handler(CommandHandler("trade", trade_command))
+    application.add_handler(CommandHandler("lp", lp_command))
     application.add_handler(CommandHandler("config", config_command))
 
     # Add callback query handler for start menu navigation
     application.add_handler(CallbackQueryHandler(start_callback_handler, pattern="^(start:|help:)"))
 
     # Add callback query handlers for trading operations
-    application.add_handler(CallbackQueryHandler(clob_callback_handler, pattern="^clob:"))
+    application.add_handler(CallbackQueryHandler(cex_callback_handler, pattern="^cex:"))
     application.add_handler(CallbackQueryHandler(dex_callback_handler, pattern="^dex:"))
     application.add_handler(CallbackQueryHandler(bots_callback_handler, pattern="^bots:"))
 
@@ -403,9 +432,9 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Welcome message and quick commands overview"),
         BotCommand("portfolio", "View detailed portfolio breakdown by account and connector"),
         BotCommand("bots", "Check status of all active trading bots"),
-        BotCommand("clob_trading", "CLOB trading (Spot & Perpetual) with quick actions"),
-        BotCommand("dex_trading", "DEX trading (Swaps & CLMM) via Gateway"),
-        # BotCommand("trade", "AI-powered trading assistant"),
+        BotCommand("swap", "Quick token swaps via DEX routers"),
+        BotCommand("trade", "Order book trading (CEX/CLOB) with limit orders"),
+        BotCommand("lp", "Liquidity pool management and explorer"),
         BotCommand("config", "Configure API servers and credentials"),
     ]
     await application.bot.set_my_commands(commands)
