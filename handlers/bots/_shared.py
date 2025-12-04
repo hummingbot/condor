@@ -3,128 +3,50 @@ Shared utilities for Bots handlers
 
 Contains:
 - Server client helper
-- Grid Strike controller defaults
 - State management helpers
-- Market data helpers for auto-pricing
-- Candle chart generation
+- Market data helpers
+- Formatters
+
+Controller-specific code (defaults, fields, charts) is in handlers/bots/controllers/
 """
 
-import io
 import logging
-import random
 import time
 from typing import Dict, Any, Optional, List, Tuple
-
-import plotly.graph_objects as go
 
 logger = logging.getLogger(__name__)
 
 # Default cache TTL in seconds
 DEFAULT_CACHE_TTL = 60
 
-# Dark theme for charts (consistent with portfolio_graphs.py)
-DARK_THEME = {
-    "bgcolor": "#0a0e14",
-    "paper_bgcolor": "#0a0e14",
-    "plot_bgcolor": "#131720",
-    "font_color": "#e6edf3",
-    "font_family": "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif",
-    "grid_color": "#21262d",
-    "axis_color": "#8b949e",
-    "up_color": "#10b981",    # Green for bullish
-    "down_color": "#ef4444",  # Red for bearish
-    "line_color": "#3b82f6",  # Blue for lines
-}
-
 
 # ============================================
-# GRID STRIKE CONTROLLER DEFAULTS
+# BACKWARDS COMPATIBILITY IMPORTS
 # ============================================
+# Import from controller modules for backwards compatibility
+# New code should import directly from handlers.bots.controllers
 
-GRID_STRIKE_DEFAULTS: Dict[str, Any] = {
-    "controller_name": "grid_strike",
-    "controller_type": "generic",
-    "id": "",
-    "connector_name": "",  # Will be set via selector
-    "trading_pair": "",    # Will be set via input
-    "side": 1,             # 1 = LONG, 2 = SHORT (Note: 2 not -1 for backend compatibility)
-    "leverage": 1,
-    "position_mode": "HEDGE",
-    "total_amount_quote": 1000,
-    "min_order_amount_quote": 6,
-    "start_price": 0.0,    # Auto-calculated: current_price * 0.98 (for LONG)
-    "end_price": 0.0,      # Auto-calculated: current_price * 1.02 (for LONG)
-    "limit_price": 0.0,    # Auto-calculated: current_price * 0.97 for LONG, * 1.03 for SHORT
-    "max_open_orders": 3,
-    "max_orders_per_batch": 1,
-    "min_spread_between_orders": 0.0002,
-    "order_frequency": 3,
-    "activation_bounds": 0.01,  # Default 1%
-    "keep_position": True,
-    "triple_barrier_config": {
-        "open_order_type": 3,
-        "take_profit": 0.0001,
-        "take_profit_order_type": 3,
-    },
-}
+from .controllers import SUPPORTED_CONTROLLERS, get_controller
+from .controllers.grid_strike import (
+    DEFAULTS as GRID_STRIKE_DEFAULTS,
+    SIDE_LONG,
+    SIDE_SHORT,
+    WIZARD_STEPS as GS_WIZARD_STEPS,
+    calculate_auto_prices,
+    generate_chart as _gs_generate_chart,
+    generate_id as _gs_generate_id,
+)
 
-# Progressive wizard steps for Grid Strike
-GS_WIZARD_STEPS = [
-    "connector_name",
-    "trading_pair",
-    "side",
-    "leverage",
-    "total_amount_quote",
-    "prices",  # Special step: shows OHLC + start/end/limit
-    "take_profit",
-    "review",  # Final review with all values
-]
-
-# Side value mapping
-SIDE_LONG = 1
-SIDE_SHORT = 2  # Backend expects 2 for SHORT (not -1)
-
-# Field configurations for the form
+# Convert ControllerField objects to dicts for backwards compatibility
+from .controllers.grid_strike import FIELDS as _GS_FIELDS, FIELD_ORDER as GRID_STRIKE_FIELD_ORDER
 GRID_STRIKE_FIELDS = {
-    "id": {"label": "Config ID", "type": "str", "required": True, "hint": "Auto-generated, or custom"},
-    "connector_name": {"label": "Connector", "type": "str", "required": True, "hint": "Select from available exchanges"},
-    "trading_pair": {"label": "Trading Pair", "type": "str", "required": True, "hint": "e.g. SOL-FDUSD, BTC-USDT"},
-    "side": {"label": "Side", "type": "int", "required": True, "hint": "LONG or SHORT"},
-    "leverage": {"label": "Leverage", "type": "int", "required": True, "hint": "e.g. 1, 5, 10"},
-    "total_amount_quote": {"label": "Total Amount (Quote)", "type": "float", "required": True, "hint": "e.g. 1000 USDT"},
-    "start_price": {"label": "Start Price", "type": "float", "required": True, "hint": "Auto: -2% from current"},
-    "end_price": {"label": "End Price", "type": "float", "required": True, "hint": "Auto: +2% from current"},
-    "limit_price": {"label": "Limit Price", "type": "float", "required": True, "hint": "Auto: -3% LONG, +3% SHORT"},
-    "max_open_orders": {"label": "Max Open Orders", "type": "int", "required": False, "hint": "Default: 3"},
-    "max_orders_per_batch": {"label": "Max Orders/Batch", "type": "int", "required": False, "hint": "Default: 1"},
-    "min_order_amount_quote": {"label": "Min Order Amount", "type": "float", "required": False, "hint": "Default: 6"},
-    "min_spread_between_orders": {"label": "Min Spread", "type": "float", "required": False, "hint": "Default: 0.0002"},
-    "take_profit": {"label": "Take Profit", "type": "float", "required": False, "hint": "Default: 0.0001"},
-    "keep_position": {"label": "Keep Position", "type": "bool", "required": False, "hint": "Keep position open after grid completion"},
-    "activation_bounds": {"label": "Activation Bounds", "type": "float", "required": False, "hint": "Price distance to activate (default: 0.01 = 1%)"},
-}
-
-# Field display order for the menu
-GRID_STRIKE_FIELD_ORDER = [
-    "id", "connector_name", "trading_pair", "side", "leverage",
-    "total_amount_quote", "start_price", "end_price", "limit_price",
-    "max_open_orders", "max_orders_per_batch", "min_order_amount_quote",
-    "min_spread_between_orders", "take_profit", "keep_position", "activation_bounds"
-]
-
-
-# ============================================
-# SUPPORTED CONTROLLER TYPES
-# ============================================
-
-SUPPORTED_CONTROLLERS = {
-    "grid_strike": {
-        "name": "Grid Strike",
-        "description": "Grid trading with stop-limit orders",
-        "defaults": GRID_STRIKE_DEFAULTS,
-        "fields": GRID_STRIKE_FIELDS,
-        "field_order": GRID_STRIKE_FIELD_ORDER,
-    },
+    name: {
+        "label": field.label,
+        "type": field.type,
+        "required": field.required,
+        "hint": field.hint,
+    }
+    for name, field in _GS_FIELDS.items()
 }
 
 
@@ -213,11 +135,16 @@ def init_new_controller_config(context, controller_type: str = "grid_strike") ->
     Returns:
         New controller config with defaults
     """
-    controller_info = SUPPORTED_CONTROLLERS.get(controller_type, SUPPORTED_CONTROLLERS["grid_strike"])
-    config = controller_info["defaults"].copy()
-    # Deep copy triple_barrier_config
-    if "triple_barrier_config" in config:
-        config["triple_barrier_config"] = config["triple_barrier_config"].copy()
+    controller_cls = get_controller(controller_type)
+    if controller_cls:
+        config = controller_cls.get_defaults()
+    else:
+        # Fallback to legacy method
+        controller_info = SUPPORTED_CONTROLLERS.get(controller_type, SUPPORTED_CONTROLLERS["grid_strike"])
+        config = controller_info["defaults"].copy()
+        if "triple_barrier_config" in config:
+            config["triple_barrier_config"] = config["triple_barrier_config"].copy()
+
     context.user_data["controller_config_params"] = config
     return config
 
@@ -415,44 +342,9 @@ async def fetch_candles(
         return None
 
 
-def calculate_auto_prices(
-    current_price: float,
-    side: int,
-    start_pct: float = 0.02,  # 2%
-    end_pct: float = 0.02,    # 2%
-    limit_pct: float = 0.03   # 3%
-) -> Tuple[float, float, float]:
-    """
-    Calculate start, end, and limit prices based on current price and side.
-
-    For LONG:
-        - start_price: current_price - 2%
-        - end_price: current_price + 2%
-        - limit_price: current_price - 3%
-
-    For SHORT:
-        - start_price: current_price + 2%
-        - end_price: current_price - 2%
-        - limit_price: current_price + 3%
-
-    Returns:
-        Tuple of (start_price, end_price, limit_price)
-    """
-    if side == SIDE_LONG:
-        start_price = current_price * (1 - start_pct)
-        end_price = current_price * (1 + end_pct)
-        limit_price = current_price * (1 - limit_pct)
-    else:  # SHORT
-        start_price = current_price * (1 + start_pct)
-        end_price = current_price * (1 - end_pct)
-        limit_price = current_price * (1 + limit_pct)
-
-    return (
-        round(start_price, 6),
-        round(end_price, 6),
-        round(limit_price, 6)
-    )
-
+# ============================================
+# BACKWARDS COMPATIBILITY WRAPPERS
+# ============================================
 
 def generate_config_id(
     connector_name: str,
@@ -460,30 +352,31 @@ def generate_config_id(
     side: int = None,
     start_price: float = None,
     end_price: float = None,
-    index: int = None
+    existing_configs: List[Dict[str, Any]] = None
 ) -> str:
     """
-    Generate a unique config ID based on parameters.
+    Generate a unique config ID with sequential numbering.
 
-    Format: gs_{connector}_{pair}_{random_number}
+    Format: NNN_gs_connector_pair
+    Example: 001_gs_binance_SOL-USDT
 
-    Example: gs_binance_SOL-USDT_4821
+    Args:
+        connector_name: Exchange connector name
+        trading_pair: Trading pair (e.g., SOL-USDT)
+        side: Side (LONG/SHORT) - unused, kept for compatibility
+        start_price: Start price - unused, kept for compatibility
+        end_price: End price - unused, kept for compatibility
+        existing_configs: List of existing configs to determine sequence number
+
+    Returns:
+        Generated config ID
     """
-    # Clean connector name (remove _perpetual suffix if present)
-    conn_clean = connector_name.replace("_perpetual", "").replace("_spot", "")
+    config = {
+        "connector_name": connector_name,
+        "trading_pair": trading_pair,
+    }
+    return _gs_generate_id(config, existing_configs or [])
 
-    # Keep pair format as-is (e.g., SOL-USDT)
-    pair_clean = trading_pair.upper()
-
-    # Generate random 4-digit number
-    rand_num = random.randint(1000, 9999)
-
-    return f"gs_{conn_clean}_{pair_clean}_{rand_num}"
-
-
-# ============================================
-# CANDLE CHART GENERATION
-# ============================================
 
 def generate_candles_chart(
     candles_data: List[Dict[str, Any]],
@@ -491,164 +384,31 @@ def generate_candles_chart(
     start_price: Optional[float] = None,
     end_price: Optional[float] = None,
     limit_price: Optional[float] = None,
-    current_price: Optional[float] = None
-) -> io.BytesIO:
+    current_price: Optional[float] = None,
+    side: int = SIDE_LONG
+):
     """
-    Generate a candlestick chart with optional grid zone overlay.
+    Generate a candlestick chart with grid zone overlay.
+
+    Wrapper for backwards compatibility - converts individual parameters to config dict.
 
     Args:
-        candles_data: List of candles from API (each with open, high, low, close, timestamp)
-        trading_pair: Trading pair name for title
-        start_price: Grid start price line
-        end_price: Grid end price line
-        limit_price: Stop limit price line
-        current_price: Current market price line
+        candles_data: List of candles from API
+        trading_pair: Trading pair name
+        start_price: Grid start price
+        end_price: Grid end price
+        limit_price: Stop limit price
+        current_price: Current market price
+        side: LONG or SHORT
 
     Returns:
         BytesIO object containing the PNG image
     """
-    # Handle both list and dict input for backwards compatibility
-    data = candles_data if isinstance(candles_data, list) else candles_data.get("data", [])
-
-    if not data:
-        # Create empty chart with message
-        fig = go.Figure()
-        fig.add_annotation(
-            text="No candle data available",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5, showarrow=False,
-            font=dict(
-                family=DARK_THEME["font_family"],
-                size=16,
-                color=DARK_THEME["font_color"]
-            )
-        )
-    else:
-        # Extract OHLCV data
-        timestamps = []
-        opens = []
-        highs = []
-        lows = []
-        closes = []
-
-        for candle in data:
-            timestamps.append(candle.get("timestamp", ""))
-            opens.append(candle.get("open", 0))
-            highs.append(candle.get("high", 0))
-            lows.append(candle.get("low", 0))
-            closes.append(candle.get("close", 0))
-
-        # Create candlestick chart
-        fig = go.Figure(data=[go.Candlestick(
-            x=timestamps,
-            open=opens,
-            high=highs,
-            low=lows,
-            close=closes,
-            increasing_line_color=DARK_THEME["up_color"],
-            decreasing_line_color=DARK_THEME["down_color"],
-            increasing_fillcolor=DARK_THEME["up_color"],
-            decreasing_fillcolor=DARK_THEME["down_color"],
-            name="Price"
-        )])
-
-        # Add grid zone overlay (shaded area between start and end)
-        if start_price and end_price:
-            fig.add_hrect(
-                y0=min(start_price, end_price),
-                y1=max(start_price, end_price),
-                fillcolor="rgba(59, 130, 246, 0.15)",  # Light blue
-                line_width=0,
-                annotation_text="Grid Zone",
-                annotation_position="top left",
-                annotation_font=dict(color=DARK_THEME["font_color"], size=11)
-            )
-
-            # Start price line
-            fig.add_hline(
-                y=start_price,
-                line_dash="dash",
-                line_color="#3b82f6",
-                line_width=2,
-                annotation_text=f"Start: {start_price:,.4f}",
-                annotation_position="right",
-                annotation_font=dict(color="#3b82f6", size=10)
-            )
-
-            # End price line
-            fig.add_hline(
-                y=end_price,
-                line_dash="dash",
-                line_color="#3b82f6",
-                line_width=2,
-                annotation_text=f"End: {end_price:,.4f}",
-                annotation_position="right",
-                annotation_font=dict(color="#3b82f6", size=10)
-            )
-
-        # Limit price line (stop loss)
-        if limit_price:
-            fig.add_hline(
-                y=limit_price,
-                line_dash="dot",
-                line_color="#ef4444",
-                line_width=2,
-                annotation_text=f"Limit: {limit_price:,.4f}",
-                annotation_position="right",
-                annotation_font=dict(color="#ef4444", size=10)
-            )
-
-        # Current price line
-        if current_price:
-            fig.add_hline(
-                y=current_price,
-                line_dash="solid",
-                line_color="#f59e0b",
-                line_width=2,
-                annotation_text=f"Current: {current_price:,.4f}",
-                annotation_position="left",
-                annotation_font=dict(color="#f59e0b", size=10)
-            )
-
-    # Update layout with dark theme
-    fig.update_layout(
-        title=dict(
-            text=f"<b>{trading_pair}</b> - Grid Strike Setup",
-            font=dict(
-                family=DARK_THEME["font_family"],
-                size=18,
-                color=DARK_THEME["font_color"]
-            ),
-            x=0.5,
-            xanchor="center"
-        ),
-        paper_bgcolor=DARK_THEME["paper_bgcolor"],
-        plot_bgcolor=DARK_THEME["plot_bgcolor"],
-        font=dict(
-            family=DARK_THEME["font_family"],
-            color=DARK_THEME["font_color"]
-        ),
-        xaxis=dict(
-            gridcolor=DARK_THEME["grid_color"],
-            color=DARK_THEME["axis_color"],
-            rangeslider_visible=False,
-            showgrid=True
-        ),
-        yaxis=dict(
-            gridcolor=DARK_THEME["grid_color"],
-            color=DARK_THEME["axis_color"],
-            side="right",
-            showgrid=True
-        ),
-        showlegend=False,
-        width=900,
-        height=500,
-        margin=dict(l=10, r=120, t=50, b=30)
-    )
-
-    # Convert to PNG bytes
-    img_bytes = io.BytesIO()
-    fig.write_image(img_bytes, format='png', scale=2)
-    img_bytes.seek(0)
-
-    return img_bytes
+    config = {
+        "trading_pair": trading_pair,
+        "start_price": start_price,
+        "end_price": end_price,
+        "limit_price": limit_price,
+        "side": side,
+    }
+    return _gs_generate_chart(config, candles_data, current_price)

@@ -50,8 +50,12 @@ logger = logging.getLogger(__name__)
 # CONTROLLER CONFIGS MENU
 # ============================================
 
-async def show_controller_configs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show the controller configs management menu with numbered configs"""
+# Pagination settings for configs
+CONFIGS_PER_PAGE = 8
+
+
+async def show_controller_configs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
+    """Show the controller configs management menu with numbered configs and pagination"""
     query = update.callback_query
 
     try:
@@ -60,6 +64,15 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
 
         # Store configs for later use
         context.user_data["controller_configs_list"] = configs
+        context.user_data["configs_page"] = page
+
+        total_configs = len(configs)
+        total_pages = (total_configs + CONFIGS_PER_PAGE - 1) // CONFIGS_PER_PAGE if total_configs > 0 else 1
+
+        # Ensure page is within bounds
+        page = max(0, min(page, total_pages - 1))
+        start_idx = page * CONFIGS_PER_PAGE
+        end_idx = min(start_idx + CONFIGS_PER_PAGE, total_configs)
 
         # Build message with numbered configs
         lines = [r"*Controller Configs*", ""]
@@ -68,31 +81,44 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
             lines.append(r"_No configurations found\._")
             lines.append(r"Create a new one to get started\!")
         else:
+            # Show page indicator if multiple pages
+            if total_pages > 1:
+                lines.append(f"_Page {page + 1}/{total_pages} \\({total_configs} total\\)_")
+                lines.append("")
+
             # Show configs with index numbers - just the config name
             lines.append("```")
-            for idx, cfg in enumerate(configs[:8]):  # Max 8 configs
+            for idx, cfg in enumerate(configs[start_idx:end_idx]):
+                global_idx = start_idx + idx
                 config_id = cfg.get("id", "unnamed")
                 # Truncate if too long
                 display_name = config_id[:35] if len(config_id) > 35 else config_id
-                lines.append(f"{idx+1}.{display_name}")
-
-            if len(configs) > 8:
-                lines.append(f"...+{len(configs) - 8} more")
+                lines.append(f"{global_idx+1}.{display_name}")
             lines.append("```")
 
         # Build keyboard - numbered buttons (4 per row)
         keyboard = []
 
-        # Config edit buttons
+        # Config edit buttons for current page
         if configs:
             edit_buttons = []
-            for i in range(min(len(configs), 8)):
+            for i in range(start_idx, end_idx):
                 edit_buttons.append(
                     InlineKeyboardButton(f"✏️{i+1}", callback_data=f"bots:edit_config:{i}")
                 )
             # Add in rows of 4
             for i in range(0, len(edit_buttons), 4):
                 keyboard.append(edit_buttons[i:i+4])
+
+        # Pagination buttons
+        if total_pages > 1:
+            pagination_row = []
+            if page > 0:
+                pagination_row.append(InlineKeyboardButton("« Prev", callback_data=f"bots:configs_page:{page-1}"))
+            if page < total_pages - 1:
+                pagination_row.append(InlineKeyboardButton("Next »", callback_data=f"bots:configs_page:{page+1}"))
+            if pagination_row:
+                keyboard.append(pagination_row)
 
         keyboard.append([
             InlineKeyboardButton("+ New Grid Strike", callback_data="bots:new_grid_strike"),
@@ -124,6 +150,11 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         )
 
 
+async def handle_configs_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
+    """Handle pagination for controller configs menu"""
+    await show_controller_configs_menu(update, context, page=page)
+
+
 # ============================================
 # LIST EXISTING CONFIGS (DEPRECATED - merged into show_controller_configs_menu)
 # ============================================
@@ -140,6 +171,14 @@ async def show_configs_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def show_new_grid_strike_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the progressive Grid Strike wizard - Step 1: Connector"""
     query = update.callback_query
+
+    # Fetch existing configs for sequence numbering
+    try:
+        client = await get_bots_client()
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs for sequencing: {e}")
 
     # Initialize new config with defaults
     config = init_new_controller_config(context, "grid_strike")
@@ -424,8 +463,9 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         config["end_price"] = end
         config["limit_price"] = limit
 
-        # Generate config ID
-        config["id"] = generate_config_id(connector, pair)
+        # Generate config ID with sequence number
+        existing_configs = context.user_data.get("controller_configs_list", [])
+        config["id"] = generate_config_id(connector, pair, existing_configs=existing_configs)
 
         set_controller_config(context, config)
 
@@ -445,7 +485,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         # Format example with current values
         example_prices = f"{start:,.6g},{end:,.6g},{limit:,.6g}"
 
-        # Build the combined caption/message
+        # Build the caption
         config_text = (
             f"*{escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
             f"*Connector:* `{escape_markdown_v2(connector)}`\n"
@@ -459,17 +499,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
         )
 
-        # Edit existing message to show config (no delete/recreate flicker)
-        await query.message.edit_text(
-            text=config_text,
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        # Update wizard message ID
-        context.user_data["gs_wizard_message_id"] = query.message.message_id
-
-        # Send chart as separate photo (visual reference only)
+        # Generate chart and send as photo with caption
         if candles:
             chart_bytes = generate_candles_chart(
                 candles, pair,
@@ -479,13 +509,31 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 current_price=current_price
             )
 
-            photo_msg = await context.bot.send_photo(
+            # Delete old message and send photo with caption + buttons
+            try:
+                await query.message.delete()
+            except:
+                pass
+
+            msg = await context.bot.send_photo(
                 chat_id=query.message.chat_id,
-                photo=chart_bytes
+                photo=chart_bytes,
+                caption=config_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
-            # Store photo message ID for cleanup
-            context.user_data["gs_chart_message_id"] = photo_msg.message_id
+            # Store as wizard message (photo with buttons)
+            context.user_data["gs_wizard_message_id"] = msg.message_id
+            context.user_data["gs_wizard_chat_id"] = query.message.chat_id
+        else:
+            # No chart - just edit text message
+            await query.message.edit_text(
+                text=config_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["gs_wizard_message_id"] = query.message.message_id
 
     except Exception as e:
         logger.error(f"Error in prices step: {e}", exc_info=True)
@@ -529,25 +577,23 @@ async def handle_gs_accept_prices(update: Update, context: ContextTypes.DEFAULT_
     if validation_error:
         await query.answer("Invalid price configuration", show_alert=True)
         # Clean up the chart photo if it exists
-        chart_msg_id = context.user_data.pop("gs_chart_message_id", None)
-        if chart_msg_id:
-            try:
-                await context.bot.delete_message(
-                    chat_id=query.message.chat_id,
-                    message_id=chart_msg_id
-                )
-            except Exception:
-                pass
-        # Show error in message
+        # Show error - delete photo and send text message
         keyboard = [
             [InlineKeyboardButton("Edit Prices", callback_data="bots:gs_back_to_prices")],
             [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
         ]
-        await query.message.edit_text(
+        try:
+            await query.message.delete()
+        except:
+            pass
+        msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
             text=f"⚠️ *Price Validation Error*\n\n{validation_error}",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+        context.user_data["gs_wizard_message_id"] = msg.message_id
+        context.user_data["gs_wizard_chat_id"] = query.message.chat_id
         return
 
     context.user_data["gs_wizard_step"] = "take_profit"
@@ -564,17 +610,6 @@ async def _show_wizard_take_profit_step(update: Update, context: ContextTypes.DE
     """Wizard Step 7: Take Profit Configuration"""
     query = update.callback_query
     config = get_controller_config(context)
-
-    # Clean up the chart photo if it exists
-    chart_msg_id = context.user_data.pop("gs_chart_message_id", None)
-    if chart_msg_id:
-        try:
-            await context.bot.delete_message(
-                chat_id=query.message.chat_id,
-                message_id=chart_msg_id
-            )
-        except Exception:
-            pass  # Ignore if already deleted
 
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
@@ -597,7 +632,7 @@ async def _show_wizard_take_profit_step(update: Update, context: ContextTypes.DE
         [InlineKeyboardButton("Cancel", callback_data="bots:controller_configs")],
     ]
 
-    await query.message.edit_text(
+    message_text = (
         r"*Grid Strike \- New Config*" + "\n\n"
         f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n"
         f"*Pair:* `{escape_markdown_v2(pair)}`" + "\n"
@@ -605,10 +640,24 @@ async def _show_wizard_take_profit_step(update: Update, context: ContextTypes.DE
         f"*Amount:* `{config.get('total_amount_quote', 0):,.0f}`" + "\n"
         f"*Grid:* `{config.get('start_price', 0):,.6g}` \\- `{config.get('end_price', 0):,.6g}`" + "\n\n"
         r"*Step 7/7:* Take Profit" + "\n\n"
-        r"Select or type take profit % \(e\.g\. `0\.4` for 0\.4%\):",
+        r"Select or type take profit % \(e\.g\. `0\.4` for 0\.4%\):"
+    )
+
+    # Delete photo message and send text message
+    try:
+        await query.message.delete()
+    except:
+        pass
+
+    msg = await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text=message_text,
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+    context.user_data["gs_wizard_message_id"] = msg.message_id
+    context.user_data["gs_wizard_chat_id"] = query.message.chat_id
 
 
 async def handle_gs_wizard_take_profit(update: Update, context: ContextTypes.DEFAULT_TYPE, tp: float) -> None:
@@ -662,33 +711,33 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
     context.user_data["bots_state"] = "gs_wizard_input"
     context.user_data["gs_wizard_step"] = "review"
 
-    # Build copyable config block
+    # Build copyable config block with real YAML field names
+    side_value = config.get("side", SIDE_LONG)
     config_block = (
-        f"id={config_id}\n"
-        f"connector={connector}\n"
-        f"pair={pair}\n"
-        f"side={side}\n"
-        f"leverage={leverage}\n"
-        f"amount={amount:.0f}\n"
-        f"start={start_price:.6g}\n"
-        f"end={end_price:.6g}\n"
-        f"limit={limit_price:.6g}\n"
-        f"tp={tp}\n"
-        f"keep={keep_position}\n"
-        f"activation={activation_bounds}\n"
-        f"max_orders={max_open_orders}\n"
-        f"batch={max_orders_per_batch}\n"
-        f"min_amount={min_order_amount}\n"
-        f"spread={min_spread}"
+        f"id: {config_id}\n"
+        f"connector_name: {connector}\n"
+        f"trading_pair: {pair}\n"
+        f"side: {side_value}\n"
+        f"leverage: {leverage}\n"
+        f"total_amount_quote: {amount:.0f}\n"
+        f"start_price: {start_price:.6g}\n"
+        f"end_price: {end_price:.6g}\n"
+        f"limit_price: {limit_price:.6g}\n"
+        f"take_profit: {tp}\n"
+        f"keep_position: {str(keep_position).lower()}\n"
+        f"activation_bounds: {activation_bounds}\n"
+        f"max_open_orders: {max_open_orders}\n"
+        f"max_orders_per_batch: {max_orders_per_batch}\n"
+        f"min_order_amount_quote: {min_order_amount}\n"
+        f"min_spread_between_orders: {min_spread}"
     )
 
     message_text = (
         f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
         f"```\n{config_block}\n```\n\n"
-        f"_To edit, send one or more lines:_\n"
-        f"`leverage=75`\n"
-        f"`amount=1000`\n"
-        f"`tp=0.001`"
+        f"_To edit, send `field: value` lines:_\n"
+        f"`leverage: 75`\n"
+        f"`total_amount_quote: 1000`"
     )
 
     keyboard = [
@@ -734,33 +783,33 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
     min_order_amount = config.get("min_order_amount_quote", 6)
     min_spread = config.get("min_spread_between_orders", 0.0002)
 
-    # Build copyable config block
+    # Build copyable config block with real YAML field names
+    side_value = config.get("side", SIDE_LONG)
     config_block = (
-        f"id={config_id}\n"
-        f"connector={connector}\n"
-        f"pair={pair}\n"
-        f"side={side}\n"
-        f"leverage={leverage}\n"
-        f"amount={amount:.0f}\n"
-        f"start={start_price:.6g}\n"
-        f"end={end_price:.6g}\n"
-        f"limit={limit_price:.6g}\n"
-        f"tp={tp}\n"
-        f"keep={keep_position}\n"
-        f"activation={activation_bounds}\n"
-        f"max_orders={max_open_orders}\n"
-        f"batch={max_orders_per_batch}\n"
-        f"min_amount={min_order_amount}\n"
-        f"spread={min_spread}"
+        f"id: {config_id}\n"
+        f"connector_name: {connector}\n"
+        f"trading_pair: {pair}\n"
+        f"side: {side_value}\n"
+        f"leverage: {leverage}\n"
+        f"total_amount_quote: {amount:.0f}\n"
+        f"start_price: {start_price:.6g}\n"
+        f"end_price: {end_price:.6g}\n"
+        f"limit_price: {limit_price:.6g}\n"
+        f"take_profit: {tp}\n"
+        f"keep_position: {str(keep_position).lower()}\n"
+        f"activation_bounds: {activation_bounds}\n"
+        f"max_open_orders: {max_open_orders}\n"
+        f"max_orders_per_batch: {max_orders_per_batch}\n"
+        f"min_order_amount_quote: {min_order_amount}\n"
+        f"min_spread_between_orders: {min_spread}"
     )
 
     message_text = (
         f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
         f"```\n{config_block}\n```\n\n"
-        f"_To edit, send one or more lines:_\n"
-        f"`leverage=75`\n"
-        f"`amount=1000`\n"
-        f"`tp=0.001`"
+        f"_To edit, send `field: value` lines:_\n"
+        f"`leverage: 75`\n"
+        f"`total_amount_quote: 1000`"
     )
 
     keyboard = [
@@ -1256,33 +1305,38 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             await _update_wizard_message_for_review(update, context)
 
         elif step == "review":
-            # Parse key=value pairs (one or more lines)
+            # Parse field: value or field=value pairs (YAML-style)
             field_map = {
+                # Real YAML field names
                 "id": "id",
-                "connector": "connector_name",
-                "pair": "trading_pair",
+                "connector_name": "connector_name",
+                "trading_pair": "trading_pair",
                 "side": "side",
                 "leverage": "leverage",
-                "amount": "total_amount_quote",
-                "start": "start_price",
-                "end": "end_price",
-                "limit": "limit_price",
-                "tp": "triple_barrier_config.take_profit",
-                "keep": "keep_position",
-                "activation": "activation_bounds",
-                "max_orders": "max_open_orders",
-                "batch": "max_orders_per_batch",
-                "min_amount": "min_order_amount_quote",
-                "spread": "min_spread_between_orders",
+                "total_amount_quote": "total_amount_quote",
+                "start_price": "start_price",
+                "end_price": "end_price",
+                "limit_price": "limit_price",
+                "take_profit": "triple_barrier_config.take_profit",
+                "keep_position": "keep_position",
+                "activation_bounds": "activation_bounds",
+                "max_open_orders": "max_open_orders",
+                "max_orders_per_batch": "max_orders_per_batch",
+                "min_order_amount_quote": "min_order_amount_quote",
+                "min_spread_between_orders": "min_spread_between_orders",
             }
 
             updated_fields = []
             lines = user_input.strip().split("\n")
             for line in lines:
                 line = line.strip()
-                if "=" not in line:
+                # Support both YAML style (field: value) and equals style (field=value)
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                elif "=" in line:
+                    key, value = line.split("=", 1)
+                else:
                     continue
-                key, value = line.split("=", 1)
                 key = key.strip().lower()
                 value = value.strip()
 
@@ -1293,10 +1347,14 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
 
                 # Handle special cases
                 if key == "side":
-                    config["side"] = SIDE_LONG if value.upper() == "LONG" else SIDE_SHORT
-                elif key == "keep":
+                    # Accept both numeric (1, 2) and text (LONG, SHORT)
+                    if value in ("1", "LONG", "long"):
+                        config["side"] = SIDE_LONG
+                    else:
+                        config["side"] = SIDE_SHORT
+                elif key == "keep_position":
                     config["keep_position"] = value.lower() in ("true", "yes", "y", "1")
-                elif key == "tp":
+                elif key == "take_profit":
                     if "triple_barrier_config" not in config:
                         config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
                     config["triple_barrier_config"]["take_profit"] = float(value)
@@ -1755,8 +1813,9 @@ async def fetch_and_apply_market_data(update: Update, context: ContextTypes.DEFA
             config["end_price"] = end
             config["limit_price"] = limit
 
-            # Generate auto ID
-            config["id"] = generate_config_id(connector, pair, side, start, end)
+            # Generate auto ID with sequence number
+            existing_configs = context.user_data.get("controller_configs_list", [])
+            config["id"] = generate_config_id(connector, pair, existing_configs=existing_configs)
 
             set_controller_config(context, config)
 
@@ -1836,14 +1895,13 @@ async def handle_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
         config["end_price"] = end
         config["limit_price"] = limit
 
-        # Regenerate ID
+        # Regenerate ID with sequence number
         if config.get("connector_name") and config.get("trading_pair"):
+            existing_configs = context.user_data.get("controller_configs_list", [])
             config["id"] = generate_config_id(
                 config["connector_name"],
                 config["trading_pair"],
-                new_side,
-                start,
-                end
+                existing_configs=existing_configs
             )
 
     set_controller_config(context, config)
@@ -1927,7 +1985,8 @@ async def process_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                     config["start_price"] = start
                     config["end_price"] = end
                     config["limit_price"] = limit
-                    config["id"] = generate_config_id(connector, pair, side, start, end)
+                    existing_configs = context.user_data.get("controller_configs_list", [])
+                    config["id"] = generate_config_id(connector, pair, existing_configs=existing_configs)
                     set_controller_config(context, config)
 
                     # Fetch candles
@@ -2230,34 +2289,9 @@ async def handle_clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def show_deploy_configure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start the progressive deployment configuration flow"""
-    query = update.callback_query
-
-    selected = context.user_data.get("selected_controllers", set())
-    configs = context.user_data.get("controller_configs_list", [])
-
-    if not selected:
-        await query.answer("No controllers selected", show_alert=True)
-        return
-
-    # Get selected config names
-    controller_names = [
-        configs[i].get("id", configs[i].get("config_name", f"config_{i}"))
-        for i in selected if i < len(configs)
-    ]
-
-    # Initialize deploy params with defaults
-    deploy_params = DEPLOY_DEFAULTS.copy()
-    deploy_params["controllers_config"] = controller_names
-    context.user_data["deploy_params"] = deploy_params
-
-    # Start progressive flow - instance_name first
-    context.user_data["deploy_current_field"] = DEPLOY_FIELD_ORDER[0]
-    context.user_data["bots_state"] = "deploy_progressive"
-    context.user_data["deploy_message_id"] = query.message.message_id
-    context.user_data["deploy_chat_id"] = query.message.chat_id
-
-    await show_deploy_progressive_form(update, context)
+    """Start the streamlined deployment configuration flow"""
+    # Use the new streamlined deploy flow
+    await show_deploy_config_step(update, context)
 
 
 async def show_deploy_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2771,6 +2805,379 @@ async def handle_execute_deploy(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.edit_text(
             f"*Deployment Failed*\n\n"
             f"Error: {escape_markdown_v2(str(e)[:200])}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+# ============================================
+# STREAMLINED DEPLOY FLOW
+# ============================================
+
+# Available docker images
+AVAILABLE_IMAGES = [
+    "hummingbot/hummingbot:latest",
+    "hummingbot/hummingbot:development",
+]
+
+
+async def _get_available_credentials(client) -> List[str]:
+    """Fetch list of available credential profiles from the backend"""
+    try:
+        accounts = await client.accounts.list_accounts()
+        return accounts if accounts else ["master_account"]
+    except Exception as e:
+        logger.warning(f"Could not fetch accounts, using default: {e}")
+        return ["master_account"]
+
+
+async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show streamlined deploy configuration with clickable buttons for credentials and image"""
+    query = update.callback_query
+
+    selected = context.user_data.get("selected_controllers", set())
+    configs = context.user_data.get("controller_configs_list", [])
+
+    if not selected:
+        await query.answer("No controllers selected", show_alert=True)
+        return
+
+    # Get selected config names
+    controller_names = [
+        configs[i].get("id", configs[i].get("config_name", f"config_{i}"))
+        for i in selected if i < len(configs)
+    ]
+
+    # Initialize or get deploy params
+    deploy_params = context.user_data.get("deploy_params", {})
+    if not deploy_params.get("controllers_config"):
+        deploy_params = {
+            "controllers_config": controller_names,
+            "credentials_profile": "master_account",
+            "image": "hummingbot/hummingbot:latest",
+        }
+    context.user_data["deploy_params"] = deploy_params
+    context.user_data["deploy_message_id"] = query.message.message_id
+    context.user_data["deploy_chat_id"] = query.message.chat_id
+
+    # Build message
+    creds = deploy_params.get("credentials_profile", "master_account")
+    image = deploy_params.get("image", "hummingbot/hummingbot:latest")
+
+    # Build controllers list in code block for readability
+    controllers_block = "\n".join(controller_names)
+
+    lines = [
+        r"*🚀 Deploy Controllers*",
+        "",
+        "```",
+        controllers_block,
+        "```",
+        "",
+        f"*Account:*  `{escape_markdown_v2(creds)}`",
+        f"*Image:*    `{escape_markdown_v2(image)}`",
+        "",
+        r"_Tap buttons below to change settings_",
+    ]
+
+    # Build keyboard - one button per row for better readability
+    keyboard = [
+        [InlineKeyboardButton(f"👤 Account: {creds}", callback_data="bots:select_creds:_show")],
+        [InlineKeyboardButton(f"🐳 Image: {image}", callback_data="bots:select_image:_show")],
+        [InlineKeyboardButton("✅ Deploy Now", callback_data="bots:deploy_confirm")],
+        [InlineKeyboardButton("« Back", callback_data="bots:deploy_menu")],
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_select_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE, creds: str) -> None:
+    """Handle credentials profile selection"""
+    query = update.callback_query
+
+    if creds == "_show":
+        # Show available credentials profiles
+        try:
+            client = await get_bots_client()
+            available_creds = await _get_available_credentials(client)
+        except Exception:
+            available_creds = ["master_account"]
+
+        deploy_params = context.user_data.get("deploy_params", {})
+        current = deploy_params.get("credentials_profile", "master_account")
+
+        lines = [
+            r"*Select Credentials Profile*",
+            "",
+            f"Current: `{escape_markdown_v2(current)}`",
+            "",
+            r"_Choose an account to deploy with:_",
+        ]
+
+        # Build buttons for each credential profile
+        keyboard = []
+        for acc in available_creds:
+            marker = "✓ " if acc == current else ""
+            keyboard.append([
+                InlineKeyboardButton(f"{marker}{acc}", callback_data=f"bots:select_creds:{acc}")
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("« Back", callback_data="bots:deploy_config"),
+        ])
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        # Set the selected credential profile
+        deploy_params = context.user_data.get("deploy_params", {})
+        deploy_params["credentials_profile"] = creds
+        context.user_data["deploy_params"] = deploy_params
+
+        await query.answer(f"Account set to {creds}")
+        await show_deploy_config_step(update, context)
+
+
+async def handle_select_image(update: Update, context: ContextTypes.DEFAULT_TYPE, image: str) -> None:
+    """Handle docker image selection"""
+    query = update.callback_query
+
+    if image == "_show":
+        # Show available images
+        deploy_params = context.user_data.get("deploy_params", {})
+        current = deploy_params.get("image", "hummingbot/hummingbot:latest")
+
+        lines = [
+            r"*Select Docker Image*",
+            "",
+            f"Current: `{escape_markdown_v2(current)}`",
+            "",
+            r"_Choose an image to deploy with:_",
+        ]
+
+        # Build buttons for each image
+        keyboard = []
+        for img in AVAILABLE_IMAGES:
+            marker = "✓ " if img == current else ""
+            img_short = img.split("/")[-1] if "/" in img else img
+            keyboard.append([
+                InlineKeyboardButton(f"{marker}{img_short}", callback_data=f"bots:select_image:{img}")
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("« Back", callback_data="bots:deploy_config"),
+        ])
+
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        # Set the selected image
+        deploy_params = context.user_data.get("deploy_params", {})
+        deploy_params["image"] = image
+        context.user_data["deploy_params"] = deploy_params
+
+        img_short = image.split("/")[-1] if "/" in image else image
+        await query.answer(f"Image set to {img_short}")
+        await show_deploy_config_step(update, context)
+
+
+async def handle_deploy_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show deployment confirmation with auto-generated instance name"""
+    query = update.callback_query
+
+    deploy_params = context.user_data.get("deploy_params", {})
+    controllers = deploy_params.get("controllers_config", [])
+    creds = deploy_params.get("credentials_profile", "master_account")
+    image = deploy_params.get("image", "hummingbot/hummingbot:latest")
+
+    if not controllers:
+        await query.answer("No controllers selected", show_alert=True)
+        return
+
+    # Generate instance name: {credentials_profile}_{timestamp}
+    import time
+    timestamp = int(time.time())
+    generated_name = f"{creds}_{timestamp}"
+
+    # Store for later use
+    context.user_data["deploy_generated_name"] = generated_name
+
+    controllers_str = "\n".join([f"• `{escape_markdown_v2(c)}`" for c in controllers])
+    image_short = image.split("/")[-1] if "/" in image else image
+
+    lines = [
+        r"*Confirm Deployment*",
+        "",
+        r"*Controllers:*",
+        controllers_str,
+        "",
+        f"*Account:* `{escape_markdown_v2(creds)}`",
+        f"*Image:* `{escape_markdown_v2(image_short)}`",
+        "",
+        r"*Instance Name:*",
+        f"`{escape_markdown_v2(generated_name)}`",
+        "",
+        r"_Click the name to deploy, or send a custom name_",
+    ]
+
+    keyboard = [
+        [
+            InlineKeyboardButton(f"✅ Deploy as {generated_name[:25]}", callback_data="bots:execute_deploy"),
+        ],
+        [
+            InlineKeyboardButton("« Back", callback_data="bots:deploy_config"),
+        ],
+    ]
+
+    # Set state to allow custom name input
+    context.user_data["bots_state"] = "deploy_custom_name"
+
+    # Store the generated name in deploy_params
+    deploy_params["instance_name"] = generated_name
+    # Set drawdowns to None (skip them)
+    deploy_params["max_global_drawdown_quote"] = None
+    deploy_params["max_controller_drawdown_quote"] = None
+    context.user_data["deploy_params"] = deploy_params
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_deploy_custom_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle custom instance name input (called from message handler)"""
+    # This is triggered via message handler when in deploy_custom_name state
+    pass  # The actual processing happens in process_deploy_custom_name_input
+
+
+async def process_deploy_custom_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
+    """Process custom instance name input and execute deployment"""
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    custom_name = user_input.strip()
+    if not custom_name:
+        return
+
+    deploy_params = context.user_data.get("deploy_params", {})
+    deploy_params["instance_name"] = custom_name
+    context.user_data["deploy_params"] = deploy_params
+
+    # Execute deployment with custom name
+    message_id = context.user_data.get("deploy_message_id")
+    chat_id = context.user_data.get("deploy_chat_id")
+
+    if not message_id or not chat_id:
+        return
+
+    controllers = deploy_params.get("controllers_config", [])
+    creds = deploy_params.get("credentials_profile", "master_account")
+    image = deploy_params.get("image", "hummingbot/hummingbot:latest")
+
+    controllers_str = ", ".join([f"`{escape_markdown_v2(c)}`" for c in controllers])
+
+    # Update message to show deploying
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                f"*Deploying\\.\\.\\.*\n\n"
+                f"*Instance:* `{escape_markdown_v2(custom_name)}`\n"
+                f"*Controllers:* {controllers_str}\n\n"
+                f"Please wait, this may take a moment\\.\\.\\."
+            ),
+            parse_mode="MarkdownV2"
+        )
+    except Exception as e:
+        logger.error(f"Error updating deploy message: {e}")
+
+    try:
+        client = await get_bots_client()
+
+        result = await client.bot_orchestration.deploy_v2_controllers(
+            instance_name=custom_name,
+            credentials_profile=creds,
+            controllers_config=controllers,
+            max_global_drawdown_quote=None,
+            max_controller_drawdown_quote=None,
+            image=image,
+        )
+
+        # Clear deploy state
+        context.user_data.pop("selected_controllers", None)
+        context.user_data.pop("deploy_params", None)
+        context.user_data.pop("bots_state", None)
+        context.user_data.pop("deploy_generated_name", None)
+
+        keyboard = [
+            [InlineKeyboardButton("View Bots", callback_data="bots:main_menu")],
+            [InlineKeyboardButton("Deploy More", callback_data="bots:deploy_menu")],
+        ]
+
+        status = result.get("status", "unknown")
+        message = result.get("message", "")
+        is_success = (
+            status == "success" or
+            "successfully" in message.lower() or
+            "created" in message.lower()
+        )
+
+        if is_success:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=(
+                    f"*Deployment Started\\!*\n\n"
+                    f"*Instance:* `{escape_markdown_v2(custom_name)}`\n"
+                    f"*Controllers:* {controllers_str}\n\n"
+                    f"The bot is being deployed\\. Check status in Bots menu\\."
+                ),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            error_msg = message or "Unknown error"
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=(
+                    f"*Deployment Failed*\n\n"
+                    f"Error: {escape_markdown_v2(error_msg)}"
+                ),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+    except Exception as e:
+        logger.error(f"Error deploying with custom name: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:deploy_confirm")],
+            [InlineKeyboardButton("Back", callback_data="bots:deploy_config")],
+        ]
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
+                f"*Deployment Failed*\n\n"
+                f"Error: {escape_markdown_v2(str(e)[:200])}"
+            ),
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )

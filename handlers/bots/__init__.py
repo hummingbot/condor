@@ -37,6 +37,7 @@ from .menu import (
 from .controllers import (
     show_controller_configs_menu,
     show_configs_list,
+    handle_configs_page,
     show_new_grid_strike_form,
     show_config_form,
     handle_set_field,
@@ -61,6 +62,13 @@ from .controllers import (
     handle_deploy_skip_field,
     handle_deploy_prev_field,
     handle_deploy_edit_field,
+    # Streamlined deploy flow
+    show_deploy_config_step,
+    handle_select_credentials,
+    handle_select_image,
+    handle_deploy_confirm,
+    handle_deploy_custom_name,
+    process_deploy_custom_name_input,
     # Progressive Grid Strike wizard
     handle_gs_wizard_connector,
     handle_gs_wizard_side,
@@ -165,6 +173,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "controller_configs":
             await show_controller_configs_menu(update, context)
 
+        elif main_action == "configs_page":
+            if len(action_parts) > 1:
+                page = int(action_parts[1])
+                await handle_configs_page(update, context, page)
+
         elif main_action == "list_configs":
             await show_configs_list(update, context)
 
@@ -240,6 +253,26 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if len(action_parts) > 1:
                 field_name = action_parts[1]
                 await handle_deploy_edit_field(update, context, field_name)
+
+        # Streamlined deploy flow
+        elif main_action == "deploy_config":
+            await show_deploy_config_step(update, context)
+
+        elif main_action == "select_creds":
+            if len(action_parts) > 1:
+                creds = action_parts[1]
+                await handle_select_credentials(update, context, creds)
+
+        elif main_action == "select_image":
+            if len(action_parts) > 1:
+                image = action_parts[1]
+                await handle_select_image(update, context, image)
+
+        elif main_action == "deploy_confirm":
+            await handle_deploy_confirm(update, context)
+
+        elif main_action == "deploy_custom_name":
+            await handle_deploy_custom_name(update, context)
 
         # Progressive Grid Strike wizard
         elif main_action == "gs_connector":
@@ -389,6 +422,9 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle progressive deploy flow input
         elif bots_state == "deploy_progressive":
             await handle_deploy_progressive_input(update, context)
+        # Handle custom instance name input for streamlined deploy
+        elif bots_state == "deploy_custom_name":
+            await process_deploy_custom_name_input(update, context, user_input)
         # Handle Grid Strike wizard input
         elif bots_state == "gs_wizard_input":
             await process_gs_wizard_input(update, context, user_input)
