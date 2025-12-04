@@ -34,7 +34,7 @@ from .menu import (
     handle_back_to_bot,
     handle_refresh_bot,
 )
-from .controllers import (
+from .controller_handlers import (
     show_controller_configs_menu,
     show_configs_list,
     handle_configs_page,
