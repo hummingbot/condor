@@ -377,7 +377,7 @@ def format_active_bots(
         status_emoji = "🟢" if is_running else "🔴"
 
         # Truncate long bot names for display
-        display_name = bot_name[:40] + "..." if len(bot_name) > 40 else bot_name
+        display_name = bot_name[:45] + "..." if len(bot_name) > 45 else bot_name
         message += f"{status_emoji} `{escape_markdown_v2(display_name)}`\n"
 
         # Performance is a dict of controller_name -> controller_info
@@ -389,8 +389,8 @@ def format_active_bots(
 
             # Create table for controllers
             message += "```\n"
-            message += f"{'Controller':<22} {'PnL':>8} {'Vol':>8}\n"
-            message += f"{'─'*22} {'─'*8} {'─'*8}\n"
+            message += f"{'Controller':<28} {'PnL':>8} {'Vol':>7}\n"
+            message += f"{'─'*28} {'─'*8} {'─'*7}\n"
 
             for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())[:6]):
                 if isinstance(ctrl_info, dict):
@@ -404,27 +404,24 @@ def format_active_bots(
                     total_pnl += pnl
                     total_volume += volume
 
-                    # Shorten controller name intelligently
-                    short_name = _shorten_controller_for_table(ctrl_name, 20)
-
-                    # Status prefix
+                    # Status prefix + full controller name
                     status_prefix = "▶" if ctrl_status == "running" else "⏸"
-                    ctrl_display = f"{status_prefix}{short_name}"[:21]
+                    ctrl_display = f"{status_prefix}{ctrl_name}"[:27]
 
                     # Format PnL and volume compactly
                     pnl_str = f"{pnl:+.2f}"[:8]
                     vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
-                    vol_str = vol_str[:8]
+                    vol_str = vol_str[:7]
 
-                    message += f"{ctrl_display:<22} {pnl_str:>8} {vol_str:>8}\n"
+                    message += f"{ctrl_display:<28} {pnl_str:>8} {vol_str:>7}\n"
 
             # Show totals row
             if len(performance) >= 1:
-                message += f"{'─'*22} {'─'*8} {'─'*8}\n"
+                message += f"{'─'*28} {'─'*8} {'─'*7}\n"
                 pnl_total_str = f"{total_pnl:+.2f}"[:8]
                 vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-                vol_total = vol_total[:8]
-                message += f"{'TOTAL':<22} {pnl_total_str:>8} {vol_total:>8}\n"
+                vol_total = vol_total[:7]
+                message += f"{'TOTAL':<28} {pnl_total_str:>8} {vol_total:>7}\n"
 
             message += "```\n"
 
@@ -687,6 +684,8 @@ KNOWN_TOKENS = {
     "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof": "RNDR",
     # Mining/DeFi
     "oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp": "ORE",
+    # Meteora
+    "METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL": "MET",
     # Add more as needed
 }
 
