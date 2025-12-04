@@ -33,6 +33,12 @@ from .menu import (
     show_bot_logs,
     handle_back_to_bot,
     handle_refresh_bot,
+    # Controller chart & edit
+    show_controller_chart,
+    show_controller_edit,
+    handle_controller_set_field,
+    handle_controller_confirm_set,
+    process_controller_field_input,
 )
 from .controller_handlers import (
     show_controller_configs_menu,
@@ -353,6 +359,24 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 idx = int(action_parts[1])
                 await show_controller_detail(update, context, idx)
 
+        # Controller chart & edit
+        elif main_action == "ctrl_chart":
+            await show_controller_chart(update, context)
+
+        elif main_action == "ctrl_edit":
+            await show_controller_edit(update, context)
+
+        elif main_action == "ctrl_set":
+            if len(action_parts) > 1:
+                field_name = action_parts[1]
+                await handle_controller_set_field(update, context, field_name)
+
+        elif main_action == "ctrl_confirm_set":
+            if len(action_parts) > 2:
+                field_name = action_parts[1]
+                value = action_parts[2]
+                await handle_controller_confirm_set(update, context, field_name, value)
+
         # Stop controller (uses context)
         elif main_action == "stop_ctrl":
             await handle_stop_controller(update, context)
@@ -416,6 +440,9 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle controller config field input
         if bots_state.startswith("set_field:"):
             await process_field_input(update, context, user_input)
+        # Handle live controller field input
+        elif bots_state.startswith("ctrl_set:"):
+            await process_controller_field_input(update, context, user_input)
         # Handle deploy field input (legacy form)
         elif bots_state.startswith("deploy_set:"):
             await process_deploy_field_input(update, context, user_input)

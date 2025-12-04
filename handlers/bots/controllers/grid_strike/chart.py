@@ -10,6 +10,7 @@ Generates candlestick charts with grid zone visualization:
 """
 
 import io
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import plotly.graph_objects as go
@@ -87,7 +88,29 @@ def generate_chart(
         closes = []
 
         for candle in data:
-            timestamps.append(candle.get("timestamp", ""))
+            raw_ts = candle.get("timestamp", "")
+            # Parse and format timestamp to show day (e.g., "Dec 1 12:00")
+            try:
+                if isinstance(raw_ts, (int, float)):
+                    # Unix timestamp (seconds or milliseconds)
+                    if raw_ts > 1e12:  # milliseconds
+                        dt = datetime.fromtimestamp(raw_ts / 1000)
+                    else:
+                        dt = datetime.fromtimestamp(raw_ts)
+                    formatted_ts = dt.strftime("%b %d %H:%M")
+                elif isinstance(raw_ts, str) and raw_ts:
+                    # Try parsing ISO format
+                    if "T" in raw_ts:
+                        dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+                    else:
+                        dt = datetime.fromisoformat(raw_ts)
+                    formatted_ts = dt.strftime("%b %d %H:%M")
+                else:
+                    formatted_ts = str(raw_ts)
+            except Exception:
+                formatted_ts = str(raw_ts)
+
+            timestamps.append(formatted_ts)
             opens.append(candle.get("open", 0))
             highs.append(candle.get("high", 0))
             lows.append(candle.get("low", 0))
