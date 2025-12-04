@@ -4,8 +4,28 @@ Gateway token management functions
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from geckoterminal_py import GeckoTerminalAsyncClient
 
 from ._shared import logger, escape_markdown_v2, extract_network_id
+
+
+# Gateway network ID -> GeckoTerminal network ID mapping
+NETWORK_TO_GECKO = {
+    "solana": "solana",
+    "solana-mainnet-beta": "solana",
+    "ethereum": "eth",
+    "ethereum-mainnet": "eth",
+    "arbitrum": "arbitrum",
+    "arbitrum-mainnet": "arbitrum",
+    "base": "base",
+    "base-mainnet": "base",
+    "polygon": "polygon_pos",
+    "polygon-mainnet": "polygon_pos",
+    "avalanche": "avax",
+    "avalanche-mainnet": "avax",
+    "optimism": "optimism",
+    "optimism-mainnet": "optimism",
+}
 
 
 async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -276,7 +296,7 @@ async def prompt_add_token(query, context: ContextTypes.DEFAULT_TYPE, network_id
 
         # Clear any lingering states from previous operations
         context.user_data.pop('dex_state', None)
-        context.user_data.pop('clob_state', None)
+        context.user_data.pop('cex_state', None)
 
         context.user_data['awaiting_token_input'] = 'token_details'
         context.user_data['token_network'] = network_id
@@ -285,10 +305,12 @@ async def prompt_add_token(query, context: ContextTypes.DEFAULT_TYPE, network_id
 
         message_text = (
             f"➕ *Add Token to {network_escaped}*\n\n"
-            "*Enter token details in this format:*\n"
+            "*Option 1:* Just paste the token address\n"
+            "_\\(details will be fetched automatically\\)_\n\n"
+            "*Option 2:* Full format\n"
             "`address,symbol,decimals,name`\n\n"
             "*Example:*\n"
-            "`9QFfgxdSqH5zT7j6rZb1y6SZhw2aFtcQu2r6BuYpump,GOLD,9,Goldcoin`\n\n"
+            "`9QFfgxdSqH5zT7j6rZb1y6SZhw2aFtcQu2r6BuYpump`\n\n"
             "⚠️ _Restart Gateway after adding for changes to take effect\\._"
         )
 
@@ -622,21 +644,59 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.info(f"Token input: network_id={network_id}, message_id={message_id}, chat_id={chat_id}")
 
         if awaiting_field == 'token_details':
-            # Parse token details: address,symbol,decimals,name
+            # Parse token details: address,symbol,decimals,name OR just address
             token_input = update.message.text.strip()
             parts = [p.strip() for p in token_input.split(',')]
 
-            if len(parts) < 3:
+            # Check if just an address (no commas) - try to fetch from GeckoTerminal
+            if len(parts) == 1 and len(token_input) > 20:
+                address = token_input
+                gecko_network = NETWORK_TO_GECKO.get(network_id, network_id)
+
+                try:
+                    # Show fetching message
+                    if message_id and chat_id:
+                        network_escaped = escape_markdown_v2(network_id)
+                        await update.get_bot().edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=f"🔍 *Fetching token details\\.\\.\\.*\n\nFrom GeckoTerminal for {network_escaped}",
+                            parse_mode="MarkdownV2"
+                        )
+
+                    gecko_client = GeckoTerminalAsyncClient()
+                    result = await gecko_client.get_specific_token_on_network(gecko_network, address)
+
+                    # Extract token data
+                    if isinstance(result, dict):
+                        token_data = result.get('data', result) if 'data' in result else result
+                        attrs = token_data.get('attributes', token_data)
+                        symbol = attrs.get('symbol', '???')
+                        decimals = attrs.get('decimals', 9)
+                        name = attrs.get('name')
+                        logger.info(f"Fetched token from GeckoTerminal: {symbol}, decimals={decimals}, name={name}")
+                    else:
+                        raise ValueError("Invalid response format from GeckoTerminal")
+
+                except Exception as e:
+                    logger.warning(f"Failed to fetch token from GeckoTerminal: {e}")
+                    await update.get_bot().send_message(
+                        chat_id=chat_id,
+                        text=f"❌ Could not fetch token details. Please use full format:\naddress,symbol,decimals,name"
+                    )
+                    return
+
+            elif len(parts) < 3:
                 await update.get_bot().send_message(
                     chat_id=chat_id,
-                    text="❌ Invalid format. Use: address,symbol,decimals,name"
+                    text="❌ Invalid format. Use: address,symbol,decimals,name\nOr just paste the token address."
                 )
                 return
-
-            address = parts[0]
-            symbol = parts[1]
-            decimals = int(parts[2])
-            name = parts[3] if len(parts) > 3 else None
+            else:
+                address = parts[0]
+                symbol = parts[1]
+                decimals = int(parts[2])
+                name = parts[3] if len(parts) > 3 else None
 
             # Clear context (including any lingering dex_state from previous operations)
             context.user_data.pop('awaiting_token_input', None)

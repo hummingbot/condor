@@ -39,7 +39,7 @@ async def handle_gateway_callback(update: Update, context: ContextTypes.DEFAULT_
     # This prevents issues like DEX pool_info state capturing gateway wallet input
     if query.data == "config_gateway":
         context.user_data.pop("dex_state", None)
-        context.user_data.pop("clob_state", None)
+        context.user_data.pop("cex_state", None)
         await show_gateway_menu(query, context)
     elif query.data == "gateway_select_server":
         await show_server_selection(query, context)

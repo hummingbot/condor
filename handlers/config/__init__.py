@@ -138,7 +138,7 @@ def get_modify_value_handler():
 
     This handler routes text input to the appropriate sub-handler based on context state.
     Order of priority:
-    1. Trading states (clob_state, dex_state) - highest priority
+    1. Trading states (cex_state, dex_state) - highest priority
     2. Config states (server modification, API keys, gateway)
     """
     from .servers import handle_server_input
@@ -149,10 +149,10 @@ def get_modify_value_handler():
         """Route text input to appropriate handler based on context state"""
         logger.info(f"handle_all_text_input: user_data keys = {list(context.user_data.keys())}")
 
-        # 1. Check CLOB trading state (highest priority)
-        if context.user_data.get('clob_state'):
-            from handlers.clob import clob_message_handler
-            await clob_message_handler(update, context)
+        # 1. Check CEX trading state (highest priority)
+        if context.user_data.get('cex_state'):
+            from handlers.cex import cex_message_handler
+            await cex_message_handler(update, context)
             return
 
         # 2. Check DEX trading state
