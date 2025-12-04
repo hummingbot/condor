@@ -18,11 +18,11 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     - Config states (servers, API keys, gateway)
     - Gateway wallet/pool/connector states
     """
-    # CLOB trading states
-    context.user_data.pop("clob_state", None)
+    # CEX trading states
+    context.user_data.pop("cex_state", None)
     context.user_data.pop("place_order_params", None)
     context.user_data.pop("current_positions", None)
-    context.user_data.pop("clob_previous_state", None)
+    context.user_data.pop("cex_previous_state", None)
 
     # DEX trading states
     context.user_data.pop("dex_state", None)
