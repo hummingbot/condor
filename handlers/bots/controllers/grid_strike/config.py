@@ -13,6 +13,17 @@ from .._base import ControllerField
 SIDE_LONG = 1
 SIDE_SHORT = 2  # Backend expects 2 for SHORT (not -1)
 
+# Order type mapping
+ORDER_TYPE_MARKET = 1
+ORDER_TYPE_LIMIT = 2
+ORDER_TYPE_LIMIT_MAKER = 3
+
+ORDER_TYPE_LABELS = {
+    ORDER_TYPE_MARKET: "Market",
+    ORDER_TYPE_LIMIT: "Limit",
+    ORDER_TYPE_LIMIT_MAKER: "Limit Maker",
+}
+
 
 # Default configuration values
 DEFAULTS: Dict[str, Any] = {
@@ -164,6 +175,22 @@ FIELDS: Dict[str, ControllerField] = {
         hint="Price distance to activate (default: 0.01 = 1%)",
         default=0.01
     ),
+    "open_order_type": ControllerField(
+        name="open_order_type",
+        label="Open Order Type",
+        type="int",
+        required=False,
+        hint="Order type for opening positions",
+        default=ORDER_TYPE_LIMIT_MAKER
+    ),
+    "take_profit_order_type": ControllerField(
+        name="take_profit_order_type",
+        label="TP Order Type",
+        type="int",
+        required=False,
+        hint="Order type for take profit",
+        default=ORDER_TYPE_LIMIT_MAKER
+    ),
 }
 
 
@@ -172,7 +199,8 @@ FIELD_ORDER: List[str] = [
     "id", "connector_name", "trading_pair", "side", "leverage",
     "total_amount_quote", "start_price", "end_price", "limit_price",
     "max_open_orders", "max_orders_per_batch", "min_order_amount_quote",
-    "min_spread_between_orders", "take_profit", "keep_position", "activation_bounds"
+    "min_spread_between_orders", "take_profit", "open_order_type",
+    "take_profit_order_type", "keep_position", "activation_bounds"
 ]
 
 
