@@ -210,9 +210,11 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
             total_realized = 0
             total_unrealized = 0
 
-            # List controllers with full names
+            # Create table with header (same format as dashboard)
             lines.append("")
             lines.append("```")
+            lines.append(f"{'Controller':<28} {'PnL':>8} {'Vol':>7}")
+            lines.append(f"{'─'*28} {'─'*8} {'─'*7}")
 
             for idx, (ctrl_name, ctrl_info) in enumerate(performance.items()):
                 if isinstance(ctrl_info, dict):
@@ -229,21 +231,22 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                     total_realized += realized
                     total_unrealized += unrealized
 
-                    # Full name with status prefix
+                    # Status prefix + full controller name (truncate to 27 chars)
                     status_prefix = "▶" if ctrl_status == "running" else "⏸"
+                    ctrl_display = f"{status_prefix}{ctrl_name}"[:27]
 
                     # Format numbers compactly
-                    pnl_str = f"{pnl:+.2f}"
+                    pnl_str = f"{pnl:+.2f}"[:8]
                     vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
+                    vol_str = vol_str[:7]
 
-                    lines.append(f"{idx+1}. {status_prefix}{ctrl_name}")
-                    lines.append(f"   PnL: {pnl_str}  Vol: {vol_str}")
+                    lines.append(f"{ctrl_display:<28} {pnl_str:>8} {vol_str:>7}")
 
             # Totals row
-            lines.append("─" * 30)
+            lines.append(f"{'─'*28} {'─'*8} {'─'*7}")
             vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-            pnl_total_str = f"{total_pnl:+.2f}"
-            lines.append(f"TOTAL  PnL: {pnl_total_str}  Vol: {vol_total}")
+            pnl_total_str = f"{total_pnl:+.2f}"[:8]
+            lines.append(f"{'TOTAL':<28} {pnl_total_str:>8} {vol_total:>7}")
             lines.append("```")
 
             # Add PnL breakdown

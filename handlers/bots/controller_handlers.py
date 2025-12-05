@@ -54,8 +54,43 @@ logger = logging.getLogger(__name__)
 CONFIGS_PER_PAGE = 8
 
 
+def _get_controller_type_display(controller_name: str) -> tuple[str, str]:
+    """Get display name and emoji for controller type"""
+    type_map = {
+        "grid_strike": ("Grid Strike", "📊"),
+        "dman_v3": ("DMan V3", "🤖"),
+        "xemm": ("XEMM", "🔄"),
+        "pmm": ("PMM", "📈"),
+    }
+    controller_lower = controller_name.lower() if controller_name else ""
+    for key, (name, emoji) in type_map.items():
+        if key in controller_lower:
+            return name, emoji
+    return controller_name or "Unknown", "⚙️"
+
+
+def _format_config_line(cfg: dict, index: int, max_len: int = 32) -> str:
+    """Format a single config line with relevant info"""
+    connector = cfg.get("connector_name", "")
+    pair = cfg.get("trading_pair", "")
+    side_val = cfg.get("side", 1)
+    side = "L" if side_val == 1 else "S"
+
+    # Build display: connector_PAIR_side
+    if connector and pair:
+        # Shorten connector name
+        conn_short = connector[:3].upper()
+        display = f"{conn_short} {pair} {side}"
+    else:
+        # Fallback to config ID
+        config_id = cfg.get("id", "unnamed")
+        display = config_id[:max_len]
+
+    return f"{index}. {display}"
+
+
 async def show_controller_configs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
-    """Show the controller configs management menu with numbered configs and pagination"""
+    """Show the controller configs management menu grouped by type"""
     query = update.callback_query
 
     try:
@@ -67,42 +102,42 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         context.user_data["configs_page"] = page
 
         total_configs = len(configs)
-        total_pages = (total_configs + CONFIGS_PER_PAGE - 1) // CONFIGS_PER_PAGE if total_configs > 0 else 1
 
-        # Ensure page is within bounds
-        page = max(0, min(page, total_pages - 1))
-        start_idx = page * CONFIGS_PER_PAGE
-        end_idx = min(start_idx + CONFIGS_PER_PAGE, total_configs)
-
-        # Build message with numbered configs
+        # Build message header
         lines = [r"*Controller Configs*", ""]
 
         if not configs:
             lines.append(r"_No configurations found\._")
             lines.append(r"Create a new one to get started\!")
         else:
-            # Show page indicator if multiple pages
-            if total_pages > 1:
-                lines.append(f"_Page {page + 1}/{total_pages} \\({total_configs} total\\)_")
-                lines.append("")
+            lines.append(f"_{total_configs} config{'s' if total_configs != 1 else ''}_")
+            lines.append("")
 
-            # Show configs with index numbers - just the config name
-            lines.append("```")
-            for idx, cfg in enumerate(configs[start_idx:end_idx]):
-                global_idx = start_idx + idx
-                config_id = cfg.get("id", "unnamed")
-                # Truncate if too long
-                display_name = config_id[:35] if len(config_id) > 35 else config_id
-                lines.append(f"{global_idx+1}.{display_name}")
-            lines.append("```")
+            # Group configs by controller type
+            grouped: dict[str, list[tuple[int, dict]]] = {}
+            for idx, cfg in enumerate(configs):
+                ctrl_type = cfg.get("controller_name", "unknown")
+                if ctrl_type not in grouped:
+                    grouped[ctrl_type] = []
+                grouped[ctrl_type].append((idx, cfg))
+
+            # Display each group
+            for ctrl_type, type_configs in grouped.items():
+                type_name, emoji = _get_controller_type_display(ctrl_type)
+                lines.append(f"{emoji} *{escape_markdown_v2(type_name)}*")
+                lines.append("```")
+                for global_idx, cfg in type_configs:
+                    line = _format_config_line(cfg, global_idx + 1)
+                    lines.append(line)
+                lines.append("```")
 
         # Build keyboard - numbered buttons (4 per row)
         keyboard = []
 
-        # Config edit buttons for current page
+        # Config edit buttons
         if configs:
             edit_buttons = []
-            for i in range(start_idx, end_idx):
+            for i in range(min(len(configs), CONFIGS_PER_PAGE)):
                 edit_buttons.append(
                     InlineKeyboardButton(f"✏️{i+1}", callback_data=f"bots:edit_config:{i}")
                 )
@@ -110,15 +145,11 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
             for i in range(0, len(edit_buttons), 4):
                 keyboard.append(edit_buttons[i:i+4])
 
-        # Pagination buttons
-        if total_pages > 1:
-            pagination_row = []
-            if page > 0:
-                pagination_row.append(InlineKeyboardButton("« Prev", callback_data=f"bots:configs_page:{page-1}"))
-            if page < total_pages - 1:
-                pagination_row.append(InlineKeyboardButton("Next »", callback_data=f"bots:configs_page:{page+1}"))
-            if pagination_row:
-                keyboard.append(pagination_row)
+            # Show "more" indicator if there are more configs
+            if len(configs) > CONFIGS_PER_PAGE:
+                keyboard.append([
+                    InlineKeyboardButton(f"Show all ({len(configs)})", callback_data="bots:configs_page:0")
+                ])
 
         keyboard.append([
             InlineKeyboardButton("+ New Grid Strike", callback_data="bots:new_grid_strike"),
@@ -227,7 +258,7 @@ async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFA
         await query.message.edit_text(
             r"*📈 Grid Strike \- New Config*" + "\n\n"
             r"*Step 1/7:* 🏦 Select Connector" + "\n\n"
-            r"Choose the exchange for this grid:",
+            r"Choose the exchange for this grid, can be a spot or perpetual exchange:",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -307,7 +338,7 @@ async def _show_wizard_pair_step(update: Update, context: ContextTypes.DEFAULT_T
 
     recent_hint = ""
     if recent_pairs:
-        recent_hint = "\n\n_Or type a custom pair below:_"
+        recent_hint = "\n\nOr type a custom pair below:"
 
     await query.message.edit_text(
         r"*📈 Grid Strike \- New Config*" + "\n\n"
@@ -497,11 +528,29 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         need_refetch = interval != cached_interval
 
         if not current_price or need_refetch:
-            await query.message.edit_text(
-                r"*📈 Grid Strike \- New Config*" + "\n\n"
-                f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
-                parse_mode="MarkdownV2"
-            )
+            # Show loading message - handle both text and photo messages
+            try:
+                await query.message.edit_text(
+                    r"*📈 Grid Strike \- New Config*" + "\n\n"
+                    f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                    parse_mode="MarkdownV2"
+                )
+            except Exception:
+                # Message is likely a photo - delete it and send new text message
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                loading_msg = await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        r"*📈 Grid Strike \- New Config*" + "\n\n"
+                        f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\."
+                    ),
+                    parse_mode="MarkdownV2"
+                )
+                # Update the wizard message ID to the new loading message
+                context.user_data["gs_wizard_message_id"] = loading_msg.message_id
 
             client = await get_bots_client()
             current_price = await fetch_current_price(client, connector, pair)
@@ -514,13 +563,26 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
         if not current_price:
             keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:controller_configs")]]
-            await query.message.edit_text(
-                r"*❌ Error*" + "\n\n"
-                f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
-                r"Please check the trading pair and try again\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            try:
+                await query.message.edit_text(
+                    r"*❌ Error*" + "\n\n"
+                    f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
+                    r"Please check the trading pair and try again\\.",
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except Exception:
+                # Message might be a photo or already deleted
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        r"*❌ Error*" + "\n\n"
+                        f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
+                        r"Please check the trading pair and try again\\."
+                    ),
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
             return
 
         # Calculate auto prices only if not already set (preserve user edits)
@@ -548,7 +610,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         context.user_data["gs_wizard_step"] = "prices"
 
         # Build interval buttons with current one highlighted
-        interval_options = ["5m", "15m", "1h", "4h"]
+        interval_options = ["1m", "5m", "15m", "1h", "4h"]
         interval_row = []
         for opt in interval_options:
             label = f"✓ {opt}" if opt == interval else opt
@@ -1573,7 +1635,7 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     interval = context.user_data.get("gs_chart_interval", "5m")
 
     # Build interval buttons with current one highlighted
-    interval_options = ["5m", "15m", "1h", "4h"]
+    interval_options = ["1m", "5m", "15m", "1h", "4h"]
     interval_row = []
     for opt in interval_options:
         label = f"✓ {opt}" if opt == interval else opt
