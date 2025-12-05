@@ -17,6 +17,7 @@ import logging
 from typing import Dict, Any, List, Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message
@@ -41,6 +42,10 @@ from ._shared import (
     GS_WIZARD_STEPS,
     SIDE_LONG,
     SIDE_SHORT,
+    ORDER_TYPE_MARKET,
+    ORDER_TYPE_LIMIT,
+    ORDER_TYPE_LIMIT_MAKER,
+    ORDER_TYPE_LABELS,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,7 +56,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 # Pagination settings for configs
-CONFIGS_PER_PAGE = 8
+CONFIGS_PER_PAGE = 16
 
 
 def _get_controller_type_display(controller_name: str) -> tuple[str, str]:
@@ -69,22 +74,27 @@ def _get_controller_type_display(controller_name: str) -> tuple[str, str]:
     return controller_name or "Unknown", "⚙️"
 
 
-def _format_config_line(cfg: dict, index: int, max_len: int = 32) -> str:
+def _format_config_line(cfg: dict, index: int) -> str:
     """Format a single config line with relevant info"""
     connector = cfg.get("connector_name", "")
     pair = cfg.get("trading_pair", "")
     side_val = cfg.get("side", 1)
     side = "L" if side_val == 1 else "S"
+    start_price = cfg.get("start_price", 0)
+    end_price = cfg.get("end_price", 0)
 
-    # Build display: connector_PAIR_side
+    # Build display: connector PAIR side [start-end]
     if connector and pair:
-        # Shorten connector name
-        conn_short = connector[:3].upper()
-        display = f"{conn_short} {pair} {side}"
+        # Format prices compactly
+        if start_price and end_price:
+            price_range = f"[{start_price:g}-{end_price:g}]"
+        else:
+            price_range = ""
+        display = f"{connector} {pair} {side} {price_range}".strip()
     else:
         # Fallback to config ID
         config_id = cfg.get("id", "unnamed")
-        display = config_id[:max_len]
+        display = config_id
 
     return f"{index}. {display}"
 
@@ -102,6 +112,12 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         context.user_data["configs_page"] = page
 
         total_configs = len(configs)
+        total_pages = (total_configs + CONFIGS_PER_PAGE - 1) // CONFIGS_PER_PAGE if total_configs > 0 else 1
+
+        # Calculate page slice
+        start_idx = page * CONFIGS_PER_PAGE
+        end_idx = min(start_idx + CONFIGS_PER_PAGE, total_configs)
+        page_configs = configs[start_idx:end_idx]
 
         # Build message header
         lines = [r"*Controller Configs*", ""]
@@ -110,16 +126,20 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
             lines.append(r"_No configurations found\._")
             lines.append(r"Create a new one to get started\!")
         else:
-            lines.append(f"_{total_configs} config{'s' if total_configs != 1 else ''}_")
+            if total_pages > 1:
+                lines.append(f"_{total_configs} configs \\(page {page + 1}/{total_pages}\\)_")
+            else:
+                lines.append(f"_{total_configs} config{'s' if total_configs != 1 else ''}_")
             lines.append("")
 
-            # Group configs by controller type
+            # Group page configs by controller type
             grouped: dict[str, list[tuple[int, dict]]] = {}
-            for idx, cfg in enumerate(configs):
+            for i, cfg in enumerate(page_configs):
+                global_idx = start_idx + i
                 ctrl_type = cfg.get("controller_name", "unknown")
                 if ctrl_type not in grouped:
                     grouped[ctrl_type] = []
-                grouped[ctrl_type].append((idx, cfg))
+                grouped[ctrl_type].append((global_idx, cfg))
 
             # Display each group
             for ctrl_type, type_configs in grouped.items():
@@ -134,22 +154,27 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         # Build keyboard - numbered buttons (4 per row)
         keyboard = []
 
-        # Config edit buttons
-        if configs:
+        # Config edit buttons for current page
+        if page_configs:
             edit_buttons = []
-            for i in range(min(len(configs), CONFIGS_PER_PAGE)):
+            for i, cfg in enumerate(page_configs):
+                global_idx = start_idx + i
                 edit_buttons.append(
-                    InlineKeyboardButton(f"✏️{i+1}", callback_data=f"bots:edit_config:{i}")
+                    InlineKeyboardButton(f"✏️{global_idx + 1}", callback_data=f"bots:edit_config:{global_idx}")
                 )
             # Add in rows of 4
             for i in range(0, len(edit_buttons), 4):
                 keyboard.append(edit_buttons[i:i+4])
 
-            # Show "more" indicator if there are more configs
-            if len(configs) > CONFIGS_PER_PAGE:
-                keyboard.append([
-                    InlineKeyboardButton(f"Show all ({len(configs)})", callback_data="bots:configs_page:0")
-                ])
+            # Pagination buttons if needed
+            if total_pages > 1:
+                nav_buttons = []
+                if page > 0:
+                    nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"bots:configs_page:{page - 1}"))
+                # Always show Next (loops to first page)
+                next_page = (page + 1) % total_pages
+                nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"bots:configs_page:{next_page}"))
+                keyboard.append(nav_buttons)
 
         keyboard.append([
             InlineKeyboardButton("+ New Grid Strike", callback_data="bots:new_grid_strike"),
@@ -1789,6 +1814,10 @@ async def show_config_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Get value, handling nested triple_barrier_config
         if field_name == "take_profit":
             value = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+        elif field_name == "open_order_type":
+            value = config.get("triple_barrier_config", {}).get("open_order_type", ORDER_TYPE_LIMIT_MAKER)
+        elif field_name == "take_profit_order_type":
+            value = config.get("triple_barrier_config", {}).get("take_profit_order_type", ORDER_TYPE_LIMIT_MAKER)
         else:
             value = config.get(field_name, "")
 
@@ -1831,7 +1860,13 @@ async def show_config_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         InlineKeyboardButton("Take Profit", callback_data="bots:set_field:take_profit"),
     ])
 
-    # Row 5: Actions
+    # Row 5: Order Types
+    keyboard.append([
+        InlineKeyboardButton("Open Order Type", callback_data="bots:cycle_order_type:open"),
+        InlineKeyboardButton("TP Order Type", callback_data="bots:cycle_order_type:tp"),
+    ])
+
+    # Row 6: Actions
     keyboard.append([
         InlineKeyboardButton("Save Config", callback_data="bots:save_config"),
         InlineKeyboardButton("Cancel", callback_data="bots:controller_configs"),
@@ -2102,6 +2137,43 @@ async def handle_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 config["trading_pair"],
                 existing_configs=existing_configs
             )
+
+    set_controller_config(context, config)
+
+    # Refresh the form
+    await show_config_form(update, context)
+
+
+async def handle_cycle_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, order_type_key: str) -> None:
+    """Cycle the order type between Market, Limit, and Limit Maker
+
+    Args:
+        update: Telegram update
+        context: Telegram context
+        order_type_key: 'open' for open_order_type, 'tp' for take_profit_order_type
+    """
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # Determine which field to update
+    field_name = "open_order_type" if order_type_key == "open" else "take_profit_order_type"
+
+    # Get current value
+    if "triple_barrier_config" not in config:
+        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+
+    current_type = config["triple_barrier_config"].get(field_name, ORDER_TYPE_LIMIT_MAKER)
+
+    # Cycle: Limit Maker -> Market -> Limit -> Limit Maker
+    order_cycle = [ORDER_TYPE_LIMIT_MAKER, ORDER_TYPE_MARKET, ORDER_TYPE_LIMIT]
+    try:
+        current_index = order_cycle.index(current_type)
+        next_index = (current_index + 1) % len(order_cycle)
+    except ValueError:
+        next_index = 0
+
+    new_type = order_cycle[next_index]
+    config["triple_barrier_config"][field_name] = new_type
 
     set_controller_config(context, config)
 
@@ -2444,11 +2516,15 @@ async def show_deploy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.message.edit_text(
-            "\n".join(lines),
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        try:
+            await query.message.edit_text(
+                "\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                raise
 
     except Exception as e:
         logger.error(f"Error loading deploy menu: {e}", exc_info=True)

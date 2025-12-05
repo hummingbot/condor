@@ -31,6 +31,10 @@ from .controllers.grid_strike import (
     DEFAULTS as GRID_STRIKE_DEFAULTS,
     SIDE_LONG,
     SIDE_SHORT,
+    ORDER_TYPE_MARKET,
+    ORDER_TYPE_LIMIT,
+    ORDER_TYPE_LIMIT_MAKER,
+    ORDER_TYPE_LABELS,
     WIZARD_STEPS as GS_WIZARD_STEPS,
     calculate_auto_prices,
     generate_chart as _gs_generate_chart,
@@ -199,6 +203,8 @@ def format_config_field_value(field_name: str, value: Any) -> str:
     """
     if field_name == "side":
         return "LONG" if value == SIDE_LONG else "SHORT"
+    elif field_name in ("open_order_type", "take_profit_order_type"):
+        return ORDER_TYPE_LABELS.get(value, f"Unknown ({value})")
     elif field_name == "keep_position":
         return "Yes" if value else "No"
     elif field_name == "activation_bounds":
