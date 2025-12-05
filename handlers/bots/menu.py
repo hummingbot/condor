@@ -45,9 +45,14 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
             InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:bot_detail:{bot_name}")
         ])
 
-    # Action buttons - 3 columns
+    # Action buttons - controller creation
     keyboard.append([
         InlineKeyboardButton("➕ Grid Strike", callback_data="bots:new_grid_strike"),
+        InlineKeyboardButton("➕ PMM Mister", callback_data="bots:new_pmm_mister"),
+    ])
+
+    # Action buttons - deploy and configs
+    keyboard.append([
         InlineKeyboardButton("🚀 Deploy", callback_data="bots:deploy_menu"),
         InlineKeyboardButton("📁 Configs", callback_data="bots:controller_configs"),
     ])
@@ -286,11 +291,24 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         try:
-            await query.message.edit_text(
-                "\n".join(lines),
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+            # Check if current message is a photo (from controller detail view)
+            if query.message.photo:
+                # Delete photo message and send new text message
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
+                    "\n".join(lines),
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            else:
+                await query.message.edit_text(
+                    "\n".join(lines),
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
         except BadRequest as e:
             if "Message is not modified" in str(e):
                 # Message content is the same, just answer the callback
@@ -302,11 +320,25 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
         logger.error(f"Error showing bot detail: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to fetch bot status: {str(e)}")
         keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
-        await query.message.edit_text(
-            error_message,
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        try:
+            if query.message.photo:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
+                    error_message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.message.edit_text(
+                    error_message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        except Exception:
+            pass
 
 
 def _shorten_controller_name(name: str, max_len: int = 28) -> str:
@@ -406,6 +438,7 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
     ctrl_config = None
     is_grid_strike = False
     chart_bytes = None
+    message_replaced = False  # Track if we've sent a new message (e.g., loading message)
 
     try:
         client = await get_bots_client()
@@ -425,6 +458,22 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
 
             # For grid strike, generate chart
             if is_grid_strike:
+                # Show loading message immediately since chart generation takes time
+                loading_text = f"⏳ *Generating chart for* `{escape_markdown_v2(short_name)}`\\.\\.\\."
+                try:
+                    if query.message.photo:
+                        # Delete photo and send text message
+                        try:
+                            await query.message.delete()
+                        except Exception:
+                            pass
+                        await query.message.chat.send_message(loading_text, parse_mode="MarkdownV2")
+                        message_replaced = True
+                    else:
+                        await query.message.edit_text(loading_text, parse_mode="MarkdownV2")
+                except Exception:
+                    pass
+
                 try:
                     connector = ctrl_config.get("connector_name", "")
                     pair = ctrl_config.get("trading_pair", "")
@@ -531,11 +580,25 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
             "",
         ] + caption_lines
 
-        await query.message.edit_text(
-            "\n".join(full_lines),
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        text_content = "\n".join(full_lines)
+
+        # If we replaced the original message (e.g., with loading message), send new message
+        if message_replaced or query.message.photo:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.message.chat.send_message(
+                text_content,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.message.edit_text(
+                text_content,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
 
 
 async def handle_stop_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -560,13 +623,29 @@ async def handle_stop_controller(update: Update, context: ContextTypes.DEFAULT_T
         ],
     ]
 
-    await query.message.edit_text(
+    message_text = (
         f"*Stop Controller?*\n\n"
         f"`{escape_markdown_v2(short_name)}`\n\n"
-        f"This will stop the controller\\.",
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"This will stop the controller\\."
     )
+
+    # Handle photo messages (from controller detail view with chart)
+    if query.message.photo:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.message.chat.send_message(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def handle_confirm_stop_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -711,11 +790,25 @@ async def show_controller_edit(update: Update, context: ContextTypes.DEFAULT_TYP
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await query.message.edit_text(
-        "\n".join(lines),
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
-    )
+    text_content = "\n".join(lines)
+
+    # Handle photo messages (from controller detail view with chart)
+    if query.message.photo:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.message.chat.send_message(
+            text_content,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+    else:
+        await query.message.edit_text(
+            text_content,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
 
 
 async def handle_controller_set_field(update: Update, context: ContextTypes.DEFAULT_TYPE, field_name: str) -> None:

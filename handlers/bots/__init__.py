@@ -45,6 +45,7 @@ from .controller_handlers import (
     show_configs_list,
     handle_configs_page,
     show_new_grid_strike_form,
+    show_new_pmm_mister_form,
     show_config_form,
     handle_set_field,
     handle_toggle_side,
@@ -100,6 +101,19 @@ from .controller_handlers import (
     handle_gs_review_back,
     handle_gs_edit_price,
     process_gs_wizard_input,
+    # PMM Mister wizard
+    handle_pmm_wizard_connector,
+    handle_pmm_wizard_pair,
+    handle_pmm_wizard_leverage,
+    handle_pmm_wizard_allocation,
+    handle_pmm_wizard_spreads,
+    handle_pmm_wizard_tp,
+    handle_pmm_save,
+    handle_pmm_review_back,
+    handle_pmm_edit_id,
+    handle_pmm_edit_advanced,
+    handle_pmm_adv_setting,
+    process_pmm_wizard_input,
 )
 from ._shared import clear_bots_state, SIDE_LONG, SIDE_SHORT
 
@@ -194,6 +208,9 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "new_grid_strike":
             await show_new_grid_strike_form(update, context)
+
+        elif main_action == "new_pmm_mister":
+            await show_new_pmm_mister_form(update, context)
 
         elif main_action == "edit_config":
             if len(action_parts) > 1:
@@ -372,6 +389,54 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "gs_review_back":
             await handle_gs_review_back(update, context)
 
+        # PMM Mister wizard
+        elif main_action == "pmm_connector":
+            if len(action_parts) > 1:
+                connector = action_parts[1]
+                await handle_pmm_wizard_connector(update, context, connector)
+
+        elif main_action == "pmm_pair":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_pmm_wizard_pair(update, context, pair)
+
+        elif main_action == "pmm_leverage":
+            if len(action_parts) > 1:
+                leverage = int(action_parts[1])
+                await handle_pmm_wizard_leverage(update, context, leverage)
+
+        elif main_action == "pmm_alloc":
+            if len(action_parts) > 1:
+                allocation = float(action_parts[1])
+                await handle_pmm_wizard_allocation(update, context, allocation)
+
+        elif main_action == "pmm_spreads":
+            if len(action_parts) > 1:
+                spreads = action_parts[1]
+                await handle_pmm_wizard_spreads(update, context, spreads)
+
+        elif main_action == "pmm_tp":
+            if len(action_parts) > 1:
+                tp = float(action_parts[1])
+                await handle_pmm_wizard_tp(update, context, tp)
+
+        elif main_action == "pmm_save":
+            await handle_pmm_save(update, context)
+
+        elif main_action == "pmm_review_back":
+            await handle_pmm_review_back(update, context)
+
+        elif main_action == "pmm_edit_id":
+            await handle_pmm_edit_id(update, context)
+
+        elif main_action == "pmm_edit_advanced":
+            await handle_pmm_edit_advanced(update, context)
+
+        elif main_action == "pmm_adv":
+            if len(action_parts) > 1:
+                setting = action_parts[1]
+                await handle_pmm_adv_setting(update, context, setting)
+
         # Bot detail
         elif main_action == "bot_detail":
             if len(action_parts) > 1:
@@ -483,6 +548,9 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle Grid Strike wizard input
         elif bots_state == "gs_wizard_input":
             await process_gs_wizard_input(update, context, user_input)
+        # Handle PMM Mister wizard input
+        elif bots_state == "pmm_wizard_input":
+            await process_pmm_wizard_input(update, context, user_input)
         else:
             logger.debug(f"Unhandled bots state: {bots_state}")
 

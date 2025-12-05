@@ -186,11 +186,25 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.message.edit_text(
-            "\n".join(lines),
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        text_content = "\n".join(lines)
+
+        # Handle photo messages (e.g., coming back from prices step with chart)
+        if query.message.photo:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.message.chat.send_message(
+                text_content,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        else:
+            await query.message.edit_text(
+                text_content,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
 
     except Exception as e:
         logger.error(f"Error loading controller configs: {e}", exc_info=True)
@@ -199,11 +213,25 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
             [InlineKeyboardButton("Back", callback_data="bots:main_menu")],
         ]
         error_msg = format_error_message(f"Failed to load configs: {str(e)}")
-        await query.message.edit_text(
-            error_msg,
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        try:
+            if query.message.photo:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
+                    error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.message.edit_text(
+                    error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        except Exception:
+            pass
 
 
 async def handle_configs_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
@@ -509,18 +537,15 @@ async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_
     config["total_amount_quote"] = amount
     set_controller_config(context, config)
 
-    # Check if market data is ready (pre-fetched in background)
-    market_data_ready = context.user_data.get("gs_market_data_ready", False)
     pair = config.get("trading_pair", "")
 
-    # Show loading indicator if market data is not ready yet
-    if not market_data_ready:
-        await query.message.edit_text(
-            r"*📈 Grid Strike \- New Config*" + "\n\n"
-            f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\." + "\n\n"
-            r"_Fetching market data and generating chart\\._",
-            parse_mode="MarkdownV2"
-        )
+    # Always show loading indicator immediately since chart generation takes time
+    await query.message.edit_text(
+        r"*📈 Grid Strike \- New Config*" + "\n\n"
+        f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\." + "\n\n"
+        r"_Fetching market data and generating chart\\._",
+        parse_mode="MarkdownV2"
+    )
 
     # Move to prices step - this will fetch OHLC and show chart
     context.user_data["gs_wizard_step"] = "prices"
@@ -694,22 +719,50 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             context.user_data["gs_wizard_message_id"] = msg.message_id
             context.user_data["gs_wizard_chat_id"] = query.message.chat_id
         else:
-            # No chart - just edit text message
-            await query.message.edit_text(
-                text=config_text,
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            context.user_data["gs_wizard_message_id"] = query.message.message_id
+            # No chart - handle photo messages
+            if query.message.photo:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                msg = await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=config_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                context.user_data["gs_wizard_message_id"] = msg.message_id
+            else:
+                await query.message.edit_text(
+                    text=config_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+                context.user_data["gs_wizard_message_id"] = query.message.message_id
 
     except Exception as e:
         logger.error(f"Error in prices step: {e}", exc_info=True)
         keyboard = [[InlineKeyboardButton("Back", callback_data="bots:controller_configs")]]
-        await query.message.edit_text(
-            format_error_message(f"Error fetching market data: {str(e)}"),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        error_msg = format_error_message(f"Error fetching market data: {str(e)}")
+        try:
+            if query.message.photo:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
+                    error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.message.edit_text(
+                    error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+        except Exception:
+            pass
 
 
 async def handle_gs_accept_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3572,3 +3625,629 @@ async def process_deploy_custom_name_input(update: Update, context: ContextTypes
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+
+# ============================================
+# PMM MISTER WIZARD
+# ============================================
+
+from .controllers.pmm_mister import (
+    DEFAULTS as PMM_DEFAULTS,
+    WIZARD_STEPS as PMM_WIZARD_STEPS,
+    validate_config as pmm_validate_config,
+    generate_id as pmm_generate_id,
+    parse_spreads,
+    format_spreads,
+)
+
+
+async def show_new_pmm_mister_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start the progressive PMM Mister wizard - Step 1: Connector"""
+    query = update.callback_query
+
+    try:
+        client = await get_bots_client()
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    config = init_new_controller_config(context, "pmm_mister")
+    context.user_data["bots_state"] = "pmm_wizard"
+    context.user_data["pmm_wizard_step"] = "connector_name"
+    context.user_data["pmm_wizard_message_id"] = query.message.message_id
+    context.user_data["pmm_wizard_chat_id"] = query.message.chat_id
+
+    await _show_pmm_wizard_connector_step(update, context)
+
+
+async def _show_pmm_wizard_connector_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 1: Select Connector"""
+    query = update.callback_query
+
+    try:
+        client = await get_bots_client()
+        cex_connectors = await get_available_cex_connectors(context.user_data, client)
+
+        if not cex_connectors:
+            keyboard = [[InlineKeyboardButton("Back", callback_data="bots:controller_configs")]]
+            await query.message.edit_text(
+                r"*PMM Mister \- New Config*" + "\n\n"
+                r"No CEX connectors configured\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+
+        keyboard = []
+        row = []
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(f"🏦 {connector}", callback_data=f"bots:pmm_connector:{connector}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")])
+
+        await query.message.edit_text(
+            r"*📈 PMM Mister \- New Config*" + "\n\n"
+            r"*Step 1/7:* 🏦 Select Connector",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error in PMM connector step: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:controller_configs")]]
+        await query.message.edit_text(
+            format_error_message(f"Error: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def handle_pmm_wizard_connector(update: Update, context: ContextTypes.DEFAULT_TYPE, connector: str) -> None:
+    """Handle connector selection"""
+    config = get_controller_config(context)
+    config["connector_name"] = connector
+    set_controller_config(context, config)
+    context.user_data["pmm_wizard_step"] = "trading_pair"
+    await _show_pmm_wizard_pair_step(update, context)
+
+
+async def _show_pmm_wizard_pair_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 2: Trading Pair"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = "trading_pair"
+
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:pmm_pair:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")])
+
+    await query.message.edit_text(
+        r"*📈 PMM Mister \- New Config*" + "\n\n"
+        f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n\n"
+        r"*Step 2/7:* 🔗 Trading Pair" + "\n\n"
+        r"Select or type a pair:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_wizard_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str) -> None:
+    """Handle pair selection"""
+    config = get_controller_config(context)
+    config["trading_pair"] = pair.upper()
+    set_controller_config(context, config)
+    context.user_data["pmm_wizard_step"] = "leverage"
+    await _show_pmm_wizard_leverage_step(update, context)
+
+
+async def _show_pmm_wizard_leverage_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 3: Leverage"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1x", callback_data="bots:pmm_leverage:1"),
+            InlineKeyboardButton("5x", callback_data="bots:pmm_leverage:5"),
+            InlineKeyboardButton("10x", callback_data="bots:pmm_leverage:10"),
+        ],
+        [
+            InlineKeyboardButton("20x", callback_data="bots:pmm_leverage:20"),
+            InlineKeyboardButton("50x", callback_data="bots:pmm_leverage:50"),
+            InlineKeyboardButton("75x", callback_data="bots:pmm_leverage:75"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+    ]
+
+    await query.message.edit_text(
+        r"*📈 PMM Mister \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+        r"*Step 3/7:* ⚡ Leverage",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_wizard_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE, leverage: int) -> None:
+    """Handle leverage selection"""
+    config = get_controller_config(context)
+    config["leverage"] = leverage
+    set_controller_config(context, config)
+    context.user_data["pmm_wizard_step"] = "portfolio_allocation"
+    await _show_pmm_wizard_allocation_step(update, context)
+
+
+async def _show_pmm_wizard_allocation_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 4: Portfolio Allocation"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 20)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1%", callback_data="bots:pmm_alloc:0.01"),
+            InlineKeyboardButton("2%", callback_data="bots:pmm_alloc:0.02"),
+            InlineKeyboardButton("5%", callback_data="bots:pmm_alloc:0.05"),
+        ],
+        [
+            InlineKeyboardButton("10%", callback_data="bots:pmm_alloc:0.1"),
+            InlineKeyboardButton("20%", callback_data="bots:pmm_alloc:0.2"),
+            InlineKeyboardButton("50%", callback_data="bots:pmm_alloc:0.5"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+    ]
+
+    await query.message.edit_text(
+        r"*📈 PMM Mister \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+        f"⚡ `{leverage}x`" + "\n\n"
+        r"*Step 4/7:* 💰 Portfolio Allocation",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_wizard_allocation(update: Update, context: ContextTypes.DEFAULT_TYPE, allocation: float) -> None:
+    """Handle allocation selection"""
+    config = get_controller_config(context)
+    config["portfolio_allocation"] = allocation
+    set_controller_config(context, config)
+    context.user_data["pmm_wizard_step"] = "spreads"
+    await _show_pmm_wizard_spreads_step(update, context)
+
+
+async def _show_pmm_wizard_spreads_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 5: Spreads"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 20)
+    allocation = config.get("portfolio_allocation", 0.05)
+
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = "spreads"
+
+    keyboard = [
+        [InlineKeyboardButton("Tight: 0.5%, 1%", callback_data="bots:pmm_spreads:0.005,0.01")],
+        [InlineKeyboardButton("Normal: 1%, 2%", callback_data="bots:pmm_spreads:0.01,0.02")],
+        [InlineKeyboardButton("Wide: 2%, 3%, 5%", callback_data="bots:pmm_spreads:0.02,0.03,0.05")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+    ]
+
+    await query.message.edit_text(
+        r"*📈 PMM Mister \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+        f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.0f}%`" + "\n\n"
+        r"*Step 5/7:* 📊 Spreads" + "\n\n"
+        r"_Or type custom: `0\.01,0\.02`_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_wizard_spreads(update: Update, context: ContextTypes.DEFAULT_TYPE, spreads: str) -> None:
+    """Handle spreads selection"""
+    config = get_controller_config(context)
+    config["buy_spreads"] = spreads
+    config["sell_spreads"] = spreads
+    set_controller_config(context, config)
+    context.user_data["pmm_wizard_step"] = "take_profit"
+    await _show_pmm_wizard_tp_step(update, context)
+
+
+async def _show_pmm_wizard_tp_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 6: Take Profit"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    spreads = config.get("buy_spreads", "0.01,0.02")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("0.01%", callback_data="bots:pmm_tp:0.0001"),
+            InlineKeyboardButton("0.02%", callback_data="bots:pmm_tp:0.0002"),
+            InlineKeyboardButton("0.05%", callback_data="bots:pmm_tp:0.0005"),
+        ],
+        [
+            InlineKeyboardButton("0.1%", callback_data="bots:pmm_tp:0.001"),
+            InlineKeyboardButton("0.2%", callback_data="bots:pmm_tp:0.002"),
+            InlineKeyboardButton("0.5%", callback_data="bots:pmm_tp:0.005"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+    ]
+
+    await query.message.edit_text(
+        r"*📈 PMM Mister \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+        f"📊 Spreads: `{escape_markdown_v2(spreads)}`" + "\n\n"
+        r"*Step 6/7:* 🎯 Take Profit",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_wizard_tp(update: Update, context: ContextTypes.DEFAULT_TYPE, tp: float) -> None:
+    """Handle take profit selection"""
+    config = get_controller_config(context)
+    config["take_profit"] = tp
+    set_controller_config(context, config)
+    context.user_data["pmm_wizard_step"] = "review"
+    await _show_pmm_wizard_review_step(update, context)
+
+
+async def _show_pmm_wizard_review_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 7: Review"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    existing = context.user_data.get("controller_configs_list", [])
+    config["id"] = pmm_generate_id(config, existing)
+    set_controller_config(context, config)
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Save Config", callback_data="bots:pmm_save")],
+        [
+            InlineKeyboardButton("✏️ Edit ID", callback_data="bots:pmm_edit_id"),
+            InlineKeyboardButton("⚙️ Advanced", callback_data="bots:pmm_edit_advanced"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+    ]
+
+    await query.message.edit_text(
+        r"*📈 PMM Mister \- Review*" + "\n\n"
+        f"*ID:* `{escape_markdown_v2(config.get('id', ''))}`" + "\n\n"
+        f"🏦 *Connector:* `{escape_markdown_v2(config.get('connector_name', ''))}`" + "\n"
+        f"🔗 *Pair:* `{escape_markdown_v2(config.get('trading_pair', ''))}`" + "\n"
+        f"⚡ *Leverage:* `{config.get('leverage', 20)}x`" + "\n"
+        f"💰 *Allocation:* `{config.get('portfolio_allocation', 0.05)*100:.0f}%`" + "\n\n"
+        f"📊 *Spreads:* `{escape_markdown_v2(config.get('buy_spreads', ''))}`" + "\n"
+        f"🎯 *Take Profit:* `{config.get('take_profit', 0.0001)*100:.2f}%`" + "\n\n"
+        f"📈 *Base %:* `{config.get('min_base_pct', 0.1)*100:.0f}%` / "
+        f"`{config.get('target_base_pct', 0.2)*100:.0f}%` / "
+        f"`{config.get('max_base_pct', 0.4)*100:.0f}%`",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save PMM config"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    is_valid, error = pmm_validate_config(config)
+    if not is_valid:
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_review_back")]]
+        await query.message.edit_text(
+            f"*Validation Error*\n\n{escape_markdown_v2(error or 'Unknown error')}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    try:
+        client = await get_bots_client()
+        result = await client.controllers.add_controller_config(config)
+
+        if result.get("status") == "success" or "success" in str(result).lower():
+            keyboard = [
+                [InlineKeyboardButton("Create Another", callback_data="bots:new_pmm_mister")],
+                [InlineKeyboardButton("Deploy Now", callback_data="bots:deploy_menu")],
+                [InlineKeyboardButton("Back to Menu", callback_data="bots:controller_configs")],
+            ]
+            await query.message.edit_text(
+                r"*✅ Config Saved\!*" + "\n\n"
+                f"*ID:* `{escape_markdown_v2(config.get('id', ''))}`",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            clear_bots_state(context)
+        else:
+            error_msg = result.get("message", str(result))
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_review_back")]]
+            await query.message.edit_text(
+                f"*Save Failed*\n\n{escape_markdown_v2(error_msg[:200])}",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+    except Exception as e:
+        logger.error(f"Error saving PMM config: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_review_back")]]
+        await query.message.edit_text(
+            f"*Error*\n\n{escape_markdown_v2(str(e)[:200])}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def handle_pmm_review_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Back to review"""
+    await _show_pmm_wizard_review_step(update, context)
+
+
+async def handle_pmm_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Edit config ID"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = "edit_id"
+
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:pmm_review_back")]]
+    await query.message.edit_text(
+        r"*Edit Config ID*" + "\n\n"
+        f"Current: `{escape_markdown_v2(config.get('id', ''))}`" + "\n\n"
+        r"Enter new ID:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_edit_advanced(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show advanced settings"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("Base %", callback_data="bots:pmm_adv:base"),
+            InlineKeyboardButton("Cooldowns", callback_data="bots:pmm_adv:cooldown"),
+        ],
+        [
+            InlineKeyboardButton("Refresh Time", callback_data="bots:pmm_adv:refresh"),
+            InlineKeyboardButton("Max Executors", callback_data="bots:pmm_adv:max_exec"),
+        ],
+        [InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_review_back")],
+    ]
+
+    await query.message.edit_text(
+        r"*Advanced Settings*" + "\n\n"
+        f"📈 *Base %:* min=`{config.get('min_base_pct', 0.1)*100:.0f}%` "
+        f"target=`{config.get('target_base_pct', 0.2)*100:.0f}%` "
+        f"max=`{config.get('max_base_pct', 0.4)*100:.0f}%`" + "\n"
+        f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 30)}s`" + "\n"
+        f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 15)}s` "
+        f"sell=`{config.get('sell_cooldown_time', 15)}s`" + "\n"
+        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 4)}`",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_pmm_adv_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, setting: str) -> None:
+    """Handle advanced setting edit"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = f"adv_{setting}"
+
+    hints = {
+        "base": ("Base Percentages", f"min={config.get('min_base_pct', 0.1)}, target={config.get('target_base_pct', 0.2)}, max={config.get('max_base_pct', 0.4)}", "min,target,max as decimals"),
+        "cooldown": ("Cooldown Times", f"buy={config.get('buy_cooldown_time', 15)}s, sell={config.get('sell_cooldown_time', 15)}s", "buy,sell in seconds"),
+        "refresh": ("Refresh Time", f"{config.get('executor_refresh_time', 30)}s", "seconds"),
+        "max_exec": ("Max Executors", str(config.get("max_active_executors_by_level", 4)), "number"),
+    }
+    label, current, hint = hints.get(setting, (setting, "", ""))
+
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:pmm_edit_advanced")]]
+    await query.message.edit_text(
+        f"*Edit {escape_markdown_v2(label)}*" + "\n\n"
+        f"Current: `{escape_markdown_v2(current)}`" + "\n\n"
+        f"Enter new value \\({escape_markdown_v2(hint)}\\):",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
+    """Process text input during PMM wizard"""
+    step = context.user_data.get("pmm_wizard_step", "")
+    config = get_controller_config(context)
+    message_id = context.user_data.get("pmm_wizard_message_id")
+    chat_id = context.user_data.get("pmm_wizard_chat_id")
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if step == "trading_pair":
+        config["trading_pair"] = user_input.upper()
+        set_controller_config(context, config)
+        context.user_data["pmm_wizard_step"] = "leverage"
+        # Edit the wizard message
+        keyboard = [
+            [
+                InlineKeyboardButton("1x", callback_data="bots:pmm_leverage:1"),
+                InlineKeyboardButton("5x", callback_data="bots:pmm_leverage:5"),
+                InlineKeyboardButton("10x", callback_data="bots:pmm_leverage:10"),
+            ],
+            [
+                InlineKeyboardButton("20x", callback_data="bots:pmm_leverage:20"),
+                InlineKeyboardButton("50x", callback_data="bots:pmm_leverage:50"),
+                InlineKeyboardButton("75x", callback_data="bots:pmm_leverage:75"),
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+        ]
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+                 f"🏦 `{escape_markdown_v2(config.get('connector_name', ''))}` \\| 🔗 `{escape_markdown_v2(config['trading_pair'])}`" + "\n\n"
+                 r"*Step 3/7:* ⚡ Leverage",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif step == "spreads":
+        config["buy_spreads"] = user_input.strip()
+        config["sell_spreads"] = user_input.strip()
+        set_controller_config(context, config)
+        context.user_data["pmm_wizard_step"] = "take_profit"
+        keyboard = [
+            [
+                InlineKeyboardButton("0.01%", callback_data="bots:pmm_tp:0.0001"),
+                InlineKeyboardButton("0.02%", callback_data="bots:pmm_tp:0.0002"),
+                InlineKeyboardButton("0.05%", callback_data="bots:pmm_tp:0.0005"),
+            ],
+            [
+                InlineKeyboardButton("0.1%", callback_data="bots:pmm_tp:0.001"),
+                InlineKeyboardButton("0.2%", callback_data="bots:pmm_tp:0.002"),
+                InlineKeyboardButton("0.5%", callback_data="bots:pmm_tp:0.005"),
+            ],
+            [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+        ]
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+                 f"📊 Spreads: `{escape_markdown_v2(user_input.strip())}`" + "\n\n"
+                 r"*Step 6/7:* 🎯 Take Profit",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif step == "edit_id":
+        config["id"] = user_input.strip()
+        set_controller_config(context, config)
+        await _pmm_show_review(context, chat_id, message_id, config)
+
+    elif step == "adv_base":
+        try:
+            parts = [float(x.strip()) for x in user_input.split(",")]
+            if len(parts) == 3:
+                config["min_base_pct"], config["target_base_pct"], config["max_base_pct"] = parts
+                set_controller_config(context, config)
+        except ValueError:
+            pass
+        await _pmm_show_advanced(context, chat_id, message_id, config)
+
+    elif step == "adv_cooldown":
+        try:
+            parts = [int(x.strip()) for x in user_input.split(",")]
+            if len(parts) == 2:
+                config["buy_cooldown_time"], config["sell_cooldown_time"] = parts
+                set_controller_config(context, config)
+        except ValueError:
+            pass
+        await _pmm_show_advanced(context, chat_id, message_id, config)
+
+    elif step == "adv_refresh":
+        try:
+            config["executor_refresh_time"] = int(user_input)
+            set_controller_config(context, config)
+        except ValueError:
+            pass
+        await _pmm_show_advanced(context, chat_id, message_id, config)
+
+    elif step == "adv_max_exec":
+        try:
+            config["max_active_executors_by_level"] = int(user_input)
+            set_controller_config(context, config)
+        except ValueError:
+            pass
+        await _pmm_show_advanced(context, chat_id, message_id, config)
+
+
+async def _pmm_show_review(context, chat_id, message_id, config):
+    """Helper to show review step"""
+    keyboard = [
+        [InlineKeyboardButton("✅ Save Config", callback_data="bots:pmm_save")],
+        [
+            InlineKeyboardButton("✏️ Edit ID", callback_data="bots:pmm_edit_id"),
+            InlineKeyboardButton("⚙️ Advanced", callback_data="bots:pmm_edit_advanced"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+    ]
+    await context.bot.edit_message_text(
+        chat_id=chat_id, message_id=message_id,
+        text=r"*📈 PMM Mister \- Review*" + "\n\n"
+             f"*ID:* `{escape_markdown_v2(config.get('id', ''))}`" + "\n\n"
+             f"🏦 *Connector:* `{escape_markdown_v2(config.get('connector_name', ''))}`" + "\n"
+             f"🔗 *Pair:* `{escape_markdown_v2(config.get('trading_pair', ''))}`" + "\n"
+             f"⚡ *Leverage:* `{config.get('leverage', 20)}x`" + "\n"
+             f"💰 *Allocation:* `{config.get('portfolio_allocation', 0.05)*100:.0f}%`" + "\n\n"
+             f"📊 *Spreads:* `{escape_markdown_v2(config.get('buy_spreads', ''))}`" + "\n"
+             f"🎯 *Take Profit:* `{config.get('take_profit', 0.0001)*100:.2f}%`",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _pmm_show_advanced(context, chat_id, message_id, config):
+    """Helper to show advanced settings"""
+    keyboard = [
+        [
+            InlineKeyboardButton("Base %", callback_data="bots:pmm_adv:base"),
+            InlineKeyboardButton("Cooldowns", callback_data="bots:pmm_adv:cooldown"),
+        ],
+        [
+            InlineKeyboardButton("Refresh Time", callback_data="bots:pmm_adv:refresh"),
+            InlineKeyboardButton("Max Executors", callback_data="bots:pmm_adv:max_exec"),
+        ],
+        [InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_review_back")],
+    ]
+    await context.bot.edit_message_text(
+        chat_id=chat_id, message_id=message_id,
+        text=r"*Advanced Settings*" + "\n\n"
+             f"📈 *Base %:* min=`{config.get('min_base_pct', 0.1)*100:.0f}%` "
+             f"target=`{config.get('target_base_pct', 0.2)*100:.0f}%` "
+             f"max=`{config.get('max_base_pct', 0.4)*100:.0f}%`" + "\n"
+             f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 30)}s`" + "\n"
+             f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 15)}s` "
+             f"sell=`{config.get('sell_cooldown_time', 15)}s`" + "\n"
+             f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 4)}`",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
