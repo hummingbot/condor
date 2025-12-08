@@ -31,23 +31,6 @@ body:
        3. 
    validations:
      required: true
- - type: input
-   id: version
-   attributes:
-     label: Release version
-     description: Include your bot version number (Can be found at the upper left corner of your CLI)
-   validations:
-     required: true
- - type: dropdown
-   id: build
-   attributes:
-     label: Type of installation
-     description: What type of installation did you use?
-     options:
-       - Source 
-       - Docker
-   validations:
-     required: true
  - type: textarea
    id: attachment
    attributes:
