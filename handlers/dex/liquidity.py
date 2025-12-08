@@ -512,6 +512,7 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Position action buttons (if positions exist)
     positions = context.user_data.get("lp_positions_cache", [])
+    token_cache = context.user_data.get("token_cache", {})
     if positions:
         # Initialize positions_cache for action handlers
         if "positions_cache" not in context.user_data:
