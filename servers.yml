@@ -2,8 +2,8 @@ servers:
 #  remote:
 #    host: 212.1.12.23
 #    port: 8000
-#    username: donero
-#    password: barabit
+#    username: admin
+#    password: admin
   local:
     host: localhost
     port: 8000
