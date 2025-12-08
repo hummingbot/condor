@@ -1,0 +1,1313 @@
+"""
+Telegram message formatters for Hummingbot data
+"""
+
+from typing import Dict, Any, List, Optional
+import re
+
+
+def escape_markdown_v2(text: str) -> str:
+    """
+    Escape special characters for Telegram MarkdownV2
+
+    Characters that need escaping: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    """
+    special_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(special_chars)}])', r'\\\1', str(text))
+
+
+def format_header_with_server(
+    title: str,
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None,
+    max_width: int = 40
+) -> str:
+    """
+    Format a header with title on the left and server info on the right
+
+    Args:
+        title: Main title text (e.g., "💼 Portfolio Details")
+        server_name: Name of the server (e.g., "remote")
+        server_status: Status of server - "online", "offline", "auth_error", "error"
+        max_width: Maximum character width for alignment (default: 40 for Telegram mobile)
+
+    Returns:
+        Formatted header string with proper alignment
+
+    Example:
+        "💼 Portfolio Details\nServer: remote 🟢"
+    """
+    if not server_name:
+        return title
+
+    # Determine status emoji
+    status_emoji = "🟢"  # Default to online
+    if server_status == "offline":
+        status_emoji = "🔴"
+    elif server_status == "auth_error":
+        status_emoji = "🟠"
+    elif server_status == "error":
+        status_emoji = "⚠️"
+
+    # Build server text - now showing "Server: name emoji"
+    server_text = f"Server: {server_name} {status_emoji}                                    "
+
+    # Return title and server on same line, separated by spaces
+    # Calculate spacing for alignment
+    title_emojis = len([c for c in title if ord(c) > 0x1F300])
+    title_display_len = len(title) + title_emojis
+
+    server_emojis = len([c for c in server_text if ord(c) > 0x1F300])
+    server_display_len = len(server_text) + server_emojis
+
+    spaces_needed = max_width - title_display_len - server_display_len
+
+    if spaces_needed < 1:
+        spaces_needed = 1
+
+    spaces = " " * spaces_needed
+
+    return f"{title}{spaces}{server_text}"
+
+
+def format_number(value: float, decimals: int = 2) -> str:
+    """Format a number with commas and specified decimals"""
+    if value >= 1000000:
+        return f"${value/1000000:.{decimals}f}M"
+    elif value >= 1000:
+        return f"${value/1000:.{decimals}f}K"
+    else:
+        return f"${value:.{decimals}f}"
+
+
+def format_amount(value: float, decimals: int = 4) -> str:
+    """
+    Format token amounts with appropriate precision
+    Uses scientific notation for very small numbers, otherwise uses fixed decimals
+    """
+    if value == 0:
+        return "0"
+    elif abs(value) < 0.0001:
+        # Use scientific notation for very small numbers
+        return f"{value:.2e}"
+    elif abs(value) < 1:
+        # Show more decimals for small amounts
+        return f"{value:.6f}".rstrip('0').rstrip('.')
+    else:
+        # Use specified decimals for normal amounts
+        formatted = f"{value:.{decimals}f}".rstrip('0').rstrip('.')
+        return formatted if '.' in f"{value:.{decimals}f}" else f"{value:.0f}"
+
+
+def format_price(value: float) -> str:
+    """
+    Format token price with appropriate precision based on magnitude.
+    Shows more decimals for lower prices, fewer for higher prices.
+    """
+    if value == 0:
+        return "$0.00"
+    elif value >= 1000:
+        return f"${value:,.0f}"
+    elif value >= 100:
+        return f"${value:.1f}"
+    elif value >= 1:
+        return f"${value:.2f}"
+    elif value >= 0.01:
+        return f"${value:.4f}"
+    elif value >= 0.0001:
+        return f"${value:.6f}"
+    else:
+        return f"${value:.2e}"
+
+
+def format_portfolio_summary(summary: Dict[str, Any]) -> str:
+    """
+    Format portfolio summary for Telegram MarkdownV2
+
+    Args:
+        summary: Portfolio summary from client.portfolio.get_portfolio_summary()
+
+    Returns:
+        Formatted Telegram message
+    """
+    total_value = summary.get("total_value", 0)
+    token_count = summary.get("token_count", 0)
+    account_count = summary.get("account_count", 0)
+    top_tokens = summary.get("top_tokens", [])
+
+    # Header
+    message = "📊 *Portfolio Summary*\n\n"
+
+    # Total value
+    message += f"💰 *Total Value:* {escape_markdown_v2(format_number(total_value))}\n"
+    message += f"🔢 *Tokens:* {escape_markdown_v2(str(token_count))}\n"
+    message += f"👤 *Accounts:* {escape_markdown_v2(str(account_count))}\n\n"
+
+    # Top holdings
+    if top_tokens:
+        message += "*🏆 Top Holdings:*\n"
+        for i, token_data in enumerate(top_tokens[:5], 1):
+            token = token_data.get("token", "Unknown")
+            value = token_data.get("value", 0)
+            percentage = token_data.get("percentage", 0)
+
+            message += f"{escape_markdown_v2(f'{i}. {token}')}: "
+            message += f"{escape_markdown_v2(format_number(value))} "
+            message += f"_{escape_markdown_v2(f'({percentage:.1f}%)')}_\n"
+
+    return message
+
+
+def format_portfolio_state(
+    state: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
+    """
+    Format detailed portfolio state for Telegram with table format
+
+    Args:
+        state: Portfolio state from client.portfolio.get_state()
+        server_name: Name of the server/exchange being queried
+        server_status: Status of the server ("online", "offline", "auth_error", "error")
+
+    Returns:
+        Formatted Telegram message
+    """
+    # Build header with server info on same line
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message = f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
+    else:
+        message = "💼 *Portfolio Details*\n\n"
+
+    total_value = 0.0
+    all_balances = []
+
+    # Collect all balances with metadata
+    for account_name, account_data in state.items():
+        for connector_name, balances in account_data.items():
+            if balances:
+                for balance in balances:
+                    token = balance.get("token", "???")
+                    units = balance.get("units", 0)
+                    value = balance.get("value", 0)
+
+                    if value > 1:  # Only show balances > $1
+                        all_balances.append({
+                            "account": account_name,
+                            "connector": connector_name,
+                            "token": token,
+                            "units": units,
+                            "value": value
+                        })
+                        total_value += value
+
+    # Calculate percentages
+    for balance in all_balances:
+        balance["percentage"] = (balance["value"] / total_value * 100) if total_value > 0 else 0
+
+    # Group by account and connector first, then sort within each group
+    from collections import defaultdict
+    grouped = defaultdict(lambda: defaultdict(list))
+
+    for balance in all_balances:
+        account = balance["account"]
+        connector = balance["connector"]
+        grouped[account][connector].append(balance)
+
+    # Sort each group by value
+    for account in grouped:
+        for connector in grouped[account]:
+            grouped[account][connector].sort(key=lambda x: x["value"], reverse=True)
+
+    # Build the message by iterating through accounts and connectors
+    for account, connectors in grouped.items():
+        message += f"*Account:* {escape_markdown_v2(account)}\n"
+
+        for connector, balances in connectors.items():
+            # Calculate total value for this connector
+            connector_total = sum(balance["value"] for balance in balances)
+            connector_total_str = format_number(connector_total)
+
+            message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
+
+            # Start table - show Token, Price, Value, %
+            table_content = "```\n"
+            table_content += f"{'Token':<10} {'Price':<12} {'Value':<12} {'%':>6}\n"
+            table_content += f"{'─'*10} {'─'*12} {'─'*12} {'─'*6}\n"
+
+            for balance in balances:
+                token = balance["token"]
+                units = balance["units"]
+                value = balance["value"]
+                percentage = balance["percentage"]
+
+                # Calculate price per token
+                price = value / units if units > 0 else 0
+                price_str = format_price(price)
+                value_str = format_number(value).replace('$', '')
+
+                # Truncate long token names
+                token_display = token[:9] if len(token) > 9 else token
+
+                # Add row to table
+                table_content += f"{token_display:<10} {price_str:<12} {value_str:<12} {percentage:>5.1f}%\n"
+
+            # Close table
+            table_content += "```\n\n"
+            message += table_content
+
+    # Show total
+    if total_value > 0:
+        message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2(format_number(total_value))}`\n"
+    else:
+        message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2('$0.00')}`\n"
+
+    return message
+
+
+def _shorten_controller_for_table(name: str, max_len: int = 28) -> str:
+    """Shorten controller name for table display
+
+    Example: gs_binance_SOL-USDT_1252
+    Result:  binance_SOL-USDT_1252
+
+    Example: grid_strike_binance_perpetual_SOL-FDUSD_long_0.0001_0.0002_1
+    Result:  binance_SOL-FDUSD_L_1
+    """
+    if len(name) <= max_len:
+        return name
+
+    parts = name.split("_")
+    connector = ""
+    pair = ""
+    side = ""
+    seq_num = ""
+
+    for p in parts:
+        p_lower = p.lower()
+        p_upper = p.upper()
+        if p_upper in ("LONG", "SHORT"):
+            side = "L" if p_upper == "LONG" else "S"
+        elif "-" in p:
+            pair = p.upper()  # SOL-FDUSD
+        elif p_lower in ("binance", "hyperliquid", "kucoin", "okx", "bybit", "gate", "mexc"):
+            connector = p_lower[:7]  # max 7 chars
+        elif p.isdigit() and len(p) <= 5:
+            # Capture sequence number (last numeric part)
+            seq_num = p
+
+    if pair:
+        if connector and side and seq_num:
+            short = f"{connector}_{pair}_{side}_{seq_num}"
+        elif connector and seq_num:
+            short = f"{connector}_{pair}_{seq_num}"
+        elif connector and side:
+            short = f"{connector}_{pair}_{side}"
+        elif connector:
+            short = f"{connector}_{pair}"
+        elif side:
+            short = f"{pair}_{side}"
+        else:
+            short = pair
+
+        if len(short) <= max_len:
+            return short
+        # Truncate pair if needed
+        return short[:max_len-1] + "."
+
+    return name[:max_len-1] + "."
+
+
+def format_active_bots(
+    bots_data: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
+    """
+    Format active bots status for Telegram with clean table layout.
+
+    Args:
+        bots_data: Active bots data from client.bot_orchestration.get_active_bots_status()
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
+
+    Returns:
+        Formatted Telegram message
+    """
+    message = "🤖 *Active Bots*\n\n"
+
+    # Handle different response formats
+    # New format: {"status": "success", "data": {"bot_name": {...}}}
+    if isinstance(bots_data, dict):
+        if "data" in bots_data and isinstance(bots_data["data"], dict):
+            # New nested format - data is a dict of bot_name -> bot_info
+            bots_dict = bots_data["data"]
+        elif "data" in bots_data and isinstance(bots_data["data"], list):
+            # Old format - data is a list
+            bots_dict = {str(i): bot for i, bot in enumerate(bots_data["data"])}
+        else:
+            bots_dict = bots_data
+    elif isinstance(bots_data, list):
+        bots_dict = {str(i): bot for i, bot in enumerate(bots_data)}
+    else:
+        bots_dict = {}
+
+    if not bots_dict:
+        message += "_No active bots found_\n"
+        return message
+
+    for bot_name, bot_info in bots_dict.items():
+        # Handle string bot_info (just name)
+        if isinstance(bot_info, str):
+            message += f"🟢 *{escape_markdown_v2(bot_info)}*\n\n"
+            continue
+
+        # Full dict format
+        status = bot_info.get("status", "unknown")
+        is_running = status == "running"
+        status_emoji = "🟢" if is_running else "🔴"
+
+        # Truncate long bot names for display
+        display_name = bot_name[:45] + "..." if len(bot_name) > 45 else bot_name
+        message += f"{status_emoji} `{escape_markdown_v2(display_name)}`\n"
+
+        # Performance is a dict of controller_name -> controller_info
+        performance = bot_info.get("performance", {})
+
+        if performance:
+            total_pnl = 0
+            total_volume = 0
+
+            # Create table for controllers
+            message += "```\n"
+            message += f"{'Controller':<28} {'PnL':>8} {'Vol':>7}\n"
+            message += f"{'─'*28} {'─'*8} {'─'*7}\n"
+
+            for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())[:6]):
+                if isinstance(ctrl_info, dict):
+                    ctrl_status = ctrl_info.get("status", "running")
+                    ctrl_perf = ctrl_info.get("performance", {})
+                    realized = ctrl_perf.get("realized_pnl_quote", 0) or 0
+                    unrealized = ctrl_perf.get("unrealized_pnl_quote", 0) or 0
+                    volume = ctrl_perf.get("volume_traded", 0) or 0
+                    pnl = realized + unrealized
+
+                    total_pnl += pnl
+                    total_volume += volume
+
+                    # Status prefix + full controller name
+                    status_prefix = "▶" if ctrl_status == "running" else "⏸"
+                    ctrl_display = f"{status_prefix}{ctrl_name}"[:27]
+
+                    # Format PnL and volume compactly
+                    pnl_str = f"{pnl:+.2f}"[:8]
+                    vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
+                    vol_str = vol_str[:7]
+
+                    message += f"{ctrl_display:<28} {pnl_str:>8} {vol_str:>7}\n"
+
+            # Show totals row
+            if len(performance) >= 1:
+                message += f"{'─'*28} {'─'*8} {'─'*7}\n"
+                pnl_total_str = f"{total_pnl:+.2f}"[:8]
+                vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
+                vol_total = vol_total[:7]
+                message += f"{'TOTAL':<28} {pnl_total_str:>8} {vol_total:>7}\n"
+
+            message += "```\n"
+
+        # Show error indicator if there are errors
+        error_logs = bot_info.get("error_logs", [])
+        if error_logs:
+            message += f"⚠️ _{len(error_logs)} error\\(s\\)_\n"
+
+        message += "\n"
+
+    message += f"_{len(bots_dict)} bot\\(s\\) running_ • _Tap for details_"
+
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message += f"\n\n_Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
+    return message
+
+
+def format_bot_status(
+    bot_status: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
+    """
+    Format individual bot status for Telegram
+
+    Args:
+        bot_status: Bot status from client.bot_orchestration.get_bot_status()
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
+
+    Returns:
+        Formatted Telegram message
+    """
+    if bot_status.get("status") != "success":
+        return format_error_message(
+            bot_status.get('message', 'Unknown error'),
+            server_name=server_name,
+            server_status=server_status
+        )
+
+    data = bot_status.get("data", {})
+    bot_name = data.get("name", "Unknown")
+    is_running = data.get("is_running", False)
+
+    # Format header
+    bot_status_emoji = "🟢" if is_running else "🔴"
+    message = f"{bot_status_emoji} *Bot:* {escape_markdown_v2(bot_name)}\n\n"
+
+    # Performance
+    performance = data.get("performance", {})
+    if performance:
+        message += "*📊 Performance:*\n"
+        message += f"  Realized PnL: {escape_markdown_v2(format_number(performance.get('realized_pnl_quote', 0)))}\n"
+        message += f"  Unrealized PnL: {escape_markdown_v2(format_number(performance.get('unrealized_pnl_quote', 0)))}\n"
+        message += f"  Volume: {escape_markdown_v2(format_number(performance.get('volume_traded', 0)))}\n\n"
+
+    # Controllers
+    controllers = data.get("controllers", [])
+    if controllers:
+        message += f"*⚙️ Controllers \\({escape_markdown_v2(str(len(controllers)))}\\):*\n"
+        for ctrl in controllers:
+            ctrl_name = ctrl.get("controller_name", "Unknown")
+            ctrl_type = ctrl.get("controller_type", "unknown")
+            message += f"  • {escape_markdown_v2(ctrl_name)} _{escape_markdown_v2(f'({ctrl_type})')}_\n"
+
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message += f"\n{'⎯' * 30}\n"
+        message += f"{' ' * 15}_Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
+    return message
+
+
+def format_error_message(
+    error: str,
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
+    """
+    Format error message for Telegram
+
+    Args:
+        error: Error message
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
+
+    Returns:
+        Formatted error message
+    """
+    msg = f"❌ *Error*\n\n{escape_markdown_v2(error)}"
+
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        separator = '⎯' * 15
+        msg += f"\n\n{separator} _Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
+    return msg
+
+
+def format_success_message(
+    message: str,
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None
+) -> str:
+    """
+    Format success message for Telegram
+
+    Args:
+        message: Success message
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
+
+    Returns:
+        Formatted success message
+    """
+    msg = f"✅ *Success*\n\n{escape_markdown_v2(message)}"
+
+    # Add server footer at the bottom right
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        separator = '⎯' * 15
+        msg += f"\n\n{separator} _Server: {escape_markdown_v2(server_name)} {status_emoji}_"
+
+    return msg
+
+def format_perpetual_positions(positions_data: Dict[str, Any]) -> str:
+    """
+    Format perpetual positions for Telegram display
+
+    Args:
+        positions_data: Dictionary with 'positions' list and 'total' count
+
+    Returns:
+        Formatted string section for perpetual positions
+    """
+    positions = positions_data.get('positions', [])
+    total = positions_data.get('total', 0)
+
+    if not positions or total == 0:
+        return "📊 *Perpetual Positions*\n_No open positions_\n"
+
+    message = f"📊 *Perpetual Positions* \\({escape_markdown_v2(str(total))}\\)\n\n"
+
+    # Group by account
+    from collections import defaultdict
+    by_account = defaultdict(list)
+
+    for pos in positions:
+        account_name = pos.get('account_name', 'Unknown')
+        by_account[account_name].append(pos)
+
+    # Format each account's positions
+    for account_name, account_positions in by_account.items():
+        message += f"*Account:* {escape_markdown_v2(account_name)}\n"
+
+        # Create table - optimized for mobile width with minimal spacing
+        # Columns: Connector(10) Pair(10) Side(4) Value(7) PnL$(7)
+        table_content = "```\n"
+        table_content += f"{'Connector':<10} {'Pair':<10} {'Side':<4} {'Value':<7} {'PnL($)':>7}\n"
+        table_content += f"{'─'*10} {'─'*10} {'─'*4} {'─'*7} {'─'*7}\n"
+
+        for pos in account_positions:
+            connector = pos.get('connector_name', 'N/A')
+            pair = pos.get('trading_pair', 'N/A')
+            # Try multiple field names for side (same as clob_trading)
+            side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
+            amount = pos.get('amount', 0)
+            entry_price = pos.get('entry_price', 0)
+            unrealized_pnl = pos.get('unrealized_pnl', 0)
+
+            # Truncate connector name if too long
+            connector_display = connector[:9] if len(connector) > 9 else connector
+
+            # Truncate pair name
+            pair_display = pair[:9] if len(pair) > 9 else pair
+
+            # Truncate side - use short form
+            side_upper = side.upper() if side else 'N/A'
+            if side_upper in ('LONG', 'BUY'):
+                side_display = 'LONG'
+            elif side_upper in ('SHORT', 'SELL'):
+                side_display = 'SHRT'
+            else:
+                side_display = side[:4] if len(side) > 4 else side
+
+            # Calculate position value (Size * Entry Price)
+            try:
+                position_value = float(amount) * float(entry_price)
+                value_str = format_number(position_value).replace('$', '')[:6]
+            except (ValueError, TypeError):
+                value_str = "N/A"
+
+            try:
+                pnl_float = float(unrealized_pnl)
+                if pnl_float >= 0:
+                    pnl_str = f"+{pnl_float:.2f}"[:7]
+                else:
+                    pnl_str = f"{pnl_float:.2f}"[:7]
+            except (ValueError, TypeError):
+                pnl_str = str(unrealized_pnl)[:7]
+
+            table_content += f"{connector_display:<10} {pair_display:<10} {side_display:<4} {value_str:<7} {pnl_str:>7}\n"
+
+        table_content += "```\n\n"
+        message += table_content
+
+    return message
+
+
+# Well-known token addresses for resolution
+KNOWN_TOKENS = {
+    # Solana Native
+    "So11111111111111111111111111111111111111112": "SOL",
+    # Stablecoins
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": "USDT",
+    # LSTs
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "mSOL",
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": "jitoSOL",
+    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1": "bSOL",
+    # Major tokens
+    "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs": "ETH",
+    "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": "BONK",
+    "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": "JUP",
+    "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE": "ORCA",
+    "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3": "PYTH",
+    "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof": "RNDR",
+    # Mining/DeFi
+    "oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp": "ORE",
+    # Meteora
+    "METvsvVRapdj9cFLzq4Tr43xK4tAjQfwX76z3n6mWQL": "MET",
+    # Add more as needed
+}
+
+# Reverse lookup: symbol -> address
+KNOWN_TOKEN_ADDRESSES = {symbol: address for address, symbol in KNOWN_TOKENS.items()}
+
+
+def resolve_token_address(symbol: str, token_cache: Optional[Dict[str, str]] = None) -> Optional[str]:
+    """
+    Resolve a token symbol to its address.
+
+    Args:
+        symbol: Token symbol to resolve (e.g., "SOL", "USDC")
+        token_cache: Optional cache from Gateway tokens {address: symbol}
+
+    Returns:
+        Token address or None if not found
+    """
+    if not symbol:
+        return None
+
+    symbol_upper = symbol.upper()
+
+    # Check known tokens first
+    if symbol_upper in KNOWN_TOKEN_ADDRESSES:
+        return KNOWN_TOKEN_ADDRESSES[symbol_upper]
+
+    # Check provided cache (reverse lookup)
+    if token_cache:
+        for address, sym in token_cache.items():
+            if sym.upper() == symbol_upper:
+                return address
+
+    return None
+
+
+def resolve_token_symbol(address: str, token_cache: Optional[Dict[str, str]] = None) -> str:
+    """
+    Resolve a token address to its symbol.
+
+    Args:
+        address: Token address to resolve
+        token_cache: Optional cache from Gateway tokens {address: symbol}
+
+    Returns:
+        Token symbol or shortened address
+    """
+    if not address:
+        return "???"
+
+    # Check provided cache first
+    if token_cache and address in token_cache:
+        return token_cache[address]
+
+    # Check known tokens
+    if address in KNOWN_TOKENS:
+        return KNOWN_TOKENS[address]
+
+    # Shorten address: first 4 chars
+    return address[:4] if len(address) > 4 else address
+
+
+def _resolve_token_symbol(address: str) -> str:
+    """Resolve a token address to its symbol (legacy wrapper)."""
+    return resolve_token_symbol(address, None)
+
+
+def _get_chain_from_network(network: str) -> str:
+    """Extract chain name from network string (e.g., 'solana-mainnet-beta' -> 'solana')."""
+    if not network:
+        return "?"
+    network = network.lower()
+    if network.startswith("solana"):
+        return "solana"
+    elif network.startswith("ethereum") or network.startswith("eth"):
+        return "ethereum"
+    elif network.startswith("polygon"):
+        return "polygon"
+    elif network.startswith("arbitrum"):
+        return "arbitrum"
+    elif network.startswith("base"):
+        return "base"
+    # Fallback: first part before dash
+    if '-' in network:
+        return network.split('-')[0][:8]
+    return network[:8]
+
+
+def _looks_like_address(s: str) -> bool:
+    """Check if a string looks like a blockchain address (long alphanumeric)."""
+    if not s:
+        return False
+    # Addresses are typically 32+ chars and alphanumeric
+    return len(s) > 20 and s.replace('1', '').replace('2', '').isalnum()
+
+
+def _format_pnl_value(value: float) -> str:
+    """Format PNL value with sign and compact notation."""
+    if value is None:
+        return "—"
+    sign = "+" if value >= 0 else ""
+    if abs(value) >= 1000:
+        return f"{sign}{value/1000:.1f}k"
+    elif abs(value) >= 1:
+        return f"{sign}{value:.2f}"
+    elif abs(value) >= 0.01:
+        return f"{sign}{value:.3f}"
+    else:
+        return f"{sign}{value:.4f}"
+
+
+def format_lp_positions(positions_data: Dict[str, Any], token_cache: Optional[Dict[str, str]] = None) -> str:
+    """
+    Format LP (CLMM) positions for Telegram display, grouped by connector.
+
+    Args:
+        positions_data: Dictionary with 'positions' list and 'total' count
+        token_cache: Optional {address: symbol} mapping for token resolution
+
+    Returns:
+        Formatted string section for LP positions
+    """
+    positions = positions_data.get('positions', [])
+    total = positions_data.get('total', 0)
+    token_cache = token_cache or {}
+
+    if not positions or total == 0:
+        return "🏊 *LP Positions \\(CLMM\\)*\n_No active LP positions_\n"
+
+    message = f"🏊 *LP Positions \\(CLMM\\)* \\({escape_markdown_v2(str(total))}\\)\n"
+
+    # Group positions by connector
+    from collections import defaultdict
+    by_connector = defaultdict(list)
+    for pos in positions:
+        connector = pos.get('connector', 'unknown')
+        by_connector[connector].append(pos)
+
+    # Format each connector's positions
+    for connector, conn_positions in by_connector.items():
+        # Get network/chain from first position
+        first_pos = conn_positions[0]
+        chain = _get_chain_from_network(first_pos.get('network', ''))
+
+        message += f"\n*{escape_markdown_v2(connector)}* \\({escape_markdown_v2(chain)}\\)\n"
+
+        # Create table with PNL info
+        # Pair(10) Range(9) Status(3) BasePNL(8) QuotePNL(8)
+        table_content = "```\n"
+        table_content += f"{'Pair':<10} {'Range':<9} {'St':>2} {'B.PNL':>7} {'Q.PNL':>7}\n"
+        table_content += f"{'─'*10} {'─'*9} {'─'*2} {'─'*7} {'─'*7}\n"
+
+        for pos in conn_positions[:8]:  # Max 8 per connector
+            # Resolve token pair using cache
+            base_token = pos.get('base_token', '')
+            quote_token = pos.get('quote_token', '')
+            base_symbol = resolve_token_symbol(base_token, token_cache)
+            quote_symbol = resolve_token_symbol(quote_token, token_cache)
+            pair_str = f"{base_symbol[:4]}-{quote_symbol[:4]}"
+
+            # Format range
+            lower_price = pos.get('lower_price', 0)
+            upper_price = pos.get('upper_price', 0)
+            if lower_price and upper_price:
+                try:
+                    low = float(lower_price)
+                    high = float(upper_price)
+                    if low >= 1000:
+                        range_str = f"{low/1000:.1f}k-{high/1000:.1f}k"
+                    elif low >= 1:
+                        range_str = f"{low:.2f}-{high:.2f}"
+                    else:
+                        range_str = f"{low:.3f}-{high:.3f}"
+                    range_str = range_str[:8]
+                except:
+                    range_str = "N/A"
+            else:
+                range_str = "N/A"
+
+            # Status (IN_RANGE -> "IN", OUT_OF_RANGE -> "OUT")
+            in_range = pos.get('in_range', '')
+            if in_range == 'IN_RANGE':
+                status = "✓"
+            elif in_range == 'OUT_OF_RANGE':
+                status = "✗"
+            else:
+                status = "?"
+
+            # PNL from pnl_summary
+            pnl_summary = pos.get('pnl_summary', {})
+            base_pnl = pnl_summary.get('base_pnl')
+            quote_pnl = pnl_summary.get('quote_pnl')
+
+            base_pnl_str = _format_pnl_value(base_pnl)[:7] if base_pnl is not None else "—"
+            quote_pnl_str = _format_pnl_value(quote_pnl)[:7] if quote_pnl is not None else "—"
+
+            table_content += f"{pair_str:<10} {range_str:<9} {status:>2} {base_pnl_str:>7} {quote_pnl_str:>7}\n"
+
+        if len(conn_positions) > 8:
+            table_content += f"... +{len(conn_positions) - 8} more\n"
+
+        table_content += "```\n"
+        message += table_content
+
+    return message
+
+
+def format_active_orders(orders_data: Dict[str, Any]) -> str:
+    """
+    Format active orders for Telegram display
+
+    Args:
+        orders_data: Dictionary with 'orders' list and 'total' count
+
+    Returns:
+        Formatted string section for active orders
+    """
+    orders = orders_data.get('orders', [])
+    total = orders_data.get('total', 0)
+
+    if not orders or total == 0:
+        return "📋 *Active Orders*\n_No active orders_\n"
+
+    message = f"📋 *Active Orders* \\({escape_markdown_v2(str(total))}\\)\n\n"
+
+    # Group by account
+    from collections import defaultdict
+    by_account = defaultdict(list)
+
+    for order in orders:
+        account_name = order.get('account_name', 'Unknown')
+        by_account[account_name].append(order)
+
+    # Format each account's orders
+    for account_name, account_orders in by_account.items():
+        message += f"*Account:* {escape_markdown_v2(account_name)}\n"
+
+        # Create table - optimized widths for mobile
+        table_content = "```\n"
+        table_content += f"{'Exch':<11} {'Pair':<9} {'Side':<5} {'Type':<6} {'Amt':<8} {'Price':<8}\n"
+        table_content += f"{'─'*11} {'─'*9} {'─'*5} {'─'*6} {'─'*8} {'─'*8}\n"
+
+        for order in account_orders[:10]:  # Show max 10 orders per account
+            connector = order.get('connector_name', 'N/A')[:10]
+            pair = order.get('trading_pair', 'N/A')[:8]
+            side = order.get('trade_type', 'N/A')[:4]
+            order_type = order.get('order_type', 'N/A')[:5]
+            amount = order.get('amount', 0)
+            price = order.get('price', 0)
+
+            # Format amount
+            amount_str = format_amount(amount)[:7]
+
+            # Format price
+            try:
+                price_float = float(price)
+                if price_float >= 1000:
+                    price_str = f"{price_float:.0f}"[:7]
+                elif price_float >= 1:
+                    price_str = f"{price_float:.2f}"[:7]
+                else:
+                    price_str = f"{price_float:.4f}"[:7]
+            except (ValueError, TypeError):
+                price_str = str(price)[:7]
+
+            table_content += f"{connector:<11} {pair:<9} {side:<5} {order_type:<6} {amount_str:<8} {price_str:<8}\n"
+
+        if len(account_orders) > 10:
+            table_content += f"\n... and {len(account_orders) - 10} more orders\n"
+
+        table_content += "```\n\n"
+        message += table_content
+
+    return message
+
+
+def format_pnl_indicator(value: Optional[float]) -> str:
+    """Format a PNL percentage with color indicator"""
+    if value is None:
+        return "—"
+    arrow = "▲" if value >= 0 else "▼"
+    return f"{arrow}{abs(value):.1f}%"
+
+
+def format_change_compact(value: Optional[float]) -> str:
+    """Format a percentage change compactly for table columns"""
+    if value is None:
+        return "—"
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{value:.1f}%"
+
+
+def format_portfolio_overview(
+    overview_data: Dict[str, Any],
+    server_name: Optional[str] = None,
+    server_status: Optional[str] = None,
+    pnl_indicators: Optional[Dict[str, Optional[float]]] = None,
+    changes_24h: Optional[Dict[str, Any]] = None,
+    token_cache: Optional[Dict[str, str]] = None
+) -> str:
+    """
+    Format complete portfolio overview with all sections
+
+    Args:
+        overview_data: Dictionary from get_portfolio_overview() containing:
+            - balances: Portfolio state
+            - perp_positions: Perpetual positions data
+            - lp_positions: LP positions data
+            - active_orders: Active orders data
+        server_name: Name of the server (optional)
+        server_status: Status of the server (optional)
+        pnl_indicators: Dict with pnl_24h, pnl_7d, pnl_30d percentages (optional)
+        changes_24h: Dict with token and connector 24h changes (optional)
+        token_cache: Dict mapping token addresses to symbols for LP position resolution (optional)
+
+    Returns:
+        Formatted Telegram message with all portfolio sections
+    """
+    # Build header
+    if server_name:
+        status_emoji = "🟢"
+        if server_status == "offline":
+            status_emoji = "🔴"
+        elif server_status == "auth_error":
+            status_emoji = "🟠"
+        elif server_status == "error":
+            status_emoji = "⚠️"
+
+        message = f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
+    else:
+        message = "💼 *Portfolio Details*\n\n"
+
+    # Add PNL indicators bar if available
+    if pnl_indicators:
+        pnl_24h = pnl_indicators.get("pnl_24h")
+        pnl_7d = pnl_indicators.get("pnl_7d")
+        pnl_30d = pnl_indicators.get("pnl_30d")
+        detected_movements = pnl_indicators.get("detected_movements", [])
+
+        # Only show if we have at least one value
+        if any(v is not None for v in [pnl_24h, pnl_7d, pnl_30d]):
+            pnl_parts = []
+            if pnl_24h is not None:
+                pnl_parts.append(f"24h: `{escape_markdown_v2(format_pnl_indicator(pnl_24h))}`")
+            if pnl_7d is not None:
+                pnl_parts.append(f"7d: `{escape_markdown_v2(format_pnl_indicator(pnl_7d))}`")
+            if pnl_30d is not None:
+                pnl_parts.append(f"30d: `{escape_markdown_v2(format_pnl_indicator(pnl_30d))}`")
+
+            if pnl_parts:
+                message += "📈 *PNL:* " + " \\| ".join(pnl_parts) + "\n"
+
+        # Show detected movements if any (max 5 most recent)
+        if detected_movements:
+            message += f"_\\({len(detected_movements)} movimiento\\(s\\) detectado\\(s\\) ajustados\\)_\n"
+            message += "\n"
+
+    # ============================================
+    # SECTION 1: BALANCES - Detailed tables by account and connector
+    # ============================================
+    balances = overview_data.get('balances')
+    if balances:
+        total_value = 0.0
+        all_balances = []
+
+        # Collect all balances with metadata
+        for account_name, account_data in balances.items():
+            for connector_name, connector_balances in account_data.items():
+                if connector_balances:
+                    for balance in connector_balances:
+                        token = balance.get("token", "???")
+                        units = balance.get("units", 0)
+                        value = balance.get("value", 0)
+
+                        if value > 1:  # Only show balances > $1
+                            all_balances.append({
+                                "account": account_name,
+                                "connector": connector_name,
+                                "token": token,
+                                "units": units,
+                                "value": value
+                            })
+                            total_value += value
+
+        # Calculate percentages
+        for balance in all_balances:
+            balance["percentage"] = (balance["value"] / total_value * 100) if total_value > 0 else 0
+
+        # Group by account and connector
+        from collections import defaultdict
+        grouped = defaultdict(lambda: defaultdict(list))
+
+        for balance in all_balances:
+            account = balance["account"]
+            connector = balance["connector"]
+            grouped[account][connector].append(balance)
+
+        # Sort each group by value
+        for account in grouped:
+            for connector in grouped[account]:
+                grouped[account][connector].sort(key=lambda x: x["value"], reverse=True)
+
+        # Get 24h changes data
+        token_changes = changes_24h.get("tokens", {}) if changes_24h else {}
+        connector_changes = changes_24h.get("connectors", {}) if changes_24h else {}
+
+        # Build the balances section by iterating through accounts and connectors
+        for account, connectors in grouped.items():
+            message += f"*Account:* {escape_markdown_v2(account)}\n"
+
+            for connector, balances_list in connectors.items():
+                # Calculate total value for this connector
+                connector_total = sum(balance["value"] for balance in balances_list)
+                connector_total_str = format_number(connector_total)
+
+                # Get connector 24h change
+                conn_change = connector_changes.get(account, {}).get(connector, {})
+                conn_pct = conn_change.get("pct_change")
+
+                if conn_pct is not None:
+                    change_str = format_change_compact(conn_pct)
+                    message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}` \\({escape_markdown_v2(change_str)}\\)\n\n"
+                else:
+                    message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
+
+                # Start table - Token, Price, Value, %Total, 24h
+                table_content = "```\n"
+                table_content += f"{'Token':<6} {'Price':<8} {'Value':<7} {'%Tot':>5} {'24h':>6}\n"
+                table_content += f"{'─'*6} {'─'*8} {'─'*7} {'─'*5} {'─'*6}\n"
+
+                for balance in balances_list:
+                    token = balance["token"]
+                    units = balance["units"]
+                    value = balance["value"]
+
+                    # Calculate price per token
+                    price = value / units if units > 0 else 0
+                    price_str = format_price(price)[:8]
+
+                    # Calculate percentage of total portfolio
+                    pct = (value / total_value * 100) if total_value > 0 else 0
+                    pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
+
+                    value_str = format_number(value).replace('$', '')[:7]
+
+                    # Get 24h price change for this token
+                    token_change = token_changes.get(token, {})
+                    price_change = token_change.get("price_change")
+                    if price_change is not None:
+                        sign = "+" if price_change >= 0 else ""
+                        change_24h_str = f"{sign}{price_change:.1f}%"[:6]
+                    else:
+                        change_24h_str = "—"
+
+                    # Truncate long token names
+                    token_display = token[:5] if len(token) > 5 else token
+
+                    # Add row to table
+                    table_content += f"{token_display:<6} {price_str:<8} {value_str:<7} {pct_str:>5} {change_24h_str:>6}\n"
+
+                # Close table
+                table_content += "```\n\n"
+                message += table_content
+
+        # Show total
+        if total_value > 0:
+            message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2(format_number(total_value))}`\n\n"
+        else:
+            message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2('$0.00')}`\n\n"
+
+    # ============================================
+    # SECTION 2: PERPETUAL POSITIONS
+    # ============================================
+    perp_positions = overview_data.get('perp_positions', {"positions": [], "total": 0})
+    message += format_perpetual_positions(perp_positions)
+
+    # ============================================
+    # SECTION 3: LP POSITIONS
+    # ============================================
+    lp_positions = overview_data.get('lp_positions', {"positions": [], "total": 0})
+    message += format_lp_positions(lp_positions, token_cache)
+
+    # ============================================
+    # SECTION 4: ACTIVE ORDERS
+    # ============================================
+    active_orders = overview_data.get('active_orders', {"orders": [], "total": 0})
+    message += format_active_orders(active_orders)
+
+    return message
+
+
+# ============================================
+# TRADING FORMATTERS
+# ============================================
+
+def format_orders_table(orders: List[Dict[str, Any]]) -> str:
+    """
+    Format orders as a monospace table for Telegram
+
+    Args:
+        orders: List of order dictionaries
+
+    Returns:
+        Formatted table string in code block
+    """
+    if not orders:
+        return "No orders found"
+
+    # Build monospace table
+    table_content = ""
+    table_content += f"{'Pair':<10} {'Side':<4} {'Amt':<8} {'Price':<8} {'Type':<6} {'Status':<7}\n"
+    table_content += f"{'─'*10} {'─'*4} {'─'*8} {'─'*8} {'─'*6} {'─'*7}\n"
+
+    for order in orders[:10]:  # Limit to 10 for Telegram
+        pair = order.get('trading_pair', 'N/A')
+        side = order.get('trade_type', 'N/A')
+        amount = order.get('amount', 0)
+        price = order.get('price', 0)
+        order_type = order.get('order_type', 'N/A')
+        status = order.get('status', 'N/A')
+
+        # Truncate long values
+        pair_display = pair[:9] if len(pair) > 9 else pair
+        side_display = side[:4] if len(side) > 4 else side
+        type_display = order_type[:6] if len(order_type) > 6 else order_type
+        status_display = status[:7] if len(status) > 7 else status
+
+        # Format amount
+        try:
+            amount_str = format_amount(float(amount))[:8]
+        except (ValueError, TypeError):
+            amount_str = str(amount)[:8]
+
+        # Format price
+        try:
+            price_str = format_amount(float(price))[:8] if price else '-'
+        except (ValueError, TypeError):
+            price_str = str(price)[:8] if price else '-'
+
+        table_content += f"{pair_display:<10} {side_display:<4} {amount_str:<8} {price_str:<8} {type_display:<6} {status_display:<7}\n"
+
+    if len(orders) > 10:
+        table_content += f"\n... and {len(orders) - 10} more orders\n"
+
+    return table_content
+
+
+def format_positions_table(positions: List[Dict[str, Any]]) -> str:
+    """
+    Format positions as a monospace table for Telegram
+
+    Args:
+        positions: List of position dictionaries
+
+    Returns:
+        Formatted table string in code block
+    """
+    if not positions:
+        return "No positions found"
+
+    # Group positions by account
+    from collections import defaultdict
+    by_account = defaultdict(list)
+
+    for pos in positions:
+        account_name = pos.get('account_name', 'master_account')
+        by_account[account_name].append(pos)
+
+    table_content = ""
+
+    # Format each account's positions
+    for account_name, account_positions in by_account.items():
+        table_content += f"Account: {account_name}\n"
+
+        # Create table - same format as format_perpetual_positions
+        table_content += f"{'Connector':<10} {'Pair':<10} {'Side':<4} {'Value':<7} {'PnL($)':>7}\n"
+        table_content += f"{'─'*10} {'─'*10} {'─'*4} {'─'*7} {'─'*7}\n"
+
+        for pos in account_positions[:10]:  # Limit to 10 for Telegram
+            connector = pos.get('connector_name', 'N/A')
+            pair = pos.get('trading_pair', 'N/A')
+            # Try multiple field names for side
+            side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', 'N/A')
+            amount = pos.get('amount', 0)
+            entry_price = pos.get('entry_price', 0)
+            pnl = pos.get('unrealized_pnl', 0)
+
+            # Truncate connector name if too long
+            connector_display = connector[:9] if len(connector) > 9 else connector
+
+            # Truncate pair name if too long
+            pair_display = pair[:9] if len(pair) > 9 else pair
+
+            # Truncate side - use short form
+            side_upper = side.upper() if side else 'N/A'
+            if side_upper in ('LONG', 'BUY'):
+                side_display = 'LONG'
+            elif side_upper in ('SHORT', 'SELL'):
+                side_display = 'SHRT'
+            else:
+                side_display = side[:4] if len(side) > 4 else side
+
+            # Calculate position value (Size * Entry Price)
+            try:
+                position_value = abs(float(amount) * float(entry_price))
+                value_str = format_number(position_value).replace('$', '')[:6]
+            except (ValueError, TypeError):
+                value_str = "N/A"
+
+            # Format PnL
+            try:
+                pnl_float = float(pnl)
+                if pnl_float >= 0:
+                    pnl_str = f"+{pnl_float:.2f}"[:7]
+                else:
+                    pnl_str = f"{pnl_float:.2f}"[:7]
+            except (ValueError, TypeError):
+                pnl_str = str(pnl)[:7]
+
+            table_content += f"{connector_display:<10} {pair_display:<10} {side_display:<4} {value_str:<7} {pnl_str:>7}\n"
+
+        if len(account_positions) > 10:
+            table_content += f"\n... and {len(account_positions) - 10} more positions\n"
+
+    return table_content

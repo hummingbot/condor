@@ -1,33 +1,50 @@
 #!/bin/bash
 
+echo "==================================="
+echo "  Condor Bot Setup"
+echo "==================================="
+echo ""
+
 # Prompt for Telegram Bot Token
 read -p "Enter your Telegram Bot Token: " telegram_token
 
 # Prompt for Authorized User IDs
+echo ""
 echo "Enter the User IDs that are allowed to talk with the bot."
 echo "Separate multiple User IDs with a comma (e.g., 12345,67890,23456)."
 read -p "User IDs: " user_ids
 
-# Prompt for extra Hummingbot images
-echo "Enter extra Hummingbot images to download, separated by a comma."
-echo "Example: hummingbot:development,hummingbot:configurable"
-read -p "Extra Hummingbot Images: " extra_hummingbot_images
+# Prompt for OpenAI API Key (optional)
+echo ""
+echo "Enter your OpenAI API Key (optional, for AI features)."
+echo "Press Enter to skip if not using AI features."
+read -p "OpenAI API Key: " openai_key
 
-# Remove spaces and ensure comma separation
+# Remove spaces from user IDs
 user_ids=$(echo $user_ids | tr -d '[:space:]')
-extra_hummingbot_images=$(echo $extra_hummingbot_images | tr -d '[:space:]')
-
-# Include default Hummingbot image in the list
-all_hummingbot_images="hummingbot/hummingbot:latest"
-if [ -n "$extra_hummingbot_images" ]; then
-    all_hummingbot_images="$extra_hummingbot_images,$all_hummingbot_images"
-fi
 
 # Create or update .env file
 echo "TELEGRAM_TOKEN=$telegram_token" > .env
 echo "AUTHORIZED_USERS=$user_ids" >> .env
-echo "EXTRA_HUMMINGBOT_IMAGES=$extra_hummingbot_images" >> .env
-echo "ALL_HUMMINGBOT_IMAGES=$all_hummingbot_images" >> .env
+if [ -n "$openai_key" ]; then
+    echo "OPENAI_API_KEY=$openai_key" >> .env
+fi
 
-echo ".env file setup completed."
-echo "You can now run 'docker-compose up -d' to start the bot."
+echo ""
+echo ".env file created successfully!"
+
+echo ""
+echo "Installing Chrome for Plotly image generation..."
+plotly_get_chrome || kaleido_get_chrome || python -c "import kaleido; kaleido.get_chrome_sync()"
+echo ""
+echo "==================================="
+echo "  How to Run Condor"
+echo "==================================="
+echo ""
+echo "Option 1: Docker (Recommended)"
+echo "  docker-compose up -d"
+echo ""
+echo "Option 2: Local Python"
+echo "  conda activate condor"
+echo "  python main.py"
+echo ""

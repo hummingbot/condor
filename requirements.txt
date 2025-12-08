@@ -1,0 +1,16 @@
+python-telegram-bot[job-queue]
+hummingbot-api-client==1.2.3
+python-dotenv
+pytest
+pre-commit
+black
+isort
+PyYAML
+pydantic-ai
+pydantic-ai-slim[openai]
+aiohttp
+watchfiles
+kaleido
+plotly
+pandas
+geckoterminal-py
