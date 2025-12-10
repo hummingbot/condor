@@ -24,6 +24,7 @@ class ServerManager:
         self.servers: Dict[str, dict] = {}
         self.clients: Dict[str, HummingbotAPIClient] = {}
         self.default_server: Optional[str] = None
+        self.per_chat_servers: Dict[int, str] = {}  # chat_id -> server_name
         self._load_config()
 
     def _load_config(self):
@@ -40,6 +41,14 @@ class ServerManager:
                 self.servers = config.get('servers', {})
                 self.default_server = config.get('default_server', None)
 
+                # Load per-chat server defaults
+                per_chat_raw = config.get('per_chat_defaults', {})
+                self.per_chat_servers = {
+                    int(chat_id): server_name
+                    for chat_id, server_name in per_chat_raw.items()
+                    if server_name in self.servers
+                }
+
                 # Validate default server exists
                 if self.default_server and self.default_server not in self.servers:
                     logger.warning(f"Default server '{self.default_server}' not found in servers list")
@@ -48,10 +57,13 @@ class ServerManager:
                 logger.info(f"Loaded {len(self.servers)} servers from {self.config_path}")
                 if self.default_server:
                     logger.info(f"Default server: {self.default_server}")
+                if self.per_chat_servers:
+                    logger.info(f"Loaded {len(self.per_chat_servers)} per-chat server defaults")
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
             self.servers = {}
             self.default_server = None
+            self.per_chat_servers = {}
 
     def _save_config(self):
         """Save servers configuration to YAML file"""
@@ -59,6 +71,8 @@ class ServerManager:
             config = {'servers': self.servers}
             if self.default_server:
                 config['default_server'] = self.default_server
+            if self.per_chat_servers:
+                config['per_chat_defaults'] = self.per_chat_servers
             with open(self.config_path, 'w') as f:
                 yaml.dump(config, f, default_flow_style=False, sort_keys=False)
             logger.info(f"Saved configuration to {self.config_path}")
@@ -147,6 +161,54 @@ class ServerManager:
         """Get the default server name"""
         return self.default_server
 
+    def get_default_server_for_chat(self, chat_id: int) -> Optional[str]:
+        """Get the default server for a specific chat, falling back to global default"""
+        server = self.per_chat_servers.get(chat_id)
+        if server and server in self.servers:
+            return server
+        # Fallback to global default server
+        if self.default_server and self.default_server in self.servers:
+            return self.default_server
+        # Last resort: first available server
+        if self.servers:
+            return list(self.servers.keys())[0]
+        return None
+
+    def set_default_server_for_chat(self, chat_id: int, server_name: str) -> bool:
+        """Set the default server for a specific chat"""
+        if server_name not in self.servers:
+            logger.error(f"Server '{server_name}' not found")
+            return False
+
+        self.per_chat_servers[chat_id] = server_name
+        self._save_config()
+        logger.info(f"Set default server for chat {chat_id} to '{server_name}'")
+        return True
+
+    def clear_default_server_for_chat(self, chat_id: int) -> bool:
+        """Clear the per-chat default server, reverting to global default"""
+        if chat_id in self.per_chat_servers:
+            del self.per_chat_servers[chat_id]
+            self._save_config()
+            logger.info(f"Cleared default server for chat {chat_id}")
+            return True
+        return False
+
+    def get_chat_server_info(self, chat_id: int) -> dict:
+        """Get server info for a chat including whether it's using per-chat or global default"""
+        per_chat = self.per_chat_servers.get(chat_id)
+        if per_chat and per_chat in self.servers:
+            return {
+                "server": per_chat,
+                "is_per_chat": True,
+                "global_default": self.default_server
+            }
+        return {
+            "server": self.default_server,
+            "is_per_chat": False,
+            "global_default": self.default_server
+        }
+
     async def check_server_status(self, name: str) -> dict:
         """
         Check if a server is online and responding using protected endpoint
@@ -162,11 +224,12 @@ class ServerManager:
 
         # Create a temporary client for testing (don't cache it)
         # Important: Do NOT use cached clients to ensure we test current credentials
+        # Use 3 second timeout for quick status checks
         client = HummingbotAPIClient(
             base_url=base_url,
             username=server['username'],
             password=server['password'],
-            timeout=ClientTimeout(10)  # Shorter timeout for status check
+            timeout=ClientTimeout(total=3, connect=2)  # Quick timeout for status check
         )
 
         try:
@@ -180,15 +243,18 @@ class ServerManager:
             error_msg = str(e)
             logger.warning(f"Status check failed for '{name}': {error_msg}")
 
-            # Categorize the error
+            # Categorize the error with clearer messages
             if "401" in error_msg or "Incorrect username or password" in error_msg:
                 return {"status": "auth_error", "message": "Invalid credentials"}
-            elif "Connection" in error_msg or "Cannot connect" in error_msg:
+            elif "timeout" in error_msg.lower() or "TimeoutError" in error_msg:
+                return {"status": "offline", "message": "Connection timeout - server unreachable"}
+            elif "Connection" in error_msg or "Cannot connect" in error_msg or "ConnectionRefused" in error_msg:
                 return {"status": "offline", "message": "Cannot reach server"}
-            elif "timeout" in error_msg.lower():
-                return {"status": "offline", "message": "Connection timeout"}
+            elif "ClientConnectorError" in error_msg or "getaddrinfo" in error_msg:
+                return {"status": "offline", "message": "Server unreachable or invalid host"}
             else:
-                return {"status": "error", "message": f"Error: {error_msg[:50]}"}
+                # Show first 80 chars of error for debugging
+                return {"status": "error", "message": f"Error: {error_msg[:80]}"}
         finally:
             # Always close the client
             try:
@@ -206,6 +272,18 @@ class ServerManager:
             logger.info(f"No default server set, using '{self.default_server}'")
 
         return await self.get_client(self.default_server)
+
+    async def get_client_for_chat(self, chat_id: int) -> HummingbotAPIClient:
+        """Get the API client for a specific chat's default server"""
+        server_name = self.get_default_server_for_chat(chat_id)
+        if not server_name:
+            # Fallback to first available server
+            if not self.servers:
+                raise ValueError("No servers configured")
+            server_name = list(self.servers.keys())[0]
+            logger.info(f"No default server for chat {chat_id}, using '{server_name}'")
+
+        return await self.get_client(server_name)
 
     async def get_client(self, name: Optional[str] = None) -> HummingbotAPIClient:
         """Get or create API client for a server. If name is None, uses default server."""
@@ -279,10 +357,11 @@ class ServerManager:
 server_manager = ServerManager()
 
 
-async def get_client():
-    """Get the API client for the default server.
+async def get_client(chat_id: int = None):
+    """Get the API client for the appropriate server.
 
-    Convenience function that wraps server_manager.get_default_client().
+    Args:
+        chat_id: Optional chat ID to get per-chat server. If None, uses 'local' as fallback.
 
     Returns:
         HummingbotAPIClient instance
@@ -290,6 +369,8 @@ async def get_client():
     Raises:
         ValueError: If no servers are configured
     """
+    if chat_id is not None:
+        return await server_manager.get_client_for_chat(chat_id)
     return await server_manager.get_default_client()
 
 
