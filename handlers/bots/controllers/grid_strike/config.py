@@ -248,11 +248,11 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
                 f"Got: {limit_price:.6g} < {start_price:.6g} < {end_price:.6g}"
             )
     else:
-        # SHORT: start_price < end_price < limit_price
-        if not (start_price < end_price < limit_price):
+        # SHORT: end_price < start_price < limit_price
+        if not (end_price < start_price < limit_price):
             return False, (
-                f"Invalid prices for SHORT: require start < end < limit. "
-                f"Got: {start_price:.6g} < {end_price:.6g} < {limit_price:.6g}"
+                f"Invalid prices for SHORT: require end < start < limit. "
+                f"Got: {end_price:.6g} < {start_price:.6g} < {limit_price:.6g}"
             )
 
     return True, None

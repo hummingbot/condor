@@ -791,7 +791,7 @@ async def handle_gs_accept_prices(update: Update, context: ContextTypes.DEFAULT_
 
     # Validate price ordering based on side
     # LONG: limit_price < start_price < end_price
-    # SHORT: start_price < end_price < limit_price
+    # SHORT: end_price < start_price < limit_price
     validation_error = None
     if side == SIDE_LONG:
         if not (limit_price < start_price < end_price):
@@ -801,11 +801,11 @@ async def handle_gs_accept_prices(update: Update, context: ContextTypes.DEFAULT_
                 f"Current: `{limit_price:,.6g}` < `{start_price:,.6g}` < `{end_price:,.6g}`"
             )
     else:  # SHORT
-        if not (start_price < end_price < limit_price):
+        if not (end_price < start_price < limit_price):
             validation_error = (
                 "Invalid prices for SHORT position\\.\n\n"
-                "Required: `start < end < limit`\n"
-                f"Current: `{start_price:,.6g}` < `{end_price:,.6g}` < `{limit_price:,.6g}`"
+                "Required: `end < start < limit`\n"
+                f"Current: `{end_price:,.6g}` < `{start_price:,.6g}` < `{limit_price:,.6g}`"
             )
 
     if validation_error:
@@ -1682,6 +1682,10 @@ async def _update_wizard_message_for_prices(update: Update, context: ContextType
         return
 
     # Create a fake query object to reuse _show_wizard_prices_step
+    class FakeChat:
+        def __init__(self, chat_id):
+            self.id = chat_id
+
     class FakeQuery:
         def __init__(self, bot, chat_id, message_id):
             self.message = FakeMessage(bot, chat_id, message_id)
@@ -1703,7 +1707,10 @@ async def _update_wizard_message_for_prices(update: Update, context: ContextType
         async def delete(self):
             await self._bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
 
-    fake_update = type('FakeUpdate', (), {'callback_query': FakeQuery(context.bot, chat_id, message_id)})()
+    fake_update = type('FakeUpdate', (), {
+        'callback_query': FakeQuery(context.bot, chat_id, message_id),
+        'effective_chat': FakeChat(chat_id)
+    })()
     await _show_wizard_prices_step(fake_update, context)
 
 
