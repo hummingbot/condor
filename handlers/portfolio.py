@@ -491,9 +491,14 @@ def _calculate_24h_changes(history_data: dict, current_balances: dict) -> dict:
     return result
 
 
-async def _fetch_dashboard_data(client, days: int):
+async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
     """
     Fetch all data needed for the portfolio dashboard.
+
+    Args:
+        client: The API client
+        days: Number of days for history
+        refresh: If True, force refresh balances from exchanges (bypasses API cache)
 
     Returns:
         Tuple of (overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval)
@@ -507,7 +512,7 @@ async def _fetch_dashboard_data(client, days: int):
 
     # Calculate optimal interval for the graph based on days
     graph_interval = _get_optimal_interval(days)
-    logger.info(f"Fetching portfolio data: days={days}, optimal_interval={graph_interval}, start_time={start_time}")
+    logger.info(f"Fetching portfolio data: days={days}, optimal_interval={graph_interval}, start_time={start_time}, refresh={refresh}")
 
     # Fetch all data in parallel
     overview_task = get_portfolio_overview(
@@ -516,7 +521,8 @@ async def _fetch_dashboard_data(client, days: int):
         include_balances=True,
         include_perp_positions=True,
         include_lp_positions=True,
-        include_active_orders=True
+        include_active_orders=True,
+        refresh=refresh
     )
 
     history_task = client.portfolio.get_history(
@@ -633,10 +639,13 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         pnl_start_time = _calculate_start_time(30)
         graph_interval = _get_optimal_interval(days)
 
+        # Check if this is a refresh request (from callback)
+        refresh = context.user_data.pop("_portfolio_refresh", False)
+
         # ========================================
         # START ALL FETCHES IN PARALLEL
         # ========================================
-        balances_task = asyncio.create_task(client.portfolio.get_state())
+        balances_task = asyncio.create_task(client.portfolio.get_state(refresh=refresh))
         perp_task = asyncio.create_task(get_perpetual_positions(client))
         lp_task = asyncio.create_task(get_lp_positions(client))
         orders_task = asyncio.create_task(get_active_orders(client))
@@ -773,8 +782,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create settings button
+        # Create buttons row with Refresh and Settings
         keyboard = [[
+            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
             InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
         ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -819,7 +829,9 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
 
         logger.info(f"Portfolio action: {action}")
 
-        if action == "settings":
+        if action == "refresh":
+            await handle_portfolio_refresh(update, context)
+        elif action == "settings":
             await show_portfolio_settings(update, context)
         elif action.startswith("set_days:"):
             days = int(action.split(":")[1])
@@ -846,8 +858,24 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             logger.error(f"Failed to send error message: {e2}")
 
 
-async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Refresh both the text message and photo with new settings"""
+async def handle_portfolio_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle refresh button - force refresh balances from exchanges"""
+    query = update.callback_query
+    await query.answer("Refreshing from exchanges...")
+
+    # Set flag to force API refresh
+    context.user_data["_portfolio_refresh"] = True
+
+    # Refresh the dashboard with fresh data
+    await refresh_portfolio_dashboard(update, context, refresh=True)
+
+
+async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = False) -> None:
+    """Refresh both the text message and photo with new settings
+
+    Args:
+        refresh: If True, force refresh balances from exchanges (bypasses API cache)
+    """
     query = update.callback_query
     bot = query.get_bot()
 
@@ -895,8 +923,9 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         days = config.get("days", 3)
 
         # Fetch all data (interval is calculated based on days)
+        # Pass refresh=True to force API to fetch fresh data from exchanges
         overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval = await _fetch_dashboard_data(
-            client, days
+            client, days, refresh=refresh
         )
 
         # Filter balances by enabled networks from wallet preferences
@@ -961,8 +990,9 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create settings button
+        # Create buttons row with Refresh and Settings
         keyboard = [[
+            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
             InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
         ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
