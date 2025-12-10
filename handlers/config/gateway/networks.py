@@ -102,17 +102,6 @@ async def handle_network_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
             # Fallback for old-style callback data
             network_id = network_idx_str
             await show_network_details(query, context, network_id)
-    elif action_data == "edit_config":
-        # Start network configuration editing
-        network_id = context.user_data.get('current_network_id')
-        if network_id:
-            await start_network_config_edit(query, context, network_id)
-        else:
-            await query.answer("❌ Network not found")
-    elif action_data == "config_keep":
-        await handle_network_config_keep(query, context)
-    elif action_data == "config_back":
-        await handle_network_config_back(query, context)
     elif action_data == "config_cancel":
         await handle_network_config_cancel(query, context)
     else:
@@ -120,7 +109,7 @@ async def handle_network_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def show_network_details(query, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
-    """Show details and configuration for a specific network"""
+    """Show network config in edit mode - user can copy/paste to change values"""
     try:
         from servers import server_manager
 
@@ -129,42 +118,46 @@ async def show_network_details(query, context: ContextTypes.DEFAULT_TYPE, networ
 
         # Try to extract config - it might be directly in response or nested under 'config'
         if isinstance(response, dict):
-            # If response has a 'config' key, use that; otherwise use the whole response
             config = response.get('config', response) if 'config' in response else response
         else:
             config = {}
 
+        # Filter out metadata fields
+        config_fields = {k: v for k, v in config.items() if k not in ['status', 'message', 'error']}
+
         network_escaped = escape_markdown_v2(network_id)
 
-        # Build configuration display
-        config_lines = []
-        for key, value in config.items():
-            key_escaped = escape_markdown_v2(str(key))
-            # Truncate long values like URLs
-            value_str = str(value)
-            if len(value_str) > 50:
-                value_str = value_str[:47] + "..."
-            value_escaped = escape_markdown_v2(value_str)
-            config_lines.append(f"• *{key_escaped}:* `{value_escaped}`")
-
-        if config_lines:
-            config_text = "\n".join(config_lines)
+        if not config_fields:
+            message_text = (
+                f"🌍 *Network: {network_escaped}*\n\n"
+                "_No configuration available_"
+            )
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_networks")]]
         else:
-            config_text = "_No configuration available_"
+            # Build copyable config for editing
+            config_lines = []
+            for key, value in config_fields.items():
+                config_lines.append(f"{key}={value}")
 
-        message_text = (
-            f"🌍 *Network: {network_escaped}*\n\n"
-            "*Configuration:*\n"
-            f"{config_text}"
-        )
+            config_text = "\n".join(config_lines)
 
-        # Store network_id in context for edit action
-        context.user_data['current_network_id'] = network_id
+            message_text = (
+                f"🌍 *{network_escaped}*\n\n"
+                f"```\n{config_text}\n```\n\n"
+                f"✏️ _Send `key=value` to update_"
+            )
 
-        keyboard = [
-            [InlineKeyboardButton("✏️ Edit Configuration", callback_data=f"gateway_network_edit_config")],
-            [InlineKeyboardButton("« Back to Networks", callback_data="gateway_networks")]
-        ]
+            # Set up editing state
+            context.user_data['configuring_network'] = True
+            context.user_data['network_config_data'] = {
+                'network_id': network_id,
+                'current_values': config_fields.copy(),
+            }
+            context.user_data['awaiting_network_input'] = 'bulk_edit'
+            context.user_data['network_message_id'] = query.message.message_id
+            context.user_data['network_chat_id'] = query.message.chat_id
+
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_networks")]]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -182,133 +175,10 @@ async def show_network_details(query, context: ContextTypes.DEFAULT_TYPE, networ
         await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 
 
-async def start_network_config_edit(query, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
-    """Start progressive configuration editing flow for a network"""
-    try:
-        from servers import server_manager
-
-        client = await server_manager.get_default_client()
-        response = await client.gateway.get_network_config(network_id)
-
-        # Try to extract config - it might be directly in response or nested under 'config'
-        if isinstance(response, dict):
-            # If response has a 'config' key, use that; otherwise use the whole response
-            config = response.get('config', response) if 'config' in response else response
-        else:
-            config = {}
-
-        # Filter out metadata fields
-        config_fields = {k: v for k, v in config.items() if k not in ['status', 'message', 'error']}
-        field_names = list(config_fields.keys())
-
-        if not field_names:
-            await query.answer("❌ No configurable fields found")
-            return
-
-        # Initialize context storage for network configuration
-        context.user_data['configuring_network'] = True
-        context.user_data['network_config_data'] = {
-            'network_id': network_id,
-            'fields': field_names,
-            'current_values': config_fields.copy(),
-            'new_values': {}
-        }
-        context.user_data['awaiting_network_input'] = field_names[0]
-        context.user_data['network_message_id'] = query.message.message_id
-        context.user_data['network_chat_id'] = query.message.chat_id
-
-        # Show first field
-        message_text, reply_markup = _build_network_config_message(
-            context.user_data['network_config_data'],
-            field_names[0],
-            field_names
-        )
-
-        await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
-        await query.answer()
-
-    except Exception as e:
-        logger.error(f"Error starting network config edit: {e}", exc_info=True)
-        error_text = f"❌ Error loading configuration: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_networks")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
-
-
-async def handle_network_config_back(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle back button during network configuration"""
-    config_data = context.user_data.get('network_config_data', {})
-    all_fields = config_data.get('fields', [])
-    current_field = context.user_data.get('awaiting_network_input')
-
-    if current_field and current_field in all_fields:
-        current_index = all_fields.index(current_field)
-        if current_index > 0:
-            # Go to previous field
-            previous_field = all_fields[current_index - 1]
-
-            # Remove the previous field's new value to re-enter it
-            new_values = config_data.get('new_values', {})
-            new_values.pop(previous_field, None)
-            config_data['new_values'] = new_values
-            context.user_data['network_config_data'] = config_data
-
-            # Update awaiting field
-            context.user_data['awaiting_network_input'] = previous_field
-            await query.answer("« Going back")
-            await _update_network_config_message(context, query.message.get_bot())
-        else:
-            await query.answer("Cannot go back")
-    else:
-        await query.answer("Cannot go back")
-
-
-async def handle_network_config_keep(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle keep current value button during network configuration"""
-    try:
-        awaiting_field = context.user_data.get('awaiting_network_input')
-        if not awaiting_field:
-            await query.answer("No field to keep")
-            return
-
-        config_data = context.user_data.get('network_config_data', {})
-        new_values = config_data.get('new_values', {})
-        all_fields = config_data.get('fields', [])
-        current_values = config_data.get('current_values', {})
-
-        # Use the current value
-        current_val = current_values.get(awaiting_field)
-        new_values[awaiting_field] = current_val
-        config_data['new_values'] = new_values
-        context.user_data['network_config_data'] = config_data
-
-        await query.answer("✓ Keeping current value")
-
-        # Move to next field or show confirmation
-        current_index = all_fields.index(awaiting_field)
-
-        if current_index < len(all_fields) - 1:
-            # Move to next field
-            context.user_data['awaiting_network_input'] = all_fields[current_index + 1]
-            await _update_network_config_message(context, query.message.get_bot())
-        else:
-            # All fields filled - submit configuration
-            context.user_data['awaiting_network_input'] = None
-            await submit_network_config(context, query.message.get_bot(), query.message.chat_id)
-
-    except Exception as e:
-        logger.error(f"Error handling keep current value: {e}", exc_info=True)
-        await query.answer(f"❌ Error: {str(e)[:100]}")
-
-
 async def handle_network_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle text input during network configuration flow"""
+    """Handle text input during network configuration - parses key=value lines"""
     awaiting_field = context.user_data.get('awaiting_network_input')
-    if not awaiting_field:
+    if awaiting_field != 'bulk_edit':
         return
 
     # Delete user's input message for clean chat
@@ -318,43 +188,63 @@ async def handle_network_config_input(update: Update, context: ContextTypes.DEFA
         pass
 
     try:
-        new_value = update.message.text.strip()
+        input_text = update.message.text.strip()
         config_data = context.user_data.get('network_config_data', {})
-        new_values = config_data.get('new_values', {})
-        all_fields = config_data.get('fields', [])
         current_values = config_data.get('current_values', {})
 
-        # Convert value to appropriate type based on current value
-        current_val = current_values.get(awaiting_field)
-        try:
-            if isinstance(current_val, bool):
-                # Handle boolean conversion
-                new_value = new_value.lower() in ['true', '1', 'yes', 'y', 'on']
-            elif isinstance(current_val, int):
-                new_value = int(new_value)
-            elif isinstance(current_val, float):
-                new_value = float(new_value)
-            # else keep as string
-        except ValueError:
-            # If conversion fails, keep as string
-            pass
+        # Parse key=value lines
+        updates = {}
+        errors = []
 
-        # Store the new value
-        new_values[awaiting_field] = new_value
-        config_data['new_values'] = new_values
+        for line in input_text.split('\n'):
+            line = line.strip()
+            if not line or '=' not in line:
+                continue
+
+            key, _, value = line.partition('=')
+            key = key.strip()
+            value = value.strip()
+
+            # Validate key exists in config
+            if key not in current_values:
+                errors.append(f"Unknown key: {key}")
+                continue
+
+            # Convert value to appropriate type based on current value
+            current_val = current_values.get(key)
+            try:
+                if isinstance(current_val, bool):
+                    value = value.lower() in ['true', '1', 'yes', 'y', 'on']
+                elif isinstance(current_val, int):
+                    value = int(value)
+                elif isinstance(current_val, float):
+                    value = float(value)
+            except ValueError:
+                pass  # Keep as string
+
+            updates[key] = value
+
+        if errors:
+            # Show errors but don't cancel
+            error_msg = "⚠️ " + ", ".join(errors)
+            await update.get_bot().send_message(
+                chat_id=update.effective_chat.id,
+                text=error_msg
+            )
+
+        if not updates:
+            await update.get_bot().send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ No valid updates found. Use format: key=value"
+            )
+            return
+
+        # Store updates and submit
+        config_data['new_values'] = updates
         context.user_data['network_config_data'] = config_data
+        context.user_data['awaiting_network_input'] = None
 
-        # Move to next field or show confirmation
-        current_index = all_fields.index(awaiting_field)
-
-        if current_index < len(all_fields) - 1:
-            # Move to next field
-            context.user_data['awaiting_network_input'] = all_fields[current_index + 1]
-            await _update_network_config_message(context, update.get_bot())
-        else:
-            # All fields filled - submit configuration
-            context.user_data['awaiting_network_input'] = None
-            await submit_network_config(context, update.get_bot(), update.effective_chat.id)
+        await submit_network_config(context, update.get_bot(), update.effective_chat.id)
 
     except Exception as e:
         logger.error(f"Error handling network config input: {e}", exc_info=True)
@@ -433,122 +323,6 @@ async def submit_network_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
         logger.error(f"Error submitting network config: {e}", exc_info=True)
         error_text = f"❌ Error saving configuration: {escape_markdown_v2(str(e))}"
         await bot.send_message(chat_id=chat_id, text=error_text, parse_mode="MarkdownV2")
-
-
-def _build_network_config_message(config_data: dict, current_field: str, all_fields: list) -> tuple:
-    """
-    Build the progressive network configuration message
-    Returns (message_text, reply_markup)
-    """
-    network_id = config_data.get('network_id', '')
-    current_values = config_data.get('current_values', {})
-    new_values = config_data.get('new_values', {})
-
-    network_escaped = escape_markdown_v2(network_id)
-
-    # Build the message showing progress
-    lines = [f"✏️ *Edit {network_escaped}*\n"]
-
-    for field in all_fields:
-        if field in new_values:
-            # Field already filled with new value - show it
-            value = new_values[field]
-            # Mask sensitive values
-            if 'key' in field.lower() or 'secret' in field.lower() or 'password' in field.lower():
-                value = '***' if value else ''
-            field_escaped = escape_markdown_v2(field)
-            value_escaped = escape_markdown_v2(str(value))
-            lines.append(f"*{field_escaped}:* `{value_escaped}` ✅")
-        elif field == current_field:
-            # Current field being filled - show current value as default
-            current_val = current_values.get(field, '')
-            # Mask sensitive values
-            if 'key' in field.lower() or 'secret' in field.lower() or 'password' in field.lower():
-                current_val = '***' if current_val else ''
-            field_escaped = escape_markdown_v2(field)
-            current_escaped = escape_markdown_v2(str(current_val))
-            lines.append(f"*{field_escaped}:* _\\(current: `{current_escaped}`\\)_")
-            lines.append("_Enter new value or keep current:_")
-            break
-        else:
-            # Future field - show current value
-            current_val = current_values.get(field, '')
-            if 'key' in field.lower() or 'secret' in field.lower() or 'password' in field.lower():
-                current_val = '***' if current_val else ''
-            field_escaped = escape_markdown_v2(field)
-            current_escaped = escape_markdown_v2(str(current_val))
-            lines.append(f"*{field_escaped}:* `{current_escaped}`")
-
-    message_text = "\n".join(lines)
-
-    # Build keyboard with back and cancel buttons
-    buttons = []
-
-    # Get current value for "Keep current" button
-    current_val = current_values.get(current_field, '')
-
-    # Always add "Keep current" button (even for empty/None values)
-    keep_buttons = []
-
-    # Check if value is empty, None, or null-like
-    is_empty = current_val is None or current_val == '' or str(current_val).lower() in ['none', 'null']
-
-    if is_empty:
-        # Show "Keep empty" for empty values
-        button_text = "Keep empty"
-    elif 'key' in current_field.lower() or 'secret' in current_field.lower() or 'password' in current_field.lower():
-        # Don't show the actual value if it's sensitive
-        button_text = "Keep current: ***"
-    else:
-        # Truncate long values
-        display_val = str(current_val)
-        if len(display_val) > 20:
-            display_val = display_val[:17] + "..."
-        button_text = f"Keep: {display_val}"
-
-    keep_buttons.append(InlineKeyboardButton(button_text, callback_data="gateway_network_config_keep"))
-    buttons.append(keep_buttons)
-
-    # Back button (only if not on first field)
-    current_index = all_fields.index(current_field)
-    if current_index > 0:
-        buttons.append([InlineKeyboardButton("« Back", callback_data="gateway_network_config_back")])
-
-    # Cancel button
-    buttons.append([InlineKeyboardButton("✖️ Cancel", callback_data="gateway_network_config_cancel")])
-
-    reply_markup = InlineKeyboardMarkup(buttons)
-    return (message_text, reply_markup)
-
-
-async def _update_network_config_message(context: ContextTypes.DEFAULT_TYPE, bot) -> None:
-    """Update the network config message with the current field"""
-    try:
-        config_data = context.user_data.get('network_config_data', {})
-        all_fields = config_data.get('fields', [])
-        current_field = context.user_data.get('awaiting_network_input')
-
-        if not current_field or not all_fields:
-            return
-
-        message_text, reply_markup = _build_network_config_message(
-            config_data,
-            current_field,
-            all_fields
-        )
-
-        message_id = context.user_data.get('network_message_id')
-        chat_id = context.user_data.get('network_chat_id')
-
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
-    except Exception as e:
-        logger.error(f"Error updating network config message: {e}", exc_info=True)
 
 
 async def handle_network_config_cancel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
