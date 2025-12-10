@@ -28,6 +28,8 @@ from .menu import (
     show_controller_detail,
     handle_stop_controller,
     handle_confirm_stop_controller,
+    handle_quick_stop_controller,
+    handle_quick_start_controller,
     handle_stop_bot,
     handle_confirm_stop_bot,
     show_bot_logs,
@@ -488,6 +490,17 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "confirm_stop_ctrl":
             await handle_confirm_stop_controller(update, context)
 
+        # Quick stop/start controller (from bot detail view)
+        elif main_action == "stop_ctrl_quick":
+            if len(action_parts) > 1:
+                idx = int(action_parts[1])
+                await handle_quick_stop_controller(update, context, idx)
+
+        elif main_action == "start_ctrl_quick":
+            if len(action_parts) > 1:
+                idx = int(action_parts[1])
+                await handle_quick_start_controller(update, context, idx)
+
         # Stop bot (uses context)
         elif main_action == "stop_bot":
             await handle_stop_bot(update, context)
@@ -544,7 +557,10 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle controller config field input
         if bots_state.startswith("set_field:"):
             await process_field_input(update, context, user_input)
-        # Handle live controller field input
+        # Handle live controller bulk edit input
+        elif bots_state == "ctrl_bulk_edit":
+            await process_controller_field_input(update, context, user_input)
+        # Handle live controller field input (legacy single field)
         elif bots_state.startswith("ctrl_set:"):
             await process_controller_field_input(update, context, user_input)
         # Handle deploy field input (legacy form)
