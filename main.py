@@ -42,7 +42,11 @@ def _get_start_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("💧 LP", callback_data="start:lp"),
         ],
         [
-            InlineKeyboardButton("⚙️ Config", callback_data="start:config"),
+            InlineKeyboardButton("🔌 Servers", callback_data="start:config_servers"),
+            InlineKeyboardButton("🔑 Keys", callback_data="start:config_keys"),
+            InlineKeyboardButton("🌐 Gateway", callback_data="start:config_gateway"),
+        ],
+        [
             InlineKeyboardButton("❓ Help", callback_data="start:help"),
         ],
     ]
@@ -302,8 +306,23 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await swap_command(update, context)
         elif action == "lp":
             await lp_command(update, context)
-        elif action == "config":
-            await config_command(update, context)
+        elif action == "config_servers":
+            from handlers.config.servers import show_api_servers
+            from handlers import clear_all_input_states
+            clear_all_input_states(context)
+            await show_api_servers(query, context)
+        elif action == "config_keys":
+            from handlers.config.api_keys import show_api_keys
+            from handlers import clear_all_input_states
+            clear_all_input_states(context)
+            await show_api_keys(query, context)
+        elif action == "config_gateway":
+            from handlers.config.gateway import show_gateway_menu
+            from handlers import clear_all_input_states
+            clear_all_input_states(context)
+            context.user_data.pop("dex_state", None)
+            context.user_data.pop("cex_state", None)
+            await show_gateway_menu(query, context)
         elif action == "help":
             await query.edit_message_text(
                 HELP_TEXTS["main"],

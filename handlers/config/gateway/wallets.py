@@ -157,8 +157,8 @@ async def prompt_add_wallet_chain(query, context: ContextTypes.DEFAULT_TYPE) -> 
             include_gateway=True
         )
 
-        # Common chains
-        supported_chains = ["ethereum", "polygon", "solana", "avalanche", "binance-smart-chain"]
+        # Base blockchain chains (wallets are at blockchain level, not network level)
+        supported_chains = ["ethereum", "solana"]
 
         message_text = (
             header +
