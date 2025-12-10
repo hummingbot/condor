@@ -277,7 +277,7 @@ Manage your trading bots efficiently and monitor their performance\.
 🆔 *Your Chat Info*:
 📱 Chat ID: `{chat_id}`
 👤 User ID: `{user_id}`
-🏷️ Username: @{username}
+🏷️ Username: `@{username}`
 
 Select a command below to get started:
 """
@@ -346,7 +346,7 @@ Manage your trading bots efficiently and monitor their performance\.
 🆔 *Your Chat Info*:
 📱 Chat ID: `{chat_id}`
 👤 User ID: `{user_id}`
-🏷️ Username: @{username}
+🏷️ Username: `@{username}`
 
 Select a command below to get started:
 """
