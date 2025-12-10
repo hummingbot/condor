@@ -552,7 +552,7 @@ async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_
     await query.message.edit_text(
         r"*📈 Grid Strike \- New Config*" + "\n\n"
         f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\." + "\n\n"
-        r"_Fetching market data and generating chart\\._",
+        r"_Fetching market data and generating chart\.\.\._",
         parse_mode="MarkdownV2"
     )
 

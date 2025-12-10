@@ -120,7 +120,16 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     reply_markup=reply_markup
                 )
             except BadRequest as e:
-                if "Message is not modified" not in str(e):
+                if "no text in the message" in str(e).lower():
+                    # Message is a photo/media, delete it and send new text message
+                    await query.message.delete()
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=full_message,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                elif "Message is not modified" not in str(e):
                     raise
         else:
             await msg.reply_text(
@@ -136,11 +145,23 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup = _build_main_menu_keyboard({})
 
         if query:
-            await query.message.edit_text(
-                error_message,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+            try:
+                await query.message.edit_text(
+                    error_message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except BadRequest as edit_error:
+                if "no text in the message" in str(edit_error).lower():
+                    await query.message.delete()
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=error_message,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    raise
         else:
             await msg.reply_text(
                 error_message,
