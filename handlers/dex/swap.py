@@ -19,6 +19,7 @@ from handlers.config.user_preferences import (
     get_dex_connector,
     get_dex_last_swap,
     set_dex_last_swap,
+    get_all_enabled_networks,
     DEFAULT_DEX_NETWORK,
 )
 from servers import get_client
@@ -37,7 +38,7 @@ from ._shared import (
     build_filter_selection_keyboard,
     HISTORY_FILTERS,
 )
-from .menu import _fetch_balances
+from .menu import _fetch_balances, _filter_balances_by_networks
 
 logger = logging.getLogger(__name__)
 
@@ -420,6 +421,10 @@ def _build_swap_menu_text(user_data: dict, params: dict, quote_result: dict = No
     help_text += r"━━━ Balance ━━━" + "\n"
     try:
         gateway_data = get_cached(user_data, "gateway_balances", ttl=120)
+        # Filter by enabled networks
+        enabled_networks = get_all_enabled_networks(user_data)
+        if enabled_networks and gateway_data:
+            gateway_data = _filter_balances_by_networks(gateway_data, enabled_networks)
         if gateway_data and gateway_data.get("balances_by_network"):
             network_key = network.split("-")[0].lower() if network else ""
             balances_found = {"base_balance": 0, "base_value": 0, "quote_balance": 0, "quote_value": 0}
