@@ -152,11 +152,15 @@ async def build_config_message_header(
     server_context, server_online = await get_server_context_header(chat_id)
     header += server_context
 
-    # Add gateway status if requested
+    # Add gateway status if requested (but only if server is online to avoid long timeouts)
     gateway_running = False
     if include_gateway:
-        gateway_info, gateway_running = await get_gateway_status_info(chat_id)
-        header += gateway_info
+        if server_online:
+            gateway_info, gateway_running = await get_gateway_status_info(chat_id)
+            header += gateway_info
+        else:
+            # Server is offline, skip gateway check to avoid timeout
+            header += f"*Gateway:* ⚪️ {escape_markdown_v2('N/A')}\n"
 
     header += "\n"
 

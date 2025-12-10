@@ -299,13 +299,13 @@ class ServerManager:
         if name in self.clients:
             return self.clients[name]
 
-        # Create new client
+        # Create new client with reasonable timeout
         base_url = f"http://{server['host']}:{server['port']}"
         client = HummingbotAPIClient(
             base_url=base_url,
             username=server['username'],
             password=server['password'],
-            timeout=ClientTimeout(30)
+            timeout=ClientTimeout(total=10, connect=5)
         )
 
         try:
