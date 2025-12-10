@@ -763,13 +763,18 @@ async def handle_plot_liquidity(
     try:
         client = await get_client()
 
-        # Fetch all pool infos in parallel
+        # Fetch all pool infos in parallel with individual timeouts
+        POOL_FETCH_TIMEOUT = 10  # seconds per pool
+
         async def fetch_pool_with_info(pool):
             """Fetch pool info and return combined data"""
             pool_address = pool.get('pool_address', pool.get('address', ''))
             connector = pool.get('connector', 'meteora')
             try:
-                pool_info = await _fetch_pool_info(client, pool_address, connector)
+                pool_info = await asyncio.wait_for(
+                    _fetch_pool_info(client, pool_address, connector),
+                    timeout=POOL_FETCH_TIMEOUT
+                )
                 bins = pool_info.get('bins', [])
                 bin_step = pool.get('bin_step') or pool_info.get('bin_step')
 
@@ -785,6 +790,9 @@ async def handle_plot_liquidity(
                     'bins': bins,
                     'bin_step': bin_step
                 }
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout fetching pool {pool_address[:12]}... after {POOL_FETCH_TIMEOUT}s")
+                return None
             except Exception as e:
                 logger.warning(f"Failed to fetch pool {pool_address}: {e}")
                 return None
@@ -793,11 +801,14 @@ async def handle_plot_liquidity(
         tasks = [fetch_pool_with_info(pool) for pool in selected_pools]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filter successful results
+        # Filter successful results and count failures
         pools_data = [r for r in results if r is not None and not isinstance(r, Exception)]
+        failed_count = len(selected_pools) - len(pools_data)
 
         if not pools_data:
-            await query.message.edit_text("❌ Failed to fetch pool data.")
+            await query.message.edit_text(
+                f"❌ Failed to fetch pool data. All {len(selected_pools)} pools failed or timed out."
+            )
             return
 
         # Log summary of what we got
@@ -854,7 +865,7 @@ async def handle_plot_liquidity(
         lines = [
             f"📊 Aggregated Liquidity: {pair_name}",
             "",
-            f"📈 Pools included: {len(pools_data)}",
+            f"📈 Pools included: {len(pools_data)}" + (f" ({failed_count} failed)" if failed_count else ""),
             f"💰 Total TVL: ${_format_number(total_tvl_selected)}",
             f"📊 Percentile: Top {percentile}%",
             f"🎯 Min bin step (resolution): {min_bin_step}",
