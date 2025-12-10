@@ -268,8 +268,9 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
                 # P&L section
                 lines.append("")
+                lines.append("*P&L*")
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                lines.append(f"*P&L:* {pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\| 💰 *R:* `{escape_markdown_v2(f'{realized:+.2f}')}` \\| 📊 *U:* `{escape_markdown_v2(f'{unrealized:+.2f}')}`")
+                lines.append(f"{pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\| 💰 R: `{escape_markdown_v2(f'{realized:+.2f}')}` \\| 📊 U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`")
                 vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
                 lines.append(f"📦 Vol: `{escape_markdown_v2(vol_str)}`")
 
