@@ -104,11 +104,26 @@ class GeneralPrefs(TypedDict, total=False):
     active_server: Optional[str]
 
 
+class WalletNetworkPrefs(TypedDict, total=False):
+    """Network preferences for a specific wallet.
+
+    Keys are wallet addresses, values are lists of enabled network IDs.
+    Example: {"0x1234...": ["ethereum-mainnet", "base", "arbitrum"]}
+    """
+    pass  # Dynamic keys based on wallet addresses
+
+
+class GatewayPrefs(TypedDict, total=False):
+    """Gateway-related preferences including wallet network settings."""
+    wallet_networks: Dict[str, list]  # wallet_address -> list of enabled network IDs
+
+
 class UserPreferences(TypedDict, total=False):
     portfolio: PortfolioPrefs
     clob: CLOBPrefs
     dex: DEXPrefs
     general: GeneralPrefs
+    gateway: GatewayPrefs
 
 
 # ============================================
@@ -137,6 +152,9 @@ def _get_default_preferences() -> UserPreferences:
         },
         "general": {
             "active_server": None,
+        },
+        "gateway": {
+            "wallet_networks": {},  # wallet_address -> list of enabled network IDs
         },
     }
 
@@ -467,6 +485,113 @@ def set_active_server(user_data: Dict, server_name: Optional[str]) -> None:
     prefs = _ensure_preferences(user_data)
     prefs["general"]["active_server"] = server_name
     logger.info(f"Set active server to {server_name}")
+
+
+# ============================================
+# PUBLIC API - GATEWAY / WALLET NETWORKS
+# ============================================
+
+# Default networks per chain
+DEFAULT_ETHEREUM_NETWORKS = ["ethereum-mainnet", "base", "arbitrum"]
+DEFAULT_SOLANA_NETWORKS = ["solana-mainnet-beta"]
+
+
+def get_gateway_prefs(user_data: Dict) -> GatewayPrefs:
+    """Get gateway preferences
+
+    Returns:
+        Gateway preferences with wallet_networks
+    """
+    _migrate_legacy_data(user_data)
+    prefs = _ensure_preferences(user_data)
+    return deepcopy(prefs.get("gateway", {"wallet_networks": {}}))
+
+
+def get_wallet_networks(user_data: Dict, wallet_address: str) -> list:
+    """Get enabled networks for a specific wallet
+
+    Args:
+        user_data: User data dict
+        wallet_address: The wallet address
+
+    Returns:
+        List of enabled network IDs, or None if not configured (use defaults)
+    """
+    gateway_prefs = get_gateway_prefs(user_data)
+    wallet_networks = gateway_prefs.get("wallet_networks", {})
+    return wallet_networks.get(wallet_address)
+
+
+def set_wallet_networks(user_data: Dict, wallet_address: str, networks: list) -> None:
+    """Set enabled networks for a specific wallet
+
+    Args:
+        user_data: User data dict
+        wallet_address: The wallet address
+        networks: List of enabled network IDs
+    """
+    prefs = _ensure_preferences(user_data)
+    if "gateway" not in prefs:
+        prefs["gateway"] = {"wallet_networks": {}}
+    if "wallet_networks" not in prefs["gateway"]:
+        prefs["gateway"]["wallet_networks"] = {}
+    prefs["gateway"]["wallet_networks"][wallet_address] = networks
+    logger.info(f"Set wallet {wallet_address[:10]}... networks to {networks}")
+
+
+def remove_wallet_networks(user_data: Dict, wallet_address: str) -> None:
+    """Remove network preferences for a wallet (when wallet is deleted)
+
+    Args:
+        user_data: User data dict
+        wallet_address: The wallet address to remove
+    """
+    prefs = _ensure_preferences(user_data)
+    if "gateway" in prefs and "wallet_networks" in prefs["gateway"]:
+        prefs["gateway"]["wallet_networks"].pop(wallet_address, None)
+        logger.info(f"Removed wallet {wallet_address[:10]}... network preferences")
+
+
+def get_default_networks_for_chain(chain: str) -> list:
+    """Get default networks for a blockchain chain
+
+    Args:
+        chain: The blockchain chain (ethereum, solana)
+
+    Returns:
+        List of default network IDs for the chain
+    """
+    if chain == "ethereum":
+        return DEFAULT_ETHEREUM_NETWORKS.copy()
+    elif chain == "solana":
+        return DEFAULT_SOLANA_NETWORKS.copy()
+    return []
+
+
+def get_all_networks_for_chain(chain: str) -> list:
+    """Get all available networks for a blockchain chain
+
+    Args:
+        chain: The blockchain chain (ethereum, solana)
+
+    Returns:
+        List of all available network IDs for the chain
+    """
+    if chain == "ethereum":
+        return [
+            "ethereum-mainnet",
+            "base",
+            "arbitrum",
+            "polygon",
+            "optimism",
+            "avalanche",
+        ]
+    elif chain == "solana":
+        return [
+            "solana-mainnet-beta",
+            "solana-devnet",
+        ]
+    return []
 
 
 # ============================================
