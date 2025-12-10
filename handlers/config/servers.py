@@ -42,7 +42,9 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await server_manager.reload_config()
 
         servers = server_manager.list_servers()
-        default_server = server_manager.get_default_server()
+        chat_id = query.message.chat_id
+        # Use per-chat default if set, otherwise global default
+        default_server = server_manager.get_default_server_for_chat(chat_id)
 
         if not servers:
             message_text = (
@@ -184,8 +186,11 @@ async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_
             await query.answer("❌ Server not found")
             return
 
+        chat_id = query.message.chat_id
+        chat_info = server_manager.get_chat_server_info(chat_id)
         default_server = server_manager.get_default_server()
-        is_default = server_name == default_server
+        is_global_default = server_name == default_server
+        is_chat_default = chat_info.get("is_per_chat") and chat_info.get("server") == server_name
 
         # Check status
         status_result = await server_manager.check_server_status(server_name)
@@ -214,14 +219,16 @@ async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_
             f"*Username:* `{username_escaped}`\n"
         )
 
-        if is_default:
-            message_text += "\n⭐️ _This is the default server_"
+        # Show if this is the default for this chat
+        if is_chat_default:
+            message_text += "\n⭐️ _Default for this chat_"
 
         message_text += "\n\n_You can modify or delete this server using the buttons below\\._"
 
         keyboard = []
 
-        if not is_default:
+        # Show Set as Default button only if not already default
+        if not is_chat_default:
             keyboard.append([InlineKeyboardButton("⭐️ Set as Default", callback_data=f"api_server_set_default_{server_name}")])
 
         # Add modification buttons in a row with 4 columns
@@ -251,14 +258,15 @@ async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_
 
 
 async def set_default_server(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
-    """Set a server as the default"""
+    """Set server as default for this chat"""
     try:
         from servers import server_manager
 
-        success = server_manager.set_default_server(server_name)
+        chat_id = query.message.chat_id
+        success = server_manager.set_default_server_for_chat(chat_id, server_name)
 
         if success:
-            await query.answer(f"✅ Set {server_name} as default")
+            await query.answer(f"✅ Set {server_name} as default for this chat")
             await show_server_details(query, context, server_name)
         else:
             await query.answer("❌ Failed to set default server")

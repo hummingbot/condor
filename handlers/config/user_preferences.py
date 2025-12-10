@@ -594,6 +594,33 @@ def get_all_networks_for_chain(chain: str) -> list:
     return []
 
 
+def get_all_enabled_networks(user_data: Dict) -> set:
+    """Get all enabled networks across all configured wallets.
+
+    This aggregates networks from all wallet configurations.
+    If no wallets are configured, returns None (meaning no filtering).
+
+    Args:
+        user_data: User data dict
+
+    Returns:
+        Set of enabled network IDs, or None if no wallets configured
+    """
+    gateway_prefs = get_gateway_prefs(user_data)
+    wallet_networks = gateway_prefs.get("wallet_networks", {})
+
+    if not wallet_networks:
+        return None  # No wallets configured, don't filter
+
+    # Aggregate all enabled networks from all wallets
+    all_networks = set()
+    for networks in wallet_networks.values():
+        if networks:
+            all_networks.update(networks)
+
+    return all_networks if all_networks else None
+
+
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
