@@ -13,6 +13,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
+from utils.auth import gateway_required
 from servers import get_client
 from ._shared import (
     get_cached,
@@ -95,6 +96,7 @@ async def _fetch_gateway_balances(client) -> dict:
     data = {
         "balances_by_network": defaultdict(list),
         "total_value": 0,
+        "token_prices": {},  # token symbol -> USD price
     }
 
     try:
@@ -119,13 +121,18 @@ async def _fetch_gateway_balances(client) -> dict:
                         token = balance.get("token", "???")
                         units = balance.get("units", 0)
                         value = balance.get("value", 0)
+                        price = balance.get("price", 0)
                         if value > 0.01:
                             data["balances_by_network"][network].append({
                                 "token": token,
                                 "units": units,
-                                "value": value
+                                "value": value,
+                                "price": price
                             })
                             data["total_value"] += value
+                            # Store token price for PnL conversion
+                            if token and price:
+                                data["token_prices"][token] = price
 
         # Sort by value
         for network in data["balances_by_network"]:
@@ -217,12 +224,16 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
     return data
 
 
-def _format_compact_position_line(pos: dict, token_cache: dict = None, index: int = None) -> str:
+def _format_compact_position_line(pos: dict, token_cache: dict = None, index: int = None, token_prices: dict = None) -> str:
     """Format a single position as a compact line for display
 
-    Returns: "1. SOL-USDC (meteora) 🟢 [0.89-1.47] | 10.5 SOL / 123 USDC"
+    Returns: "1. SOL-USDC (meteora) 🟢 [0.89-1.47] | PnL: -$25 | Value: $63"
+
+    Args:
+        token_prices: dict mapping token symbol -> USD price (e.g. {"SOL": 138.82})
     """
     token_cache = token_cache or {}
+    token_prices = token_prices or {}
 
     # Resolve token symbols
     base_token = pos.get('base_token', pos.get('token_a', ''))
@@ -289,43 +300,42 @@ def _format_compact_position_line(pos: dict, token_cache: dict = None, index: in
     pnl_summary = pos.get('pnl_summary', {})
     position_value_quote = pnl_summary.get('current_total_value_quote')
 
-    # Get values from pnl_summary
-    initial_value = pnl_summary.get('initial_value_quote', 0)
-    total_fees_value = pnl_summary.get('total_fees_value_quote', 0)
-    current_total_value = pnl_summary.get('current_total_value_quote', 0)
+    # Get values from pnl_summary (all values are in quote token units)
+    total_pnl_quote = pnl_summary.get('total_pnl_quote', 0)
+    total_fees_quote = pnl_summary.get('total_fees_value_quote', 0)
+    current_lp_value_quote = pnl_summary.get('current_lp_value_quote', 0)
 
     # Build line with price indicator next to range
     prefix = f"{index}. " if index is not None else "• "
     range_with_indicator = f"{range_str} {price_indicator}" if price_indicator else range_str
     line = f"{prefix}{pair} ({connector}) {status_emoji} {range_with_indicator}"
 
-    # Add PnL + value + pending fees in USD (all in one line)
+    # Add PnL + value + pending fees, converted to USD
     try:
-        initial_f = float(initial_value) if initial_value else 0
-        current_f = float(current_total_value) if current_total_value else 0
-        fees_f = float(total_fees_value) if total_fees_value else 0
+        pnl_f = float(total_pnl_quote) if total_pnl_quote else 0
+        fees_f = float(total_fees_quote) if total_fees_quote else 0
+        lp_value_f = float(current_lp_value_quote) if current_lp_value_quote else 0
 
         # Get quote token price for USD conversion
-        quote_price = pos.get('quote_token_price', pos.get('quote_price', 1.0))
-        try:
-            quote_price_f = float(quote_price) if quote_price else 1.0
-        except (ValueError, TypeError):
-            quote_price_f = 1.0
+        # All pnl_summary values are in quote token units, so we just need quote price
+        quote_price = token_prices.get(quote_symbol, 1.0)
 
-        # Convert to USD
-        initial_usd = initial_f * quote_price_f
-        current_usd = current_f * quote_price_f
-        fees_usd = fees_f * quote_price_f
+        # Convert from quote token to USD
+        pnl_usd = pnl_f * quote_price
+        fees_usd = fees_f * quote_price
+        value_usd = lp_value_f * quote_price
 
-        # PnL = current value - initial
-        pnl_usd = current_usd - initial_usd
-        pnl_sign = "+" if pnl_usd >= 0 else ""
+        # Debug logging
+        logger.info(f"Position {index}: lp_value={lp_value_f:.4f} {quote_symbol} @ ${quote_price:.2f} = ${value_usd:.2f}, pnl={pnl_f:.4f} {quote_symbol} = ${pnl_usd:.2f}")
 
-        if current_usd > 0 or initial_usd > 0:
-            # Format: PnL: -$25.12 | Value: $41.23 | 🎁 $3.70
+        if value_usd > 0 or pnl_f != 0:
+            # Format: PnL: -$25.12 | Value: $63.45 | 🎁 $3.70
             parts = []
-            parts.append(f"PnL: {pnl_sign}${abs(pnl_usd):.2f}")
-            parts.append(f"Value: ${current_usd:.2f}")
+            if pnl_usd >= 0:
+                parts.append(f"PnL: +${pnl_usd:.2f}")
+            else:
+                parts.append(f"PnL: -${abs(pnl_usd):.2f}")
+            parts.append(f"Value: ${value_usd:.2f}")
             if fees_usd > 0.01:
                 parts.append(f"🎁 ${fees_usd:.2f}")
             line += "\n   " + " | ".join(parts)
@@ -335,12 +345,13 @@ def _format_compact_position_line(pos: dict, token_cache: dict = None, index: in
     return line
 
 
-def _format_closed_position_line(pos: dict, token_cache: dict = None) -> str:
+def _format_closed_position_line(pos: dict, token_cache: dict = None, token_prices: dict = None) -> str:
     """Format a closed position with same format as active positions
 
-    Shows: Pair (connector) ✓ [range] | PnL: +$X | 🎁 $X | Xd ago
+    Shows: Pair (connector) ✓ [range] | PnL: +$2.88 | 🎁 $1.40 | 1d
     """
     token_cache = token_cache or {}
+    token_prices = token_prices or {}
 
     # Resolve token symbols
     base_token = pos.get('base_token', pos.get('token_a', ''))
@@ -369,30 +380,24 @@ def _format_closed_position_line(pos: dict, token_cache: dict = None) -> str:
         except (ValueError, TypeError):
             pass
 
-    # Get PnL data
+    # Get PnL data - use pre-calculated total_pnl_quote
     pnl_summary = pos.get('pnl_summary', {})
-    initial_value = pnl_summary.get('initial_value_quote', 0) or 0
-    current_total_value = pnl_summary.get('current_total_value_quote', 0) or 0
+    total_pnl_quote = pnl_summary.get('total_pnl_quote', 0) or 0
     total_fees_value = pnl_summary.get('total_fees_value_quote', 0) or 0
 
-    # Get quote token price for USD conversion
-    quote_price = pos.get('quote_token_price', pos.get('quote_price', 1.0))
     try:
-        quote_price_f = float(quote_price) if quote_price else 1.0
+        pnl_f = float(total_pnl_quote)
+        fees_f = float(total_fees_value)
     except (ValueError, TypeError):
-        quote_price_f = 1.0
+        pnl_f = 0
+        fees_f = 0
+
+    # Get quote token price for USD conversion
+    quote_price = token_prices.get(quote_symbol, 1.0)
 
     # Convert to USD
-    try:
-        initial_usd = float(initial_value) * quote_price_f
-        current_usd = float(current_total_value) * quote_price_f
-        fees_usd = float(total_fees_value) * quote_price_f
-        pnl_usd = current_usd - initial_usd
-        pnl_sign = "+" if pnl_usd >= 0 else ""
-    except (ValueError, TypeError):
-        pnl_usd = 0
-        fees_usd = 0
-        pnl_sign = ""
+    pnl_usd = pnl_f * quote_price
+    fees_usd = fees_f * quote_price
 
     # Get close timestamp
     closed_at = pos.get('closed_at', pos.get('updated_at', ''))
@@ -401,9 +406,12 @@ def _format_closed_position_line(pos: dict, token_cache: dict = None) -> str:
     # Build line: "MET-USDC (met) ✓ [0.31-0.32]"
     line = f"{pair} ({connector}) ✓ {range_str}"
 
-    # Add PnL and fees on second line
+    # Add PnL and fees on second line in USD
     parts = []
-    parts.append(f"PnL: {pnl_sign}${abs(pnl_usd):.2f}")
+    if pnl_usd >= 0:
+        parts.append(f"PnL: +${pnl_usd:.2f}")
+    else:
+        parts.append(f"PnL: -${abs(pnl_usd):.2f}")
     if fees_usd > 0.01:
         parts.append(f"🎁 ${fees_usd:.2f}")
     if age:
@@ -417,6 +425,7 @@ def _format_closed_position_line(pos: dict, token_cache: dict = None) -> str:
 # MENU DISPLAY
 # ============================================
 
+@gateway_required
 async def handle_liquidity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle liquidity pools - unified menu"""
     context.user_data["dex_state"] = "liquidity"
@@ -432,10 +441,11 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     - Recent closed positions (history)
     - Explore pools button
     """
+    chat_id = update.effective_chat.id
     help_text = r"💧 *Liquidity Pools*" + "\n\n"
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Fetch balances (cached)
         gateway_data = await cached_call(
@@ -499,13 +509,15 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         positions = lp_data.get("positions", [])
         token_cache = lp_data.get("token_cache", {})
+        token_prices = gateway_data.get("token_prices", {})
         context.user_data["token_cache"] = token_cache
+        context.user_data["token_prices"] = token_prices
 
         # Show active positions
         if positions:
             help_text += rf"━━━ Active Positions \({len(positions)}\) ━━━" + "\n"
             for i, pos in enumerate(positions[:5], 1):  # Show max 5
-                line = _format_compact_position_line(pos, token_cache, index=i)
+                line = _format_compact_position_line(pos, token_cache, index=i, token_prices=token_prices)
                 help_text += escape_markdown_v2(line) + "\n"
 
             if len(positions) > 5:
@@ -558,7 +570,7 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         if closed_positions:
             help_text += r"━━━ Closed Positions ━━━" + "\n"
             for pos in closed_positions:
-                line = _format_closed_position_line(pos, token_cache)
+                line = _format_closed_position_line(pos, token_cache, token_prices)
                 help_text += escape_markdown_v2(line) + "\n"
             help_text += "\n"
 
@@ -883,6 +895,8 @@ async def handle_lp_history(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     """Show position history with filters and pagination"""
     from datetime import datetime
 
+    chat_id = update.effective_chat.id
+
     try:
         # Get or initialize filters
         if reset_filters:
@@ -890,7 +904,7 @@ async def handle_lp_history(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         else:
             filters = get_history_filters(context.user_data, "position")
 
-        client = await get_client()
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             error_message = format_error_message("Gateway CLMM not available")

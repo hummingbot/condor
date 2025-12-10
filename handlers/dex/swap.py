@@ -251,7 +251,8 @@ async def handle_swap_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def _fetch_quotes_background(
     context: ContextTypes.DEFAULT_TYPE,
     message,
-    params: dict
+    params: dict,
+    chat_id: int = None
 ) -> None:
     """Fetch BUY/SELL quotes and balances in background and update the message"""
     try:
@@ -264,7 +265,7 @@ async def _fetch_quotes_background(
         if not all([connector, network, trading_pair, amount]):
             return
 
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():
@@ -511,13 +512,14 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
         quote_result: Optional quote result to display inline
         auto_quote: If True, fetch quote in background automatically
     """
+    chat_id = update.effective_chat.id
     params = context.user_data.get("swap_params", {})
 
     # Fetch recent swaps if not cached
     swaps = get_cached(context.user_data, "recent_swaps", ttl=60)
     if swaps is None:
         try:
-            client = await get_client()
+            client = await get_client(chat_id)
             swaps = await _fetch_recent_swaps(client, limit=5)
             set_cached(context.user_data, "recent_swaps", swaps)
         except Exception as e:
@@ -552,7 +554,7 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
 
     # Launch background quote fetch if no quote yet and auto_quote is enabled
     if auto_quote and quote_result is None and message:
-        asyncio.create_task(_fetch_quotes_background(context, message, params))
+        asyncio.create_task(_fetch_quotes_background(context, message, params, chat_id))
 
 
 # ============================================
@@ -577,11 +579,12 @@ async def handle_swap_toggle_side(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available router connectors for selection"""
+    chat_id = update.effective_chat.id
     params = context.user_data.get("swap_params", {})
     network = params.get("network", "solana-mainnet-beta")
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         cache_key = "router_connectors"
         connectors = get_cached(context.user_data, cache_key, ttl=300)
@@ -652,8 +655,9 @@ async def handle_swap_connector_select(update: Update, context: ContextTypes.DEF
 
 async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available networks for selection"""
+    chat_id = update.effective_chat.id
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         networks_cache_key = "gateway_networks"
         networks = get_cached(context.user_data, networks_cache_key, ttl=300)
@@ -809,6 +813,7 @@ async def handle_swap_set_slippage(update: Update, context: ContextTypes.DEFAULT
 
 async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Get quote for both BUY and SELL in parallel, display with spread"""
+    chat_id = update.effective_chat.id
     try:
         params = context.user_data.get("swap_params", {})
 
@@ -821,7 +826,7 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
         if not all([connector, network, trading_pair, amount]):
             raise ValueError("Missing required parameters")
 
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():

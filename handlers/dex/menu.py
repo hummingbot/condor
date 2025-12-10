@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, resolve_token_symbol, KNOWN_TOKENS
-from handlers.config.user_preferences import get_dex_last_swap
+from handlers.config.user_preferences import get_dex_last_swap, get_all_enabled_networks
 from servers import get_client
 from ._shared import cached_call, invalidate_cache
 
@@ -101,8 +101,14 @@ def _format_price(price) -> str:
         return str(price)
 
 
-async def _fetch_balances(client) -> dict:
-    """Fetch gateway/DEX balances (blockchain wallets like solana, ethereum)"""
+async def _fetch_balances(client, enabled_networks: set = None) -> dict:
+    """Fetch gateway/DEX balances (blockchain wallets like solana, ethereum)
+
+    Args:
+        client: API client
+        enabled_networks: Optional set of enabled network IDs to filter by.
+                         If None, shows all gateway networks.
+    """
     from collections import defaultdict
 
     # Gateway/blockchain connectors contain these keywords
@@ -133,6 +139,11 @@ async def _fetch_balances(client) -> dict:
                 is_gateway = any(keyword in connector_lower for keyword in GATEWAY_KEYWORDS)
                 if not is_gateway:
                     logger.debug(f"Skipping non-gateway connector: {connector_name}")
+                    continue
+
+                # Filter by enabled networks if specified
+                if enabled_networks and connector_lower not in enabled_networks:
+                    logger.debug(f"Skipping disabled network: {connector_name}")
                     continue
 
                 if balances:
