@@ -1658,12 +1658,12 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 def _format_timeframe_label(timeframe: str) -> str:
     """Convert API timeframe to display label"""
     labels = {
-        "1m": "1 Hour (1m candles)",
-        "5m": "5 Hours (5m candles)",
-        "15m": "15 Hours (15m candles)",
-        "1h": "1 Day (1h candles)",
-        "4h": "4 Days (4h candles)",
-        "1d": "7 Days (1d candles)",
+        "1m": "1m candles",
+        "5m": "5m candles",
+        "15m": "15m candles",
+        "1h": "1h candles",
+        "4h": "4h candles",
+        "1d": "1d candles",
     }
     return labels.get(timeframe, timeframe)
 

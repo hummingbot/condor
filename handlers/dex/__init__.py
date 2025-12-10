@@ -515,11 +515,15 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Pool OHLCV and combined chart handlers (for Meteora/CLMM pools)
         elif action.startswith("pool_ohlcv:"):
-            timeframe = action.split(":")[1]
-            await handle_pool_ohlcv(update, context, timeframe)
+            parts = action.split(":")
+            timeframe = parts[1]
+            currency = parts[2] if len(parts) > 2 else "usd"
+            await handle_pool_ohlcv(update, context, timeframe, currency)
         elif action.startswith("pool_combined:"):
-            timeframe = action.split(":")[1]
-            await handle_pool_combined_chart(update, context, timeframe)
+            parts = action.split(":")
+            timeframe = parts[1]
+            currency = parts[2] if len(parts) > 2 else "usd"
+            await handle_pool_combined_chart(update, context, timeframe, currency)
 
         # Refresh data
         elif action == "refresh":
