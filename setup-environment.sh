@@ -37,14 +37,26 @@ echo ""
 echo "Installing Chrome for Plotly image generation..."
 plotly_get_chrome || kaleido_get_chrome || python -c "import kaleido; kaleido.get_chrome_sync()"
 echo ""
+echo "Ensuring condor_bot_data.pickle exists as a file..."
+# Create pickle file if it doesn't exist or if it's a directory
+# This prevents Docker from creating it as a directory when mounting
+if [ -d condor_bot_data.pickle ]; then
+    echo "WARNING: condor_bot_data.pickle is a directory. Removing..."
+    rm -rf condor_bot_data.pickle
+fi
+if [ ! -f condor_bot_data.pickle ]; then
+    echo "Creating condor_bot_data.pickle..."
+    touch condor_bot_data.pickle
+fi
 echo "==================================="
 echo "  How to Run Condor"
 echo "==================================="
 echo ""
 echo "Option 1: Docker (Recommended)"
-echo "  docker-compose up -d"
+echo "  docker compose up -d"
 echo ""
 echo "Option 2: Local Python"
+echo "  make install" 
 echo "  conda activate condor"
 echo "  python main.py"
 echo ""
