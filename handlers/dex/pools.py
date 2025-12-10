@@ -1950,17 +1950,22 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
     if detailed:
         # Full detailed view
         if pool_address:
-            lines.append(f"📍 Pool: {pool_address[:16]}...")
+            lines.append(f"📍 Pool: `{pool_address}`")
 
-        # Range with status indicator
+        # Range with status indicator - show appropriate decimals based on price magnitude
         if lower and upper:
             try:
                 lower_f = float(lower)
                 upper_f = float(upper)
                 if lower_f >= 1:
-                    range_str = f"{lower_f:.2f} - {upper_f:.2f}"
+                    decimals = 2
+                elif lower_f >= 0.01:
+                    decimals = 4
+                elif lower_f >= 0.0001:
+                    decimals = 6
                 else:
-                    range_str = f"{lower_f:.4f} - {upper_f:.4f}"
+                    decimals = 8
+                range_str = f"{lower_f:.{decimals}f} - {upper_f:.{decimals}f}"
                 lines.append(f"{range_emoji} Range: [{range_str}]")
             except (ValueError, TypeError):
                 lines.append(f"{range_emoji} Range: [{lower} - {upper}]")
@@ -1978,6 +1983,13 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
 
         lines.append("")  # Separator
 
+        # Get quote token price for USD conversion
+        quote_price = pos.get('quote_token_price', pos.get('quote_price', 1.0))
+        try:
+            quote_price_f = float(quote_price) if quote_price else 1.0
+        except (ValueError, TypeError):
+            quote_price_f = 1.0
+
         # Current holdings
         if base_amount or quote_amount:
             try:
@@ -1988,47 +2000,49 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
             except (ValueError, TypeError):
                 pass
 
-        # Value information from pnl_summary
+        # Value information from pnl_summary - convert to USD
         initial_value = pnl_summary.get('initial_value_quote')
         current_value = pnl_summary.get('current_lp_value_quote') or pnl_summary.get('current_total_value_quote')
         if initial_value and current_value:
             try:
-                lines.append(f"💵 Value: ${float(current_value):.2f} (initial: ${float(initial_value):.2f})")
+                initial_usd = float(initial_value) * quote_price_f
+                current_usd = float(current_value) * quote_price_f
+                lines.append(f"💵 Value: ${current_usd:.2f} (initial: ${initial_usd:.2f})")
             except (ValueError, TypeError):
                 pass
 
         lines.append("")  # Separator
         lines.append("━━━ Performance ━━━")
 
-        # PnL from pnl_summary
+        # PnL from pnl_summary - convert to USD
         total_pnl = pnl_summary.get('total_pnl_quote')
         total_pnl_pct = pnl_summary.get('total_pnl_pct')
         if total_pnl is not None:
             try:
-                pnl_val = float(total_pnl)
+                pnl_val = float(total_pnl) * quote_price_f
                 pnl_pct = float(total_pnl_pct) if total_pnl_pct else 0
                 emoji = "📈" if pnl_val >= 0 else "📉"
                 sign = "+" if pnl_val >= 0 else ""
-                lines.append(f"{emoji} PnL: {sign}${pnl_val:.4f} ({sign}{pnl_pct:.4f}%)")
+                lines.append(f"{emoji} PnL: {sign}${pnl_val:.2f} ({sign}{pnl_pct:.2f}%)")
             except (ValueError, TypeError):
                 pass
 
-        # Impermanent loss
+        # Impermanent loss - convert to USD
         il = pnl_summary.get('impermanent_loss_quote')
         if il is not None:
             try:
-                il_val = float(il)
+                il_val = float(il) * quote_price_f
                 if il_val != 0:
-                    lines.append(f"⚠️ IL: ${il_val:.4f}")
+                    lines.append(f"⚠️ IL: ${il_val:.2f}")
             except (ValueError, TypeError):
                 pass
 
-        # Fees earned
+        # Fees earned - convert to USD
         total_fees = pnl_summary.get('total_fees_value_quote')
         if total_fees is not None:
             try:
-                fees_val = float(total_fees)
-                lines.append(f"🎁 Fees earned: ${fees_val:.4f}")
+                fees_val = float(total_fees) * quote_price_f
+                lines.append(f"🎁 Fees earned: ${fees_val:.2f}")
             except (ValueError, TypeError):
                 pass
 
