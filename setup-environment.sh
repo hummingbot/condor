@@ -37,17 +37,9 @@ echo ""
 echo "Installing Chrome for Plotly image generation..."
 plotly_get_chrome || kaleido_get_chrome || python -c "import kaleido; kaleido.get_chrome_sync()"
 echo ""
-echo "Ensuring condor_bot_data.pickle exists as a file..."
-# Create pickle file if it doesn't exist or if it's a directory
-# This prevents Docker from creating it as a directory when mounting
-if [ -d condor_bot_data.pickle ]; then
-    echo "WARNING: condor_bot_data.pickle is a directory. Removing..."
-    rm -rf condor_bot_data.pickle
-fi
-if [ ! -f condor_bot_data.pickle ]; then
-    echo "Creating condor_bot_data.pickle..."
-    touch condor_bot_data.pickle
-fi
+echo "Ensuring data directory exists for persistence..."
+mkdir -p data
+
 echo "==================================="
 echo "  How to Run Condor"
 echo "==================================="
