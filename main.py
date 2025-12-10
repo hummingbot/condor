@@ -1,6 +1,7 @@
 import logging
 import importlib
 import sys
+import os
 import asyncio
 from pathlib import Path
 
@@ -482,12 +483,28 @@ async def watch_and_reload(application: Application) -> None:
         except Exception as e:
             logger.error(f"❌ Auto-reload failed: {e}", exc_info=True)
 
+def get_persistence() -> PicklePersistence:
+    """
+    Build a persistence object that works both locally and in Docker.
+    - Uses an env var override if provided.
+    - Defaults to <project_root>/data/condor_bot_data.pickle.
+    - Ensures the parent directory exists, but does NOT create the file.
+    """
+    base_dir = Path(__file__).parent
+    default_path = base_dir / "data" / "condor_bot_data.pickle"
+
+    persistence_path = Path(os.getenv("CONDOR_PERSISTENCE_FILE", default_path))
+
+    # Make sure the directory exists; the file will be created by PTB
+    persistence_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return PicklePersistence(filepath=persistence_path)
 
 def main() -> None:
     """Run the bot."""
     # Setup persistence to save user data, chat data, and bot data
     # This will save trading context, last used parameters, etc.
-    persistence = PicklePersistence(filepath="condor_bot_data.pickle")
+    persistence = get_persistence()
 
     # Create the Application with persistence enabled
     application = (
