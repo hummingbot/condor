@@ -21,6 +21,7 @@ from handlers.config.user_preferences import (
     get_portfolio_prefs,
     set_portfolio_days,
     PORTFOLIO_DAYS_OPTIONS,
+    get_all_enabled_networks,
 )
 from utils.portfolio_graphs import generate_portfolio_dashboard
 from utils.trading_data import get_portfolio_overview
@@ -64,6 +65,40 @@ def _get_optimal_interval(days: int, max_points: int = 100) -> str:
 
     # Fallback to 1d if nothing else works
     return "1d"
+
+
+def _filter_balances_by_networks(balances: dict, enabled_networks: set) -> dict:
+    """
+    Filter portfolio balances to only include enabled networks.
+
+    The connector name in the portfolio state corresponds to the network
+    (e.g., 'solana-mainnet-beta', 'ethereum-mainnet', 'base').
+
+    Args:
+        balances: Portfolio state dict {account: {connector: [balances]}}
+        enabled_networks: Set of enabled network IDs, or None for no filtering
+
+    Returns:
+        Filtered balances dict with same structure
+    """
+    if enabled_networks is None:
+        return balances
+
+    if not balances:
+        return balances
+
+    filtered = {}
+    for account_name, account_data in balances.items():
+        filtered_account = {}
+        for connector_name, connector_balances in account_data.items():
+            # Check if this connector/network is enabled
+            connector_lower = connector_name.lower()
+            if connector_lower in enabled_networks:
+                filtered_account[connector_name] = connector_balances
+        if filtered_account:
+            filtered[account_name] = filtered_account
+
+    return filtered
 
 
 def _parse_snapshot_tokens(state: dict) -> dict:
@@ -553,6 +588,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Get the appropriate message object for replies
     message = update.message or (update.callback_query.message if update.callback_query else None)
+    chat_id = update.effective_chat.id
     if not message:
         logger.error("No message object available for portfolio_command")
         return
@@ -570,8 +606,8 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await message.reply_text(error_message, parse_mode="MarkdownV2")
             return
 
-        # Always use the default server from server_manager
-        default_server = server_manager.get_default_server()
+        # Use per-chat default server, falling back to global default
+        default_server = server_manager.get_default_server_for_chat(chat_id)
         if default_server and default_server in enabled_servers:
             server_name = default_server
         else:
@@ -659,6 +695,11 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # ========================================
         try:
             balances = await balances_task
+            # Filter balances by enabled networks from wallet preferences
+            enabled_networks = get_all_enabled_networks(context.user_data)
+            if enabled_networks:
+                logger.info(f"Filtering portfolio by enabled networks: {enabled_networks}")
+                balances = _filter_balances_by_networks(balances, enabled_networks)
             await update_ui("Loading positions & 24h data...")
         except Exception as e:
             logger.error(f"Failed to fetch balances: {e}")
@@ -822,14 +863,14 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         from servers import server_manager
         from utils.trading_data import get_tokens_for_networks
 
-        # Always use the default server from server_manager
+        # Use per-chat default server from server_manager
         servers = server_manager.list_servers()
         enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
 
         if not enabled_servers:
             return
 
-        default_server = server_manager.get_default_server()
+        default_server = server_manager.get_default_server_for_chat(chat_id)
         if default_server and default_server in enabled_servers:
             server_name = default_server
         else:
@@ -857,6 +898,12 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval = await _fetch_dashboard_data(
             client, days
         )
+
+        # Filter balances by enabled networks from wallet preferences
+        enabled_networks = get_all_enabled_networks(context.user_data)
+        if enabled_networks and overview_data and overview_data.get('balances'):
+            logger.info(f"Filtering portfolio refresh by enabled networks: {enabled_networks}")
+            overview_data['balances'] = _filter_balances_by_networks(overview_data['balances'], enabled_networks)
 
         # Calculate current portfolio value for PNL
         current_value = 0.0

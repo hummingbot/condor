@@ -58,8 +58,11 @@ GRID_STRIKE_FIELDS = {
 # SERVER CLIENT HELPER
 # ============================================
 
-async def get_bots_client():
+async def get_bots_client(chat_id: Optional[int] = None):
     """Get the API client for bot operations
+
+    Args:
+        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
 
     Returns:
         Client instance with bot_orchestration and controller endpoints
@@ -75,14 +78,18 @@ async def get_bots_client():
     if not enabled_servers:
         raise ValueError("No enabled API servers available")
 
-    # Use default server if set, otherwise fall back to first enabled
-    default_server = server_manager.get_default_server()
+    # Use per-chat server if chat_id provided, otherwise global default
+    if chat_id is not None:
+        default_server = server_manager.get_default_server_for_chat(chat_id)
+    else:
+        default_server = server_manager.get_default_server()
+
     if default_server and default_server in enabled_servers:
         server_name = default_server
     else:
         server_name = enabled_servers[0]
 
-    logger.info(f"Bots using server: {server_name}")
+    logger.info(f"Bots using server: {server_name}" + (f" (chat_id={chat_id})" if chat_id else ""))
     client = await server_manager.get_client(server_name)
 
     return client

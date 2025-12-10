@@ -102,9 +102,10 @@ def _format_config_line(cfg: dict, index: int) -> str:
 async def show_controller_configs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
     """Show the controller configs management menu grouped by type"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         configs = await client.controllers.list_controller_configs()
 
         # Store configs for later use
@@ -255,10 +256,11 @@ async def show_configs_list(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def show_new_grid_strike_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the progressive Grid Strike wizard - Step 1: Connector"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     # Fetch existing configs for sequence numbering
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         configs = await client.controllers.list_controller_configs()
         context.user_data["controller_configs_list"] = configs
     except Exception as e:
@@ -278,10 +280,11 @@ async def show_new_grid_strike_form(update: Update, context: ContextTypes.DEFAUL
 async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Wizard Step 1: Select Connector"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         cex_connectors = await get_available_cex_connectors(context.user_data, client)
 
         if not cex_connectors:
@@ -342,13 +345,14 @@ async def handle_gs_wizard_connector(update: Update, context: ContextTypes.DEFAU
 async def handle_gs_wizard_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str) -> None:
     """Handle trading pair selection from button in wizard"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     config["trading_pair"] = pair.upper()
     set_controller_config(context, config)
 
     # Start background fetch of market data
-    asyncio.create_task(_background_fetch_market_data(context, config))
+    asyncio.create_task(_background_fetch_market_data(context, config, chat_id))
 
     # Move to side step
     context.user_data["gs_wizard_step"] = "side"
@@ -564,6 +568,7 @@ async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_
 async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str = None) -> None:
     """Wizard Step 6: Price Configuration with OHLC chart"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     connector = config.get("connector_name", "")
@@ -611,7 +616,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 # Update the wizard message ID to the new loading message
                 context.user_data["gs_wizard_message_id"] = loading_msg.message_id
 
-            client = await get_bots_client()
+            client = await get_bots_client(chat_id)
             current_price = await fetch_current_price(client, connector, pair)
 
             if current_price:
@@ -1329,7 +1334,7 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         result = await client.controllers.create_or_update_controller_config(config_id, config)
 
         # Clean up wizard state
@@ -1378,7 +1383,7 @@ def _cleanup_wizard_state(context) -> None:
     clear_bots_state(context)
 
 
-async def _background_fetch_market_data(context, config: dict) -> None:
+async def _background_fetch_market_data(context, config: dict, chat_id: int = None) -> None:
     """Background task to fetch market data while user continues with wizard"""
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
@@ -1387,7 +1392,7 @@ async def _background_fetch_market_data(context, config: dict) -> None:
         return
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Fetch current price
         current_price = await fetch_current_price(client, connector, pair)
@@ -1412,6 +1417,7 @@ async def _background_fetch_market_data(context, config: dict) -> None:
 async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
     """Process text input during wizard flow"""
     step = context.user_data.get("gs_wizard_step")
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     if not step:
@@ -1434,7 +1440,7 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             set_controller_config(context, config)
 
             # Start background fetch of market data
-            asyncio.create_task(_background_fetch_market_data(context, config))
+            asyncio.create_task(_background_fetch_market_data(context, config, chat_id))
 
             # Move to side step
             context.user_data["gs_wizard_step"] = "side"
@@ -2007,9 +2013,10 @@ async def handle_set_field(update: Update, context: ContextTypes.DEFAULT_TYPE, f
 async def show_connector_selector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show connector selection keyboard with available CEX connectors"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Get available CEX connectors (with cache)
         cex_connectors = await get_available_cex_connectors(context.user_data, client)
@@ -2077,6 +2084,7 @@ async def handle_select_connector(update: Update, context: ContextTypes.DEFAULT_
 async def fetch_and_apply_market_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetch current price and candles, apply auto-pricing, show chart"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     connector = config.get("connector_name")
@@ -2088,7 +2096,7 @@ async def fetch_and_apply_market_data(update: Update, context: ContextTypes.DEFA
         return
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Show loading message
         await query.message.edit_text(
@@ -2251,6 +2259,7 @@ async def process_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context: Telegram context
         user_input: The text the user entered
     """
+    chat_id = update.effective_chat.id
     field_name = context.user_data.get("editing_controller_field")
 
     if not field_name:
@@ -2303,7 +2312,7 @@ async def process_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
             try:
-                client = await get_bots_client()
+                client = await get_bots_client(chat_id)
                 connector = config.get("connector_name")
                 pair = config.get("trading_pair")
                 side = config.get("side", SIDE_LONG)
@@ -2380,6 +2389,7 @@ async def process_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_save_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Save the current config to the backend"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     # Validate required fields
@@ -2401,7 +2411,7 @@ async def handle_save_config(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Save to backend using config id as the config_name
         config_name = config.get("id", "")
@@ -2521,9 +2531,10 @@ DEPLOY_FIELD_ORDER = [
 async def show_deploy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the deploy controllers menu"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         configs = await client.controllers.list_controller_configs()
 
         if not configs:
@@ -3055,6 +3066,7 @@ async def process_deploy_field_input(update: Update, context: ContextTypes.DEFAU
 async def handle_execute_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Execute the deployment of selected controllers"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     deploy_params = context.user_data.get("deploy_params", {})
 
@@ -3081,7 +3093,7 @@ async def handle_execute_deploy(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Deploy using deploy_v2_controllers (this can take time)
         result = await client.bot_orchestration.deploy_v2_controllers(
@@ -3248,11 +3260,12 @@ async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_
 async def handle_select_credentials(update: Update, context: ContextTypes.DEFAULT_TYPE, creds: str) -> None:
     """Handle credentials profile selection"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     if creds == "_show":
         # Show available credentials profiles
         try:
-            client = await get_bots_client()
+            client = await get_bots_client(chat_id)
             available_creds = await _get_available_credentials(client)
         except Exception:
             available_creds = ["master_account"]
@@ -3562,7 +3575,7 @@ async def process_deploy_custom_name_input(update: Update, context: ContextTypes
         logger.error(f"Error updating deploy message: {e}")
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         result = await client.bot_orchestration.deploy_v2_controllers(
             instance_name=custom_name,
@@ -3653,9 +3666,10 @@ from .controllers.pmm_mister import (
 async def show_new_pmm_mister_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the progressive PMM Mister wizard - Step 1: Connector"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         configs = await client.controllers.list_controller_configs()
         context.user_data["controller_configs_list"] = configs
     except Exception as e:
@@ -3673,9 +3687,10 @@ async def show_new_pmm_mister_form(update: Update, context: ContextTypes.DEFAULT
 async def _show_pmm_wizard_connector_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """PMM Wizard Step 1: Select Connector"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         cex_connectors = await get_available_cex_connectors(context.user_data, client)
 
         if not cex_connectors:
@@ -4007,6 +4022,7 @@ async def _show_pmm_wizard_review_step(update: Update, context: ContextTypes.DEF
 async def handle_pmm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Save PMM config"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     is_valid, error = pmm_validate_config(config)
@@ -4020,7 +4036,7 @@ async def handle_pmm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         config_id = config.get("id", "")
         result = await client.controllers.create_or_update_controller_config(config_id, config)
 

@@ -82,13 +82,14 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Determine if this is a callback query or direct command
     query = update.callback_query
     msg = update.message or (query.message if query else None)
+    chat_id = update.effective_chat.id
 
     if not msg:
         logger.error("No message object available for show_bots_menu")
         return
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         bots_data = await client.bot_orchestration.get_active_bots_status()
 
         # Extract bots dictionary for building keyboard
@@ -183,6 +184,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
         bot_name: Name of the bot to show
     """
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     try:
         # Try to get bot info from cached data first
@@ -195,7 +197,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
         # If not in cache, fetch fresh data
         if not bot_info:
-            client = await get_bots_client()
+            client = await get_bots_client(chat_id)
             fresh_data = await client.bot_orchestration.get_active_bots_status()
             if isinstance(fresh_data, dict) and "data" in fresh_data:
                 bot_info = fresh_data.get("data", {}).get(bot_name)
@@ -421,6 +423,7 @@ def _shorten_controller_name(name: str, max_len: int = 28) -> str:
 async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, controller_idx: int) -> None:
     """Show controller detail with edit/stop options (using index)"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     bot_name = context.user_data.get("current_bot_name")
     bot_info = context.user_data.get("current_bot_info", {})
@@ -462,7 +465,7 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
     message_replaced = False  # Track if we've sent a new message (e.g., loading message)
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
         configs = await client.controllers.get_bot_controller_configs(bot_name)
 
         # Find the matching config
@@ -672,6 +675,7 @@ async def handle_stop_controller(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_confirm_stop_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Actually stop the controller"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     bot_name = context.user_data.get("current_bot_name")
     controllers = context.user_data.get("current_controllers", [])
@@ -690,7 +694,7 @@ async def handle_confirm_stop_controller(update: Update, context: ContextTypes.D
     )
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Stop controller by setting manual_kill_switch=True
         result = await client.controllers.update_bot_controller_config(
@@ -904,6 +908,7 @@ async def handle_controller_set_field(update: Update, context: ContextTypes.DEFA
 async def handle_controller_confirm_set(update: Update, context: ContextTypes.DEFAULT_TYPE, field_name: str, value: str) -> None:
     """Confirm and apply a controller field change"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     bot_name = context.user_data.get("current_bot_name")
     ctrl_config = context.user_data.get("current_controller_config")
@@ -929,7 +934,7 @@ async def handle_controller_confirm_set(update: Update, context: ContextTypes.DE
     await query.answer("Updating...")
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Build config update
         if field_name == "take_profit":
@@ -1007,6 +1012,7 @@ async def handle_controller_confirm_set(update: Update, context: ContextTypes.DE
 
 async def process_controller_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
     """Process user input for controller field editing"""
+    chat_id = update.effective_chat.id
     field_name = context.user_data.get("editing_ctrl_field")
     bot_name = context.user_data.get("current_bot_name")
     ctrl_config = context.user_data.get("current_controller_config")
@@ -1035,7 +1041,7 @@ async def process_controller_field_input(update: Update, context: ContextTypes.D
 
     # Validate and update
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         # Build config update
         if field_name == "take_profit":
@@ -1127,6 +1133,7 @@ async def handle_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_confirm_stop_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Actually stop and archive the bot"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     bot_name = context.user_data.get("current_bot_name")
     if not bot_name:
@@ -1141,7 +1148,7 @@ async def handle_confirm_stop_bot(update: Update, context: ContextTypes.DEFAULT_
     )
 
     try:
-        client = await get_bots_client()
+        client = await get_bots_client(chat_id)
 
         result = await client.bot_orchestration.stop_and_archive_bot(
             bot_name=bot_name,

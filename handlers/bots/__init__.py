@@ -149,12 +149,13 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Check if specific bot name was provided
     if update.message and context.args and len(context.args) > 0:
         bot_name = context.args[0]
+        chat_id = update.effective_chat.id
         # For direct command with bot name, show detail view
         from utils.telegram_formatters import format_bot_status, format_error_message
         from ._shared import get_bots_client
 
         try:
-            client = await get_bots_client()
+            client = await get_bots_client(chat_id)
             bot_status = await client.bot_orchestration.get_bot_status(bot_name)
             response_message = format_bot_status(bot_status)
             await msg.reply_text(response_message, parse_mode="MarkdownV2")
