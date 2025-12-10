@@ -111,6 +111,8 @@ from .controller_handlers import (
     handle_pmm_save,
     handle_pmm_review_back,
     handle_pmm_edit_id,
+    handle_pmm_edit_field,
+    handle_pmm_set_field,
     handle_pmm_edit_advanced,
     handle_pmm_adv_setting,
     process_pmm_wizard_input,
@@ -428,6 +430,17 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "pmm_edit_id":
             await handle_pmm_edit_id(update, context)
+
+        elif main_action == "pmm_edit":
+            if len(action_parts) > 1:
+                field = action_parts[1]
+                await handle_pmm_edit_field(update, context, field)
+
+        elif main_action == "pmm_set":
+            if len(action_parts) > 2:
+                field = action_parts[1]
+                value = action_parts[2]
+                await handle_pmm_set_field(update, context, field, value)
 
         elif main_action == "pmm_edit_advanced":
             await handle_pmm_edit_advanced(update, context)

@@ -35,8 +35,8 @@ DEFAULTS: Dict[str, Any] = {
     "target_base_pct": 0.2,
     "min_base_pct": 0.1,
     "max_base_pct": 0.4,
-    "buy_spreads": "0.01,0.02",
-    "sell_spreads": "0.01,0.02",
+    "buy_spreads": "0.0002,0.001",
+    "sell_spreads": "0.0002,0.001",
     "buy_amounts_pct": "1,2",
     "sell_amounts_pct": "1,2",
     "executor_refresh_time": 30,
@@ -122,16 +122,16 @@ FIELDS: Dict[str, ControllerField] = {
         label="Buy Spreads",
         type="str",
         required=True,
-        hint="Comma-separated spreads (e.g. 0.01,0.02)",
-        default="0.01,0.02"
+        hint="Comma-separated spreads (e.g. 0.0002,0.001)",
+        default="0.0002,0.001"
     ),
     "sell_spreads": ControllerField(
         name="sell_spreads",
         label="Sell Spreads",
         type="str",
         required=True,
-        hint="Comma-separated spreads (e.g. 0.01,0.02)",
-        default="0.01,0.02"
+        hint="Comma-separated spreads (e.g. 0.0002,0.001)",
+        default="0.0002,0.001"
     ),
     "buy_amounts_pct": ControllerField(
         name="buy_amounts_pct",
