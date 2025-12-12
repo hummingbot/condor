@@ -290,8 +290,8 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
         # Get list of available connectors
         all_connectors = await client.connectors.list_connectors()
 
-        # Filter out testnet connectors
-        connectors = [c for c in all_connectors if 'testnet' not in c.lower()]
+        # Filter out testnet connectors and gateway connectors (those with '/' like "uniswap/ethereum")
+        connectors = [c for c in all_connectors if 'testnet' not in c.lower() and '/' not in c]
 
         # Create connector buttons in grid of 3 per row (for better readability of long names)
         # Store account name and connector list in context to avoid exceeding 64-byte callback_data limit
