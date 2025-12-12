@@ -174,7 +174,11 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         context.user_data["configs_page"] = page
 
         # Get selection state (uses config IDs for persistence)
+        # Sync with available configs - remove any IDs that no longer exist
         selected = context.user_data.get("selected_configs", {})  # {config_id: True}
+        available_ids = {c.get("id") for c in configs if c.get("id")}
+        selected = {cfg_id: is_sel for cfg_id, is_sel in selected.items() if cfg_id in available_ids}
+        context.user_data["selected_configs"] = selected
         selected_ids = [cfg_id for cfg_id, is_sel in selected.items() if is_sel]
 
         # Calculate pagination
@@ -1088,7 +1092,10 @@ async def _show_wizard_pair_step(update: Update, context: ContextTypes.DEFAULT_T
         if row:
             keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back_to_connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
 
     recent_hint = ""
     if recent_pairs:
@@ -1117,7 +1124,10 @@ async def _show_wizard_side_step(update: Update, context: ContextTypes.DEFAULT_T
             InlineKeyboardButton("📈 LONG", callback_data="bots:gs_side:long"),
             InlineKeyboardButton("📉 SHORT", callback_data="bots:gs_side:short"),
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back_to_pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
     ]
 
     await query.message.edit_text(
@@ -1173,7 +1183,10 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
             InlineKeyboardButton("50x", callback_data="bots:gs_leverage:50"),
             InlineKeyboardButton("75x", callback_data="bots:gs_leverage:75"),
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back_to_side"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
     ]
 
     await query.message.edit_text(
@@ -1302,7 +1315,10 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
             InlineKeyboardButton("💰 2000", callback_data="bots:gs_amount:2000"),
             InlineKeyboardButton("💰 5000", callback_data="bots:gs_amount:5000"),
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back_to_leverage"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
     ]
 
     await query.message.edit_text(
@@ -1519,7 +1535,10 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             [
                 InlineKeyboardButton("💾 Save Config", callback_data="bots:gs_save"),
             ],
-            [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back_to_amount"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+            ],
         ]
 
         # Build copyable YAML config format
@@ -1541,8 +1560,8 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             f"start_price: {start:.6g}\n"
             f"end_price: {end:.6g}\n"
             f"limit_price: {limit:.6g}\n"
-            f"take_profit: {take_profit}  # {take_profit*100:.3f}%\n"
-            f"min_spread_between_orders: {min_spread}  # {min_spread*100:.3f}%\n"
+            f"take_profit: {take_profit}\n"
+            f"min_spread_between_orders: {min_spread}\n"
             f"min_order_amount_quote: {min_order_amount:.0f}\n"
             f"max_open_orders: {max_open_orders}\n"
             f"order_frequency: {order_frequency}"
@@ -1550,10 +1569,12 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
         # Grid analysis info
         grid_valid = "OK" if grid.get("valid") else "WARN"
-        natr_info = f" \\| NATR: {natr*100:.2f}%" if natr else ""
+        grid_range_pct = grid.get("grid_range_pct", 0)
+        natr_info = f" \\| NATR: {natr*100:.2f}%".replace(".", "\\.") if natr else ""
+        range_info = f" \\| range: {grid_range_pct:.2f}%".replace(".", "\\.")
 
         config_text = (
-            f"*{escape_markdown_v2(pair)}* \\| current: `{current_price:,.6g}`{natr_info}\n\n"
+            f"*{escape_markdown_v2(pair)}* \\| current: `{current_price:,.6g}`{range_info}{natr_info}\n\n"
             f"```\n{yaml_block}\n```\n\n"
             f"Grid: `{grid['num_levels']}` levels \\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
             f"@ `${grid['amount_per_level']:.2f}`/lvl \\[{grid_valid}\\]"
@@ -1650,6 +1671,47 @@ async def handle_gs_back_to_prices(update: Update, context: ContextTypes.DEFAULT
     """Go back to prices step from validation error"""
     context.user_data["gs_wizard_step"] = "prices"
     await _show_wizard_prices_step(update, context)
+
+
+async def handle_gs_back_to_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go back to connector selection step"""
+    context.user_data["gs_wizard_step"] = "connector_name"
+    await _show_wizard_connector_step(update, context)
+
+
+async def handle_gs_back_to_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go back to trading pair step"""
+    context.user_data["gs_wizard_step"] = "trading_pair"
+    await _show_wizard_pair_step(update, context)
+
+
+async def handle_gs_back_to_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go back to side selection step"""
+    context.user_data["gs_wizard_step"] = "side"
+    await _show_wizard_side_step(update, context)
+
+
+async def handle_gs_back_to_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go back to leverage step (or side step for spot exchanges)"""
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+
+    # If spot exchange, go back to side step instead
+    if not connector.endswith("_perpetual"):
+        context.user_data["gs_wizard_step"] = "side"
+        await _show_wizard_side_step(update, context)
+    else:
+        context.user_data["gs_wizard_step"] = "leverage"
+        await _show_wizard_leverage_step(update, context)
+
+
+async def handle_gs_back_to_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go back to amount step"""
+    context.user_data["gs_wizard_step"] = "total_amount_quote"
+    # Clear cached market data to avoid showing stale chart
+    context.user_data.pop("gs_current_price", None)
+    context.user_data.pop("gs_candles", None)
+    await _show_wizard_amount_step(update, context)
 
 
 async def handle_gs_interval_change(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str) -> None:
@@ -2755,38 +2817,30 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
         [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
     ]
 
-    # Build copyable YAML config format
+    # Get config values
     max_open_orders = config.get("max_open_orders", 3)
     order_frequency = config.get("order_frequency", 3)
     leverage = config.get("leverage", 1)
     side_value = config.get("side", SIDE_LONG)
-
-    # YAML block for copying
-    yaml_block = (
-        f"connector_name: {connector}\n"
-        f"trading_pair: {pair}\n"
-        f"side: {side_value}  # 1=LONG, 2=SHORT\n"
-        f"leverage: {leverage}\n"
-        f"total_amount_quote: {total_amount:.0f}\n"
-        f"start_price: {start:.6g}\n"
-        f"end_price: {end:.6g}\n"
-        f"limit_price: {limit:.6g}\n"
-        f"take_profit: {take_profit}  # {take_profit*100:.3f}%\n"
-        f"min_spread_between_orders: {min_spread}  # {min_spread*100:.3f}%\n"
-        f"min_order_amount_quote: {min_order_amount:.0f}\n"
-        f"max_open_orders: {max_open_orders}\n"
-        f"order_frequency: {order_frequency}"
-    )
+    side_str = "LONG" if side_value == SIDE_LONG else "SHORT"
 
     # Grid analysis info
-    grid_valid = "OK" if grid.get("valid") else "WARN"
-    natr_info = f" \\| NATR: {natr*100:.2f}%" if natr else ""
+    grid_valid = "✓" if grid.get("valid") else "⚠️"
+    natr_pct = f"{natr*100:.2f}%" if natr else "N/A"
+    range_pct = f"{grid.get('grid_range_pct', 0):.2f}%"
 
+    # Build config text with individually copyable key=value params
     config_text = (
-        f"*{escape_markdown_v2(pair)}* \\| current: `{current_price:,.6g}`{natr_info}\n\n"
-        f"```\n{yaml_block}\n```\n\n"
-        f"Grid: `{grid['num_levels']}` levels \\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
-        f"@ `${grid['amount_per_level']:.2f}`/lvl \\[{grid_valid}\\]"
+        f"*{escape_markdown_v2(pair)}* {side_str}\n"
+        f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
+        f"`total_amount_quote={total_amount:.0f}`\n"
+        f"`start_price={start:.6g}` `end_price={end:.6g}`\n"
+        f"`limit_price={limit:.6g}` `leverage={leverage}`\n"
+        f"`take_profit={take_profit}` `min_spread={min_spread}`\n"
+        f"`min_order_amount={min_order_amount:.0f}` `max_orders={max_open_orders}`\n\n"
+        f"{grid_valid} Grid: `{grid['num_levels']}` levels "
+        f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
+        f"@ `${grid['amount_per_level']:.2f}`/lvl"
     )
 
     # Add warnings if any
@@ -2794,7 +2848,7 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
         warnings_text = "\n".join(f"⚠️ {escape_markdown_v2(w)}" for w in grid["warnings"])
         config_text += f"\n{warnings_text}"
 
-    config_text += "\n\n_Edit: `field=value` \\(e\\.g\\. `start\\_price=130`\\)_"
+    config_text += "\n\n_Edit: `field=value`_"
 
     try:
         # Delete old message (which is a photo)

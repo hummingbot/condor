@@ -235,7 +235,7 @@ def generate_chart(
             showgrid=True
         ),
         showlegend=False,
-        width=900,
+        width=1100,
         height=500,
         margin=dict(l=10, r=120, t=50, b=50)  # Increased bottom margin for multi-line x-axis labels
     )

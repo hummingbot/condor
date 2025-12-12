@@ -109,6 +109,11 @@ from .controller_handlers import (
     handle_gs_wizard_amount,
     handle_gs_accept_prices,
     handle_gs_back_to_prices,
+    handle_gs_back_to_connector,
+    handle_gs_back_to_pair,
+    handle_gs_back_to_side,
+    handle_gs_back_to_leverage,
+    handle_gs_back_to_amount,
     handle_gs_interval_change,
     handle_gs_wizard_take_profit,
     handle_gs_edit_id,
@@ -429,6 +434,21 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "gs_back_to_prices":
             await handle_gs_back_to_prices(update, context)
+
+        elif main_action == "gs_back_to_connector":
+            await handle_gs_back_to_connector(update, context)
+
+        elif main_action == "gs_back_to_pair":
+            await handle_gs_back_to_pair(update, context)
+
+        elif main_action == "gs_back_to_side":
+            await handle_gs_back_to_side(update, context)
+
+        elif main_action == "gs_back_to_leverage":
+            await handle_gs_back_to_leverage(update, context)
+
+        elif main_action == "gs_back_to_amount":
+            await handle_gs_back_to_amount(update, context)
 
         elif main_action == "gs_interval":
             if len(action_parts) > 1:
