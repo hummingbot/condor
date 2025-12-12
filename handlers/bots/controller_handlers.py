@@ -47,6 +47,19 @@ from ._shared import (
     ORDER_TYPE_LIMIT_MAKER,
     ORDER_TYPE_LABELS,
 )
+from .controllers.grid_strike.grid_analysis import (
+    calculate_natr,
+    calculate_price_stats,
+    suggest_grid_params,
+    generate_theoretical_grid,
+    format_grid_summary,
+)
+from handlers.cex._shared import (
+    fetch_cex_balances,
+    get_cex_balances,
+    fetch_trading_rules,
+    get_trading_rules,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +69,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 # Pagination settings for configs
-CONFIGS_PER_PAGE = 16
+CONFIGS_PER_PAGE = 8  # Reduced to leave space for action buttons
 
 
 def _get_controller_type_display(controller_name: str) -> tuple[str, str]:
@@ -99,8 +112,42 @@ def _format_config_line(cfg: dict, index: int) -> str:
     return f"{index}. {display}"
 
 
+def _get_config_seq_num(cfg: dict) -> int:
+    """Extract sequence number from config ID for sorting"""
+    config_id = cfg.get("id", "")
+    parts = config_id.split("_", 1)
+    if parts and parts[0].isdigit():
+        return int(parts[0])
+    return -1  # No number goes to end
+
+
+def _get_available_controller_types(configs: list) -> dict[str, int]:
+    """Get available controller types with counts"""
+    type_counts: dict[str, int] = {}
+    for cfg in configs:
+        ctrl_type = cfg.get("controller_name", "unknown")
+        type_counts[ctrl_type] = type_counts.get(ctrl_type, 0) + 1
+    return type_counts
+
+
+def _get_selected_config_ids(context, type_configs: list) -> list[str]:
+    """Get list of selected config IDs from selection state"""
+    selected = context.user_data.get("selected_configs", {})  # {config_id: True}
+    result = []
+    for cfg in type_configs:
+        cfg_id = cfg.get("id", "")
+        if cfg_id and selected.get(cfg_id):
+            result.append(cfg_id)
+    return result
+
+
 async def show_controller_configs_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
-    """Show the controller configs management menu grouped by type"""
+    """
+    Unified configs menu - shows configs directly with type selector, multi-select,
+    and actions (Deploy, Edit, Delete).
+
+    Selection persists across type/page changes using config IDs (not indices).
+    """
     query = update.callback_query
     chat_id = update.effective_chat.id
 
@@ -108,89 +155,124 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         client = await get_bots_client(chat_id)
         configs = await client.controllers.list_controller_configs()
 
-        # Store configs for later use
+        # Store all configs
         context.user_data["controller_configs_list"] = configs
+
+        # Get available types
+        type_counts = _get_available_controller_types(configs)
+
+        # Determine current type (default to first available or grid_strike)
+        current_type = context.user_data.get("configs_controller_type")
+        if not current_type or current_type not in type_counts:
+            current_type = list(type_counts.keys())[0] if type_counts else "grid_strike"
+        context.user_data["configs_controller_type"] = current_type
+
+        # Filter and sort configs by current type
+        type_configs = [c for c in configs if c.get("controller_name") == current_type]
+        type_configs.sort(key=_get_config_seq_num, reverse=True)
+        context.user_data["configs_type_filtered"] = type_configs
         context.user_data["configs_page"] = page
 
-        total_configs = len(configs)
-        total_pages = (total_configs + CONFIGS_PER_PAGE - 1) // CONFIGS_PER_PAGE if total_configs > 0 else 1
+        # Get selection state (uses config IDs for persistence)
+        selected = context.user_data.get("selected_configs", {})  # {config_id: True}
+        selected_ids = [cfg_id for cfg_id, is_sel in selected.items() if is_sel]
 
-        # Calculate page slice
+        # Calculate pagination
+        total_pages = max(1, (len(type_configs) + CONFIGS_PER_PAGE - 1) // CONFIGS_PER_PAGE)
         start_idx = page * CONFIGS_PER_PAGE
-        end_idx = min(start_idx + CONFIGS_PER_PAGE, total_configs)
-        page_configs = configs[start_idx:end_idx]
+        end_idx = min(start_idx + CONFIGS_PER_PAGE, len(type_configs))
+        page_configs = type_configs[start_idx:end_idx]
 
-        # Build message header
+        # Build message
+        type_name, emoji = _get_controller_type_display(current_type)
         lines = [r"*Controller Configs*", ""]
 
-        if not configs:
-            lines.append(r"_No configurations found\._")
-            lines.append(r"Create a new one to get started\!")
-        else:
-            if total_pages > 1:
-                lines.append(f"_{total_configs} configs \\(page {page + 1}/{total_pages}\\)_")
-            else:
-                lines.append(f"_{total_configs} config{'s' if total_configs != 1 else ''}_")
+        # Add separator to maintain consistent width
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        # Show selected summary (always visible)
+        if selected_ids:
+            lines.append(f"✅ *Selected \\({len(selected_ids)}\\):*")
+            for cfg_id in selected_ids[:5]:  # Show max 5
+                lines.append(f"  • `{escape_markdown_v2(cfg_id)}`")
+            if len(selected_ids) > 5:
+                lines.append(f"  _\\.\\.\\.and {len(selected_ids) - 5} more_")
             lines.append("")
 
-            # Group page configs by controller type
-            grouped: dict[str, list[tuple[int, dict]]] = {}
-            for i, cfg in enumerate(page_configs):
-                global_idx = start_idx + i
-                ctrl_type = cfg.get("controller_name", "unknown")
-                if ctrl_type not in grouped:
-                    grouped[ctrl_type] = []
-                grouped[ctrl_type].append((global_idx, cfg))
+        # Current type info
+        if type_configs:
+            if total_pages > 1:
+                lines.append(f"_{len(type_configs)} {escape_markdown_v2(type_name)} configs \\(page {page + 1}/{total_pages}\\)_")
+            else:
+                lines.append(f"_{len(type_configs)} {escape_markdown_v2(type_name)} config{'s' if len(type_configs) != 1 else ''}_")
+        else:
+            lines.append(f"_No {escape_markdown_v2(type_name)} configs yet_")
 
-            # Display each group
-            for ctrl_type, type_configs in grouped.items():
-                type_name, emoji = _get_controller_type_display(ctrl_type)
-                lines.append(f"{emoji} *{escape_markdown_v2(type_name)}*")
-                lines.append("```")
-                for global_idx, cfg in type_configs:
-                    line = _format_config_line(cfg, global_idx + 1)
-                    lines.append(line)
-                lines.append("```")
-
-        # Build keyboard - numbered buttons (4 per row)
+        # Build keyboard
         keyboard = []
 
-        # Config edit buttons for current page
-        if page_configs:
-            edit_buttons = []
-            for i, cfg in enumerate(page_configs):
-                global_idx = start_idx + i
-                edit_buttons.append(
-                    InlineKeyboardButton(f"✏️{global_idx + 1}", callback_data=f"bots:edit_config:{global_idx}")
-                )
-            # Add in rows of 4
-            for i in range(0, len(edit_buttons), 4):
-                keyboard.append(edit_buttons[i:i+4])
+        # Row 1: Type selector + Create buttons
+        type_row = []
+        # Type selector button (shows current type, click to change)
+        other_types = [t for t in type_counts.keys() if t != current_type]
+        if other_types or len(type_counts) > 1:
+            type_row.append(InlineKeyboardButton(f"{emoji} {type_name} ▼", callback_data="bots:cfg_select_type"))
+        else:
+            type_row.append(InlineKeyboardButton(f"{emoji} {type_name}", callback_data="bots:noop"))
 
-            # Pagination buttons if needed
-            if total_pages > 1:
-                nav_buttons = []
-                if page > 0:
-                    nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"bots:configs_page:{page - 1}"))
-                # Always show Next (loops to first page)
-                next_page = (page + 1) % total_pages
-                nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"bots:configs_page:{next_page}"))
-                keyboard.append(nav_buttons)
+        # Create button for current type
+        if current_type == "grid_strike":
+            type_row.append(InlineKeyboardButton("➕ New", callback_data="bots:new_grid_strike"))
+        elif "pmm" in current_type.lower():
+            type_row.append(InlineKeyboardButton("➕ New", callback_data="bots:new_pmm_mister"))
+        else:
+            type_row.append(InlineKeyboardButton("➕ New", callback_data="bots:new_grid_strike"))
+
+        keyboard.append(type_row)
+
+        # Config checkboxes - show just the controller name/ID
+        for i, cfg in enumerate(page_configs):
+            config_id = cfg.get("id", f"config_{start_idx + i}")
+            is_selected = selected.get(config_id, False)
+            checkbox = "✅" if is_selected else "⬜"
+
+            # Show just the config ID (truncated if needed)
+            display = f"{checkbox} {config_id[:28]}"
+
+            keyboard.append([
+                InlineKeyboardButton(display, callback_data=f"bots:cfg_toggle:{config_id}")
+            ])
+
+        # Pagination row
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("◀️", callback_data=f"bots:cfg_page:{page - 1}"))
+            nav.append(InlineKeyboardButton(f"📄 {page + 1}/{total_pages}", callback_data="bots:noop"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton("▶️", callback_data=f"bots:cfg_page:{page + 1}"))
+            keyboard.append(nav)
+
+        # Action buttons (only if something selected)
+        if selected_ids:
+            keyboard.append([
+                InlineKeyboardButton(f"🚀 Deploy ({len(selected_ids)})", callback_data="bots:cfg_deploy"),
+                InlineKeyboardButton(f"✏️ Edit ({len(selected_ids)})", callback_data="bots:cfg_edit_loop"),
+            ])
+            keyboard.append([
+                InlineKeyboardButton(f"🗑️ Delete ({len(selected_ids)})", callback_data="bots:cfg_delete_confirm"),
+                InlineKeyboardButton("⬜ Clear", callback_data="bots:cfg_clear_selection"),
+            ])
 
         keyboard.append([
-            InlineKeyboardButton("+ New Grid Strike", callback_data="bots:new_grid_strike"),
-        ])
-
-        keyboard.append([
-            InlineKeyboardButton("Back", callback_data="bots:main_menu"),
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu"),
         ])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-
         text_content = "\n".join(lines)
 
-        # Handle photo messages (e.g., coming back from prices step with chart)
-        if query.message.photo:
+        # Handle photo messages (use getattr for FakeMessage compatibility)
+        if getattr(query.message, 'photo', None):
             try:
                 await query.message.delete()
             except Exception:
@@ -201,21 +283,25 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
                 reply_markup=reply_markup
             )
         else:
-            await query.message.edit_text(
-                text_content,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+            try:
+                await query.message.edit_text(
+                    text_content,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except BadRequest as e:
+                if "Message is not modified" not in str(e):
+                    raise
 
     except Exception as e:
         logger.error(f"Error loading controller configs: {e}", exc_info=True)
         keyboard = [
-            [InlineKeyboardButton("+ New Grid Strike", callback_data="bots:new_grid_strike")],
-            [InlineKeyboardButton("Back", callback_data="bots:main_menu")],
+            [InlineKeyboardButton("➕ Grid Strike", callback_data="bots:new_grid_strike")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")],
         ]
         error_msg = format_error_message(f"Failed to load configs: {str(e)}")
         try:
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 try:
                     await query.message.delete()
                 except Exception:
@@ -235,9 +321,620 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
             pass
 
 
+async def show_type_selector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show type selector popup to switch between controller types"""
+    query = update.callback_query
+    configs = context.user_data.get("controller_configs_list", [])
+
+    type_counts = _get_available_controller_types(configs)
+    current_type = context.user_data.get("configs_controller_type", "grid_strike")
+
+    lines = [r"*Select Controller Type*", ""]
+
+    keyboard = []
+    for ctrl_type, count in sorted(type_counts.items()):
+        type_name, emoji = _get_controller_type_display(ctrl_type)
+        is_current = "• " if ctrl_type == current_type else ""
+        keyboard.append([
+            InlineKeyboardButton(f"{is_current}{emoji} {type_name} ({count})", callback_data=f"bots:cfg_type:{ctrl_type}")
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs"),
+    ])
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def show_configs_by_type(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                controller_type: str, page: int = 0) -> None:
+    """Switch to a specific controller type and show configs"""
+    context.user_data["configs_controller_type"] = controller_type
+    context.user_data["configs_page"] = page
+    await show_controller_configs_menu(update, context, page)
+
+
+async def handle_cfg_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE, config_id: str) -> None:
+    """Toggle config selection by config ID"""
+    selected = context.user_data.get("selected_configs", {})
+
+    if selected.get(config_id):
+        selected.pop(config_id, None)
+    else:
+        selected[config_id] = True
+
+    context.user_data["selected_configs"] = selected
+
+    page = context.user_data.get("configs_page", 0)
+    await show_controller_configs_menu(update, context, page)
+
+
+async def handle_cfg_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
+    """Handle pagination for configs"""
+    await show_controller_configs_menu(update, context, page)
+
+
+async def handle_cfg_clear_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear all selected configs"""
+    context.user_data["selected_configs"] = {}
+    page = context.user_data.get("configs_page", 0)
+    await show_controller_configs_menu(update, context, page)
+
+
+async def handle_cfg_delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show delete confirmation dialog"""
+    query = update.callback_query
+    selected = context.user_data.get("selected_configs", {})
+    selected_ids = [cfg_id for cfg_id, is_sel in selected.items() if is_sel]
+
+    if not selected_ids:
+        await query.answer("No configs selected", show_alert=True)
+        return
+
+    # Build confirmation message
+    lines = [r"*Delete Configs\?*", ""]
+    lines.append(f"You are about to delete {len(selected_ids)} config{'s' if len(selected_ids) != 1 else ''}:")
+    lines.append("")
+
+    for cfg_id in selected_ids:
+        lines.append(f"• `{escape_markdown_v2(cfg_id)}`")
+
+    lines.append("")
+    lines.append(r"⚠️ _This action cannot be undone\._")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Delete", callback_data="bots:cfg_delete_execute"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs"),
+        ]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text_content = "\n".join(lines)
+
+    await query.message.edit_text(
+        text_content,
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_cfg_delete_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Execute deletion of selected configs"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    selected = context.user_data.get("selected_configs", {})
+    selected_ids = [cfg_id for cfg_id, is_sel in selected.items() if is_sel]
+
+    if not selected_ids:
+        await query.answer("No configs selected", show_alert=True)
+        return
+
+    # Show progress
+    await query.message.edit_text(
+        f"🗑️ Deleting {len(selected_ids)} config{'s' if len(selected_ids) != 1 else ''}\\.\\.\\.",
+        parse_mode="MarkdownV2"
+    )
+
+    # Delete each config
+    client = await get_bots_client(chat_id)
+    deleted = []
+    failed = []
+
+    for config_id in selected_ids:
+        try:
+            await client.controllers.delete_controller_config(config_id)
+            deleted.append(config_id)
+        except Exception as e:
+            logger.error(f"Failed to delete config {config_id}: {e}")
+            failed.append((config_id, str(e)))
+
+    # Clear selection
+    context.user_data["selected_configs"] = {}
+
+    # Build result message
+    lines = []
+    if deleted:
+        lines.append(f"✅ *Deleted {len(deleted)} config{'s' if len(deleted) != 1 else ''}*")
+        for cfg_id in deleted:
+            lines.append(f"  • `{escape_markdown_v2(cfg_id)}`")
+
+    if failed:
+        lines.append("")
+        lines.append(f"❌ *Failed to delete {len(failed)}:*")
+        for cfg_id, error in failed:
+            lines.append(f"  • `{escape_markdown_v2(cfg_id)}`")
+            lines.append(f"    _{escape_markdown_v2(error[:40])}_")
+
+    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:controller_configs")]]
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_cfg_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Deploy selected configs - bridges to existing deploy flow"""
+    selected = context.user_data.get("selected_configs", {})
+    selected_ids = [cfg_id for cfg_id, is_sel in selected.items() if is_sel]
+    all_configs = context.user_data.get("controller_configs_list", [])
+
+    if not selected_ids:
+        query = update.callback_query
+        await query.answer("No configs selected", show_alert=True)
+        return
+
+    # Map config IDs to all_configs indices for existing deploy flow
+    deploy_indices = set()
+    for cfg_id in selected_ids:
+        for all_idx, all_cfg in enumerate(all_configs):
+            if all_cfg.get("id") == cfg_id:
+                deploy_indices.add(all_idx)
+                break
+
+    # Set up for existing deploy flow
+    context.user_data["selected_controllers"] = deploy_indices
+
+    # Don't clear selection - keep it for when user comes back
+
+    # Use existing deploy configure flow
+    await show_deploy_configure(update, context)
+
+
+# ============================================
+# EDIT LOOP - Edit multiple configs in sequence
+# ============================================
+
+async def handle_cfg_edit_loop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start editing selected configs in a loop"""
+    query = update.callback_query
+    selected = context.user_data.get("selected_configs", {})
+    selected_ids = [cfg_id for cfg_id, is_sel in selected.items() if is_sel]
+    all_configs = context.user_data.get("controller_configs_list", [])
+
+    if not selected_ids:
+        await query.answer("No configs selected", show_alert=True)
+        return
+
+    # Build list of configs to edit
+    configs_to_edit = []
+    for cfg_id in selected_ids:
+        for cfg in all_configs:
+            if cfg.get("id") == cfg_id:
+                configs_to_edit.append(cfg.copy())
+                break
+
+    if not configs_to_edit:
+        await query.answer("Configs not found", show_alert=True)
+        return
+
+    # Store edit loop state
+    context.user_data["cfg_edit_loop"] = configs_to_edit
+    context.user_data["cfg_edit_index"] = 0
+    context.user_data["cfg_edit_modified"] = {}  # {config_id: modified_config}
+
+    await show_cfg_edit_form(update, context)
+
+
+def _get_editable_config_fields(config: dict) -> dict:
+    """Extract editable fields from a controller config"""
+    controller_type = config.get("controller_name", "grid_strike")
+    tp_cfg = config.get("triple_barrier_config", {})
+    take_profit = tp_cfg.get("take_profit", 0.0001) if isinstance(tp_cfg, dict) else 0.0001
+
+    if "grid_strike" in controller_type:
+        return {
+            "start_price": config.get("start_price", 0),
+            "end_price": config.get("end_price", 0),
+            "limit_price": config.get("limit_price", 0),
+            "total_amount_quote": config.get("total_amount_quote", 0),
+            "max_open_orders": config.get("max_open_orders", 3),
+            "max_orders_per_batch": config.get("max_orders_per_batch", 1),
+            "min_spread_between_orders": config.get("min_spread_between_orders", 0.0002),
+            "activation_bounds": config.get("activation_bounds", 0.01),
+            "take_profit": take_profit,
+        }
+    # Default fields for other controller types
+    return {
+        "total_amount_quote": config.get("total_amount_quote", 0),
+        "take_profit": take_profit,
+    }
+
+
+async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show edit form for current config in bulk edit format (key=value)"""
+    query = update.callback_query
+
+    configs_to_edit = context.user_data.get("cfg_edit_loop", [])
+    current_idx = context.user_data.get("cfg_edit_index", 0)
+    modified = context.user_data.get("cfg_edit_modified", {})
+
+    if not configs_to_edit or current_idx >= len(configs_to_edit):
+        await show_controller_configs_menu(update, context)
+        return
+
+    total = len(configs_to_edit)
+    config = configs_to_edit[current_idx]
+    config_id = config.get("id", "unknown")
+
+    # Check if we have modifications for this config
+    if config_id in modified:
+        config = modified[config_id]
+
+    # Store current config for editing
+    set_controller_config(context, config)
+
+    # Get editable fields
+    editable_fields = _get_editable_config_fields(config)
+
+    # Store editable fields and set state for bulk edit
+    context.user_data["cfg_editable_fields"] = editable_fields
+    context.user_data["bots_state"] = "cfg_bulk_edit"
+    context.user_data["cfg_edit_message_id"] = query.message.message_id if not query.message.photo else None
+    context.user_data["cfg_edit_chat_id"] = query.message.chat_id
+
+    # Build message with key=value format
+    lines = [f"*Edit Config* \\({current_idx + 1}/{total}\\)", ""]
+    lines.append(f"`{escape_markdown_v2(config_id)}`")
+    lines.append("")
+
+    # Build config text for display
+    config_lines = []
+    for key, value in editable_fields.items():
+        config_lines.append(f"{key}={value}")
+    config_text = "\n".join(config_lines)
+
+    lines.append("```")
+    lines.append(config_text)
+    lines.append("```")
+    lines.append("")
+    lines.append("✏️ _Send `key=value` to update_")
+
+    # Build keyboard - simplified, no field buttons
+    keyboard = []
+
+    # Navigation row
+    nav_row = []
+    if current_idx > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="bots:cfg_edit_prev"))
+    nav_row.append(InlineKeyboardButton(f"💾 Save", callback_data="bots:cfg_edit_save"))
+    if current_idx < total - 1:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data="bots:cfg_edit_next"))
+    keyboard.append(nav_row)
+
+    # Final row
+    keyboard.append([
+        InlineKeyboardButton("💾 Save All & Exit", callback_data="bots:cfg_edit_save_all"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:cfg_edit_cancel"),
+    ])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_cfg_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE, field_name: str) -> None:
+    """Prompt to edit a field in the current config"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    if not config:
+        await query.answer("Config not found", show_alert=True)
+        return
+
+    # Get current value
+    if field_name == "take_profit":
+        current_value = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    elif field_name == "side":
+        # Toggle side directly
+        current_side = config.get("side", 1)
+        new_side = 2 if current_side == 1 else 1
+        config["side"] = new_side
+
+        # Store modified config
+        config_id = config.get("id")
+        modified = context.user_data.get("cfg_edit_modified", {})
+        modified[config_id] = config
+        context.user_data["cfg_edit_modified"] = modified
+
+        # Update in edit loop
+        configs_to_edit = context.user_data.get("cfg_edit_loop", [])
+        current_idx = context.user_data.get("cfg_edit_index", 0)
+        if current_idx < len(configs_to_edit):
+            configs_to_edit[current_idx] = config
+
+        await show_cfg_edit_form(update, context)
+        return
+    else:
+        current_value = config.get(field_name, "")
+
+    # Get field info
+    field_labels = {
+        "leverage": ("Leverage", "Enter leverage (1-20)"),
+        "total_amount_quote": ("Amount (USDT)", "Enter total amount in quote currency"),
+        "start_price": ("Start Price", "Enter start price"),
+        "end_price": ("End Price", "Enter end price"),
+        "limit_price": ("Limit Price", "Enter limit/stop price"),
+        "take_profit": ("Take Profit", "Enter take profit (e.g., 0.01 = 1%)"),
+        "max_open_orders": ("Max Open Orders", "Enter max open orders (1-10)"),
+    }
+
+    label, hint = field_labels.get(field_name, (field_name, "Enter value"))
+
+    # Store state for input processing
+    context.user_data["bots_state"] = f"cfg_edit_input:{field_name}"
+    context.user_data["cfg_edit_field"] = field_name
+
+    lines = [
+        f"*Edit {escape_markdown_v2(label)}*",
+        "",
+        f"Current: `{escape_markdown_v2(str(current_value))}`",
+        "",
+        f"_{escape_markdown_v2(hint)}_",
+    ]
+
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:cfg_edit_form")]]
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
+    """Process user input for config bulk edit - parses key=value lines"""
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    editable_fields = context.user_data.get("cfg_editable_fields", {})
+
+    if not config:
+        await update.message.reply_text("Context lost. Please start over.")
+        return
+
+    # Delete user's input message for clean chat
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Parse key=value lines
+    updates = {}
+    errors = []
+
+    for line in user_input.split('\n'):
+        line = line.strip()
+        if not line or '=' not in line:
+            continue
+
+        key, _, value = line.partition('=')
+        key = key.strip()
+        value = value.strip()
+
+        # Validate key exists in editable fields
+        if key not in editable_fields:
+            errors.append(f"Unknown: {key}")
+            continue
+
+        # Convert value to appropriate type
+        current_val = editable_fields.get(key)
+        try:
+            if isinstance(current_val, bool):
+                parsed_value = value.lower() in ['true', '1', 'yes', 'y', 'on']
+            elif isinstance(current_val, int):
+                parsed_value = int(value)
+            elif isinstance(current_val, float):
+                parsed_value = float(value)
+            else:
+                parsed_value = value
+            updates[key] = parsed_value
+        except ValueError:
+            errors.append(f"Invalid: {key}={value}")
+
+    if errors:
+        error_msg = "⚠️ " + ", ".join(errors)
+        await update.get_bot().send_message(chat_id=chat_id, text=error_msg)
+
+    if not updates:
+        await update.get_bot().send_message(
+            chat_id=chat_id,
+            text="❌ No valid updates found. Use format: key=value"
+        )
+        return
+
+    # Apply updates to config
+    for key, value in updates.items():
+        if key == "take_profit":
+            if "triple_barrier_config" not in config:
+                config["triple_barrier_config"] = {}
+            config["triple_barrier_config"]["take_profit"] = value
+        else:
+            config[key] = value
+
+    # Store modified config
+    config_id = config.get("id")
+    modified = context.user_data.get("cfg_edit_modified", {})
+    modified[config_id] = config
+    context.user_data["cfg_edit_modified"] = modified
+
+    # Update in edit loop
+    configs_to_edit = context.user_data.get("cfg_edit_loop", [])
+    current_idx = context.user_data.get("cfg_edit_index", 0)
+    if current_idx < len(configs_to_edit):
+        configs_to_edit[current_idx] = config
+
+    # Update editable fields for display
+    context.user_data["cfg_editable_fields"] = _get_editable_config_fields(config)
+
+    # Format updated fields
+    updated_lines = [f"`{escape_markdown_v2(k)}` \\= `{escape_markdown_v2(str(v))}`" for k, v in updates.items()]
+
+    keyboard = [[InlineKeyboardButton("✅ Continue", callback_data="bots:cfg_edit_form")]]
+
+    await update.get_bot().send_message(
+        chat_id=chat_id,
+        text=f"✅ *Updated*\n\n" + "\n".join(updated_lines) + "\n\n_Tap to continue editing_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_cfg_edit_prev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go to previous config in edit loop"""
+    current_idx = context.user_data.get("cfg_edit_index", 0)
+    if current_idx > 0:
+        context.user_data["cfg_edit_index"] = current_idx - 1
+    await show_cfg_edit_form(update, context)
+
+
+async def handle_cfg_edit_next(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Go to next config in edit loop"""
+    configs_to_edit = context.user_data.get("cfg_edit_loop", [])
+    current_idx = context.user_data.get("cfg_edit_index", 0)
+    if current_idx < len(configs_to_edit) - 1:
+        context.user_data["cfg_edit_index"] = current_idx + 1
+    await show_cfg_edit_form(update, context)
+
+
+async def handle_cfg_edit_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save current config and stay in edit loop"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    config = get_controller_config(context)
+    if not config:
+        await query.answer("Config not found", show_alert=True)
+        return
+
+    config_id = config.get("id")
+
+    try:
+        client = await get_bots_client(chat_id)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+        await query.answer(f"✅ Saved {config_id[:20]}")
+
+        # Remove from modified since it's now saved
+        modified = context.user_data.get("cfg_edit_modified", {})
+        modified.pop(config_id, None)
+        context.user_data["cfg_edit_modified"] = modified
+
+    except Exception as e:
+        logger.error(f"Failed to save config {config_id}: {e}")
+        await query.answer(f"❌ Save failed: {str(e)[:30]}", show_alert=True)
+
+
+async def handle_cfg_edit_save_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save all modified configs and exit edit loop"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    modified = context.user_data.get("cfg_edit_modified", {})
+
+    if not modified:
+        await query.answer("No changes to save")
+        # Clean up edit loop state
+        context.user_data.pop("cfg_edit_loop", None)
+        context.user_data.pop("cfg_edit_index", None)
+        context.user_data.pop("cfg_edit_modified", None)
+        await show_controller_configs_menu(update, context)
+        return
+
+    # Show progress
+    await query.message.edit_text(
+        f"💾 Saving {len(modified)} config{'s' if len(modified) != 1 else ''}\\.\\.\\.",
+        parse_mode="MarkdownV2"
+    )
+
+    client = await get_bots_client(chat_id)
+    saved = []
+    failed = []
+
+    for config_id, config in modified.items():
+        try:
+            await client.controllers.create_or_update_controller_config(config_id, config)
+            saved.append(config_id)
+        except Exception as e:
+            logger.error(f"Failed to save config {config_id}: {e}")
+            failed.append((config_id, str(e)))
+
+    # Clean up edit loop state
+    context.user_data.pop("cfg_edit_loop", None)
+    context.user_data.pop("cfg_edit_index", None)
+    context.user_data.pop("cfg_edit_modified", None)
+
+    # Build result message
+    lines = []
+    if saved:
+        lines.append(f"✅ *Saved {len(saved)} config{'s' if len(saved) != 1 else ''}*")
+        for cfg_id in saved[:5]:
+            lines.append(f"  • `{escape_markdown_v2(cfg_id)}`")
+        if len(saved) > 5:
+            lines.append(f"  _\\.\\.\\.and {len(saved) - 5} more_")
+
+    if failed:
+        lines.append("")
+        lines.append(f"❌ *Failed to save {len(failed)}:*")
+        for cfg_id, error in failed[:3]:
+            lines.append(f"  • `{escape_markdown_v2(cfg_id)}`")
+
+    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:controller_configs")]]
+
+    await query.message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_cfg_edit_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel edit loop without saving"""
+    # Clean up edit loop state
+    context.user_data.pop("cfg_edit_loop", None)
+    context.user_data.pop("cfg_edit_index", None)
+    context.user_data.pop("cfg_edit_modified", None)
+    context.user_data.pop("bots_state", None)
+
+    await show_controller_configs_menu(update, context)
+
+
 async def handle_configs_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
-    """Handle pagination for controller configs menu"""
-    await show_controller_configs_menu(update, context, page=page)
+    """Handle pagination for controller configs menu (legacy, redirects to cfg_page)"""
+    controller_type = context.user_data.get("configs_controller_type")
+    if controller_type:
+        await show_configs_by_type(update, context, controller_type, page)
+    else:
+        await show_controller_configs_menu(update, context, page=page)
 
 
 # ============================================
@@ -505,8 +1202,9 @@ async def handle_gs_wizard_leverage(update: Update, context: ContextTypes.DEFAUL
 
 
 async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Wizard Step 5: Enter Amount"""
+    """Wizard Step 5: Enter Amount with available balances"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
     connector = config.get("connector_name", "")
@@ -516,6 +1214,83 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
 
     context.user_data["bots_state"] = "gs_wizard_input"
     context.user_data["gs_wizard_step"] = "total_amount_quote"
+
+    # Extract base and quote tokens from pair
+    base_token, quote_token = "", ""
+    if "-" in pair:
+        base_token, quote_token = pair.split("-", 1)
+
+    # Fetch balances for the connector
+    balance_text = ""
+    try:
+        client = await get_bots_client(chat_id)
+        balances = await get_cex_balances(
+            context.user_data, client, "master_account", ttl=30
+        )
+
+        # Try to find connector balances with flexible matching
+        # (binance_perpetual should match binance_perpetual, binance, etc.)
+        connector_balances = []
+        connector_lower = connector.lower()
+        connector_base = connector_lower.replace("_perpetual", "").replace("_spot", "")
+
+        for bal_connector, bal_list in balances.items():
+            bal_lower = bal_connector.lower()
+            bal_base = bal_lower.replace("_perpetual", "").replace("_spot", "")
+            # Match exact, base name, or if one contains the other
+            if bal_lower == connector_lower or bal_base == connector_base:
+                connector_balances = bal_list
+                logger.debug(f"Found balances for {connector} under key {bal_connector}")
+                break
+
+        if connector_balances:
+            relevant_balances = []
+            for bal in connector_balances:
+                token = bal.get("token", bal.get("asset", ""))
+                # Portfolio API returns 'units' for available balance
+                available = bal.get("units", bal.get("available_balance", bal.get("free", 0)))
+                value_usd = bal.get("value", 0)  # USD value if available
+                if token and available:
+                    try:
+                        available_float = float(available)
+                        if available_float > 0:
+                            # Show quote token and base token balances
+                            if token.upper() in [quote_token.upper(), base_token.upper()]:
+                                relevant_balances.append((token, available_float, float(value_usd) if value_usd else None))
+                    except (ValueError, TypeError):
+                        continue
+
+            if relevant_balances:
+                bal_lines = []
+                for token, available, value_usd in relevant_balances:
+                    # Format amount based on size
+                    if available >= 1000:
+                        amt_str = f"{available:,.0f}"
+                    elif available >= 1:
+                        amt_str = f"{available:,.2f}"
+                    else:
+                        amt_str = f"{available:,.6f}"
+
+                    # Add USD value if available
+                    if value_usd and value_usd >= 1:
+                        bal_lines.append(f"{token}: {amt_str} (${value_usd:,.0f})")
+                    else:
+                        bal_lines.append(f"{token}: {amt_str}")
+                balance_text = "💼 *Available:* " + " \\| ".join(
+                    escape_markdown_v2(b) for b in bal_lines
+                ) + "\n\n"
+            else:
+                # Connector has balances but not the specific tokens for this pair
+                logger.debug(f"Connector {connector} has balances but not {base_token} or {quote_token}")
+                balance_text = f"_No {escape_markdown_v2(quote_token)} balance on {escape_markdown_v2(connector)}_\n\n"
+        elif balances:
+            # Balances exist but not for this connector/pair
+            logger.debug(f"No balances found for connector {connector} with tokens {base_token}/{quote_token}. Available connectors: {list(balances.keys())}")
+            balance_text = f"_No {escape_markdown_v2(quote_token)} balance found_\n\n"
+        else:
+            logger.debug(f"No balances returned from API for connector {connector}")
+    except Exception as e:
+        logger.warning(f"Could not fetch balances for amount step: {e}", exc_info=True)
 
     keyboard = [
         [
@@ -535,6 +1310,7 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
         f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
         f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n"
         f"🎯 *Side:* `{side}` \\| ⚡ *Leverage:* `{leverage}x`" + "\n\n"
+        + balance_text +
         r"*Step 5/7:* 💰 Total Amount \(Quote\)" + "\n\n"
         r"Select or type amount in quote currency:",
         parse_mode="MarkdownV2",
@@ -566,7 +1342,7 @@ async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str = None) -> None:
-    """Wizard Step 6: Price Configuration with OHLC chart"""
+    """Wizard Step 6: Grid Configuration with prices, TP, spread, and grid analysis"""
     query = update.callback_query
     chat_id = update.effective_chat.id
     config = get_controller_config(context)
@@ -574,21 +1350,20 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
     connector = config.get("connector_name", "")
     pair = config.get("trading_pair", "")
     side = config.get("side", SIDE_LONG)
+    total_amount = config.get("total_amount_quote", 1000)
 
-    # Get current interval (default 5m)
+    # Get current interval (default 1m for better NATR calculation)
     if interval is None:
-        interval = context.user_data.get("gs_chart_interval", "5m")
+        interval = context.user_data.get("gs_chart_interval", "1m")
     context.user_data["gs_chart_interval"] = interval
 
     # Check if we have pre-cached data from background fetch
     current_price = context.user_data.get("gs_current_price")
     candles = context.user_data.get("gs_candles")
-    market_data_ready = context.user_data.get("gs_market_data_ready", False)
-    market_data_error = context.user_data.get("gs_market_data_error")
 
     try:
         # If no cached data or interval changed, fetch now
-        cached_interval = context.user_data.get("gs_candles_interval", "5m")
+        cached_interval = context.user_data.get("gs_candles_interval", "1m")
         need_refetch = interval != cached_interval
 
         if not current_price or need_refetch:
@@ -613,7 +1388,6 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                     ),
                     parse_mode="MarkdownV2"
                 )
-                # Update the wizard message ID to the new loading message
                 context.user_data["gs_wizard_message_id"] = loading_msg.message_id
 
             client = await get_bots_client(chat_id)
@@ -621,9 +1395,18 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
             if current_price:
                 context.user_data["gs_current_price"] = current_price
-                candles = await fetch_candles(client, connector, pair, interval=interval, max_records=500)
+                # Fetch candles (100 records is enough for NATR calculation)
+                candles = await fetch_candles(client, connector, pair, interval=interval, max_records=100)
                 context.user_data["gs_candles"] = candles
                 context.user_data["gs_candles_interval"] = interval
+
+                # Fetch trading rules for validation
+                try:
+                    rules = await get_trading_rules(context.user_data, client, connector)
+                    context.user_data["gs_trading_rules"] = rules.get(pair, {})
+                except Exception as e:
+                    logger.warning(f"Could not fetch trading rules: {e}")
+                    context.user_data["gs_trading_rules"] = {}
 
         if not current_price:
             keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
@@ -636,7 +1419,6 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
             except Exception:
-                # Message might be a photo or already deleted
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=(
@@ -649,16 +1431,55 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 )
             return
 
-        # Calculate auto prices only if not already set (preserve user edits)
+        # Calculate NATR from candles
+        natr = None
+        candles_list = candles.get("data", []) if isinstance(candles, dict) else candles
+        logger.info(f"Candles for {pair} ({interval}): {len(candles_list) if candles_list else 0} records")
+        if candles_list:
+            natr = calculate_natr(candles_list, period=14)
+            context.user_data["gs_natr"] = natr
+
+        # Get trading rules
+        trading_rules = context.user_data.get("gs_trading_rules", {})
+        min_notional = trading_rules.get("min_notional_size", 5.0)
+        min_order_size = trading_rules.get("min_order_size", 0)
+
+        # Calculate smart defaults based on NATR if not already set
         if not config.get("start_price") or not config.get("end_price"):
-            start, end, limit = calculate_auto_prices(current_price, side)
-            config["start_price"] = start
-            config["end_price"] = end
-            config["limit_price"] = limit
-        else:
-            start = config.get("start_price")
-            end = config.get("end_price")
-            limit = config.get("limit_price")
+            if natr and natr > 0:
+                # Use NATR-based suggestions
+                suggestions = suggest_grid_params(
+                    current_price, natr, side, total_amount, min_notional
+                )
+                config["start_price"] = suggestions["start_price"]
+                config["end_price"] = suggestions["end_price"]
+                config["limit_price"] = suggestions["limit_price"]
+                # Only set these if not already configured
+                if not config.get("min_spread_between_orders") or config.get("min_spread_between_orders") == 0.0002:
+                    config["min_spread_between_orders"] = suggestions["min_spread_between_orders"]
+                if not config.get("triple_barrier_config", {}).get("take_profit") or \
+                   config.get("triple_barrier_config", {}).get("take_profit") == 0.0001:
+                    if "triple_barrier_config" not in config:
+                        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+                    config["triple_barrier_config"]["take_profit"] = suggestions["take_profit"]
+            else:
+                # Fallback to default percentages
+                start, end, limit = calculate_auto_prices(current_price, side)
+                config["start_price"] = start
+                config["end_price"] = end
+                config["limit_price"] = limit
+
+        start = config.get("start_price")
+        end = config.get("end_price")
+        limit = config.get("limit_price")
+        min_spread = config.get("min_spread_between_orders", 0.0002)
+        take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+        min_order_amount = config.get("min_order_amount_quote", max(6, min_notional))
+
+        # Ensure min_order_amount respects exchange rules
+        if min_notional > min_order_amount:
+            config["min_order_amount_quote"] = min_notional
+            min_order_amount = min_notional
 
         # Generate config ID with sequence number (if not already set)
         if not config.get("id"):
@@ -666,6 +1487,19 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             config["id"] = generate_config_id(connector, pair, existing_configs=existing_configs)
 
         set_controller_config(context, config)
+
+        # Generate theoretical grid
+        grid = generate_theoretical_grid(
+            start_price=start,
+            end_price=end,
+            min_spread=min_spread,
+            total_amount=total_amount,
+            min_order_amount=min_order_amount,
+            current_price=current_price,
+            side=side,
+            trading_rules=trading_rules,
+        )
+        context.user_data["gs_theoretical_grid"] = grid
 
         # Show price edit options
         side_str = "📈 LONG" if side == SIDE_LONG else "📉 SHORT"
@@ -683,36 +1517,64 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         keyboard = [
             interval_row,
             [
-                InlineKeyboardButton("✅ Accept Prices", callback_data="bots:gs_accept_prices"),
+                InlineKeyboardButton("💾 Save Config", callback_data="bots:gs_save"),
             ],
             [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
         ]
 
-        # Format example with current values
-        example_prices = f"{start:,.6g},{end:,.6g},{limit:,.6g}"
+        # Build copyable YAML config format
+        max_open_orders = config.get("max_open_orders", 3)
+        max_orders_per_batch = config.get("max_orders_per_batch", 1)
+        order_frequency = config.get("order_frequency", 3)
+        leverage = config.get("leverage", 1)
+        side_value = config.get("side", SIDE_LONG)
+        activation_bounds = config.get("activation_bounds", 0.01)
+        config_id = config.get("id", "")
 
-        # Build the caption
-        config_text = (
-            f"*📊 {escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
-            f"🏦 *Connector:* `{escape_markdown_v2(connector)}`\n"
-            f"🎯 *Side:* `{side_str}` \\| ⚡ *Leverage:* `{config.get('leverage', 1)}x`\n"
-            f"💰 *Amount:* `{config.get('total_amount_quote', 0):,.0f}`\n\n"
-            f"📍 Current: `{current_price:,.6g}`\n"
-            f"🟢 Start: `{start:,.6g}`\n"
-            f"🔵 End: `{end:,.6g}`\n"
-            f"🔴 Limit: `{limit:,.6g}`\n\n"
-            f"_Type `start,end,limit` to edit_\n"
-            f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
+        # YAML block for copying
+        yaml_block = (
+            f"connector_name: {connector}\n"
+            f"trading_pair: {pair}\n"
+            f"side: {side_value}  # 1=LONG, 2=SHORT\n"
+            f"leverage: {leverage}\n"
+            f"total_amount_quote: {total_amount:.0f}\n"
+            f"start_price: {start:.6g}\n"
+            f"end_price: {end:.6g}\n"
+            f"limit_price: {limit:.6g}\n"
+            f"take_profit: {take_profit}  # {take_profit*100:.3f}%\n"
+            f"min_spread_between_orders: {min_spread}  # {min_spread*100:.3f}%\n"
+            f"min_order_amount_quote: {min_order_amount:.0f}\n"
+            f"max_open_orders: {max_open_orders}\n"
+            f"order_frequency: {order_frequency}"
         )
 
+        # Grid analysis info
+        grid_valid = "OK" if grid.get("valid") else "WARN"
+        natr_info = f" \\| NATR: {natr*100:.2f}%" if natr else ""
+
+        config_text = (
+            f"*{escape_markdown_v2(pair)}* \\| current: `{current_price:,.6g}`{natr_info}\n\n"
+            f"```\n{yaml_block}\n```\n\n"
+            f"Grid: `{grid['num_levels']}` levels \\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
+            f"@ `${grid['amount_per_level']:.2f}`/lvl \\[{grid_valid}\\]"
+        )
+
+        # Add warnings if any
+        if grid.get("warnings"):
+            warnings_text = "\n".join(f"⚠️ {escape_markdown_v2(w)}" for w in grid["warnings"])
+            config_text += f"\n{warnings_text}"
+
+        config_text += "\n\n_Edit: `field=value` \\(e\\.g\\. `start\\_price=130`\\)_"
+
         # Generate chart and send as photo with caption
-        if candles:
+        if candles_list:
             chart_bytes = generate_candles_chart(
-                candles, pair,
+                candles_list, pair,
                 start_price=start,
                 end_price=end,
                 limit_price=limit,
-                current_price=current_price
+                current_price=current_price,
+                side=side
             )
 
             # Delete old message and send photo with caption + buttons
@@ -729,12 +1591,11 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
 
-            # Store as wizard message (photo with buttons)
             context.user_data["gs_wizard_message_id"] = msg.message_id
             context.user_data["gs_wizard_chat_id"] = query.message.chat_id
         else:
             # No chart - handle photo messages
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 try:
                     await query.message.delete()
                 except Exception:
@@ -759,7 +1620,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
         error_msg = format_error_message(f"Error fetching market data: {str(e)}")
         try:
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 try:
                     await query.message.delete()
                 except Exception:
@@ -780,58 +1641,9 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
 
 async def handle_gs_accept_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Accept prices and move to take profit step"""
-    query = update.callback_query
-    config = get_controller_config(context)
-
-    side = config.get("side", SIDE_LONG)
-    start_price = config.get("start_price", 0)
-    end_price = config.get("end_price", 0)
-    limit_price = config.get("limit_price", 0)
-
-    # Validate price ordering based on side
-    # LONG: limit_price < start_price < end_price
-    # SHORT: end_price < start_price < limit_price
-    validation_error = None
-    if side == SIDE_LONG:
-        if not (limit_price < start_price < end_price):
-            validation_error = (
-                "Invalid prices for LONG position\\.\n\n"
-                "Required: `limit < start < end`\n"
-                f"Current: `{limit_price:,.6g}` < `{start_price:,.6g}` < `{end_price:,.6g}`"
-            )
-    else:  # SHORT
-        if not (end_price < start_price < limit_price):
-            validation_error = (
-                "Invalid prices for SHORT position\\.\n\n"
-                "Required: `end < start < limit`\n"
-                f"Current: `{end_price:,.6g}` < `{start_price:,.6g}` < `{limit_price:,.6g}`"
-            )
-
-    if validation_error:
-        await query.answer("Invalid price configuration", show_alert=True)
-        # Clean up the chart photo if it exists
-        # Show error - delete photo and send text message
-        keyboard = [
-            [InlineKeyboardButton("Edit Prices", callback_data="bots:gs_back_to_prices")],
-            [InlineKeyboardButton("Cancel", callback_data="bots:main_menu")],
-        ]
-        try:
-            await query.message.delete()
-        except:
-            pass
-        msg = await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=f"⚠️ *Price Validation Error*\n\n{validation_error}",
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        context.user_data["gs_wizard_message_id"] = msg.message_id
-        context.user_data["gs_wizard_chat_id"] = query.message.chat_id
-        return
-
-    context.user_data["gs_wizard_step"] = "take_profit"
-    await _show_wizard_take_profit_step(update, context)
+    """Accept grid configuration and save - legacy handler, redirects to gs_save"""
+    # Redirect to save handler since prices step is now the final step
+    await handle_gs_save(update, context)
 
 
 async def handle_gs_back_to_prices(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -995,11 +1807,36 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
         ],
     ]
 
-    await query.message.edit_text(
-        message_text,
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    # Handle photo messages - can't edit_text on photos, need to delete and send new
+    try:
+        if getattr(query.message, 'photo', None):
+            await query.message.delete()
+            msg = await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["gs_wizard_message_id"] = msg.message_id
+        else:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+    except BadRequest as e:
+        # Fallback: delete and send new message
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        context.user_data["gs_wizard_message_id"] = msg.message_id
 
 
 async def _update_wizard_message_for_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1317,6 +2154,48 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     config = get_controller_config(context)
 
+    # Validate price ordering before saving
+    side = config.get("side", SIDE_LONG)
+    start_price = config.get("start_price", 0)
+    end_price = config.get("end_price", 0)
+    limit_price = config.get("limit_price", 0)
+
+    validation_error = None
+    if side == SIDE_LONG:
+        if not (limit_price < start_price < end_price):
+            validation_error = (
+                "Invalid prices for LONG position\\.\n\n"
+                "Required: `limit < start < end`\n"
+                f"Current: `{limit_price:,.6g}` < `{start_price:,.6g}` < `{end_price:,.6g}`"
+            )
+    else:  # SHORT
+        if not (end_price < start_price < limit_price):
+            validation_error = (
+                "Invalid prices for SHORT position\\.\n\n"
+                "Required: `end < start < limit`\n"
+                f"Current: `{end_price:,.6g}` < `{start_price:,.6g}` < `{limit_price:,.6g}`"
+            )
+
+    if validation_error:
+        await query.answer("Invalid price configuration", show_alert=True)
+        keyboard = [
+            [InlineKeyboardButton("Edit Prices", callback_data="bots:gs_back_to_prices")],
+            [InlineKeyboardButton("Cancel", callback_data="bots:main_menu")],
+        ]
+        try:
+            await query.message.delete()
+        except:
+            pass
+        msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"⚠️ *Price Validation Error*\n\n{validation_error}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        context.user_data["gs_wizard_message_id"] = msg.message_id
+        context.user_data["gs_wizard_chat_id"] = query.message.chat_id
+        return
+
     config_id = config.get("id", "")
     chat_id = query.message.chat_id
 
@@ -1366,8 +2245,9 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def handle_gs_review_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Go back to review step"""
-    await _show_wizard_review_step(update, context)
+    """Go back to prices step (main configuration screen)"""
+    context.user_data["gs_wizard_step"] = "prices"
+    await _show_wizard_prices_step(update, context)
 
 
 def _cleanup_wizard_state(context) -> None:
@@ -1400,9 +2280,10 @@ async def _background_fetch_market_data(context, config: dict, chat_id: int = No
         if current_price:
             context.user_data["gs_current_price"] = current_price
 
-            # Fetch candles (5m, 2000 records)
-            candles = await fetch_candles(client, connector, pair, interval="5m", max_records=2000)
+            # Fetch candles (1m, 100 records) - consistent with default interval
+            candles = await fetch_candles(client, connector, pair, interval="1m", max_records=100)
             context.user_data["gs_candles"] = candles
+            context.user_data["gs_candles_interval"] = "1m"
             context.user_data["gs_market_data_ready"] = True
 
             logger.info(f"Background fetch complete for {pair}: price={current_price}")
@@ -1449,20 +2330,126 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             await _update_wizard_message_for_side(update, context)
 
         elif step == "prices":
-            # Parse comma-separated prices: start,end,limit
-            parts = user_input.replace(" ", "").split(",")
-            if len(parts) == 3:
-                config["start_price"] = float(parts[0])
-                config["end_price"] = float(parts[1])
-                config["limit_price"] = float(parts[2])
+            # Handle multiple input formats:
+            # 1. field=value - set any field (e.g., start_price=130, order_frequency=5)
+            # 2. start,end,limit - price values (legacy)
+            # 3. tp:0.1 - take profit percentage (legacy)
+            # 4. spread:0.05 - min spread percentage (legacy)
+            # 5. min:10 - min order amount (legacy)
+            input_stripped = user_input.strip()
+            input_lower = input_stripped.lower()
+
+            # Check for field=value format first
+            if "=" in input_stripped:
+                # Parse field=value format
+                changes_made = False
+                for line in input_stripped.split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+
+                    # Map field names and set values
+                    if field in ("start_price", "start"):
+                        config["start_price"] = float(value)
+                        changes_made = True
+                    elif field in ("end_price", "end"):
+                        config["end_price"] = float(value)
+                        changes_made = True
+                    elif field in ("limit_price", "limit"):
+                        config["limit_price"] = float(value)
+                        changes_made = True
+                    elif field in ("take_profit", "tp"):
+                        # Support both decimal (0.001) and percentage (0.1%)
+                        val = float(value.replace("%", ""))
+                        if val > 1:  # Likely percentage like 0.1
+                            val = val / 100
+                        config.setdefault("triple_barrier_config", GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy())
+                        config["triple_barrier_config"]["take_profit"] = val
+                        changes_made = True
+                    elif field in ("min_spread_between_orders", "min_spread", "spread"):
+                        val = float(value.replace("%", ""))
+                        if val > 1:  # Likely percentage
+                            val = val / 100
+                        config["min_spread_between_orders"] = val
+                        changes_made = True
+                    elif field in ("min_order_amount_quote", "min_order", "min"):
+                        config["min_order_amount_quote"] = float(value.replace("$", ""))
+                        changes_made = True
+                    elif field in ("total_amount_quote", "total_amount", "amount"):
+                        config["total_amount_quote"] = float(value)
+                        changes_made = True
+                    elif field == "leverage":
+                        config["leverage"] = int(float(value))
+                        changes_made = True
+                    elif field == "side":
+                        config["side"] = int(float(value))
+                        changes_made = True
+                    elif field in ("max_open_orders", "max_orders"):
+                        config["max_open_orders"] = int(float(value))
+                        changes_made = True
+                    elif field == "order_frequency":
+                        config["order_frequency"] = int(float(value))
+                        changes_made = True
+                    elif field == "max_orders_per_batch":
+                        config["max_orders_per_batch"] = int(float(value))
+                        changes_made = True
+                    elif field == "activation_bounds":
+                        val = float(value.replace("%", ""))
+                        if val > 1:  # Likely percentage
+                            val = val / 100
+                        config["activation_bounds"] = val
+                        changes_made = True
+
+                if changes_made:
+                    set_controller_config(context, config)
+                    await _update_wizard_message_for_prices_after_edit(update, context)
+                else:
+                    raise ValueError(f"Unknown field: {field}")
+
+            elif input_lower.startswith("tp:"):
+                # Take profit in percentage (e.g., tp:0.1 = 0.1% = 0.001)
+                tp_pct = float(input_lower.replace("tp:", "").replace("%", "").strip())
+                tp_decimal = tp_pct / 100
+                if "triple_barrier_config" not in config:
+                    config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+                config["triple_barrier_config"]["take_profit"] = tp_decimal
                 set_controller_config(context, config)
-                # Stay in prices step to show updated values
                 await _update_wizard_message_for_prices_after_edit(update, context)
-            elif len(parts) == 1:
-                # Single price - ask which one to update
-                raise ValueError("Use format: start,end,limit")
+
+            elif input_lower.startswith("spread:"):
+                # Min spread in percentage (e.g., spread:0.05 = 0.05% = 0.0005)
+                spread_pct = float(input_lower.replace("spread:", "").replace("%", "").strip())
+                spread_decimal = spread_pct / 100
+                config["min_spread_between_orders"] = spread_decimal
+                set_controller_config(context, config)
+                await _update_wizard_message_for_prices_after_edit(update, context)
+
+            elif input_lower.startswith("min:"):
+                # Min order amount in quote (e.g., min:10 = $10)
+                min_amt = float(input_lower.replace("min:", "").replace("$", "").strip())
+                config["min_order_amount_quote"] = min_amt
+                set_controller_config(context, config)
+                await _update_wizard_message_for_prices_after_edit(update, context)
+
             else:
-                raise ValueError("Invalid format")
+                # Parse comma-separated prices: start,end,limit
+                parts = user_input.replace(" ", "").split(",")
+                if len(parts) == 3:
+                    config["start_price"] = float(parts[0])
+                    config["end_price"] = float(parts[1])
+                    config["limit_price"] = float(parts[2])
+                    set_controller_config(context, config)
+                    # Stay in prices step to show updated values
+                    await _update_wizard_message_for_prices_after_edit(update, context)
+                elif len(parts) == 1:
+                    # Single price - ask which one to update
+                    raise ValueError("Use format: field=value (e.g., start_price=130)")
+                else:
+                    raise ValueError("Invalid format")
 
         elif step == "take_profit":
             # Parse take profit - interpret as percentage (0.4 = 0.4% = 0.004)
@@ -1715,7 +2702,7 @@ async def _update_wizard_message_for_prices(update: Update, context: ContextType
 
 
 async def _update_wizard_message_for_prices_after_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Update prices display after editing prices - regenerate chart with new prices"""
+    """Update prices display after editing prices - regenerate chart with new prices and grid analysis"""
     config = get_controller_config(context)
     message_id = context.user_data.get("gs_wizard_message_id")
     chat_id = context.user_data.get("gs_wizard_chat_id")
@@ -1732,7 +2719,26 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     limit = config.get("limit_price", 0)
     current_price = context.user_data.get("gs_current_price", 0)
     candles = context.user_data.get("gs_candles")
-    interval = context.user_data.get("gs_chart_interval", "5m")
+    interval = context.user_data.get("gs_chart_interval", "1m")
+    total_amount = config.get("total_amount_quote", 1000)
+    min_spread = config.get("min_spread_between_orders", 0.0002)
+    take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    min_order_amount = config.get("min_order_amount_quote", 6)
+    natr = context.user_data.get("gs_natr")
+    trading_rules = context.user_data.get("gs_trading_rules", {})
+
+    # Regenerate theoretical grid with updated parameters
+    grid = generate_theoretical_grid(
+        start_price=start,
+        end_price=end,
+        min_spread=min_spread,
+        total_amount=total_amount,
+        min_order_amount=min_order_amount,
+        current_price=current_price,
+        side=side,
+        trading_rules=trading_rules,
+    )
+    context.user_data["gs_theoretical_grid"] = grid
 
     # Build interval buttons with current one highlighted
     interval_options = ["1m", "5m", "15m", "1h", "4h"]
@@ -1744,27 +2750,51 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     keyboard = [
         interval_row,
         [
-            InlineKeyboardButton("✅ Accept Prices", callback_data="bots:gs_accept_prices"),
+            InlineKeyboardButton("💾 Save Config", callback_data="bots:gs_save"),
         ],
         [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
     ]
 
-    # Format example with current values
-    example_prices = f"{start:,.6g},{end:,.6g},{limit:,.6g}"
+    # Build copyable YAML config format
+    max_open_orders = config.get("max_open_orders", 3)
+    order_frequency = config.get("order_frequency", 3)
+    leverage = config.get("leverage", 1)
+    side_value = config.get("side", SIDE_LONG)
 
-    # Build the caption
-    config_text = (
-        f"*📊 {escape_markdown_v2(pair)}* \\- Grid Zone Preview\n\n"
-        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`\n"
-        f"🎯 *Side:* `{side_str}` \\| ⚡ *Leverage:* `{config.get('leverage', 1)}x`\n"
-        f"💰 *Amount:* `{config.get('total_amount_quote', 0):,.0f}`\n\n"
-        f"📍 Current: `{current_price:,.6g}`\n"
-        f"🟢 Start: `{start:,.6g}`\n"
-        f"🔵 End: `{end:,.6g}`\n"
-        f"🔴 Limit: `{limit:,.6g}`\n\n"
-        f"_Type `start,end,limit` to edit_\n"
-        f"_e\\.g\\. `{escape_markdown_v2(example_prices)}`_"
+    # YAML block for copying
+    yaml_block = (
+        f"connector_name: {connector}\n"
+        f"trading_pair: {pair}\n"
+        f"side: {side_value}  # 1=LONG, 2=SHORT\n"
+        f"leverage: {leverage}\n"
+        f"total_amount_quote: {total_amount:.0f}\n"
+        f"start_price: {start:.6g}\n"
+        f"end_price: {end:.6g}\n"
+        f"limit_price: {limit:.6g}\n"
+        f"take_profit: {take_profit}  # {take_profit*100:.3f}%\n"
+        f"min_spread_between_orders: {min_spread}  # {min_spread*100:.3f}%\n"
+        f"min_order_amount_quote: {min_order_amount:.0f}\n"
+        f"max_open_orders: {max_open_orders}\n"
+        f"order_frequency: {order_frequency}"
     )
+
+    # Grid analysis info
+    grid_valid = "OK" if grid.get("valid") else "WARN"
+    natr_info = f" \\| NATR: {natr*100:.2f}%" if natr else ""
+
+    config_text = (
+        f"*{escape_markdown_v2(pair)}* \\| current: `{current_price:,.6g}`{natr_info}\n\n"
+        f"```\n{yaml_block}\n```\n\n"
+        f"Grid: `{grid['num_levels']}` levels \\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
+        f"@ `${grid['amount_per_level']:.2f}`/lvl \\[{grid_valid}\\]"
+    )
+
+    # Add warnings if any
+    if grid.get("warnings"):
+        warnings_text = "\n".join(f"⚠️ {escape_markdown_v2(w)}" for w in grid["warnings"])
+        config_text += f"\n{warnings_text}"
+
+    config_text += "\n\n_Edit: `field=value` \\(e\\.g\\. `start\\_price=130`\\)_"
 
     try:
         # Delete old message (which is a photo)
@@ -1773,14 +2803,18 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
         except Exception:
             pass
 
+        # Get candles list
+        candles_list = candles.get("data", []) if isinstance(candles, dict) else candles
+
         # Generate new chart with updated prices
-        if candles:
+        if candles_list:
             chart_bytes = generate_candles_chart(
-                candles, pair,
+                candles_list, pair,
                 start_price=start,
                 end_price=end,
                 limit_price=limit,
-                current_price=current_price
+                current_price=current_price,
+                side=side
             )
 
             # Send new photo with updated caption
@@ -1825,7 +2859,7 @@ async def handle_gs_edit_price(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["bots_state"] = "gs_wizard_input"
     context.user_data["gs_wizard_step"] = field
 
-    keyboard = [[InlineKeyboardButton("Cancel", callback_data="bots:gs_accept_prices")]]
+    keyboard = [[InlineKeyboardButton("Cancel", callback_data="bots:gs_back_to_prices")]]
 
     await query.message.edit_text(
         f"*Edit {escape_markdown_v2(label)}*" + "\n\n"

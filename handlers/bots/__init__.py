@@ -35,6 +35,7 @@ from .menu import (
     show_bot_logs,
     handle_back_to_bot,
     handle_refresh_bot,
+    handle_refresh_controller,
     # Controller chart & edit
     show_controller_chart,
     show_controller_edit,
@@ -46,6 +47,25 @@ from .controller_handlers import (
     show_controller_configs_menu,
     show_configs_list,
     handle_configs_page,
+    # Unified configs menu with multi-select
+    show_configs_by_type,
+    show_type_selector,
+    handle_cfg_toggle,
+    handle_cfg_page,
+    handle_cfg_clear_selection,
+    handle_cfg_delete_confirm,
+    handle_cfg_delete_execute,
+    handle_cfg_deploy,
+    # Edit loop
+    handle_cfg_edit_loop,
+    show_cfg_edit_form,
+    handle_cfg_edit_field,
+    process_cfg_edit_input,
+    handle_cfg_edit_prev,
+    handle_cfg_edit_next,
+    handle_cfg_edit_save,
+    handle_cfg_edit_save_all,
+    handle_cfg_edit_cancel,
     show_new_grid_strike_form,
     show_new_pmm_mister_form,
     show_config_form,
@@ -210,6 +230,67 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "list_configs":
             await show_configs_list(update, context)
+
+        # Unified configs menu with multi-select
+        elif main_action == "cfg_select_type":
+            await show_type_selector(update, context)
+
+        elif main_action == "cfg_type":
+            if len(action_parts) > 1:
+                controller_type = action_parts[1]
+                await show_configs_by_type(update, context, controller_type)
+
+        elif main_action == "cfg_toggle":
+            if len(action_parts) > 1:
+                config_id = action_parts[1]
+                await handle_cfg_toggle(update, context, config_id)
+
+        elif main_action == "cfg_page":
+            if len(action_parts) > 1:
+                page = int(action_parts[1])
+                await handle_cfg_page(update, context, page)
+
+        elif main_action == "cfg_clear_selection":
+            await handle_cfg_clear_selection(update, context)
+
+        elif main_action == "cfg_deploy":
+            await handle_cfg_deploy(update, context)
+
+        elif main_action == "cfg_delete_confirm":
+            await handle_cfg_delete_confirm(update, context)
+
+        elif main_action == "cfg_delete_execute":
+            await handle_cfg_delete_execute(update, context)
+
+        # Edit loop handlers
+        elif main_action == "cfg_edit_loop":
+            await handle_cfg_edit_loop(update, context)
+
+        elif main_action == "cfg_edit_form":
+            await show_cfg_edit_form(update, context)
+
+        elif main_action == "cfg_edit_field":
+            if len(action_parts) > 1:
+                field_name = action_parts[1]
+                await handle_cfg_edit_field(update, context, field_name)
+
+        elif main_action == "cfg_edit_prev":
+            await handle_cfg_edit_prev(update, context)
+
+        elif main_action == "cfg_edit_next":
+            await handle_cfg_edit_next(update, context)
+
+        elif main_action == "cfg_edit_save":
+            await handle_cfg_edit_save(update, context)
+
+        elif main_action == "cfg_edit_save_all":
+            await handle_cfg_edit_save_all(update, context)
+
+        elif main_action == "cfg_edit_cancel":
+            await handle_cfg_edit_cancel(update, context)
+
+        elif main_action == "noop":
+            pass  # Do nothing - used for pagination display button
 
         elif main_action == "new_grid_strike":
             await show_new_grid_strike_form(update, context)
@@ -519,6 +600,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "refresh_bot":
             await handle_refresh_bot(update, context)
 
+        elif main_action == "refresh_ctrl":
+            if len(action_parts) > 1:
+                idx = int(action_parts[1])
+                await handle_refresh_controller(update, context, idx)
+
         else:
             logger.warning(f"Unknown bots action: {action}")
             await query.message.reply_text(f"Unknown action: {action}")
@@ -581,6 +667,12 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle PMM Mister wizard input
         elif bots_state == "pmm_wizard_input":
             await process_pmm_wizard_input(update, context, user_input)
+        # Handle config edit loop field input (legacy single field)
+        elif bots_state.startswith("cfg_edit_input:"):
+            await process_cfg_edit_input(update, context, user_input)
+        # Handle config bulk edit (key=value format)
+        elif bots_state == "cfg_bulk_edit":
+            await process_cfg_edit_input(update, context, user_input)
         else:
             logger.debug(f"Unhandled bots state: {bots_state}")
 

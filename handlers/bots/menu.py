@@ -51,9 +51,8 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
         InlineKeyboardButton("➕ PMM Mister", callback_data="bots:new_pmm_mister"),
     ])
 
-    # Action buttons - deploy and configs
+    # Action buttons - configs
     keyboard.append([
-        InlineKeyboardButton("🚀 Deploy", callback_data="bots:deploy_menu"),
         InlineKeyboardButton("📁 Configs", callback_data="bots:controller_configs"),
     ])
 
@@ -377,7 +376,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
         try:
             # Check if current message is a photo (from controller detail view)
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 # Delete photo message and send new text message
                 try:
                     await query.message.delete()
@@ -406,7 +405,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
         error_message = format_error_message(f"Failed to fetch bot status: {str(e)}")
         keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
         try:
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 try:
                     await query.message.delete()
                 except Exception:
@@ -515,7 +514,7 @@ def _shorten_controller_name(name: str, max_len: int = 28) -> str:
 # ============================================
 
 async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, controller_idx: int) -> None:
-    """Show controller detail with edit/stop options (using index)"""
+    """Show controller detail with editable config (like networks.py pattern)"""
     query = update.callback_query
     chat_id = update.effective_chat.id
 
@@ -547,16 +546,9 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
     volume = ctrl_perf.get("volume_traded", 0) or 0
     pnl = realized + unrealized
 
-    pnl_emoji = "📈" if pnl >= 0 else "📉"
-    status_emoji = "🟢" if ctrl_status == "running" else "🔴"
-
-    short_name = _shorten_controller_name(controller_name, 35)
-
-    # Try to fetch controller config for additional info
+    # Try to fetch controller config
     ctrl_config = None
     is_grid_strike = False
-    chart_bytes = None
-    message_replaced = False  # Track if we've sent a new message (e.g., loading message)
 
     try:
         client = await get_bots_client(chat_id)
@@ -569,100 +561,53 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
                 break
 
         if ctrl_config:
-            # Store for later use
             context.user_data["current_controller_config"] = ctrl_config
             controller_type = ctrl_config.get("controller_name", "")
             is_grid_strike = "grid_strike" in controller_type.lower()
 
-            # For grid strike, generate chart
-            if is_grid_strike:
-                # Show loading message immediately since chart generation takes time
-                loading_text = f"⏳ *Generating chart for* `{escape_markdown_v2(short_name)}`\\.\\.\\."
-                try:
-                    if query.message.photo:
-                        # Delete photo and send text message
-                        try:
-                            await query.message.delete()
-                        except Exception:
-                            pass
-                        await query.message.chat.send_message(loading_text, parse_mode="MarkdownV2")
-                        message_replaced = True
-                    else:
-                        await query.message.edit_text(loading_text, parse_mode="MarkdownV2")
-                except Exception:
-                    pass
-
-                try:
-                    connector = ctrl_config.get("connector_name", "")
-                    pair = ctrl_config.get("trading_pair", "")
-
-                    # Fetch candles and current price
-                    candles = await client.market_data.get_candles(
-                        connector_name=connector,
-                        trading_pair=pair,
-                        interval="1h",
-                        max_records=100
-                    )
-                    prices = await client.market_data.get_prices(
-                        connector_name=connector,
-                        trading_pairs=pair
-                    )
-                    current_price = prices.get("prices", {}).get(pair)
-
-                    # Generate chart
-                    from .controllers.grid_strike import generate_chart
-                    chart_bytes = generate_chart(ctrl_config, candles, current_price)
-                except Exception as chart_err:
-                    logger.warning(f"Could not generate chart: {chart_err}")
-
     except Exception as e:
         logger.warning(f"Could not fetch controller config: {e}")
 
-    # Build caption (shorter for photo message, max 1024 chars)
-    # Format PnL values with escaping
-    pnl_str = escape_markdown_v2(f"{pnl:+.2f}")
-    realized_str = escape_markdown_v2(f"{realized:+.2f}")
-    unrealized_str = escape_markdown_v2(f"{unrealized:+.2f}")
-    vol_str = escape_markdown_v2(format_number(volume))
+    # Build message with P&L summary + editable config
+    status_emoji = "▶️" if ctrl_status == "running" else "⏸️"
+    pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+    vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
 
-    if is_grid_strike and ctrl_config:
-        connector = ctrl_config.get("connector_name", "N/A")
-        pair = ctrl_config.get("trading_pair", "N/A")
-        side_val = ctrl_config.get("side", 1)
-        side_str = "LONG" if side_val == 1 else "SHORT"
-        leverage = ctrl_config.get("leverage", 1)
-        start_p = ctrl_config.get("start_price", 0)
-        end_p = ctrl_config.get("end_price", 0)
-        limit_p = ctrl_config.get("limit_price", 0)
-        total_amt = ctrl_config.get("total_amount_quote", 0)
+    lines = [
+        f"{status_emoji} *{escape_markdown_v2(controller_name)}*",
+        "",
+        f"{pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\| 💰 R: `{escape_markdown_v2(f'{realized:+.2f}')}` \\| 📊 U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`",
+        f"📦 Vol: `{escape_markdown_v2(vol_str)}`",
+    ]
 
-        caption_lines = [
-            f"{status_emoji} *{escape_markdown_v2(pair)}* \\| {escape_markdown_v2(side_str)} {leverage}x",
-            f"{pnl_emoji} PnL: `{pnl_str}` \\(R: {realized_str} U: {unrealized_str}\\)",
-            f"📊 Vol: `{vol_str}`",
-            "",
-            f"Grid: `{escape_markdown_v2(f'{start_p:.6g}')}` → `{escape_markdown_v2(f'{end_p:.6g}')}`",
-            f"Limit: `{escape_markdown_v2(f'{limit_p:.6g}')}` \\| Amt: `{total_amt}`",
-        ]
-        caption = "\n".join(caption_lines)
-    else:
-        caption_lines = [
-            f"⚙️ `{escape_markdown_v2(short_name)}`",
-            f"{status_emoji} Status: `{escape_markdown_v2(ctrl_status)}`",
-            "",
-            f"{pnl_emoji} *PnL:* `{pnl_str}` \\| 📊 *Vol:* `{vol_str}`",
-            f"  Realized: `{realized_str}`",
-            f"  Unrealized: `{unrealized_str}`",
-        ]
-        caption = "\n".join(caption_lines)
+    # Add editable config section if available
+    if ctrl_config and is_grid_strike:
+        editable_fields = _get_editable_controller_fields(ctrl_config)
+
+        # Store for input processing
+        context.user_data["ctrl_editable_fields"] = editable_fields
+        context.user_data["bots_state"] = "ctrl_bulk_edit"
+        context.user_data["ctrl_edit_chat_id"] = query.message.chat_id
+
+        # Build config text
+        config_lines = []
+        for key, value in editable_fields.items():
+            config_lines.append(f"{key}={value}")
+        config_text = "\n".join(config_lines)
+
+        lines.append("")
+        lines.append("```")
+        lines.append(config_text)
+        lines.append("```")
+        lines.append("")
+        lines.append("✏️ _Send `key=value` to update_")
 
     # Build keyboard
     keyboard = []
 
-    # For grid strike, add edit options
     if is_grid_strike and ctrl_config:
         keyboard.append([
-            InlineKeyboardButton("✏️ Edit Config", callback_data="bots:ctrl_edit"),
+            InlineKeyboardButton("📊 Chart", callback_data="bots:ctrl_chart"),
             InlineKeyboardButton("🛑 Stop", callback_data="bots:stop_ctrl"),
         ])
     else:
@@ -672,51 +617,31 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
 
     keyboard.append([
         InlineKeyboardButton("⬅️ Back", callback_data="bots:back_to_bot"),
-        InlineKeyboardButton("🔄 Refresh", callback_data=f"bots:ctrl_idx:{controller_idx}"),
+        InlineKeyboardButton("🔄 Refresh", callback_data=f"bots:refresh_ctrl:{controller_idx}"),
     ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
+    text_content = "\n".join(lines)
 
-    # Send as photo if we have a chart, otherwise text
-    if chart_bytes:
-        # Delete old message and send new photo message
+    # Store message_id for later edits
+    if getattr(query.message, 'photo', None):
         try:
             await query.message.delete()
         except Exception:
             pass
-
-        await query.message.chat.send_photo(
-            photo=chart_bytes,
-            caption=caption,
+        sent_msg = await query.message.chat.send_message(
+            text_content,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup
         )
+        context.user_data["ctrl_edit_message_id"] = sent_msg.message_id
     else:
-        # Fallback to text message
-        full_lines = [
-            "*Controller Details*",
-            "",
-        ] + caption_lines
-
-        text_content = "\n".join(full_lines)
-
-        # If we replaced the original message (e.g., with loading message), send new message
-        if message_replaced or query.message.photo:
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-            await query.message.chat.send_message(
-                text_content,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-        else:
-            await query.message.edit_text(
-                text_content,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+        await query.message.edit_text(
+            text_content,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+        context.user_data["ctrl_edit_message_id"] = query.message.message_id
 
 
 async def handle_stop_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -748,7 +673,7 @@ async def handle_stop_controller(update: Update, context: ContextTypes.DEFAULT_T
     )
 
     # Handle photo messages (from controller detail view with chart)
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         try:
             await query.message.delete()
         except Exception:
@@ -892,12 +817,96 @@ async def handle_quick_start_controller(update: Update, context: ContextTypes.DE
 # ============================================
 
 async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Refresh and show OHLC chart for grid strike controller"""
+    """Generate and show OHLC chart for grid strike controller"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
     controller_idx = context.user_data.get("current_controller_idx", 0)
+    ctrl_config = context.user_data.get("current_controller_config")
 
-    # Just call the detail view which now shows the chart
-    await show_controller_detail(update, context, controller_idx)
+    if not ctrl_config:
+        await query.answer("Config not found", show_alert=True)
+        return
+
+    # Show loading message
+    short_name = _shorten_controller_name(ctrl_config.get("id", ""), 30)
+    loading_text = f"⏳ *Generating chart\\.\\.\\.*"
+
+    try:
+        await query.message.edit_text(loading_text, parse_mode="MarkdownV2")
+    except Exception:
+        pass
+
+    try:
+        client = await get_bots_client(chat_id)
+        connector = ctrl_config.get("connector_name", "")
+        pair = ctrl_config.get("trading_pair", "")
+
+        # Fetch candles and current price
+        candles = await client.market_data.get_candles(
+            connector_name=connector,
+            trading_pair=pair,
+            interval="1h",
+            max_records=100
+        )
+        prices = await client.market_data.get_prices(
+            connector_name=connector,
+            trading_pairs=pair
+        )
+        current_price = prices.get("prices", {}).get(pair)
+
+        # Generate chart
+        from .controllers.grid_strike import generate_chart
+        chart_bytes = generate_chart(ctrl_config, candles, current_price)
+
+        if chart_bytes:
+            # Build caption
+            side_val = ctrl_config.get("side", 1)
+            side_str = "LONG" if side_val == 1 else "SHORT"
+            leverage = ctrl_config.get("leverage", 1)
+            start_p = ctrl_config.get("start_price", 0)
+            end_p = ctrl_config.get("end_price", 0)
+            limit_p = ctrl_config.get("limit_price", 0)
+
+            caption = (
+                f"📊 *{escape_markdown_v2(pair)}* \\| {escape_markdown_v2(side_str)} {leverage}x\n"
+                f"Grid: `{escape_markdown_v2(f'{start_p:.6g}')}` → `{escape_markdown_v2(f'{end_p:.6g}')}`\n"
+                f"Limit: `{escape_markdown_v2(f'{limit_p:.6g}')}`"
+            )
+
+            keyboard = [[
+                InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}"),
+                InlineKeyboardButton("🔄 Refresh", callback_data="bots:ctrl_chart"),
+            ]]
+
+            # Delete text message and send photo
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+            await query.message.chat.send_photo(
+                photo=chart_bytes,
+                caption=caption,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            await query.message.edit_text(
+                "❌ Could not generate chart",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}")
+                ]])
+            )
+
+    except Exception as e:
+        logger.error(f"Error generating chart: {e}", exc_info=True)
+        await query.message.edit_text(
+            f"❌ Error: {escape_markdown_v2(str(e)[:100])}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}")
+            ]])
+        )
 
 
 async def show_controller_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -920,7 +929,7 @@ async def show_controller_edit(update: Update, context: ContextTypes.DEFAULT_TYP
     # Store editable fields in context for input processing
     context.user_data["ctrl_editable_fields"] = editable_fields
     context.user_data["bots_state"] = "ctrl_bulk_edit"
-    context.user_data["ctrl_edit_message_id"] = query.message.message_id if not query.message.photo else None
+    context.user_data["ctrl_edit_message_id"] = query.message.message_id if not getattr(query.message, 'photo', None) else None
     context.user_data["ctrl_edit_chat_id"] = query.message.chat_id
 
     # Build config text for display
@@ -950,7 +959,7 @@ async def show_controller_edit(update: Update, context: ContextTypes.DEFAULT_TYP
     text_content = "\n".join(lines)
 
     # Handle photo messages (from controller detail view with chart)
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         try:
             await query.message.delete()
         except Exception:
@@ -984,7 +993,6 @@ def _get_editable_controller_fields(ctrl_config: Dict[str, Any]) -> Dict[str, An
         "max_orders_per_batch": ctrl_config.get("max_orders_per_batch", 1),
         "min_spread_between_orders": ctrl_config.get("min_spread_between_orders", 0.0002),
         "take_profit": take_profit,
-        "manual_kill_switch": ctrl_config.get("manual_kill_switch", False),
     }
 
 
@@ -1436,9 +1444,39 @@ async def handle_refresh_bot(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if bot_name:
         # Clear cache to force refresh
         context.user_data.pop("current_bot_info", None)
+        context.user_data.pop("active_bots_data", None)
         await show_bot_detail(update, context, bot_name)
     else:
         await show_bots_menu(update, context)
+
+
+async def handle_refresh_controller(update: Update, context: ContextTypes.DEFAULT_TYPE, controller_idx: int) -> None:
+    """Refresh controller detail - clears cache and reloads"""
+    # Clear cache to force fresh data fetch
+    context.user_data.pop("current_bot_info", None)
+    context.user_data.pop("active_bots_data", None)
+    context.user_data.pop("current_controller_config", None)
+
+    # Reload bot info first to get fresh performance data
+    bot_name = context.user_data.get("current_bot_name")
+    chat_id = update.effective_chat.id
+
+    if bot_name:
+        try:
+            client = await get_bots_client(chat_id)
+            fresh_data = await client.bot_orchestration.get_active_bots_status()
+            if isinstance(fresh_data, dict) and "data" in fresh_data:
+                bot_info = fresh_data.get("data", {}).get(bot_name)
+                if bot_info:
+                    context.user_data["active_bots_data"] = fresh_data
+                    context.user_data["current_bot_info"] = bot_info
+                    # Update controllers list
+                    performance = bot_info.get("performance", {})
+                    context.user_data["current_controllers"] = list(performance.keys())
+        except Exception as e:
+            logger.warning(f"Error refreshing bot data: {e}")
+
+    await show_controller_detail(update, context, controller_idx)
 
 
 # ============================================
