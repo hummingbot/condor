@@ -151,6 +151,14 @@ FIELDS: Dict[str, ControllerField] = {
         hint="Default: 0.0002",
         default=0.0002
     ),
+    "order_frequency": ControllerField(
+        name="order_frequency",
+        label="Order Frequency",
+        type="int",
+        required=False,
+        hint="Seconds between order placement (default: 3)",
+        default=3
+    ),
     "take_profit": ControllerField(
         name="take_profit",
         label="Take Profit",
@@ -198,9 +206,9 @@ FIELDS: Dict[str, ControllerField] = {
 FIELD_ORDER: List[str] = [
     "id", "connector_name", "trading_pair", "side", "leverage",
     "total_amount_quote", "start_price", "end_price", "limit_price",
-    "max_open_orders", "max_orders_per_batch", "min_order_amount_quote",
-    "min_spread_between_orders", "take_profit", "open_order_type",
-    "take_profit_order_type", "keep_position", "activation_bounds"
+    "max_open_orders", "max_orders_per_batch", "order_frequency",
+    "min_order_amount_quote", "min_spread_between_orders", "take_profit",
+    "open_order_type", "take_profit_order_type", "keep_position", "activation_bounds"
 ]
 
 

@@ -29,6 +29,13 @@ from .config import (
     generate_id,
 )
 from .chart import generate_chart, generate_preview_chart
+from .grid_analysis import (
+    calculate_natr,
+    calculate_price_stats,
+    suggest_grid_params,
+    generate_theoretical_grid,
+    format_grid_summary,
+)
 
 
 class GridStrikeController(BaseController):
@@ -103,4 +110,10 @@ __all__ = [
     "generate_id",
     "generate_chart",
     "generate_preview_chart",
+    # Grid analysis
+    "calculate_natr",
+    "calculate_price_stats",
+    "suggest_grid_params",
+    "generate_theoretical_grid",
+    "format_grid_summary",
 ]

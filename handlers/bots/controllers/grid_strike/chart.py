@@ -220,7 +220,12 @@ def generate_chart(
             rangeslider_visible=False,
             showgrid=True,
             nticks=8,  # Limit number of ticks to prevent crowding
-            tickformat="%b %d\n%H:%M",  # Multi-line format: "Dec 4" on first line, "20:00" on second
+            # Use smart date formatting based on zoom level
+            tickformatstops=[
+                dict(dtickrange=[None, 3600000], value="%H:%M"),  # < 1 hour between ticks: show time only
+                dict(dtickrange=[3600000, 86400000], value="%H:%M\n%b %d"),  # 1h-1day: show time and date
+                dict(dtickrange=[86400000, None], value="%b %d"),  # > 1 day: show date only
+            ],
             tickangle=0,  # Keep labels horizontal
         ),
         yaxis=dict(
