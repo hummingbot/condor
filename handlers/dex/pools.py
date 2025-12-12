@@ -1470,7 +1470,7 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.edit_caption(
             caption=escape_markdown_v2("🔄 Adding tokens to Gateway..."),
             parse_mode="MarkdownV2"
-        ) if query.message.photo else await query.message.edit_text(
+        ) if getattr(query.message, 'photo', None) else await query.message.edit_text(
             escape_markdown_v2("🔄 Adding tokens to Gateway..."),
             parse_mode="MarkdownV2"
         )
@@ -1546,7 +1546,7 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.edit_caption(
             caption=escape_markdown_v2(success_msg),
             parse_mode="MarkdownV2"
-        ) if query.message.photo else await query.message.edit_text(
+        ) if getattr(query.message, 'photo', None) else await query.message.edit_text(
             escape_markdown_v2(success_msg),
             parse_mode="MarkdownV2"
         )
@@ -1792,7 +1792,7 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
 
     # Show loading - keep the message reference for editing
     loading_msg = query.message
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         # Edit photo caption to show loading
         try:
             await query.message.edit_caption(
@@ -3817,7 +3817,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
 
         # Edit the current message to show loading state
         try:
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 await query.message.edit_caption(caption=loading_msg, parse_mode="MarkdownV2")
             else:
                 await query.message.edit_text(loading_msg, parse_mode="MarkdownV2")
@@ -3904,7 +3904,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
 
         # Edit the loading message with success result
         try:
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 await query.message.edit_caption(caption=pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup)
             else:
                 await query.message.edit_text(pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup)
@@ -3917,7 +3917,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
-            if query.message.photo:
+            if getattr(query.message, 'photo', None):
                 await query.message.edit_caption(caption=error_message, parse_mode="MarkdownV2", reply_markup=reply_markup)
             else:
                 await query.message.edit_text(error_message, parse_mode="MarkdownV2", reply_markup=reply_markup)

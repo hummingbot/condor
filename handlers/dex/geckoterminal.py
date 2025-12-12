@@ -1400,7 +1400,7 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     ])
 
     # Handle case when returning from photo (OHLCV chart) - can't edit photo to text
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         await query.message.chat.send_message(
             "\n".join(lines),
@@ -1470,7 +1470,7 @@ async def show_gecko_charts_menu(update: Update, context: ContextTypes.DEFAULT_T
     ])
 
     # Handle photo messages - can't edit photo to text
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         await query.message.chat.send_message(
             "\n".join(lines),
@@ -1501,7 +1501,7 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     await query.answer("Loading chart...")
 
     # Show loading - handle photo messages (can't edit photo to text)
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         loading_msg = await query.message.chat.send_message(
             f"📈 *OHLCV Chart*\n\n_Loading {timeframe} data\\.\\.\\._",
@@ -1691,7 +1691,7 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer("Loading liquidity chart...")
 
     # Show loading
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         loading_msg = await query.message.chat.send_message(
             f"📊 *Liquidity Distribution*\n\n_Loading\\.\\.\\._",
@@ -1805,7 +1805,7 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Show loading - keep the message reference for editing
     loading_msg = query.message
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         # Edit photo caption to show loading (keeps the existing photo)
         try:
             await query.message.edit_caption(
@@ -2557,7 +2557,7 @@ async def handle_gecko_add_liquidity(update: Update, context: ContextTypes.DEFAU
 
     # Delete the current message and show the pool detail with add liquidity controls
     try:
-        if query.message.photo:
+        if getattr(query.message, 'photo', None):
             await query.message.delete()
         else:
             await query.message.delete()
