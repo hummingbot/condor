@@ -1007,9 +1007,9 @@ async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFA
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
 
         await query.message.edit_text(
-            r"*📈 Grid Strike \- New Config*" + "\n\n"
-            r"*Step 1/7:* 🏦 Select Connector" + "\n\n"
-            r"Choose the exchange for this grid, can be a spot or perpetual exchange:",
+            r"*📈 Grid Strike \- Step 1*" + "\n\n"
+            r"🏦 *Select Connector*" + "\n\n"
+            r"Choose the exchange for this grid \(spot or perpetual\):",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1095,10 +1095,14 @@ async def _show_wizard_pair_step(update: Update, context: ContextTypes.DEFAULT_T
     if recent_pairs:
         recent_hint = "\n\nOr type a custom pair below:"
 
+    # Determine total steps based on connector type
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 6 if is_perp else 5
+
     await query.message.edit_text(
-        r"*📈 Grid Strike \- New Config*" + "\n\n"
-        f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n\n"
-        r"*Step 2/7:* 🔗 Trading Pair" + "\n\n"
+        rf"*📈 Grid Strike \- Step 2/{total_steps}*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}`" + "\n\n"
+        r"🔗 *Trading Pair*" + "\n\n"
         r"Select a recent pair or enter a new one:" + escape_markdown_v2(recent_hint),
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1124,12 +1128,14 @@ async def _show_wizard_side_step(update: Update, context: ContextTypes.DEFAULT_T
         ],
     ]
 
+    # Determine total steps based on connector type
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 6 if is_perp else 5
+
     await query.message.edit_text(
-        r"*📈 Grid Strike \- New Config*" + "\n\n"
-        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-        f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n\n"
-        r"*Step 3/7:* 🎯 Side" + "\n\n"
-        r"Select trading side:",
+        rf"*📈 Grid Strike \- Step 3/{total_steps}*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+        r"🎯 *Select Side*",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1183,13 +1189,11 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
         ],
     ]
 
+    # Leverage step is only shown for perps (always 6 steps)
     await query.message.edit_text(
-        r"*📈 Grid Strike \- New Config*" + "\n\n"
-        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-        f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n"
-        f"🎯 *Side:* `{side}`" + "\n\n"
-        r"*Step 4/7:* ⚡ Leverage" + "\n\n"
-        r"Select leverage:",
+        r"*📈 Grid Strike \- Step 4/6*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}` \\| {side}" + "\n\n"
+        r"⚡ *Select Leverage*",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1315,17 +1319,40 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
         ],
     ]
 
-    await query.message.edit_text(
-        r"*📈 Grid Strike \- New Config*" + "\n\n"
-        f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-        f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n"
-        f"🎯 *Side:* `{side}` \\| ⚡ *Leverage:* `{leverage}x`" + "\n\n"
+    # Determine step number based on connector type
+    # Perps: Step 5/6 (has leverage step), Spot: Step 4/5 (no leverage step)
+    is_perp = connector.endswith("_perpetual")
+    step_num = 5 if is_perp else 4
+    total_steps = 6 if is_perp else 5
+
+    message_text = (
+        rf"*📈 Grid Strike \- Step {step_num}/{total_steps}*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+        f"🎯 {side} \\| ⚡ `{leverage}x`" + "\n\n"
         + balance_text +
-        r"*Step 5/7:* 💰 Total Amount \(Quote\)" + "\n\n"
-        r"Select or type amount in quote currency:",
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        r"💰 *Total Amount \(Quote\)*" + "\n\n"
+        r"Select or type amount:"
     )
+
+    # Handle both text and photo messages (when going back from chart step)
+    try:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception:
+        # Message is likely a photo - delete it and send new text message
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float) -> None:
@@ -1547,8 +1574,13 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         natr_pct = f"{natr*100:.2f}%" if natr else "N/A"
         range_pct = f"{grid.get('grid_range_pct', 0):.2f}%"
 
+        # Determine final step number based on connector type
+        is_perp = connector.endswith("_perpetual")
+        final_step = 6 if is_perp else 5
+
         # Build config text with individually copyable key=value params
         config_text = (
+            rf"*📈 Grid Strike \- Step {final_step}/{final_step} \(Final\)*" + "\n\n"
             f"*{escape_markdown_v2(pair)}* {side_str_label}\n"
             f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
             f"`total_amount_quote={total_amount:.0f}`\n"
@@ -2689,16 +2721,18 @@ async def _update_wizard_message_for_side(update: Update, context: ContextTypes.
         [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
     ]
 
+    # Determine total steps based on connector type
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 6 if is_perp else 5
+
     try:
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=(
-                r"*📈 Grid Strike \- New Config*" + "\n\n"
-                f"🏦 *Connector:* `{escape_markdown_v2(connector)}`" + "\n"
-                f"🔗 *Pair:* `{escape_markdown_v2(pair)}`" + "\n\n"
-                r"*Step 3/7:* 🎯 Side" + "\n\n"
-                r"Select trading side:"
+                rf"*📈 Grid Strike \- Step 3/{total_steps}*" + "\n\n"
+                f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                r"🎯 *Select Side*"
             ),
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
