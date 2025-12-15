@@ -130,7 +130,7 @@ async def cached_call(
 # Define which cache keys should be invalidated together
 CACHE_GROUPS = {
     "balances": ["gateway_balances", "portfolio_data", "wallet_balances", "token_balances", "gateway_data"],
-    "positions": ["clmm_positions", "liquidity_positions", "pool_positions", "gateway_lp_positions"],
+    "positions": ["clmm_positions", "liquidity_positions", "pool_positions", "gateway_lp_positions", "gateway_closed_positions"],
     "swaps": ["swap_history", "recent_swaps"],
     "tokens": ["token_cache"],  # Token list from gateway
     "all": None,  # Special: clears entire cache

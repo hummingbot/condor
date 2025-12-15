@@ -160,7 +160,8 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
         result = await client.gateway_clmm.search_positions(
             limit=100,
             offset=0,
-            status=status
+            status=status,
+            refresh=True
         )
 
         if not result:
@@ -302,8 +303,13 @@ def _format_compact_position_line(pos: dict, token_cache: dict = None, index: in
 
     # Get values from pnl_summary (all values are in quote token units)
     total_pnl_quote = pnl_summary.get('total_pnl_quote', 0)
-    total_fees_quote = pnl_summary.get('total_fees_value_quote', 0)
     current_lp_value_quote = pnl_summary.get('current_lp_value_quote', 0)
+
+    # Get PENDING fees (fees available to collect) and COLLECTED fees
+    base_fee_pending = pos.get('base_fee_pending', 0) or 0
+    quote_fee_pending = pos.get('quote_fee_pending', 0) or 0
+    base_fee_collected = pos.get('base_fee_collected', 0) or 0
+    quote_fee_collected = pos.get('quote_fee_collected', 0) or 0
 
     # Build line with price indicator next to range
     prefix = f"{index}. " if index is not None else "• "
@@ -313,31 +319,62 @@ def _format_compact_position_line(pos: dict, token_cache: dict = None, index: in
     # Add PnL + value + pending fees, converted to USD
     try:
         pnl_f = float(total_pnl_quote) if total_pnl_quote else 0
-        fees_f = float(total_fees_quote) if total_fees_quote else 0
         lp_value_f = float(current_lp_value_quote) if current_lp_value_quote else 0
 
-        # Get quote token price for USD conversion
-        # All pnl_summary values are in quote token units, so we just need quote price
-        quote_price = token_prices.get(quote_symbol, 1.0)
+        # Get token prices for USD conversion (try exact match, then variants)
+        def get_price(symbol, default=0):
+            if symbol in token_prices:
+                return token_prices[symbol]
+            # Try case-insensitive match
+            symbol_lower = symbol.lower()
+            for key, price in token_prices.items():
+                if key.lower() == symbol_lower:
+                    return price
+            # Try common variants (WSOL <-> SOL, WETH <-> ETH, etc.)
+            variants = {
+                "sol": ["wsol", "wrapped sol"],
+                "wsol": ["sol"],
+                "eth": ["weth", "wrapped eth"],
+                "weth": ["eth"],
+            }
+            for variant in variants.get(symbol_lower, []):
+                for key, price in token_prices.items():
+                    if key.lower() == variant:
+                        return price
+            return default
 
-        # Convert from quote token to USD
+        quote_price = get_price(quote_symbol, 1.0)
+        base_price = get_price(base_symbol, 0)
+
+        # Convert PnL and value from quote token to USD
         pnl_usd = pnl_f * quote_price
-        fees_usd = fees_f * quote_price
         value_usd = lp_value_f * quote_price
 
+        # Calculate pending fees in USD (fees available to collect)
+        base_pending_f = float(base_fee_pending) if base_fee_pending else 0
+        quote_pending_f = float(quote_fee_pending) if quote_fee_pending else 0
+        pending_fees_usd = (base_pending_f * base_price) + (quote_pending_f * quote_price)
+
+        # Calculate collected fees in USD (fees already claimed)
+        base_collected_f = float(base_fee_collected) if base_fee_collected else 0
+        quote_collected_f = float(quote_fee_collected) if quote_fee_collected else 0
+        collected_fees_usd = (base_collected_f * base_price) + (quote_collected_f * quote_price)
+
         # Debug logging
-        logger.info(f"Position {index}: lp_value={lp_value_f:.4f} {quote_symbol} @ ${quote_price:.2f} = ${value_usd:.2f}, pnl={pnl_f:.4f} {quote_symbol} = ${pnl_usd:.2f}")
+        logger.info(f"Position {index}: {base_symbol}@${base_price:.4f}, {quote_symbol}@${quote_price:.2f} | pending=${pending_fees_usd:.2f}, collected=${collected_fees_usd:.2f}")
 
         if value_usd > 0 or pnl_f != 0:
-            # Format: PnL: -$25.12 | Value: $63.45 | 🎁 $3.70
+            # Format: PnL: -$25.12 | Value: $63.45 | 🎁 $3.70 | 💰 $1.20
             parts = []
             if pnl_usd >= 0:
                 parts.append(f"PnL: +${pnl_usd:.2f}")
             else:
                 parts.append(f"PnL: -${abs(pnl_usd):.2f}")
             parts.append(f"Value: ${value_usd:.2f}")
-            if fees_usd > 0.01:
-                parts.append(f"🎁 ${fees_usd:.2f}")
+            if pending_fees_usd > 0.01:
+                parts.append(f"🎁 ${pending_fees_usd:.2f}")
+            if collected_fees_usd > 0.01:
+                parts.append(f"💰 ${collected_fees_usd:.2f}")
             line += "\n   " + " | ".join(parts)
     except (ValueError, TypeError):
         pass
@@ -348,7 +385,7 @@ def _format_compact_position_line(pos: dict, token_cache: dict = None, index: in
 def _format_closed_position_line(pos: dict, token_cache: dict = None, token_prices: dict = None) -> str:
     """Format a closed position with same format as active positions
 
-    Shows: Pair (connector) ✓ [range] | PnL: +$2.88 | 🎁 $1.40 | 1d
+    Shows: Pair (connector) ✓ [range] | PnL: +$2.88 | 💰 $1.40 | 1d
     """
     token_cache = token_cache or {}
     token_prices = token_prices or {}
@@ -413,7 +450,7 @@ def _format_closed_position_line(pos: dict, token_cache: dict = None, token_pric
     else:
         parts.append(f"PnL: -${abs(pnl_usd):.2f}")
     if fees_usd > 0.01:
-        parts.append(f"🎁 ${fees_usd:.2f}")
+        parts.append(f"💰 ${fees_usd:.2f}")
     if age:
         parts.append(age)
     line += "\n   " + " | ".join(parts)
@@ -863,7 +900,7 @@ def _format_detailed_position_line(pos: dict, token_cache: dict = None) -> str:
     except (ValueError, TypeError):
         pass
 
-    # Fees earned
+    # Fees earned (collected)
     try:
         base_fee_f = float(base_fee)
         quote_fee_f = float(quote_fee)
@@ -873,9 +910,9 @@ def _format_detailed_position_line(pos: dict, token_cache: dict = None) -> str:
         if quote_fee_f > 0.0001:
             fee_parts.append(f"{_format_token_amount(quote_fee_f)} {quote_symbol}")
         if fee_parts:
-            lines.append(f"   🎁 Fees earned: {' + '.join(fee_parts)}")
+            lines.append(f"   💰 Fees earned: {' + '.join(fee_parts)}")
         else:
-            lines.append(f"   🎁 Fees earned: 0")
+            lines.append(f"   💰 Fees earned: 0")
     except (ValueError, TypeError):
         pass
 

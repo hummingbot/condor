@@ -299,13 +299,14 @@ class ServerManager:
         if name in self.clients:
             return self.clients[name]
 
-        # Create new client with reasonable timeout
+        # Create new client with longer timeout to handle slow operations
+        # (credential verification can take time as it connects to external exchanges)
         base_url = f"http://{server['host']}:{server['port']}"
         client = HummingbotAPIClient(
             base_url=base_url,
             username=server['username'],
             password=server['password'],
-            timeout=ClientTimeout(total=10, connect=5)
+            timeout=ClientTimeout(total=60, connect=10)
         )
 
         try:

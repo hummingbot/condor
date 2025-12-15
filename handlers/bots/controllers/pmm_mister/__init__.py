@@ -29,6 +29,14 @@ from .config import (
     format_spreads,
 )
 from .chart import generate_chart, generate_preview_chart
+from .pmm_analysis import (
+    calculate_natr,
+    calculate_price_stats,
+    suggest_pmm_params,
+    generate_theoretical_levels,
+    format_pmm_summary,
+    calculate_effective_spread,
+)
 
 
 class PmmMisterController(BaseController):
@@ -98,4 +106,11 @@ __all__ = [
     "format_spreads",
     "generate_chart",
     "generate_preview_chart",
+    # PMM analysis
+    "calculate_natr",
+    "calculate_price_stats",
+    "suggest_pmm_params",
+    "generate_theoretical_levels",
+    "format_pmm_summary",
+    "calculate_effective_spread",
 ]

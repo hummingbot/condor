@@ -5,32 +5,16 @@ Generates candlestick charts with PMM spread visualization:
 - Buy spread levels (green dashed lines)
 - Sell spread levels (red dashed lines)
 - Current price line
-- Base percentage target zone indicator
+- Take profit zone indicator
+
+Uses the unified candlestick chart function from visualizations module.
 """
 
 import io
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import plotly.graph_objects as go
-
+from handlers.dex.visualizations import generate_candlestick_chart, DARK_THEME
 from .config import parse_spreads
-
-
-# Dark theme (consistent with grid_strike)
-DARK_THEME = {
-    "bgcolor": "#0a0e14",
-    "paper_bgcolor": "#0a0e14",
-    "plot_bgcolor": "#131720",
-    "font_color": "#e6edf3",
-    "font_family": "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif",
-    "grid_color": "#21262d",
-    "axis_color": "#8b949e",
-    "up_color": "#10b981",    # Green for bullish/buy
-    "down_color": "#ef4444",  # Red for bearish/sell
-    "line_color": "#3b82f6",  # Blue for lines
-    "target_color": "#f59e0b",  # Orange for target
-}
 
 
 def generate_chart(
@@ -45,6 +29,7 @@ def generate_chart(
     - Candlestick price data
     - Buy spread levels (green dashed lines below price)
     - Sell spread levels (red dashed lines above price)
+    - Take profit zone (shaded area around current price)
     - Current price line (orange solid)
 
     Args:
@@ -67,8 +52,78 @@ def generate_chart(
     # Handle both list and dict input
     data = candles_data if isinstance(candles_data, list) else candles_data.get("data", [])
 
-    if not data:
-        # Create empty chart with message
+    # Build title
+    title = f"{trading_pair} - PMM Mister"
+
+    # Get reference price for spread calculations
+    ref_price = current_price
+    if not ref_price and data:
+        # Use last close if no current price provided
+        last_candle = data[-1] if isinstance(data[-1], dict) else None
+        if last_candle:
+            ref_price = last_candle.get("close", 0)
+
+    # Build horizontal lines for spread overlays
+    hlines = []
+
+    # Add buy spread levels (below current price)
+    if ref_price and buy_spreads:
+        for i, spread in enumerate(buy_spreads):
+            buy_price = ref_price * (1 - spread)
+            # Fade opacity for further levels
+            opacity_suffix = "" if i == 0 else f" (L{i+1})"
+            hlines.append({
+                "y": buy_price,
+                "color": DARK_THEME["up_color"],
+                "dash": "dash",
+                "width": 2 if i == 0 else 1,
+                "label": f"Buy{opacity_suffix}: {buy_price:,.4f} (-{spread*100:.1f}%)",
+                "label_position": "left",
+            })
+
+    # Add sell spread levels (above current price)
+    if ref_price and sell_spreads:
+        for i, spread in enumerate(sell_spreads):
+            sell_price = ref_price * (1 + spread)
+            opacity_suffix = "" if i == 0 else f" (L{i+1})"
+            hlines.append({
+                "y": sell_price,
+                "color": DARK_THEME["down_color"],
+                "dash": "dash",
+                "width": 2 if i == 0 else 1,
+                "label": f"Sell{opacity_suffix}: {sell_price:,.4f} (+{spread*100:.1f}%)",
+                "label_position": "right",
+            })
+
+    # Build horizontal rectangles for take profit zone
+    hrects = []
+    if ref_price and take_profit:
+        tp_up = ref_price * (1 + take_profit)
+        tp_down = ref_price * (1 - take_profit)
+        hrects.append({
+            "y0": tp_down,
+            "y1": tp_up,
+            "color": "rgba(245, 158, 11, 0.1)",  # Light orange
+            "label": f"TP Zone ({take_profit*100:.2f}%)",
+        })
+
+    # Use the unified candlestick chart function
+    result = generate_candlestick_chart(
+        candles=data,
+        title=title,
+        current_price=current_price,
+        show_volume=False,  # PMM chart doesn't show volume
+        width=1100,
+        height=500,
+        hlines=hlines if hlines else None,
+        hrects=hrects if hrects else None,
+        reverse_data=False,  # CEX data is already in chronological order
+    )
+
+    # Handle empty chart case
+    if result is None:
+        import plotly.graph_objects as go
+
         fig = go.Figure()
         fig.add_annotation(
             text="No candle data available",
@@ -80,167 +135,19 @@ def generate_chart(
                 color=DARK_THEME["font_color"]
             )
         )
-    else:
-        # Extract OHLCV data
-        timestamps = []
-        opens = []
-        highs = []
-        lows = []
-        closes = []
+        fig.update_layout(
+            paper_bgcolor=DARK_THEME["paper_bgcolor"],
+            plot_bgcolor=DARK_THEME["plot_bgcolor"],
+            width=1100,
+            height=500,
+        )
 
-        for candle in data:
-            raw_ts = candle.get("timestamp", "")
-            # Parse timestamp
-            dt = None
-            try:
-                if isinstance(raw_ts, (int, float)):
-                    # Unix timestamp (seconds or milliseconds)
-                    if raw_ts > 1e12:  # milliseconds
-                        dt = datetime.fromtimestamp(raw_ts / 1000)
-                    else:
-                        dt = datetime.fromtimestamp(raw_ts)
-                elif isinstance(raw_ts, str) and raw_ts:
-                    # Try parsing ISO format
-                    if "T" in raw_ts:
-                        dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
-                    else:
-                        dt = datetime.fromisoformat(raw_ts)
-            except Exception:
-                dt = None
+        img_bytes = io.BytesIO()
+        fig.write_image(img_bytes, format='png', scale=2)
+        img_bytes.seek(0)
+        return img_bytes
 
-            if dt:
-                timestamps.append(dt)
-            else:
-                timestamps.append(str(raw_ts))
-
-            opens.append(candle.get("open", 0))
-            highs.append(candle.get("high", 0))
-            lows.append(candle.get("low", 0))
-            closes.append(candle.get("close", 0))
-
-        # Use current_price or last close
-        ref_price = current_price or (closes[-1] if closes else 0)
-
-        # Create candlestick chart
-        fig = go.Figure(data=[go.Candlestick(
-            x=timestamps,
-            open=opens,
-            high=highs,
-            low=lows,
-            close=closes,
-            increasing_line_color=DARK_THEME["up_color"],
-            decreasing_line_color=DARK_THEME["down_color"],
-            increasing_fillcolor=DARK_THEME["up_color"],
-            decreasing_fillcolor=DARK_THEME["down_color"],
-            name="Price"
-        )])
-
-        # Add buy spread levels (below current price)
-        if ref_price and buy_spreads:
-            for i, spread in enumerate(buy_spreads):
-                buy_price = ref_price * (1 - spread)
-                opacity = 0.8 - (i * 0.15)  # Fade out for further levels
-                fig.add_hline(
-                    y=buy_price,
-                    line_dash="dash",
-                    line_color=DARK_THEME["up_color"],
-                    line_width=2,
-                    opacity=max(0.3, opacity),
-                    annotation_text=f"Buy L{i+1}: {buy_price:,.4f} (-{spread*100:.1f}%)",
-                    annotation_position="left",
-                    annotation_font=dict(color=DARK_THEME["up_color"], size=9)
-                )
-
-        # Add sell spread levels (above current price)
-        if ref_price and sell_spreads:
-            for i, spread in enumerate(sell_spreads):
-                sell_price = ref_price * (1 + spread)
-                opacity = 0.8 - (i * 0.15)
-                fig.add_hline(
-                    y=sell_price,
-                    line_dash="dash",
-                    line_color=DARK_THEME["down_color"],
-                    line_width=2,
-                    opacity=max(0.3, opacity),
-                    annotation_text=f"Sell L{i+1}: {sell_price:,.4f} (+{spread*100:.1f}%)",
-                    annotation_position="right",
-                    annotation_font=dict(color=DARK_THEME["down_color"], size=9)
-                )
-
-        # Add take profit indicator as a shaded zone
-        if ref_price and take_profit:
-            tp_up = ref_price * (1 + take_profit)
-            tp_down = ref_price * (1 - take_profit)
-            fig.add_hrect(
-                y0=tp_down,
-                y1=tp_up,
-                fillcolor="rgba(245, 158, 11, 0.1)",
-                line_width=0,
-                annotation_text=f"TP Zone ({take_profit*100:.2f}%)",
-                annotation_position="top right",
-                annotation_font=dict(color=DARK_THEME["target_color"], size=9)
-            )
-
-        # Current price line
-        if current_price:
-            fig.add_hline(
-                y=current_price,
-                line_dash="solid",
-                line_color=DARK_THEME["target_color"],
-                line_width=2,
-                annotation_text=f"Current: {current_price:,.4f}",
-                annotation_position="left",
-                annotation_font=dict(color=DARK_THEME["target_color"], size=10)
-            )
-
-    # Build title
-    title_text = f"<b>{trading_pair}</b> - PMM Mister"
-
-    # Update layout with dark theme
-    fig.update_layout(
-        title=dict(
-            text=title_text,
-            font=dict(
-                family=DARK_THEME["font_family"],
-                size=18,
-                color=DARK_THEME["font_color"]
-            ),
-            x=0.5,
-            xanchor="center"
-        ),
-        paper_bgcolor=DARK_THEME["paper_bgcolor"],
-        plot_bgcolor=DARK_THEME["plot_bgcolor"],
-        font=dict(
-            family=DARK_THEME["font_family"],
-            color=DARK_THEME["font_color"]
-        ),
-        xaxis=dict(
-            gridcolor=DARK_THEME["grid_color"],
-            color=DARK_THEME["axis_color"],
-            rangeslider_visible=False,
-            showgrid=True,
-            nticks=8,
-            tickformat="%b %d\n%H:%M",
-            tickangle=0,
-        ),
-        yaxis=dict(
-            gridcolor=DARK_THEME["grid_color"],
-            color=DARK_THEME["axis_color"],
-            side="right",
-            showgrid=True
-        ),
-        showlegend=False,
-        width=900,
-        height=500,
-        margin=dict(l=10, r=140, t=50, b=50)
-    )
-
-    # Convert to PNG bytes
-    img_bytes = io.BytesIO()
-    fig.write_image(img_bytes, format='png', scale=2)
-    img_bytes.seek(0)
-
-    return img_bytes
+    return result
 
 
 def generate_preview_chart(
@@ -253,4 +160,5 @@ def generate_preview_chart(
 
     Same as generate_chart but with smaller dimensions.
     """
+    # Use the same logic but we could customize dimensions here if needed
     return generate_chart(config, candles_data, current_price)

@@ -1908,7 +1908,7 @@ def _format_timeframe_label(timeframe: str) -> str:
 # MANAGE POSITIONS (unified view)
 # ============================================
 
-def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool = False) -> str:
+def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool = False, token_prices: dict = None) -> str:
     """
     Format a single position for display.
 
@@ -1916,11 +1916,13 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
         pos: Position data dictionary
         token_cache: Optional token address->symbol mapping
         detailed: If True, show full details; if False, show compact summary
+        token_prices: Optional token symbol -> USD price mapping
 
     Returns:
         Formatted position string (not escaped)
     """
     token_cache = token_cache or {}
+    token_prices = token_prices or {}
 
     # Resolve token addresses to symbols
     base_token = pos.get('base_token', pos.get('token_a', ''))
@@ -1994,12 +1996,30 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
 
         lines.append("")  # Separator
 
-        # Get quote token price for USD conversion
-        quote_price = pos.get('quote_token_price', pos.get('quote_price', 1.0))
-        try:
-            quote_price_f = float(quote_price) if quote_price else 1.0
-        except (ValueError, TypeError):
-            quote_price_f = 1.0
+        # Get token prices for USD conversion (try exact match, then variants)
+        def get_price(symbol, default=0):
+            if symbol in token_prices:
+                return token_prices[symbol]
+            # Try case-insensitive match
+            symbol_lower = symbol.lower()
+            for key, price in token_prices.items():
+                if key.lower() == symbol_lower:
+                    return price
+            # Try common variants (WSOL <-> SOL, WETH <-> ETH, etc.)
+            variants = {
+                "sol": ["wsol", "wrapped sol"],
+                "wsol": ["sol"],
+                "eth": ["weth", "wrapped eth"],
+                "weth": ["eth"],
+            }
+            for variant in variants.get(symbol_lower, []):
+                for key, price in token_prices.items():
+                    if key.lower() == variant:
+                        return price
+            return default
+
+        quote_price_f = get_price(quote_symbol, 1.0)
+        base_price_f = get_price(base_symbol, 0)
 
         # Current holdings
         if base_amount or quote_amount:
@@ -2048,21 +2068,29 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
             except (ValueError, TypeError):
                 pass
 
-        # Fees earned - convert to USD
-        total_fees = pnl_summary.get('total_fees_value_quote')
-        if total_fees is not None:
-            try:
-                fees_val = float(total_fees) * quote_price_f
-                lines.append(f"🎁 Fees earned: ${fees_val:.2f}")
-            except (ValueError, TypeError):
-                pass
-
-        # Pending fees
+        # Fees - show pending and collected separately in USD
         try:
-            base_fee_f = float(base_fee) if base_fee else 0
-            quote_fee_f = float(quote_fee) if quote_fee else 0
-            if base_fee_f > 0 or quote_fee_f > 0:
-                lines.append(f"⏳ Pending: {format_amount(base_fee_f)} {base_symbol} / {format_amount(quote_fee_f)} {quote_symbol}")
+            # Get fee amounts
+            base_fee_pending = float(pos.get('base_fee_pending', 0) or 0)
+            quote_fee_pending = float(pos.get('quote_fee_pending', 0) or 0)
+            base_fee_collected = float(pos.get('base_fee_collected', 0) or 0)
+            quote_fee_collected = float(pos.get('quote_fee_collected', 0) or 0)
+
+            # Convert to USD
+            pending_usd = (base_fee_pending * base_price_f) + (quote_fee_pending * quote_price_f)
+            collected_usd = (base_fee_collected * base_price_f) + (quote_fee_collected * quote_price_f)
+
+            # Show pending fees (available to collect)
+            if pending_usd > 0.01:
+                lines.append(f"🎁 Pending fees: ${pending_usd:.2f}")
+
+            # Show collected fees (already claimed)
+            if collected_usd > 0.01:
+                lines.append(f"💰 Collected fees: ${collected_usd:.2f}")
+
+            # If no fees at all, show zero
+            if pending_usd <= 0.01 and collected_usd <= 0.01:
+                lines.append(f"💰 Fees: $0.00")
         except (ValueError, TypeError):
             pass
 
@@ -2276,8 +2304,11 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
             token_cache = await get_token_cache_from_gateway()
             context.user_data["token_cache"] = token_cache
 
+        # Get token prices for USD conversion
+        token_prices = context.user_data.get("token_prices", {})
+
         # Format detailed view with full information
-        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True)
+        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True, token_prices=token_prices)
         message = r"📍 *Position Details*" + "\n\n"
         message += escape_markdown_v2(detail)
 
@@ -2396,7 +2427,7 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
         network = pos.get('network', 'solana-mainnet-beta')
         position_address = pos.get('position_address', pos.get('nft_id', ''))
 
-        # Call collect fees with 10s timeout - Solana should be fast
+        # Call collect fees with 30s timeout
         try:
             result = await asyncio.wait_for(
                 client.gateway_clmm.collect_fees(
@@ -2404,7 +2435,7 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
                     network=network,
                     position_address=position_address
                 ),
-                timeout=10.0
+                timeout=30.0
             )
         except asyncio.TimeoutError:
             raise TimeoutError("Operation timed out. Check your connection to the backend.")
@@ -2414,14 +2445,14 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
             [InlineKeyboardButton("« Back", callback_data="dex:liquidity")]
         ])
 
-        if result:
-            # Invalidate position cache so next view fetches fresh data with 0 fees
-            # Also invalidate balances since collected fees go to wallet
-            invalidate_cache(context.user_data, "positions", "balances")
-            # Also clear the local position caches used for quick lookups
-            context.user_data.pop("positions_cache", None)
-            context.user_data.pop("lp_positions_cache", None)
+        # Always invalidate caches after API call - even if result is empty,
+        # the transaction was sent and we need fresh data
+        invalidate_cache(context.user_data, "positions", "balances")
+        # Also clear the local position caches used for quick lookups
+        context.user_data.pop("positions_cache", None)
+        context.user_data.pop("lp_positions_cache", None)
 
+        if result:
             success_msg = f"✅ *Fees collected from {escape_markdown_v2(pair)}\\!*"
             if isinstance(result, dict):
                 tx_hash = result.get('tx_hash') or result.get('txHash') or result.get('signature')
@@ -2475,9 +2506,10 @@ async def handle_pos_close_confirm(update: Update, context: ContextTypes.DEFAULT
             await update.callback_query.answer("Position not found. Please refresh.")
             return
 
-        # Get token cache for symbol resolution
+        # Get token cache and prices for display
         token_cache = context.user_data.get("token_cache") or {}
-        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True)
+        token_prices = context.user_data.get("token_prices", {})
+        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True, token_prices=token_prices)
 
         message = r"⚠️ *Close Position?*" + "\n\n"
         message += escape_markdown_v2(detail) + "\n\n"
@@ -2512,9 +2544,10 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
             await update.callback_query.answer("Position not found. Please refresh.")
             return
 
-        # Get token cache for symbol resolution
+        # Get token cache and prices for display
         token_cache = context.user_data.get("token_cache") or {}
-        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True)
+        token_prices = context.user_data.get("token_prices", {})
+        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True, token_prices=token_prices)
 
         # Immediately update message to show closing status (remove keyboard)
         closing_msg = r"⏳ *Closing Position\.\.\.*" + "\n\n"

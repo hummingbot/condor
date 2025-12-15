@@ -542,8 +542,67 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
 
     except Exception as e:
         logger.error(f"Error submitting API key config: {e}", exc_info=True)
-        error_text = f"❌ Error saving configuration: {escape_markdown_v2(str(e))}"
-        await bot.send_message(chat_id=chat_id, text=error_text, parse_mode="MarkdownV2")
+
+        # Get account name for back button before clearing state
+        config_data = context.user_data.get('api_key_config_data', {})
+        account_name = config_data.get('account_name', '')
+        connector_name = config_data.get('connector_name', '')
+        message_id = context.user_data.get('api_key_message_id')
+
+        # Clear context data so user can retry
+        context.user_data.pop('configuring_api_key', None)
+        context.user_data.pop('awaiting_api_key_input', None)
+        context.user_data.pop('api_key_config_data', None)
+        context.user_data.pop('api_key_message_id', None)
+        context.user_data.pop('api_key_chat_id', None)
+
+        # Build error message with more helpful text for timeout
+        error_str = str(e)
+        if "TimeoutError" in error_str or "timeout" in error_str.lower():
+            connector_escaped = escape_markdown_v2(connector_name)
+            error_text = (
+                f"❌ *Connection Timeout*\n\n"
+                f"Failed to verify credentials for *{connector_escaped}*\\.\n\n"
+                "The exchange took too long to respond\\. "
+                "Please check your API keys and try again\\."
+            )
+        else:
+            error_text = f"❌ Error saving configuration: {escape_markdown_v2(error_str)}"
+
+        # Add back button to navigate back to account
+        if account_name:
+            encoded_account = base64.b64encode(account_name.encode()).decode()
+            keyboard = [[InlineKeyboardButton("« Back to Account", callback_data=f"api_key_back_account:{encoded_account}")]]
+        else:
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="api_key_back_to_accounts")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Try to edit existing message, fall back to sending new message
+        try:
+            if message_id and chat_id:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            else:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+        except Exception as msg_error:
+            logger.error(f"Failed to send error message: {msg_error}")
+            # Last resort: send simple message
+            await bot.send_message(
+                chat_id=chat_id,
+                text=error_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
 
 
 async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_name: str, connector_name: str) -> None:
