@@ -15,7 +15,8 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.answer("Loading networks...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.list_networks()
 
         networks = response.get('networks', [])
@@ -113,7 +114,8 @@ async def show_network_details(query, context: ContextTypes.DEFAULT_TYPE, networ
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.get_network_config(network_id)
 
         # Try to extract config - it might be directly in response or nested under 'config'
@@ -290,7 +292,7 @@ async def submit_network_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
         context.user_data.pop('awaiting_network_input', None)
 
         # Submit configuration to Gateway
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
         await client.gateway.update_network_config(network_id, final_config)
 
         success_text = f"✅ Configuration saved for {escape_markdown_v2(network_id)}\\!"

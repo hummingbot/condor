@@ -17,7 +17,8 @@ async def show_pools_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.answer("Loading connectors...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.list_connectors()
         connectors = response.get('connectors', [])
 
@@ -176,7 +177,8 @@ async def show_pool_networks(query, context: ContextTypes.DEFAULT_TYPE, connecto
 
         if not connector_info:
             # Fallback: fetch connector info again if not in context
-            client = await server_manager.get_default_client()
+            chat_id = query.message.chat_id
+            client = await server_manager.get_client_for_chat(chat_id)
             response = await client.gateway.list_connectors()
             connectors = response.get('connectors', [])
             connector_info = next((c for c in connectors if c.get('name') == connector_name), None)
@@ -250,7 +252,8 @@ async def show_connector_pools(query, context: ContextTypes.DEFAULT_TYPE, connec
 
         await query.answer("Loading pools...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
 
         connector_escaped = escape_markdown_v2(connector_name)
@@ -369,8 +372,10 @@ async def prompt_remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connecto
         connector_escaped = escape_markdown_v2(connector_name)
         network_escaped = escape_markdown_v2(network)
 
+        chat_id = query.message.chat_id
+
         # Fetch pools to display as options
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
         pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
 
         if not pools:
@@ -478,7 +483,8 @@ async def remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name:
         except TypeError:
             pass  # Mock query doesn't support answer
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         await client.gateway.delete_pool(connector=connector_name, network=network, pool_type=pool_type, address=pool_address)
 
         connector_escaped = escape_markdown_v2(connector_name)
@@ -577,7 +583,7 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
 
             try:
-                client = await server_manager.get_default_client()
+                client = await server_manager.get_client_for_chat(chat_id)
 
                 logger.info(f"Adding pool: connector={connector_name}, network={network}, "
                            f"pool_type={pool_type}, base={base}, quote={quote}, address={address}, "

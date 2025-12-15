@@ -12,9 +12,11 @@ from ._shared import logger, escape_markdown_v2
 async def start_deploy_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show Docker image selection for Gateway deployment"""
     try:
+        chat_id = query.message.chat_id
         header, server_online, _ = await build_config_message_header(
             "🚀 Deploy Gateway",
-            include_gateway=False
+            include_gateway=False,
+            chat_id=chat_id
         )
 
         if not server_online:
@@ -64,7 +66,8 @@ async def deploy_gateway_with_image(query, context: ContextTypes.DEFAULT_TYPE) -
 
         await query.answer("🚀 Deploying Gateway...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Gateway configuration
         config = {
@@ -95,9 +98,11 @@ async def deploy_gateway_with_image(query, context: ContextTypes.DEFAULT_TYPE) -
 async def prompt_custom_image(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Prompt user to enter custom Docker image"""
     try:
+        chat_id = query.message.chat_id
         header, server_online, _ = await build_config_message_header(
             "✏️ Custom Gateway Image",
-            include_gateway=False
+            include_gateway=False,
+            chat_id=chat_id
         )
 
         context.user_data['awaiting_gateway_input'] = 'custom_image'
@@ -129,14 +134,15 @@ async def prompt_custom_image(query, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def stop_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Stop Gateway container on the default server"""
+    """Stop Gateway container on the current server"""
     try:
         from servers import server_manager
         from .menu import show_gateway_menu
 
         await query.answer("⏹ Stopping Gateway...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.stop()
 
         if response.get('status') == 'success' or response.get('status') == 'stopped':
@@ -155,11 +161,13 @@ async def stop_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Restart Gateway container on the default server"""
+    """Restart Gateway container on the current server"""
     try:
         from servers import server_manager
         from .menu import show_gateway_menu
         import asyncio
+
+        chat_id = query.message.chat_id
 
         # Answer the callback query first
         await query.answer("🔄 Restarting Gateway...")
@@ -167,7 +175,8 @@ async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Update message to show restarting status
         header, _, _ = await build_config_message_header(
             "🌐 Gateway Configuration",
-            include_gateway=False  # Don't check status during restart
+            include_gateway=False,  # Don't check status during restart
+            chat_id=chat_id
         )
 
         restarting_text = (
@@ -185,7 +194,7 @@ async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass  # Ignore if message can't be edited
 
         # Perform the restart
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.restart()
 
         # Wait a moment for the restart to take effect
@@ -235,7 +244,8 @@ async def show_gateway_logs(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.answer("📋 Loading logs...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.get_logs(tail=50)
 
         logs = response.get('logs', 'No logs available')
