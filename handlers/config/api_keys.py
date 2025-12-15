@@ -27,9 +27,11 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
         else:
             # Build header with server context
+            chat_id = query.message.chat_id
             header, server_online, _ = await build_config_message_header(
                 "🔑 API Keys",
-                include_gateway=False
+                include_gateway=False,
+                chat_id=chat_id
             )
 
             if not server_online:
@@ -39,8 +41,8 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
             else:
-                # Get client from default server
-                client = await server_manager.get_default_client()
+                # Get client from per-chat server
+                client = await server_manager.get_client_for_chat(chat_id)
                 accounts = await client.accounts.list_accounts()
 
                 if not accounts:
@@ -242,13 +244,16 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
     try:
         from servers import server_manager
 
+        chat_id = query.message.chat_id
+
         # Build header with server context
         header, server_online, _ = await build_config_message_header(
             f"🔑 API Keys",
-            include_gateway=False
+            include_gateway=False,
+            chat_id=chat_id
         )
 
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Get list of connected credentials for this account
         credentials = await client.accounts.list_account_credentials(account_name=account_name)
@@ -337,7 +342,8 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Get config map for this connector
         config_fields = await client.connectors.get_config_map(connector_name)
@@ -475,7 +481,7 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
                 parse_mode="MarkdownV2"
             )
 
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Add credentials using the accounts API
         await client.accounts.add_credential(
@@ -547,7 +553,8 @@ async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_n
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Delete the credential
         await client.accounts.delete_credential(
