@@ -42,7 +42,7 @@ DEFAULTS: Dict[str, Any] = {
     "limit_price": 0.0,
     "max_open_orders": 3,
     "max_orders_per_batch": 1,
-    "min_spread_between_orders": 0.0002,
+    "min_spread_between_orders": 0.0001,
     "order_frequency": 3,
     "activation_bounds": 0.01,  # 1%
     "keep_position": True,
@@ -148,8 +148,8 @@ FIELDS: Dict[str, ControllerField] = {
         label="Min Spread",
         type="float",
         required=False,
-        hint="Default: 0.0002",
-        default=0.0002
+        hint="Default: 0.0001",
+        default=0.0001
     ),
     "order_frequency": ControllerField(
         name="order_frequency",
@@ -256,11 +256,11 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
                 f"Got: {limit_price:.6g} < {start_price:.6g} < {end_price:.6g}"
             )
     else:
-        # SHORT: end_price < start_price < limit_price
-        if not (end_price < start_price < limit_price):
+        # SHORT: start_price < end_price < limit_price
+        if not (start_price < end_price < limit_price):
             return False, (
-                f"Invalid prices for SHORT: require end < start < limit. "
-                f"Got: {end_price:.6g} < {start_price:.6g} < {limit_price:.6g}"
+                f"Invalid prices for SHORT: require start < end < limit. "
+                f"Got: {start_price:.6g} < {end_price:.6g} < {limit_price:.6g}"
             )
 
     return True, None
@@ -282,8 +282,8 @@ def calculate_auto_prices(
         - limit_price: current_price - 3%
 
     For SHORT:
-        - start_price: current_price + 2%
-        - end_price: current_price - 2%
+        - start_price: current_price - 2%
+        - end_price: current_price + 2%
         - limit_price: current_price + 3%
 
     Returns:
@@ -294,8 +294,8 @@ def calculate_auto_prices(
         end_price = current_price * (1 + end_pct)
         limit_price = current_price * (1 - limit_pct)
     else:  # SHORT
-        start_price = current_price * (1 + start_pct)
-        end_price = current_price * (1 - end_pct)
+        start_price = current_price * (1 - start_pct)
+        end_price = current_price * (1 + end_pct)
         limit_price = current_price * (1 + limit_pct)
 
     return (

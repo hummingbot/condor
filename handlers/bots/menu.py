@@ -257,21 +257,17 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                 total_realized += realized
                 total_unrealized += unrealized
 
-                # Controller section
-                lines.append("")
-                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                # Controller section - compact format
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
                 # Controller name and status
                 ctrl_status_emoji = "▶️" if ctrl_status == "running" else "⏸️"
                 lines.append(f"{ctrl_status_emoji} *{escape_markdown_v2(ctrl_name)}*")
 
-                # P&L section
-                lines.append("")
-                lines.append("*P&L*")
+                # P&L + Volume in one line (compact)
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                lines.append(f"{pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\| 💰 R: `{escape_markdown_v2(f'{realized:+.2f}')}` \\| 📊 U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`")
                 vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
-                lines.append(f"📦 Vol: `{escape_markdown_v2(vol_str)}`")
+                lines.append(f"{pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{realized:+.2f}')}` / U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`\\) 📦 `{escape_markdown_v2(vol_str)}`")
 
                 # Open Positions section
                 positions = ctrl_perf.get("positions_summary", [])
@@ -342,13 +338,10 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
             # Total summary (only if multiple controllers)
             if len(performance) > 1:
-                lines.append("")
-                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
                 vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-                lines.append(f"*TOTAL*")
-                lines.append(f"  {pnl_emoji} P&L: `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{total_realized:+.2f}')}` / U: `{escape_markdown_v2(f'{total_unrealized:+.2f}')}`\\)")
-                lines.append(f"  📦 Volume: `{escape_markdown_v2(vol_total)}`")
+                lines.append(f"*TOTAL* {pnl_emoji} `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{total_realized:+.2f}')}` / U: `{escape_markdown_v2(f'{total_unrealized:+.2f}')}`\\) 📦 `{escape_markdown_v2(vol_total)}`")
 
         # Error summary at the bottom
         error_logs = bot_info.get("error_logs", [])
@@ -846,7 +839,7 @@ async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TY
             connector_name=connector,
             trading_pair=pair,
             interval="1h",
-            max_records=100
+            max_records=420
         )
         prices = await client.market_data.get_prices(
             connector_name=connector,
@@ -991,7 +984,7 @@ def _get_editable_controller_fields(ctrl_config: Dict[str, Any]) -> Dict[str, An
         "total_amount_quote": ctrl_config.get("total_amount_quote", 0),
         "max_open_orders": ctrl_config.get("max_open_orders", 3),
         "max_orders_per_batch": ctrl_config.get("max_orders_per_batch", 1),
-        "min_spread_between_orders": ctrl_config.get("min_spread_between_orders", 0.0002),
+        "min_spread_between_orders": ctrl_config.get("min_spread_between_orders", 0.0001),
         "take_profit": take_profit,
     }
 

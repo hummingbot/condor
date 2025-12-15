@@ -339,7 +339,7 @@ async def fetch_candles(
     connector_name: str,
     trading_pair: str,
     interval: str = "1m",
-    max_records: int = 100
+    max_records: int = 420
 ) -> Optional[Dict[str, Any]]:
     """Fetch candles data for a trading pair."""
     try:

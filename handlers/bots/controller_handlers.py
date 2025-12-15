@@ -561,7 +561,7 @@ def _get_editable_config_fields(config: dict) -> dict:
             "total_amount_quote": config.get("total_amount_quote", 0),
             "max_open_orders": config.get("max_open_orders", 3),
             "max_orders_per_batch": config.get("max_orders_per_batch", 1),
-            "min_spread_between_orders": config.get("min_spread_between_orders", 0.0002),
+            "min_spread_between_orders": config.get("min_spread_between_orders", 0.0001),
             "activation_bounds": config.get("activation_bounds", 0.01),
             "take_profit": take_profit,
         }
@@ -609,15 +609,9 @@ async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE)
     lines.append(f"`{escape_markdown_v2(config_id)}`")
     lines.append("")
 
-    # Build config text for display
-    config_lines = []
+    # Build config text for display (each line copyable)
     for key, value in editable_fields.items():
-        config_lines.append(f"{key}={value}")
-    config_text = "\n".join(config_lines)
-
-    lines.append("```")
-    lines.append(config_text)
-    lines.append("```")
+        lines.append(f"`{key}={value}`")
     lines.append("")
     lines.append("✏️ _Send `key=value` to update_")
 
@@ -1411,8 +1405,8 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
             if current_price:
                 context.user_data["gs_current_price"] = current_price
-                # Fetch candles (100 records is enough for NATR calculation)
-                candles = await fetch_candles(client, connector, pair, interval=interval, max_records=100)
+                # Fetch candles for NATR calculation and chart visualization
+                candles = await fetch_candles(client, connector, pair, interval=interval, max_records=420)
                 context.user_data["gs_candles"] = candles
                 context.user_data["gs_candles_interval"] = interval
 
@@ -1471,7 +1465,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 config["end_price"] = suggestions["end_price"]
                 config["limit_price"] = suggestions["limit_price"]
                 # Only set these if not already configured
-                if not config.get("min_spread_between_orders") or config.get("min_spread_between_orders") == 0.0002:
+                if not config.get("min_spread_between_orders") or config.get("min_spread_between_orders") == 0.0001:
                     config["min_spread_between_orders"] = suggestions["min_spread_between_orders"]
                 if not config.get("triple_barrier_config", {}).get("take_profit") or \
                    config.get("triple_barrier_config", {}).get("take_profit") == 0.0001:
@@ -1488,7 +1482,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         start = config.get("start_price")
         end = config.get("end_price")
         limit = config.get("limit_price")
-        min_spread = config.get("min_spread_between_orders", 0.0002)
+        min_spread = config.get("min_spread_between_orders", 0.0001)
         take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
         min_order_amount = config.get("min_order_amount_quote", max(6, min_notional))
 
@@ -1541,43 +1535,34 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             ],
         ]
 
-        # Build copyable YAML config format
+        # Get config values
         max_open_orders = config.get("max_open_orders", 3)
-        max_orders_per_batch = config.get("max_orders_per_batch", 1)
         order_frequency = config.get("order_frequency", 3)
         leverage = config.get("leverage", 1)
         side_value = config.get("side", SIDE_LONG)
-        activation_bounds = config.get("activation_bounds", 0.01)
-        config_id = config.get("id", "")
-
-        # YAML block for copying
-        yaml_block = (
-            f"connector_name: {connector}\n"
-            f"trading_pair: {pair}\n"
-            f"side: {side_value}  # 1=LONG, 2=SHORT\n"
-            f"leverage: {leverage}\n"
-            f"total_amount_quote: {total_amount:.0f}\n"
-            f"start_price: {start:.6g}\n"
-            f"end_price: {end:.6g}\n"
-            f"limit_price: {limit:.6g}\n"
-            f"take_profit: {take_profit}\n"
-            f"min_spread_between_orders: {min_spread}\n"
-            f"min_order_amount_quote: {min_order_amount:.0f}\n"
-            f"max_open_orders: {max_open_orders}\n"
-            f"order_frequency: {order_frequency}"
-        )
+        side_str_label = "LONG" if side_value == SIDE_LONG else "SHORT"
 
         # Grid analysis info
-        grid_valid = "OK" if grid.get("valid") else "WARN"
-        grid_range_pct = grid.get("grid_range_pct", 0)
-        natr_info = f" \\| NATR: {natr*100:.2f}%".replace(".", "\\.") if natr else ""
-        range_info = f" \\| range: {grid_range_pct:.2f}%".replace(".", "\\.")
+        grid_valid = "✓" if grid.get("valid") else "⚠️"
+        natr_pct = f"{natr*100:.2f}%" if natr else "N/A"
+        range_pct = f"{grid.get('grid_range_pct', 0):.2f}%"
 
+        # Build config text with individually copyable key=value params
         config_text = (
-            f"*{escape_markdown_v2(pair)}* \\| current: `{current_price:,.6g}`{range_info}{natr_info}\n\n"
-            f"```\n{yaml_block}\n```\n\n"
-            f"Grid: `{grid['num_levels']}` levels \\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
-            f"@ `${grid['amount_per_level']:.2f}`/lvl \\[{grid_valid}\\]"
+            f"*{escape_markdown_v2(pair)}* {side_str_label}\n"
+            f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
+            f"`total_amount_quote={total_amount:.0f}`\n"
+            f"`start_price={start:.6g}`\n"
+            f"`end_price={end:.6g}`\n"
+            f"`limit_price={limit:.6g}`\n"
+            f"`leverage={leverage}`\n"
+            f"`take_profit={take_profit}`\n"
+            f"`min_spread_between_orders={min_spread}`\n"
+            f"`min_order_amount_quote={min_order_amount:.0f}`\n"
+            f"`max_open_orders={max_open_orders}`\n\n"
+            f"{grid_valid} Grid: `{grid['num_levels']}` levels "
+            f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
+            f"@ `${grid['amount_per_level']:.2f}`/lvl"
         )
 
         # Add warnings if any
@@ -1585,7 +1570,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             warnings_text = "\n".join(f"⚠️ {escape_markdown_v2(w)}" for w in grid["warnings"])
             config_text += f"\n{warnings_text}"
 
-        config_text += "\n\n_Edit: `field=value` \\(e\\.g\\. `start\\_price=130`\\)_"
+        config_text += "\n\n_Edit: `field=value`_"
 
         # Generate chart and send as photo with caption
         if candles_list:
@@ -1815,7 +1800,7 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
     min_order_amount = config.get("min_order_amount_quote", 6)
-    min_spread = config.get("min_spread_between_orders", 0.0002)
+    min_spread = config.get("min_spread_between_orders", 0.0001)
 
     # Delete previous chart if exists
     chart_msg_id = context.user_data.pop("gs_chart_message_id", None)
@@ -1926,7 +1911,7 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
     min_order_amount = config.get("min_order_amount_quote", 6)
-    min_spread = config.get("min_spread_between_orders", 0.0002)
+    min_spread = config.get("min_spread_between_orders", 0.0001)
 
     # Build copyable config block with real YAML field names
     side_value = config.get("side", SIDE_LONG)
@@ -2189,7 +2174,7 @@ async def handle_gs_edit_spread(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["bots_state"] = "gs_wizard_input"
     context.user_data["gs_wizard_step"] = "edit_spread"
 
-    current = config.get("min_spread_between_orders", 0.0002)
+    current = config.get("min_spread_between_orders", 0.0001)
 
     keyboard = [
         [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
@@ -2231,11 +2216,11 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Current: `{limit_price:,.6g}` < `{start_price:,.6g}` < `{end_price:,.6g}`"
             )
     else:  # SHORT
-        if not (end_price < start_price < limit_price):
+        if not (start_price < end_price < limit_price):
             validation_error = (
                 "Invalid prices for SHORT position\\.\n\n"
-                "Required: `end < start < limit`\n"
-                f"Current: `{end_price:,.6g}` < `{start_price:,.6g}` < `{limit_price:,.6g}`"
+                "Required: `start < end < limit`\n"
+                f"Current: `{start_price:,.6g}` < `{end_price:,.6g}` < `{limit_price:,.6g}`"
             )
 
     if validation_error:
@@ -2342,8 +2327,8 @@ async def _background_fetch_market_data(context, config: dict, chat_id: int = No
         if current_price:
             context.user_data["gs_current_price"] = current_price
 
-            # Fetch candles (1m, 100 records) - consistent with default interval
-            candles = await fetch_candles(client, connector, pair, interval="1m", max_records=100)
+            # Fetch candles (1m, 420 records) - consistent with default interval
+            candles = await fetch_candles(client, connector, pair, interval="1m", max_records=420)
             context.user_data["gs_candles"] = candles
             context.user_data["gs_candles_interval"] = "1m"
             context.user_data["gs_market_data_ready"] = True
@@ -2438,7 +2423,7 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                             val = val / 100
                         config["min_spread_between_orders"] = val
                         changes_made = True
-                    elif field in ("min_order_amount_quote", "min_order", "min"):
+                    elif field in ("min_order_amount_quote", "min_order_amount", "min_order", "min"):
                         config["min_order_amount_quote"] = float(value.replace("$", ""))
                         changes_made = True
                     elif field in ("total_amount_quote", "total_amount", "amount"):
@@ -2783,7 +2768,7 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     candles = context.user_data.get("gs_candles")
     interval = context.user_data.get("gs_chart_interval", "1m")
     total_amount = config.get("total_amount_quote", 1000)
-    min_spread = config.get("min_spread_between_orders", 0.0002)
+    min_spread = config.get("min_spread_between_orders", 0.0001)
     take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
     min_order_amount = config.get("min_order_amount_quote", 6)
     natr = context.user_data.get("gs_natr")
@@ -2834,10 +2819,14 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
         f"*{escape_markdown_v2(pair)}* {side_str}\n"
         f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
         f"`total_amount_quote={total_amount:.0f}`\n"
-        f"`start_price={start:.6g}` `end_price={end:.6g}`\n"
-        f"`limit_price={limit:.6g}` `leverage={leverage}`\n"
-        f"`take_profit={take_profit}` `min_spread={min_spread}`\n"
-        f"`min_order_amount={min_order_amount:.0f}` `max_orders={max_open_orders}`\n\n"
+        f"`start_price={start:.6g}`\n"
+        f"`end_price={end:.6g}`\n"
+        f"`limit_price={limit:.6g}`\n"
+        f"`leverage={leverage}`\n"
+        f"`take_profit={take_profit}`\n"
+        f"`min_spread_between_orders={min_spread}`\n"
+        f"`min_order_amount_quote={min_order_amount:.0f}`\n"
+        f"`max_open_orders={max_open_orders}`\n\n"
         f"{grid_valid} Grid: `{grid['num_levels']}` levels "
         f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
         f"@ `${grid['amount_per_level']:.2f}`/lvl"
@@ -3219,7 +3208,7 @@ async def fetch_and_apply_market_data(update: Update, context: ContextTypes.DEFA
             set_controller_config(context, config)
 
             # Fetch candles for chart
-            candles = await fetch_candles(client, connector, pair, interval="5m", max_records=50)
+            candles = await fetch_candles(client, connector, pair, interval="5m", max_records=420)
 
             if candles:
                 # Generate and send chart
@@ -3427,7 +3416,7 @@ async def process_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                     set_controller_config(context, config)
 
                     # Fetch candles
-                    candles = await fetch_candles(client, connector, pair, interval="5m", max_records=50)
+                    candles = await fetch_candles(client, connector, pair, interval="5m", max_records=420)
 
                     if candles:
                         chart_bytes = generate_candles_chart(
