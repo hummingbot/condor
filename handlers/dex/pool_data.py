@@ -188,7 +188,8 @@ async def fetch_liquidity_bins(
     pool_address: str,
     connector: str = "meteora",
     network: str = "solana-mainnet-beta",
-    user_data: dict = None
+    user_data: dict = None,
+    chat_id: int = None
 ) -> Tuple[Optional[List], Optional[Dict], Optional[str]]:
     """Fetch liquidity bin data for CLMM pools via gateway
 
@@ -197,6 +198,7 @@ async def fetch_liquidity_bins(
         connector: DEX connector (meteora, raydium, orca)
         network: Network identifier
         user_data: Optional user_data dict for caching
+        chat_id: Chat ID for per-chat server selection
 
     Returns:
         Tuple of (bins_list, pool_info, error_message)
@@ -215,7 +217,7 @@ async def fetch_liquidity_bins(
             if cached is not None:
                 return cached.get('bins'), cached, None
 
-        client = await get_client()
+        client = await get_client(chat_id)
         if not client:
             return None, None, "Gateway client not available"
 

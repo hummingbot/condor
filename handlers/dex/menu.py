@@ -440,7 +440,8 @@ async def _load_menu_data_background(
     reply_markup,
     last_swap,
     server_name: str = None,
-    refresh: bool = False
+    refresh: bool = False,
+    chat_id: int = None
 ) -> None:
     """Background task to load gateway data and update the menu progressively.
 
@@ -449,11 +450,12 @@ async def _load_menu_data_background(
 
     Args:
         refresh: If True, force refresh balances from exchanges (bypasses 5-min API cache)
+        chat_id: Chat ID for per-chat server selection
     """
     gateway_data = {"balances_by_network": {}, "lp_positions": [], "total_value": 0, "token_cache": {}}
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Step 2: Fetch balances first (usually fast) and update UI immediately
         # When refresh=True, bypass local cache and tell API to refresh from exchanges
@@ -595,8 +597,9 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, refr
     last_swap = get_dex_last_swap(context.user_data)
 
     # Spawn background task to load data - user can navigate away without waiting
+    chat_id = update.effective_chat.id
     task = asyncio.create_task(
-        _load_menu_data_background(message, context, reply_markup, last_swap, server_name, refresh=refresh)
+        _load_menu_data_background(message, context, reply_markup, last_swap, server_name, refresh=refresh, chat_id=chat_id)
     )
     context.user_data[DEX_LOADING_TASK_KEY] = task
 

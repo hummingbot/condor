@@ -1709,10 +1709,12 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
         connector = get_connector_for_dex(dex_id)
 
         # Fetch liquidity bins via gateway
+        chat_id = update.effective_chat.id
         bins, pool_info, error = await fetch_liquidity_bins(
             pool_address=address,
             connector=connector,
-            user_data=context.user_data
+            user_data=context.user_data,
+            chat_id=chat_id
         )
 
         if error or not bins:
@@ -1846,10 +1848,12 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ohlcv_data = ohlcv_result.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
 
         # Fetch liquidity bins
+        chat_id = update.effective_chat.id
         bins, pool_info, _ = await fetch_liquidity_bins(
             pool_address=address,
             connector=connector,
-            user_data=context.user_data
+            user_data=context.user_data,
+            chat_id=chat_id
         )
 
         if not ohlcv_data and not bins:

@@ -494,6 +494,7 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
             message = update.callback_query.message
 
     # Store message for later editing
+    chat_id = update.effective_chat.id
     if message:
         context.user_data["trade_menu_message_id"] = message.message_id
         context.user_data["trade_menu_chat_id"] = message.chat_id
@@ -501,7 +502,7 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Launch background data fetch if needed (when any key data is missing)
     needs_fetch = balances is None or quote_data is None or current_price is None
     if auto_fetch and message and needs_fetch:
-        asyncio.create_task(_fetch_trade_data_background(context, message, params))
+        asyncio.create_task(_fetch_trade_data_background(context, message, params, chat_id))
 
 
 async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> None:
@@ -546,7 +547,8 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
 async def _fetch_trade_data_background(
     context: ContextTypes.DEFAULT_TYPE,
     message,
-    params: dict
+    params: dict,
+    chat_id: int = None
 ) -> None:
     """Fetch trade data in background and update message when done (like swap.py)"""
     logger.info(f"Starting background fetch for trade data...")
@@ -556,7 +558,7 @@ async def _fetch_trade_data_background(
     is_perpetual = _is_perpetual_connector(connector)
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
     except Exception as e:
         logger.warning(f"Could not get client for trade data: {e}")
         return
@@ -750,7 +752,8 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
         # Parse amount (remove $ if present)
         volume = float(str(amount).replace("$", ""))
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # If amount is in USD, we need to convert to base token volume
         if "$" in str(amount):
@@ -885,7 +888,8 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
     keyboard = []
 
     try:
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
         cex_connectors = await get_available_cex_connectors(context.user_data, client)
 
         # Build buttons (2 per row)
@@ -1039,7 +1043,8 @@ async def handle_trade_toggle_pos_mode(update: Update, context: ContextTypes.DEF
     account = get_clob_account(context.user_data)
 
     try:
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Get current mode
         current_mode = context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE")
@@ -1088,7 +1093,8 @@ async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         if order_type in ["LIMIT", "LIMIT_MAKER"] and (not price or price == "—"):
             raise ValueError("Price required for LIMIT orders")
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Handle USD amount
         is_quote_amount = "$" in str(amount)
@@ -1337,7 +1343,8 @@ async def process_trade_set_leverage(
         trading_pair = params.get("trading_pair", "BTC-USDT")
         account = get_clob_account(context.user_data)
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Set leverage on exchange
         await client.trading.set_leverage(

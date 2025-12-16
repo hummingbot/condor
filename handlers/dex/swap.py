@@ -966,7 +966,8 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
             parse_mode="MarkdownV2"
         )
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1083,7 +1084,8 @@ async def process_swap_status(
 ) -> None:
     """Process swap status check"""
     try:
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1183,7 +1185,8 @@ async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             filters = get_history_filters(context.user_data, "swap")
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_swap'):
             error_message = format_error_message("Gateway swap not available")

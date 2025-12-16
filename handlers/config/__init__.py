@@ -31,12 +31,10 @@ def _get_config_menu_markup_and_text():
         [
             InlineKeyboardButton("🔌 API Servers", callback_data="config_api_servers"),
             InlineKeyboardButton("🔑 API Keys", callback_data="config_api_keys"),
-        ],
-        [
             InlineKeyboardButton("🌐 Gateway", callback_data="config_gateway"),
         ],
         [
-            InlineKeyboardButton("❌ Close", callback_data="config_close"),
+            InlineKeyboardButton("❌ Cancel", callback_data="config_close"),
         ],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)

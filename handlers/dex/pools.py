@@ -27,12 +27,13 @@ logger = logging.getLogger(__name__)
 # TOKEN CACHE HELPERS
 # ============================================
 
-async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta") -> dict:
+async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta", chat_id: int = None) -> dict:
     """
     Fetch tokens from Gateway and build address->symbol cache.
 
     Args:
         network: Network ID (default: solana-mainnet-beta)
+        chat_id: Chat ID for per-chat server selection
 
     Returns:
         Dict mapping token addresses to symbols
@@ -40,7 +41,7 @@ async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta") -> 
     token_cache = dict(KNOWN_TOKENS)  # Start with known tokens
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Try to get tokens from Gateway
         if hasattr(client, 'gateway'):
@@ -211,7 +212,8 @@ async def process_pool_info(
         if connector not in supported_connectors:
             raise ValueError(f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}")
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -619,9 +621,14 @@ async def process_pool_list(
             sent_msg = await update.message.reply_text(loading_msg, parse_mode="MarkdownV2")
             context.user_data["pool_list_message_id"] = sent_msg.message_id
             context.user_data["pool_list_chat_id"] = sent_msg.chat_id
+            chat_id = sent_msg.chat_id  # Ensure chat_id is set
             loading_sent = "new"
 
-        client = await get_client()
+        # Ensure chat_id is set for get_client
+        if not chat_id:
+            chat_id = update.effective_chat.id
+
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -761,7 +768,8 @@ async def handle_plot_liquidity(
     )
 
     try:
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Fetch all pool infos in parallel with individual timeouts
         POOL_FETCH_TIMEOUT = 10  # seconds per pool
@@ -967,17 +975,18 @@ async def _show_pool_detail(
     network = 'solana-mainnet-beta'
 
     # Fetch additional pool info with bins (cached with 60s TTL)
+    chat_id = update.effective_chat.id
     cache_key = f"pool_info_{connector}_{pool_address}"
     pool_info = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
     if pool_info is None:
-        client = await get_client()
+        client = await get_client(chat_id)
         pool_info = await _fetch_pool_info(client, pool_address, connector)
         set_cached(context.user_data, cache_key, pool_info)
 
     # Get or fetch token cache for symbol resolution
     token_cache = context.user_data.get("token_cache")
     if not token_cache:
-        token_cache = await get_token_cache_from_gateway()
+        token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
         context.user_data["token_cache"] = token_cache
 
     # Try to get trading pair name from multiple sources
@@ -1143,7 +1152,7 @@ async def _show_pool_detail(
         balance_cache_key = f"token_balances_{network}_{base_symbol}_{quote_symbol}"
         balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
         if balances is None:
-            client = await get_client()
+            client = await get_client(chat_id)
             balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
             set_cached(context.user_data, balance_cache_key, balances)
 
@@ -1820,10 +1829,12 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
         # Get bins from cached pool_info or fetch
         bins = pool_info.get('bins', [])
         if not bins:
+            chat_id = update.effective_chat.id
             bins, _, _ = await fetch_liquidity_bins(
                 pool_address=pool_address,
                 connector=connector,
-                user_data=context.user_data
+                user_data=context.user_data,
+                chat_id=chat_id
             )
 
         if not ohlcv_data and not bins:
@@ -2170,13 +2181,14 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
 async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display manage positions menu with all active LP positions"""
     try:
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
 
         # Fetch token cache for symbol resolution
-        token_cache = await get_token_cache_from_gateway()
+        token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
         context.user_data["token_cache"] = token_cache
 
         # Fetch all open positions
@@ -2299,9 +2311,10 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
             return
 
         # Get token cache (fetch if not available)
+        chat_id = update.effective_chat.id
         token_cache = context.user_data.get("token_cache")
         if not token_cache:
-            token_cache = await get_token_cache_from_gateway()
+            token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
             context.user_data["token_cache"] = token_cache
 
         # Get token prices for USD conversion
@@ -2417,7 +2430,8 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=None
         )
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2560,7 +2574,8 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
             parse_mode="MarkdownV2"
         )
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2646,7 +2661,8 @@ async def process_position_list(
         network = parts[1]
         pool_address = parts[2]
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -3073,7 +3089,8 @@ async def show_add_position_menu(
         if base_token and quote_token:
             token_cache = context.user_data.get("token_cache")
             if not token_cache:
-                token_cache = await get_token_cache_from_gateway()
+                chat_id = update.effective_chat.id
+                token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
                 context.user_data["token_cache"] = token_cache
 
             base_symbol = resolve_token_symbol(base_token, token_cache)
@@ -3228,7 +3245,8 @@ async def show_add_position_menu(
             balance_cache_key = f"token_balances_{network}_{base_symbol}_{quote_symbol}"
             balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
             if balances is None:
-                client = await get_client()
+                chat_id = update.effective_chat.id
+                client = await get_client(chat_id)
                 balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
                 set_cached(context.user_data, balance_cache_key, balances)
 
@@ -3556,7 +3574,8 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Refetch pool info
     if pool_address:
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
         pool_info = await _fetch_pool_info(client, pool_address, connector)
         set_cached(context.user_data, pool_cache_key, pool_info)
         context.user_data["selected_pool_info"] = pool_info
@@ -3857,7 +3876,8 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             pass
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -4122,7 +4142,8 @@ async def process_add_position(
         connector = params.get("connector", "meteora")
         network = params.get("network", "solana-mainnet-beta")
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")

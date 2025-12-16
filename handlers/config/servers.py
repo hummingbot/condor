@@ -270,6 +270,10 @@ async def set_default_server(query, context: ContextTypes.DEFAULT_TYPE, server_n
             # Invalidate ALL cached data since we're switching to a different server
             # This ensures /lp, /swap, etc. will fetch fresh data from the new server
             invalidate_cache(context.user_data, "all")
+
+            # Store current server in user_data as fallback for background tasks
+            context.user_data["_current_server"] = server_name
+
             logger.info(f"Cache invalidated after switching to server '{server_name}'")
 
             await query.answer(f"✅ Set {server_name} as default for this chat")

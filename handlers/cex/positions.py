@@ -17,7 +17,8 @@ async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         from servers import get_client
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Get all positions
         result = await client.trading.get_positions(limit=100)
@@ -237,7 +238,8 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
 
         from servers import get_client
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Place market order to close position
         result = await client.trading.place_order(
