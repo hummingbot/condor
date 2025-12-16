@@ -1491,14 +1491,8 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 config["start_price"] = suggestions["start_price"]
                 config["end_price"] = suggestions["end_price"]
                 config["limit_price"] = suggestions["limit_price"]
-                # Only set these if not already configured
-                if not config.get("min_spread_between_orders") or config.get("min_spread_between_orders") == 0.0001:
-                    config["min_spread_between_orders"] = suggestions["min_spread_between_orders"]
-                if not config.get("triple_barrier_config", {}).get("take_profit") or \
-                   config.get("triple_barrier_config", {}).get("take_profit") == 0.0001:
-                    if "triple_barrier_config" not in config:
-                        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
-                    config["triple_barrier_config"]["take_profit"] = suggestions["take_profit"]
+                # Note: min_spread_between_orders and take_profit use fixed defaults from config.py
+                # NATR-based suggestions are not applied - user prefers consistent defaults
             else:
                 # Fallback to default percentages
                 start, end, limit = calculate_auto_prices(current_price, side)

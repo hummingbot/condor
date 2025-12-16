@@ -48,7 +48,7 @@ DEFAULTS: Dict[str, Any] = {
     "keep_position": True,
     "triple_barrier_config": {
         "open_order_type": 3,
-        "take_profit": 0.0001,
+        "take_profit": 0.0005,
         "take_profit_order_type": 3,
     },
 }
@@ -164,8 +164,8 @@ FIELDS: Dict[str, ControllerField] = {
         label="Take Profit",
         type="float",
         required=False,
-        hint="Default: 0.0001",
-        default=0.0001
+        hint="Default: 0.0005",
+        default=0.0005
     ),
     "keep_position": ControllerField(
         name="keep_position",

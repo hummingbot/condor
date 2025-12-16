@@ -267,7 +267,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                 # P&L + Volume in one line (compact)
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
                 vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
-                lines.append(f"{pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{realized:+.2f}')}` / U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`\\) 📦 `{escape_markdown_v2(vol_str)}`")
+                lines.append(f"{pnl_emoji} pnl: `{escape_markdown_v2(f'{pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{realized:+.2f}')}` / U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`\\) 📦 vol: `{escape_markdown_v2(vol_str)}`")
 
                 # Open Positions section
                 positions = ctrl_perf.get("positions_summary", [])
@@ -341,7 +341,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                 lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
                 vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-                lines.append(f"*TOTAL* {pnl_emoji} `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{total_realized:+.2f}')}` / U: `{escape_markdown_v2(f'{total_unrealized:+.2f}')}`\\) 📦 `{escape_markdown_v2(vol_total)}`")
+                lines.append(f"*TOTAL* {pnl_emoji} pnl: `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{total_realized:+.2f}')}` / U: `{escape_markdown_v2(f'{total_unrealized:+.2f}')}`\\) 📦 vol: `{escape_markdown_v2(vol_total)}`")
 
         # Error summary at the bottom
         error_logs = bot_info.get("error_logs", [])
