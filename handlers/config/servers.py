@@ -261,11 +261,17 @@ async def set_default_server(query, context: ContextTypes.DEFAULT_TYPE, server_n
     """Set server as default for this chat"""
     try:
         from servers import server_manager
+        from handlers.dex._shared import invalidate_cache
 
         chat_id = query.message.chat_id
         success = server_manager.set_default_server_for_chat(chat_id, server_name)
 
         if success:
+            # Invalidate ALL cached data since we're switching to a different server
+            # This ensures /lp, /swap, etc. will fetch fresh data from the new server
+            invalidate_cache(context.user_data, "all")
+            logger.info(f"Cache invalidated after switching to server '{server_name}'")
+
             await query.answer(f"✅ Set {server_name} as default for this chat")
             await show_server_details(query, context, server_name)
         else:
@@ -303,10 +309,21 @@ async def delete_server(query, context: ContextTypes.DEFAULT_TYPE, server_name: 
     """Delete a server from configuration"""
     try:
         from servers import server_manager
+        from handlers.dex._shared import invalidate_cache
+
+        # Check if this is the current chat's default server
+        chat_id = query.message.chat_id
+        current_default = server_manager.get_default_server_for_chat(chat_id)
+        was_current = (current_default == server_name)
 
         success = server_manager.delete_server(server_name)
 
         if success:
+            # Invalidate cache if we deleted the server that was in use
+            if was_current:
+                invalidate_cache(context.user_data, "all")
+                logger.info(f"Cache invalidated after deleting current server '{server_name}'")
+
             await query.answer(f"✅ Deleted {server_name}")
             await show_api_servers(query, context)
         else:
@@ -873,6 +890,13 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
 
         if success:
             logger.info(f"Successfully modified {field} for server {server_name}")
+
+            # Invalidate cache if this is the current chat's default server
+            current_default = server_manager.get_default_server_for_chat(chat_id)
+            if current_default == server_name:
+                from handlers.dex._shared import invalidate_cache
+                invalidate_cache(context.user_data, "all")
+                logger.info(f"Cache invalidated after modifying current server '{server_name}'")
             if modify_message_id and modify_chat_id:
                 logger.info(f"Attempting to show server details for message {modify_message_id}")
 
