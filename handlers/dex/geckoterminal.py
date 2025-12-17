@@ -1400,7 +1400,7 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     ])
 
     # Handle case when returning from photo (OHLCV chart) - can't edit photo to text
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         await query.message.chat.send_message(
             "\n".join(lines),
@@ -1470,7 +1470,7 @@ async def show_gecko_charts_menu(update: Update, context: ContextTypes.DEFAULT_T
     ])
 
     # Handle photo messages - can't edit photo to text
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         await query.message.chat.send_message(
             "\n".join(lines),
@@ -1501,7 +1501,7 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
     await query.answer("Loading chart...")
 
     # Show loading - handle photo messages (can't edit photo to text)
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         loading_msg = await query.message.chat.send_message(
             f"📈 *OHLCV Chart*\n\n_Loading {timeframe} data\\.\\.\\._",
@@ -1658,12 +1658,12 @@ async def show_ohlcv_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, t
 def _format_timeframe_label(timeframe: str) -> str:
     """Convert API timeframe to display label"""
     labels = {
-        "1m": "1 Hour (1m candles)",
-        "5m": "5 Hours (5m candles)",
-        "15m": "15 Hours (15m candles)",
-        "1h": "1 Day (1h candles)",
-        "4h": "4 Days (4h candles)",
-        "1d": "7 Days (1d candles)",
+        "1m": "1m candles",
+        "5m": "5m candles",
+        "15m": "15m candles",
+        "1h": "1h candles",
+        "4h": "4h candles",
+        "1d": "1d candles",
     }
     return labels.get(timeframe, timeframe)
 
@@ -1691,7 +1691,7 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer("Loading liquidity chart...")
 
     # Show loading
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.message.delete()
         loading_msg = await query.message.chat.send_message(
             f"📊 *Liquidity Distribution*\n\n_Loading\\.\\.\\._",
@@ -1709,10 +1709,12 @@ async def show_gecko_liquidity(update: Update, context: ContextTypes.DEFAULT_TYP
         connector = get_connector_for_dex(dex_id)
 
         # Fetch liquidity bins via gateway
+        chat_id = update.effective_chat.id
         bins, pool_info, error = await fetch_liquidity_bins(
             pool_address=address,
             connector=connector,
-            user_data=context.user_data
+            user_data=context.user_data,
+            chat_id=chat_id
         )
 
         if error or not bins:
@@ -1805,7 +1807,7 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Show loading - keep the message reference for editing
     loading_msg = query.message
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         # Edit photo caption to show loading (keeps the existing photo)
         try:
             await query.message.edit_caption(
@@ -1846,10 +1848,12 @@ async def show_gecko_combined(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ohlcv_data = ohlcv_result.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
 
         # Fetch liquidity bins
+        chat_id = update.effective_chat.id
         bins, pool_info, _ = await fetch_liquidity_bins(
             pool_address=address,
             connector=connector,
-            user_data=context.user_data
+            user_data=context.user_data,
+            chat_id=chat_id
         )
 
         if not ohlcv_data and not bins:
@@ -2557,7 +2561,7 @@ async def handle_gecko_add_liquidity(update: Update, context: ContextTypes.DEFAU
 
     # Delete the current message and show the pool detail with add liquidity controls
     try:
-        if query.message.photo:
+        if getattr(query.message, 'photo', None):
             await query.message.delete()
         else:
             await query.message.delete()

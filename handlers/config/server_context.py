@@ -11,9 +11,12 @@ from utils.telegram_formatters import escape_markdown_v2
 logger = logging.getLogger(__name__)
 
 
-async def get_server_context_header() -> Tuple[str, bool]:
+async def get_server_context_header(chat_id: int = None) -> Tuple[str, bool]:
     """
     Get a standardized server context header showing current server and status.
+
+    Args:
+        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
 
     Returns:
         Tuple of (header_text: str, is_online: bool)
@@ -23,8 +26,11 @@ async def get_server_context_header() -> Tuple[str, bool]:
     try:
         from servers import server_manager
 
-        # Get default server
-        default_server = server_manager.get_default_server()
+        # Get default server (per-chat if chat_id provided)
+        if chat_id is not None:
+            default_server = server_manager.get_default_server_for_chat(chat_id)
+        else:
+            default_server = server_manager.get_default_server()
         servers = server_manager.list_servers()
 
         if not servers:
@@ -73,9 +79,12 @@ async def get_server_context_header() -> Tuple[str, bool]:
         return f"⚠️ _Error loading server info: {escape_markdown_v2(str(e))}_\n", False
 
 
-async def get_gateway_status_info() -> Tuple[str, bool]:
+async def get_gateway_status_info(chat_id: int = None) -> Tuple[str, bool]:
     """
     Get gateway status information for the current server.
+
+    Args:
+        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
 
     Returns:
         Tuple of (status_text: str, is_running: bool)
@@ -85,7 +94,10 @@ async def get_gateway_status_info() -> Tuple[str, bool]:
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        if chat_id is not None:
+            client = await server_manager.get_client_for_chat(chat_id)
+        else:
+            client = await server_manager.get_default_client()
 
         # Check gateway status
         try:
@@ -118,7 +130,8 @@ async def get_gateway_status_info() -> Tuple[str, bool]:
 
 async def build_config_message_header(
     title: str,
-    include_gateway: bool = False
+    include_gateway: bool = False,
+    chat_id: int = None
 ) -> Tuple[str, bool, bool]:
     """
     Build a standardized header for configuration messages.
@@ -126,6 +139,7 @@ async def build_config_message_header(
     Args:
         title: The title/heading for this config screen (will be bolded automatically)
         include_gateway: Whether to include gateway status info
+        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
 
     Returns:
         Tuple of (header_text: str, server_online: bool, gateway_running: bool)
@@ -135,14 +149,18 @@ async def build_config_message_header(
     header = f"*{title_escaped}*\n\n"
 
     # Add server context
-    server_context, server_online = await get_server_context_header()
+    server_context, server_online = await get_server_context_header(chat_id)
     header += server_context
 
-    # Add gateway status if requested
+    # Add gateway status if requested (but only if server is online to avoid long timeouts)
     gateway_running = False
     if include_gateway:
-        gateway_info, gateway_running = await get_gateway_status_info()
-        header += gateway_info
+        if server_online:
+            gateway_info, gateway_running = await get_gateway_status_info(chat_id)
+            header += gateway_info
+        else:
+            # Server is offline, skip gateway check to avoid timeout
+            header += f"*Gateway:* ⚪️ {escape_markdown_v2('N/A')}\n"
 
     header += "\n"
 

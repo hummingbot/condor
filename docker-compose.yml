@@ -7,7 +7,7 @@ services:
       - .env
     volumes:
       # Persist bot data (user preferences, trading context, etc.)
-      - ./condor_bot_data.pickle:/app/condor_bot_data.pickle
+      - ./data:/app/data
       # Mount servers config
       - ./servers.yml:/app/servers.yml
     environment:

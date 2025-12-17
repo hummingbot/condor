@@ -1,0 +1,12 @@
+.env
+servers.yml
+data/
+__pycache__/
+.git/
+*.pyc
+/data
+/logs
+/build
+/dist
+/.git
+/.github

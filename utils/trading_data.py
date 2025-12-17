@@ -269,6 +269,7 @@ async def get_portfolio_overview(
     include_perp_positions: bool = True,
     include_lp_positions: bool = True,
     include_active_orders: bool = True,
+    refresh: bool = False,
 ) -> Dict[str, Any]:
     """
     Get a unified portfolio overview with all position types
@@ -280,6 +281,7 @@ async def get_portfolio_overview(
         include_perp_positions: Include perpetual positions (default: True)
         include_lp_positions: Include LP (CLMM) positions (default: True)
         include_active_orders: Include active orders (default: True)
+        refresh: If True, force refresh balances from exchanges (bypasses API cache)
 
     Returns:
         Dictionary containing all portfolio data:
@@ -297,7 +299,7 @@ async def get_portfolio_overview(
         tasks = {}
 
         if include_balances:
-            tasks['balances'] = client.portfolio.get_state()
+            tasks['balances'] = client.portfolio.get_state(refresh=refresh)
 
         if include_perp_positions:
             tasks['perp_positions'] = get_perpetual_positions(client, account_names)

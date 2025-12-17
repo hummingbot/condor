@@ -35,7 +35,8 @@ async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await query.answer("Loading networks...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.list_networks()
 
         networks = response.get('networks', [])
@@ -181,7 +182,8 @@ async def show_network_tokens(query, context: ContextTypes.DEFAULT_TYPE, network
 
         await query.answer("Loading tokens...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Try to get tokens - the method might not exist in older versions
         try:
@@ -336,7 +338,8 @@ async def prompt_remove_token(query, context: ContextTypes.DEFAULT_TYPE, network
 
         await query.answer("Loading tokens...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Get tokens for the network
         try:
@@ -513,8 +516,10 @@ async def show_delete_token_confirmation(query, context: ContextTypes.DEFAULT_TY
     try:
         from servers import server_manager
 
+        chat_id = query.message.chat_id
+
         # Get token details to show in confirmation
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Try to get tokens - the method might not exist in older versions
         try:
@@ -584,7 +589,8 @@ async def remove_token(query, context: ContextTypes.DEFAULT_TYPE, network_id: st
 
         await query.answer("Removing token...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         await client.gateway.delete_token(network_id=network_id, token_address=token_address)
 
         network_escaped = escape_markdown_v2(network_id)
@@ -718,7 +724,7 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
 
             try:
-                client = await server_manager.get_default_client()
+                client = await server_manager.get_client_for_chat(chat_id)
                 await client.gateway.add_token(
                     network_id=network_id,
                     address=address,
@@ -851,7 +857,7 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
 
             try:
-                client = await server_manager.get_default_client()
+                client = await server_manager.get_client_for_chat(chat_id)
 
                 # Delete old token first, then add with new values
                 await client.gateway.delete_token(network_id=network_id, token_address=token_address)

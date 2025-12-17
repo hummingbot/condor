@@ -130,7 +130,7 @@ async def cached_call(
 # Define which cache keys should be invalidated together
 CACHE_GROUPS = {
     "balances": ["gateway_balances", "portfolio_data", "wallet_balances", "token_balances", "gateway_data"],
-    "positions": ["clmm_positions", "liquidity_positions", "pool_positions", "gateway_lp_positions"],
+    "positions": ["clmm_positions", "liquidity_positions", "pool_positions", "gateway_lp_positions", "gateway_closed_positions"],
     "swaps": ["swap_history", "recent_swaps"],
     "tokens": ["token_cache"],  # Token list from gateway
     "all": None,  # Special: clears entire cache
@@ -216,6 +216,7 @@ class BackgroundRefreshManager:
         self._tasks: Dict[int, asyncio.Task] = {}
         self._last_activity: Dict[int, float] = {}
         self._refresh_funcs: Dict[str, Callable] = {}
+        self._user_chat_ids: Dict[int, int] = {}  # Track chat_id per user for server selection
 
     def register_refresh(self, key: str, func: Callable) -> None:
         """Register a function to be called during background refresh.
@@ -227,7 +228,7 @@ class BackgroundRefreshManager:
         self._refresh_funcs[key] = func
         logger.debug(f"Registered background refresh for '{key}'")
 
-    def touch(self, user_id: int, user_data: dict) -> None:
+    def touch(self, user_id: int, user_data: dict, chat_id: int = None) -> None:
         """Mark user as active, starting background refresh if needed.
 
         Call this at the start of any handler to keep refresh alive.
@@ -235,8 +236,13 @@ class BackgroundRefreshManager:
         Args:
             user_id: Telegram user ID
             user_data: context.user_data dict
+            chat_id: Chat ID for per-chat server selection
         """
         self._last_activity[user_id] = time.time()
+
+        # Store chat_id for this user (for per-chat server selection)
+        if chat_id is not None:
+            self._user_chat_ids[user_id] = chat_id
 
         if user_id not in self._tasks or self._tasks[user_id].done():
             self._tasks[user_id] = asyncio.create_task(
@@ -247,7 +253,9 @@ class BackgroundRefreshManager:
     async def _refresh_loop(self, user_id: int, user_data: dict) -> None:
         """Background loop that refreshes data until inactivity timeout."""
         try:
-            client = await get_client()
+            # Use per-chat server if available
+            chat_id = self._user_chat_ids.get(user_id)
+            client = await get_client(chat_id)
         except Exception as e:
             logger.warning(f"Background refresh: couldn't get client: {e}")
             return
@@ -273,6 +281,7 @@ class BackgroundRefreshManager:
         # Cleanup
         self._tasks.pop(user_id, None)
         self._last_activity.pop(user_id, None)
+        self._user_chat_ids.pop(user_id, None)
 
     def stop(self, user_id: int) -> None:
         """Manually stop background refresh for a user."""
@@ -280,6 +289,7 @@ class BackgroundRefreshManager:
             self._tasks[user_id].cancel()
             self._tasks.pop(user_id, None)
             self._last_activity.pop(user_id, None)
+            self._user_chat_ids.pop(user_id, None)
             logger.debug(f"Manually stopped background refresh for user {user_id}")
 
 
@@ -298,9 +308,11 @@ def with_background_refresh(func: Callable) -> Callable:
     @functools.wraps(func)
     async def wrapper(update, context, *args, **kwargs):
         if update.effective_user:
+            chat_id = update.effective_chat.id if update.effective_chat else None
             background_refresh.touch(
                 update.effective_user.id,
-                context.user_data
+                context.user_data,
+                chat_id=chat_id
             )
         return await func(update, context, *args, **kwargs)
     return wrapper

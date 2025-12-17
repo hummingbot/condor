@@ -19,6 +19,7 @@ from handlers.config.user_preferences import (
     get_dex_connector,
     get_dex_last_swap,
     set_dex_last_swap,
+    get_all_enabled_networks,
     DEFAULT_DEX_NETWORK,
 )
 from servers import get_client
@@ -37,7 +38,7 @@ from ._shared import (
     build_filter_selection_keyboard,
     HISTORY_FILTERS,
 )
-from .menu import _fetch_balances
+from .menu import _fetch_balances, _filter_balances_by_networks
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +252,8 @@ async def handle_swap_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def _fetch_quotes_background(
     context: ContextTypes.DEFAULT_TYPE,
     message,
-    params: dict
+    params: dict,
+    chat_id: int = None
 ) -> None:
     """Fetch BUY/SELL quotes and balances in background and update the message"""
     try:
@@ -264,7 +266,7 @@ async def _fetch_quotes_background(
         if not all([connector, network, trading_pair, amount]):
             return
 
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():
@@ -419,6 +421,10 @@ def _build_swap_menu_text(user_data: dict, params: dict, quote_result: dict = No
     help_text += r"━━━ Balance ━━━" + "\n"
     try:
         gateway_data = get_cached(user_data, "gateway_balances", ttl=120)
+        # Filter by enabled networks
+        enabled_networks = get_all_enabled_networks(user_data)
+        if enabled_networks and gateway_data:
+            gateway_data = _filter_balances_by_networks(gateway_data, enabled_networks)
         if gateway_data and gateway_data.get("balances_by_network"):
             network_key = network.split("-")[0].lower() if network else ""
             balances_found = {"base_balance": 0, "base_value": 0, "quote_balance": 0, "quote_value": 0}
@@ -511,13 +517,14 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
         quote_result: Optional quote result to display inline
         auto_quote: If True, fetch quote in background automatically
     """
+    chat_id = update.effective_chat.id
     params = context.user_data.get("swap_params", {})
 
     # Fetch recent swaps if not cached
     swaps = get_cached(context.user_data, "recent_swaps", ttl=60)
     if swaps is None:
         try:
-            client = await get_client()
+            client = await get_client(chat_id)
             swaps = await _fetch_recent_swaps(client, limit=5)
             set_cached(context.user_data, "recent_swaps", swaps)
         except Exception as e:
@@ -552,7 +559,7 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
 
     # Launch background quote fetch if no quote yet and auto_quote is enabled
     if auto_quote and quote_result is None and message:
-        asyncio.create_task(_fetch_quotes_background(context, message, params))
+        asyncio.create_task(_fetch_quotes_background(context, message, params, chat_id))
 
 
 # ============================================
@@ -577,11 +584,12 @@ async def handle_swap_toggle_side(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available router connectors for selection"""
+    chat_id = update.effective_chat.id
     params = context.user_data.get("swap_params", {})
     network = params.get("network", "solana-mainnet-beta")
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         cache_key = "router_connectors"
         connectors = get_cached(context.user_data, cache_key, ttl=300)
@@ -652,8 +660,9 @@ async def handle_swap_connector_select(update: Update, context: ContextTypes.DEF
 
 async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available networks for selection"""
+    chat_id = update.effective_chat.id
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         networks_cache_key = "gateway_networks"
         networks = get_cached(context.user_data, networks_cache_key, ttl=300)
@@ -809,6 +818,7 @@ async def handle_swap_set_slippage(update: Update, context: ContextTypes.DEFAULT
 
 async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Get quote for both BUY and SELL in parallel, display with spread"""
+    chat_id = update.effective_chat.id
     try:
         params = context.user_data.get("swap_params", {})
 
@@ -821,7 +831,7 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
         if not all([connector, network, trading_pair, amount]):
             raise ValueError("Missing required parameters")
 
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():
@@ -956,7 +966,8 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
             parse_mode="MarkdownV2"
         )
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1073,7 +1084,8 @@ async def process_swap_status(
 ) -> None:
     """Process swap status check"""
     try:
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1173,7 +1185,8 @@ async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE
         else:
             filters = get_history_filters(context.user_data, "swap")
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_swap'):
             error_message = format_error_message("Gateway swap not available")

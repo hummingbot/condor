@@ -28,11 +28,14 @@ from .menu import (
     show_controller_detail,
     handle_stop_controller,
     handle_confirm_stop_controller,
+    handle_quick_stop_controller,
+    handle_quick_start_controller,
     handle_stop_bot,
     handle_confirm_stop_bot,
     show_bot_logs,
     handle_back_to_bot,
     handle_refresh_bot,
+    handle_refresh_controller,
     # Controller chart & edit
     show_controller_chart,
     show_controller_edit,
@@ -44,7 +47,27 @@ from .controller_handlers import (
     show_controller_configs_menu,
     show_configs_list,
     handle_configs_page,
+    # Unified configs menu with multi-select
+    show_configs_by_type,
+    show_type_selector,
+    handle_cfg_toggle,
+    handle_cfg_page,
+    handle_cfg_clear_selection,
+    handle_cfg_delete_confirm,
+    handle_cfg_delete_execute,
+    handle_cfg_deploy,
+    # Edit loop
+    handle_cfg_edit_loop,
+    show_cfg_edit_form,
+    handle_cfg_edit_field,
+    process_cfg_edit_input,
+    handle_cfg_edit_prev,
+    handle_cfg_edit_next,
+    handle_cfg_edit_save,
+    handle_cfg_edit_save_all,
+    handle_cfg_edit_cancel,
     show_new_grid_strike_form,
+    show_new_pmm_mister_form,
     show_config_form,
     handle_set_field,
     handle_toggle_side,
@@ -86,6 +109,11 @@ from .controller_handlers import (
     handle_gs_wizard_amount,
     handle_gs_accept_prices,
     handle_gs_back_to_prices,
+    handle_gs_back_to_connector,
+    handle_gs_back_to_pair,
+    handle_gs_back_to_side,
+    handle_gs_back_to_leverage,
+    handle_gs_back_to_amount,
     handle_gs_interval_change,
     handle_gs_wizard_take_profit,
     handle_gs_edit_id,
@@ -100,6 +128,21 @@ from .controller_handlers import (
     handle_gs_review_back,
     handle_gs_edit_price,
     process_gs_wizard_input,
+    # PMM Mister wizard
+    handle_pmm_wizard_connector,
+    handle_pmm_wizard_pair,
+    handle_pmm_wizard_leverage,
+    handle_pmm_wizard_allocation,
+    handle_pmm_wizard_spreads,
+    handle_pmm_wizard_tp,
+    handle_pmm_save,
+    handle_pmm_review_back,
+    handle_pmm_edit_id,
+    handle_pmm_edit_field,
+    handle_pmm_set_field,
+    handle_pmm_edit_advanced,
+    handle_pmm_adv_setting,
+    process_pmm_wizard_input,
 )
 from ._shared import clear_bots_state, SIDE_LONG, SIDE_SHORT
 
@@ -133,12 +176,13 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Check if specific bot name was provided
     if update.message and context.args and len(context.args) > 0:
         bot_name = context.args[0]
+        chat_id = update.effective_chat.id
         # For direct command with bot name, show detail view
         from utils.telegram_formatters import format_bot_status, format_error_message
         from ._shared import get_bots_client
 
         try:
-            client = await get_bots_client()
+            client = await get_bots_client(chat_id)
             bot_status = await client.bot_orchestration.get_bot_status(bot_name)
             response_message = format_bot_status(bot_status)
             await msg.reply_text(response_message, parse_mode="MarkdownV2")
@@ -192,8 +236,72 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "list_configs":
             await show_configs_list(update, context)
 
+        # Unified configs menu with multi-select
+        elif main_action == "cfg_select_type":
+            await show_type_selector(update, context)
+
+        elif main_action == "cfg_type":
+            if len(action_parts) > 1:
+                controller_type = action_parts[1]
+                await show_configs_by_type(update, context, controller_type)
+
+        elif main_action == "cfg_toggle":
+            if len(action_parts) > 1:
+                config_id = action_parts[1]
+                await handle_cfg_toggle(update, context, config_id)
+
+        elif main_action == "cfg_page":
+            if len(action_parts) > 1:
+                page = int(action_parts[1])
+                await handle_cfg_page(update, context, page)
+
+        elif main_action == "cfg_clear_selection":
+            await handle_cfg_clear_selection(update, context)
+
+        elif main_action == "cfg_deploy":
+            await handle_cfg_deploy(update, context)
+
+        elif main_action == "cfg_delete_confirm":
+            await handle_cfg_delete_confirm(update, context)
+
+        elif main_action == "cfg_delete_execute":
+            await handle_cfg_delete_execute(update, context)
+
+        # Edit loop handlers
+        elif main_action == "cfg_edit_loop":
+            await handle_cfg_edit_loop(update, context)
+
+        elif main_action == "cfg_edit_form":
+            await show_cfg_edit_form(update, context)
+
+        elif main_action == "cfg_edit_field":
+            if len(action_parts) > 1:
+                field_name = action_parts[1]
+                await handle_cfg_edit_field(update, context, field_name)
+
+        elif main_action == "cfg_edit_prev":
+            await handle_cfg_edit_prev(update, context)
+
+        elif main_action == "cfg_edit_next":
+            await handle_cfg_edit_next(update, context)
+
+        elif main_action == "cfg_edit_save":
+            await handle_cfg_edit_save(update, context)
+
+        elif main_action == "cfg_edit_save_all":
+            await handle_cfg_edit_save_all(update, context)
+
+        elif main_action == "cfg_edit_cancel":
+            await handle_cfg_edit_cancel(update, context)
+
+        elif main_action == "noop":
+            pass  # Do nothing - used for pagination display button
+
         elif main_action == "new_grid_strike":
             await show_new_grid_strike_form(update, context)
+
+        elif main_action == "new_pmm_mister":
+            await show_new_pmm_mister_form(update, context)
 
         elif main_action == "edit_config":
             if len(action_parts) > 1:
@@ -327,6 +435,21 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "gs_back_to_prices":
             await handle_gs_back_to_prices(update, context)
 
+        elif main_action == "gs_back_to_connector":
+            await handle_gs_back_to_connector(update, context)
+
+        elif main_action == "gs_back_to_pair":
+            await handle_gs_back_to_pair(update, context)
+
+        elif main_action == "gs_back_to_side":
+            await handle_gs_back_to_side(update, context)
+
+        elif main_action == "gs_back_to_leverage":
+            await handle_gs_back_to_leverage(update, context)
+
+        elif main_action == "gs_back_to_amount":
+            await handle_gs_back_to_amount(update, context)
+
         elif main_action == "gs_interval":
             if len(action_parts) > 1:
                 interval = action_parts[1]
@@ -372,6 +495,65 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "gs_review_back":
             await handle_gs_review_back(update, context)
 
+        # PMM Mister wizard
+        elif main_action == "pmm_connector":
+            if len(action_parts) > 1:
+                connector = action_parts[1]
+                await handle_pmm_wizard_connector(update, context, connector)
+
+        elif main_action == "pmm_pair":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_pmm_wizard_pair(update, context, pair)
+
+        elif main_action == "pmm_leverage":
+            if len(action_parts) > 1:
+                leverage = int(action_parts[1])
+                await handle_pmm_wizard_leverage(update, context, leverage)
+
+        elif main_action == "pmm_alloc":
+            if len(action_parts) > 1:
+                allocation = float(action_parts[1])
+                await handle_pmm_wizard_allocation(update, context, allocation)
+
+        elif main_action == "pmm_spreads":
+            if len(action_parts) > 1:
+                spreads = action_parts[1]
+                await handle_pmm_wizard_spreads(update, context, spreads)
+
+        elif main_action == "pmm_tp":
+            if len(action_parts) > 1:
+                tp = float(action_parts[1])
+                await handle_pmm_wizard_tp(update, context, tp)
+
+        elif main_action == "pmm_save":
+            await handle_pmm_save(update, context)
+
+        elif main_action == "pmm_review_back":
+            await handle_pmm_review_back(update, context)
+
+        elif main_action == "pmm_edit_id":
+            await handle_pmm_edit_id(update, context)
+
+        elif main_action == "pmm_edit":
+            if len(action_parts) > 1:
+                field = action_parts[1]
+                await handle_pmm_edit_field(update, context, field)
+
+        elif main_action == "pmm_set":
+            if len(action_parts) > 2:
+                field = action_parts[1]
+                value = action_parts[2]
+                await handle_pmm_set_field(update, context, field, value)
+
+        elif main_action == "pmm_edit_advanced":
+            await handle_pmm_edit_advanced(update, context)
+
+        elif main_action == "pmm_adv":
+            if len(action_parts) > 1:
+                setting = action_parts[1]
+                await handle_pmm_adv_setting(update, context, setting)
+
         # Bot detail
         elif main_action == "bot_detail":
             if len(action_parts) > 1:
@@ -409,6 +591,17 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "confirm_stop_ctrl":
             await handle_confirm_stop_controller(update, context)
 
+        # Quick stop/start controller (from bot detail view)
+        elif main_action == "stop_ctrl_quick":
+            if len(action_parts) > 1:
+                idx = int(action_parts[1])
+                await handle_quick_stop_controller(update, context, idx)
+
+        elif main_action == "start_ctrl_quick":
+            if len(action_parts) > 1:
+                idx = int(action_parts[1])
+                await handle_quick_start_controller(update, context, idx)
+
         # Stop bot (uses context)
         elif main_action == "stop_bot":
             await handle_stop_bot(update, context)
@@ -426,6 +619,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "refresh_bot":
             await handle_refresh_bot(update, context)
+
+        elif main_action == "refresh_ctrl":
+            if len(action_parts) > 1:
+                idx = int(action_parts[1])
+                await handle_refresh_controller(update, context, idx)
 
         else:
             logger.warning(f"Unknown bots action: {action}")
@@ -465,7 +663,10 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle controller config field input
         if bots_state.startswith("set_field:"):
             await process_field_input(update, context, user_input)
-        # Handle live controller field input
+        # Handle live controller bulk edit input
+        elif bots_state == "ctrl_bulk_edit":
+            await process_controller_field_input(update, context, user_input)
+        # Handle live controller field input (legacy single field)
         elif bots_state.startswith("ctrl_set:"):
             await process_controller_field_input(update, context, user_input)
         # Handle deploy field input (legacy form)
@@ -483,6 +684,15 @@ async def bots_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Handle Grid Strike wizard input
         elif bots_state == "gs_wizard_input":
             await process_gs_wizard_input(update, context, user_input)
+        # Handle PMM Mister wizard input
+        elif bots_state == "pmm_wizard_input":
+            await process_pmm_wizard_input(update, context, user_input)
+        # Handle config edit loop field input (legacy single field)
+        elif bots_state.startswith("cfg_edit_input:"):
+            await process_cfg_edit_input(update, context, user_input)
+        # Handle config bulk edit (key=value format)
+        elif bots_state == "cfg_bulk_edit":
+            await process_cfg_edit_input(update, context, user_input)
         else:
             logger.debug(f"Unhandled bots state: {bots_state}")
 

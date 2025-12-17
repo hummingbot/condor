@@ -1,12 +1,13 @@
 """
-Grid Strike Controller Module
+PMM Mister Controller Module
 
-Provides configuration, validation, and visualization for grid strike controllers.
+Provides configuration, validation, and visualization for PMM (Pure Market Making) controllers.
 
-Grid Strike is a grid trading strategy that:
-- Places orders within a defined price range (start_price to end_price)
-- Has a limit_price as stop loss
-- Can be LONG (buy low, sell high) or SHORT (sell high, buy low)
+PMM Mister is an advanced market making strategy that:
+- Places buy/sell orders at configurable spread levels
+- Manages position with target/min/max base percentages
+- Features hanging executors and breakeven awareness
+- Supports price distance requirements and cooldowns
 """
 
 import io
@@ -18,41 +19,37 @@ from .config import (
     FIELDS,
     FIELD_ORDER,
     WIZARD_STEPS,
-    SIDE_LONG,
-    SIDE_SHORT,
     ORDER_TYPE_MARKET,
     ORDER_TYPE_LIMIT,
     ORDER_TYPE_LIMIT_MAKER,
     ORDER_TYPE_LABELS,
     validate_config,
-    calculate_auto_prices,
     generate_id,
+    parse_spreads,
+    format_spreads,
 )
 from .chart import generate_chart, generate_preview_chart
-from .grid_analysis import (
+from .pmm_analysis import (
     calculate_natr,
     calculate_price_stats,
-    suggest_grid_params,
-    generate_theoretical_grid,
-    format_grid_summary,
+    suggest_pmm_params,
+    generate_theoretical_levels,
+    format_pmm_summary,
+    calculate_effective_spread,
 )
 
 
-class GridStrikeController(BaseController):
-    """Grid Strike controller implementation."""
+class PmmMisterController(BaseController):
+    """PMM Mister controller implementation."""
 
-    controller_type = "grid_strike"
-    display_name = "Grid Strike"
-    description = "Grid trading with stop-limit orders"
+    controller_type = "pmm_mister"
+    display_name = "PMM Mister"
+    description = "Advanced pure market making with position management"
 
     @classmethod
     def get_defaults(cls) -> Dict[str, Any]:
         """Get default configuration values."""
-        # Return a deep copy to prevent mutation
-        defaults = DEFAULTS.copy()
-        if "triple_barrier_config" in defaults:
-            defaults["triple_barrier_config"] = defaults["triple_barrier_config"].copy()
-        return defaults
+        return DEFAULTS.copy()
 
     @classmethod
     def get_fields(cls) -> Dict[str, ControllerField]:
@@ -92,28 +89,28 @@ class GridStrikeController(BaseController):
 # Export commonly used items at module level
 __all__ = [
     # Controller class
-    "GridStrikeController",
+    "PmmMisterController",
     # Config
     "DEFAULTS",
     "FIELDS",
     "FIELD_ORDER",
     "WIZARD_STEPS",
-    "SIDE_LONG",
-    "SIDE_SHORT",
     "ORDER_TYPE_MARKET",
     "ORDER_TYPE_LIMIT",
     "ORDER_TYPE_LIMIT_MAKER",
     "ORDER_TYPE_LABELS",
     # Functions
     "validate_config",
-    "calculate_auto_prices",
     "generate_id",
+    "parse_spreads",
+    "format_spreads",
     "generate_chart",
     "generate_preview_chart",
-    # Grid analysis
+    # PMM analysis
     "calculate_natr",
     "calculate_price_stats",
-    "suggest_grid_params",
-    "generate_theoretical_grid",
-    "format_grid_summary",
+    "suggest_pmm_params",
+    "generate_theoretical_levels",
+    "format_pmm_summary",
+    "calculate_effective_spread",
 ]

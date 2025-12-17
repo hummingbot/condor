@@ -23,9 +23,11 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
         else:
             # Build unified header with server and gateway info
+            chat_id = query.message.chat_id
             header, server_online, gateway_running = await build_config_message_header(
                 "🌐 Gateway Configuration",
-                include_gateway=True
+                include_gateway=True,
+                chat_id=chat_id
             )
 
             message_text = header

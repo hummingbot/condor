@@ -15,7 +15,8 @@ async def show_connectors_menu(query, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         await query.answer("Loading connectors...")
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.list_connectors()
 
         connectors = response.get('connectors', [])
@@ -114,7 +115,8 @@ async def show_connector_details(query, context: ContextTypes.DEFAULT_TYPE, conn
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.get_connector_config(connector_name)
 
         # Try to extract config - it might be directly in response or nested under 'config'
@@ -179,7 +181,8 @@ async def start_connector_config_edit(query, context: ContextTypes.DEFAULT_TYPE,
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
         response = await client.gateway.get_connector_config(connector_name)
 
         # Extract config
@@ -393,7 +396,7 @@ async def submit_connector_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_
                 parse_mode="MarkdownV2"
             )
 
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Update configuration using the gateway API
         await client.gateway.update_connector_config(connector_name, final_config)

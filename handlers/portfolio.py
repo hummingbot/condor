@@ -21,6 +21,7 @@ from handlers.config.user_preferences import (
     get_portfolio_prefs,
     set_portfolio_days,
     PORTFOLIO_DAYS_OPTIONS,
+    get_all_enabled_networks,
 )
 from utils.portfolio_graphs import generate_portfolio_dashboard
 from utils.trading_data import get_portfolio_overview
@@ -64,6 +65,40 @@ def _get_optimal_interval(days: int, max_points: int = 100) -> str:
 
     # Fallback to 1d if nothing else works
     return "1d"
+
+
+def _filter_balances_by_networks(balances: dict, enabled_networks: set) -> dict:
+    """
+    Filter portfolio balances to only include enabled networks.
+
+    The connector name in the portfolio state corresponds to the network
+    (e.g., 'solana-mainnet-beta', 'ethereum-mainnet', 'base').
+
+    Args:
+        balances: Portfolio state dict {account: {connector: [balances]}}
+        enabled_networks: Set of enabled network IDs, or None for no filtering
+
+    Returns:
+        Filtered balances dict with same structure
+    """
+    if enabled_networks is None:
+        return balances
+
+    if not balances:
+        return balances
+
+    filtered = {}
+    for account_name, account_data in balances.items():
+        filtered_account = {}
+        for connector_name, connector_balances in account_data.items():
+            # Check if this connector/network is enabled
+            connector_lower = connector_name.lower()
+            if connector_lower in enabled_networks:
+                filtered_account[connector_name] = connector_balances
+        if filtered_account:
+            filtered[account_name] = filtered_account
+
+    return filtered
 
 
 def _parse_snapshot_tokens(state: dict) -> dict:
@@ -456,9 +491,14 @@ def _calculate_24h_changes(history_data: dict, current_balances: dict) -> dict:
     return result
 
 
-async def _fetch_dashboard_data(client, days: int):
+async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
     """
     Fetch all data needed for the portfolio dashboard.
+
+    Args:
+        client: The API client
+        days: Number of days for history
+        refresh: If True, force refresh balances from exchanges (bypasses API cache)
 
     Returns:
         Tuple of (overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval)
@@ -472,7 +512,7 @@ async def _fetch_dashboard_data(client, days: int):
 
     # Calculate optimal interval for the graph based on days
     graph_interval = _get_optimal_interval(days)
-    logger.info(f"Fetching portfolio data: days={days}, optimal_interval={graph_interval}, start_time={start_time}")
+    logger.info(f"Fetching portfolio data: days={days}, optimal_interval={graph_interval}, start_time={start_time}, refresh={refresh}")
 
     # Fetch all data in parallel
     overview_task = get_portfolio_overview(
@@ -481,7 +521,8 @@ async def _fetch_dashboard_data(client, days: int):
         include_balances=True,
         include_perp_positions=True,
         include_lp_positions=True,
-        include_active_orders=True
+        include_active_orders=True,
+        refresh=refresh
     )
 
     history_task = client.portfolio.get_history(
@@ -553,6 +594,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     # Get the appropriate message object for replies
     message = update.message or (update.callback_query.message if update.callback_query else None)
+    chat_id = update.effective_chat.id
     if not message:
         logger.error("No message object available for portfolio_command")
         return
@@ -570,8 +612,8 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await message.reply_text(error_message, parse_mode="MarkdownV2")
             return
 
-        # Always use the default server from server_manager
-        default_server = server_manager.get_default_server()
+        # Use per-chat default server, falling back to global default
+        default_server = server_manager.get_default_server_for_chat(chat_id)
         if default_server and default_server in enabled_servers:
             server_name = default_server
         else:
@@ -597,10 +639,13 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         pnl_start_time = _calculate_start_time(30)
         graph_interval = _get_optimal_interval(days)
 
+        # Check if this is a refresh request (from callback)
+        refresh = context.user_data.pop("_portfolio_refresh", False)
+
         # ========================================
         # START ALL FETCHES IN PARALLEL
         # ========================================
-        balances_task = asyncio.create_task(client.portfolio.get_state())
+        balances_task = asyncio.create_task(client.portfolio.get_state(refresh=refresh))
         perp_task = asyncio.create_task(get_perpetual_positions(client))
         lp_task = asyncio.create_task(get_lp_positions(client))
         orders_task = asyncio.create_task(get_active_orders(client))
@@ -659,6 +704,11 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # ========================================
         try:
             balances = await balances_task
+            # Filter balances by enabled networks from wallet preferences
+            enabled_networks = get_all_enabled_networks(context.user_data)
+            if enabled_networks:
+                logger.info(f"Filtering portfolio by enabled networks: {enabled_networks}")
+                balances = _filter_balances_by_networks(balances, enabled_networks)
             await update_ui("Loading positions & 24h data...")
         except Exception as e:
             logger.error(f"Failed to fetch balances: {e}")
@@ -732,8 +782,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create settings button
+        # Create buttons row with Refresh and Settings
         keyboard = [[
+            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
             InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
         ]]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -778,7 +829,9 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
 
         logger.info(f"Portfolio action: {action}")
 
-        if action == "settings":
+        if action == "refresh":
+            await handle_portfolio_refresh(update, context)
+        elif action == "settings":
             await show_portfolio_settings(update, context)
         elif action.startswith("set_days:"):
             days = int(action.split(":")[1])
@@ -805,8 +858,24 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             logger.error(f"Failed to send error message: {e2}")
 
 
-async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Refresh both the text message and photo with new settings"""
+async def handle_portfolio_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle refresh button - force refresh balances from exchanges"""
+    query = update.callback_query
+    await query.answer("Refreshing from exchanges...")
+
+    # Set flag to force API refresh
+    context.user_data["_portfolio_refresh"] = True
+
+    # Refresh the dashboard with fresh data
+    await refresh_portfolio_dashboard(update, context, refresh=True)
+
+
+async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = False) -> None:
+    """Refresh both the text message and photo with new settings
+
+    Args:
+        refresh: If True, force refresh balances from exchanges (bypasses API cache)
+    """
     query = update.callback_query
     bot = query.get_bot()
 
@@ -822,14 +891,14 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         from servers import server_manager
         from utils.trading_data import get_tokens_for_networks
 
-        # Always use the default server from server_manager
+        # Use per-chat default server from server_manager
         servers = server_manager.list_servers()
         enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
 
         if not enabled_servers:
             return
 
-        default_server = server_manager.get_default_server()
+        default_server = server_manager.get_default_server_for_chat(chat_id)
         if default_server and default_server in enabled_servers:
             server_name = default_server
         else:
@@ -854,9 +923,16 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         days = config.get("days", 3)
 
         # Fetch all data (interval is calculated based on days)
+        # Pass refresh=True to force API to fetch fresh data from exchanges
         overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval = await _fetch_dashboard_data(
-            client, days
+            client, days, refresh=refresh
         )
+
+        # Filter balances by enabled networks from wallet preferences
+        enabled_networks = get_all_enabled_networks(context.user_data)
+        if enabled_networks and overview_data and overview_data.get('balances'):
+            logger.info(f"Filtering portfolio refresh by enabled networks: {enabled_networks}")
+            overview_data['balances'] = _filter_balances_by_networks(overview_data['balances'], enabled_networks)
 
         # Calculate current portfolio value for PNL
         current_value = 0.0
@@ -914,8 +990,9 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create settings button
+        # Create buttons row with Refresh and Settings
         keyboard = [[
+            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
             InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
         ]]
         reply_markup = InlineKeyboardMarkup(keyboard)

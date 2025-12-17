@@ -17,7 +17,8 @@ async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         from servers import get_client
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Search for orders with specified status
         if status == "OPEN":
@@ -163,7 +164,8 @@ async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFA
 
         from servers import get_client
 
-        client = await get_client()
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id)
 
         # Cancel the order
         result = await client.trading.cancel_order(

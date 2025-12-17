@@ -1,6 +1,7 @@
 import logging
 import importlib
 import sys
+import os
 import asyncio
 from pathlib import Path
 
@@ -42,7 +43,11 @@ def _get_start_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("💧 LP", callback_data="start:lp"),
         ],
         [
-            InlineKeyboardButton("⚙️ Config", callback_data="start:config"),
+            InlineKeyboardButton("🔌 Servers", callback_data="start:config_servers"),
+            InlineKeyboardButton("🔑 Keys", callback_data="start:config_keys"),
+            InlineKeyboardButton("🌐 Gateway", callback_data="start:config_gateway"),
+        ],
+        [
             InlineKeyboardButton("❓ Help", callback_data="start:help"),
         ],
     ]
@@ -273,7 +278,7 @@ Manage your trading bots efficiently and monitor their performance\.
 🆔 *Your Chat Info*:
 📱 Chat ID: `{chat_id}`
 👤 User ID: `{user_id}`
-🏷️ Username: @{username}
+🏷️ Username: `@{username}`
 
 Select a command below to get started:
 """
@@ -302,8 +307,23 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             await swap_command(update, context)
         elif action == "lp":
             await lp_command(update, context)
-        elif action == "config":
-            await config_command(update, context)
+        elif action == "config_servers":
+            from handlers.config.servers import show_api_servers
+            from handlers import clear_all_input_states
+            clear_all_input_states(context)
+            await show_api_servers(query, context)
+        elif action == "config_keys":
+            from handlers.config.api_keys import show_api_keys
+            from handlers import clear_all_input_states
+            clear_all_input_states(context)
+            await show_api_keys(query, context)
+        elif action == "config_gateway":
+            from handlers.config.gateway import show_gateway_menu
+            from handlers import clear_all_input_states
+            clear_all_input_states(context)
+            context.user_data.pop("dex_state", None)
+            context.user_data.pop("cex_state", None)
+            await show_gateway_menu(query, context)
         elif action == "help":
             await query.edit_message_text(
                 HELP_TEXTS["main"],
@@ -327,7 +347,7 @@ Manage your trading bots efficiently and monitor their performance\.
 🆔 *Your Chat Info*:
 📱 Chat ID: `{chat_id}`
 👤 User ID: `{user_id}`
-🏷️ Username: @{username}
+🏷️ Username: `@{username}`
 
 Select a command below to get started:
 """
@@ -463,12 +483,28 @@ async def watch_and_reload(application: Application) -> None:
         except Exception as e:
             logger.error(f"❌ Auto-reload failed: {e}", exc_info=True)
 
+def get_persistence() -> PicklePersistence:
+    """
+    Build a persistence object that works both locally and in Docker.
+    - Uses an env var override if provided.
+    - Defaults to <project_root>/data/condor_bot_data.pickle.
+    - Ensures the parent directory exists, but does NOT create the file.
+    """
+    base_dir = Path(__file__).parent
+    default_path = base_dir / "data" / "condor_bot_data.pickle"
+
+    persistence_path = Path(os.getenv("CONDOR_PERSISTENCE_FILE", default_path))
+
+    # Make sure the directory exists; the file will be created by PTB
+    persistence_path.parent.mkdir(parents=True, exist_ok=True)
+
+    return PicklePersistence(filepath=persistence_path)
 
 def main() -> None:
     """Run the bot."""
     # Setup persistence to save user data, chat data, and bot data
     # This will save trading context, last used parameters, etc.
-    persistence = PicklePersistence(filepath="condor_bot_data.pickle")
+    persistence = get_persistence()
 
     # Create the Application with persistence enabled
     application = (

@@ -5,14 +5,345 @@ Provides unified chart generation for DEX pools:
 - Liquidity distribution charts (from CLMM bin data)
 - OHLCV candlestick charts (from GeckoTerminal)
 - Combined charts with OHLCV + Liquidity side-by-side
+- Base candlestick chart function (shared with grid_strike)
 """
 
 import io
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+# ==============================================
+# UNIFIED DARK THEME (shared across all charts)
+# ==============================================
+DARK_THEME = {
+    "bgcolor": "#0a0e14",
+    "paper_bgcolor": "#0a0e14",
+    "plot_bgcolor": "#131720",
+    "font_color": "#e6edf3",
+    "font_family": "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif",
+    "grid_color": "#21262d",
+    "axis_color": "#8b949e",
+    "up_color": "#10b981",      # Green for bullish
+    "down_color": "#ef4444",    # Red for bearish
+    "current_price_color": "#f59e0b",  # Orange for current price
+    "line_color": "#3b82f6",    # Blue for lines
+}
+
+
+def _normalize_candles(candles: List[Union[Dict, List]]) -> List[Dict[str, Any]]:
+    """Normalize candle data to a standard dict format.
+
+    Accepts both:
+    - List of dicts: [{"timestamp": ..., "open": ..., "high": ..., "low": ..., "close": ..., "volume": ...}]
+    - List of lists: [[timestamp, open, high, low, close, volume], ...]
+
+    Returns:
+        List of normalized candle dicts with keys: timestamp, open, high, low, close, volume
+    """
+    normalized = []
+
+    for candle in candles:
+        if isinstance(candle, dict):
+            normalized.append({
+                "timestamp": candle.get("timestamp"),
+                "open": float(candle.get("open", 0) or 0),
+                "high": float(candle.get("high", 0) or 0),
+                "low": float(candle.get("low", 0) or 0),
+                "close": float(candle.get("close", 0) or 0),
+                "volume": float(candle.get("volume", 0) or 0),
+            })
+        elif isinstance(candle, (list, tuple)) and len(candle) >= 5:
+            normalized.append({
+                "timestamp": candle[0],
+                "open": float(candle[1] or 0),
+                "high": float(candle[2] or 0),
+                "low": float(candle[3] or 0),
+                "close": float(candle[4] or 0),
+                "volume": float(candle[5] or 0) if len(candle) > 5 else 0,
+            })
+
+    return normalized
+
+
+def _parse_timestamp(raw_ts) -> Optional[datetime]:
+    """Parse timestamp from various formats to datetime."""
+    if raw_ts is None:
+        return None
+
+    try:
+        if isinstance(raw_ts, datetime):
+            return raw_ts
+        if hasattr(raw_ts, 'to_pydatetime'):  # pandas Timestamp
+            return raw_ts.to_pydatetime()
+        if isinstance(raw_ts, (int, float)):
+            # Unix timestamp (seconds or milliseconds)
+            if raw_ts > 1e12:  # milliseconds
+                return datetime.fromtimestamp(raw_ts / 1000)
+            else:
+                return datetime.fromtimestamp(raw_ts)
+        if isinstance(raw_ts, str) and raw_ts:
+            # Try parsing ISO format
+            if "T" in raw_ts:
+                return datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            else:
+                return datetime.fromisoformat(raw_ts)
+    except Exception:
+        pass
+
+    return None
+
+
+def generate_candlestick_chart(
+    candles: List[Union[Dict, List]],
+    title: str = "",
+    current_price: Optional[float] = None,
+    show_volume: bool = True,
+    width: int = 1100,
+    height: int = 600,
+    hlines: Optional[List[Dict]] = None,
+    hrects: Optional[List[Dict]] = None,
+    reverse_data: bool = False,
+) -> Optional[io.BytesIO]:
+    """Generate a candlestick chart with optional overlays.
+
+    This is the base function used by both grid_strike and DEX OHLCV charts.
+
+    Args:
+        candles: List of candle data (dicts or lists - will be normalized)
+        title: Chart title
+        current_price: Current price for horizontal line
+        show_volume: Whether to show volume subplot
+        width: Chart width in pixels
+        height: Chart height in pixels
+        hlines: List of horizontal lines to add, each dict with:
+            - y: float (required)
+            - color: str (default: blue)
+            - dash: str (solid, dash, dot, dashdot)
+            - label: str (annotation text)
+            - label_position: str (left, right)
+        hrects: List of horizontal rectangles to add, each dict with:
+            - y0: float (required)
+            - y1: float (required)
+            - color: str (fill color with alpha, e.g., "rgba(59, 130, 246, 0.15)")
+            - label: str (annotation text)
+        reverse_data: Whether to reverse data order (GeckoTerminal returns newest first)
+
+    Returns:
+        BytesIO buffer with PNG image or None if failed
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        # Normalize candle data
+        normalized = _normalize_candles(candles)
+        if not normalized:
+            logger.warning("No valid candle data after normalization")
+            return None
+
+        # Reverse if needed (GeckoTerminal returns newest first)
+        if reverse_data:
+            normalized = list(reversed(normalized))
+
+        # Extract data for plotting
+        timestamps = []
+        opens = []
+        highs = []
+        lows = []
+        closes = []
+        volumes = []
+
+        for candle in normalized:
+            dt = _parse_timestamp(candle["timestamp"])
+            if dt:
+                timestamps.append(dt)
+            else:
+                timestamps.append(str(candle["timestamp"]))
+
+            opens.append(candle["open"])
+            highs.append(candle["high"])
+            lows.append(candle["low"])
+            closes.append(candle["close"])
+            volumes.append(candle["volume"])
+
+        if not timestamps:
+            logger.warning("No valid timestamps in candle data")
+            return None
+
+        # Create figure with or without volume subplot
+        if show_volume and any(v > 0 for v in volumes):
+            fig = make_subplots(
+                rows=2, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                row_heights=[0.75, 0.25],
+            )
+            volume_row = 2
+        else:
+            fig = go.Figure()
+            volume_row = None
+
+        # Add candlestick chart
+        candlestick = go.Candlestick(
+            x=timestamps,
+            open=opens,
+            high=highs,
+            low=lows,
+            close=closes,
+            increasing_line_color=DARK_THEME["up_color"],
+            decreasing_line_color=DARK_THEME["down_color"],
+            increasing_fillcolor=DARK_THEME["up_color"],
+            decreasing_fillcolor=DARK_THEME["down_color"],
+            name="Price"
+        )
+
+        if volume_row:
+            fig.add_trace(candlestick, row=1, col=1)
+        else:
+            fig.add_trace(candlestick)
+
+        # Add volume bars if enabled
+        if volume_row:
+            volume_colors = [
+                DARK_THEME["up_color"] if closes[i] >= opens[i] else DARK_THEME["down_color"]
+                for i in range(len(timestamps))
+            ]
+            fig.add_trace(
+                go.Bar(
+                    x=timestamps,
+                    y=volumes,
+                    name='Volume',
+                    marker_color=volume_colors,
+                    opacity=0.7,
+                ),
+                row=2, col=1
+            )
+
+        # Add horizontal rectangles (grid zones, etc.)
+        if hrects:
+            for rect in hrects:
+                fig.add_hrect(
+                    y0=rect.get("y0"),
+                    y1=rect.get("y1"),
+                    fillcolor=rect.get("color", "rgba(59, 130, 246, 0.15)"),
+                    line_width=0,
+                    annotation_text=rect.get("label"),
+                    annotation_position="top left",
+                    annotation_font=dict(
+                        color=DARK_THEME["font_color"],
+                        size=11
+                    ) if rect.get("label") else None
+                )
+
+        # Add horizontal lines (start price, end price, limit price, etc.)
+        if hlines:
+            for hline in hlines:
+                fig.add_hline(
+                    y=hline.get("y"),
+                    line_dash=hline.get("dash", "solid"),
+                    line_color=hline.get("color", DARK_THEME["line_color"]),
+                    line_width=hline.get("width", 2),
+                    annotation_text=hline.get("label"),
+                    annotation_position=hline.get("label_position", "right"),
+                    annotation_font=dict(
+                        color=hline.get("color", DARK_THEME["line_color"]),
+                        size=10
+                    ) if hline.get("label") else None
+                )
+
+        # Add current price line
+        if current_price:
+            fig.add_hline(
+                y=current_price,
+                line_dash="solid",
+                line_color=DARK_THEME["current_price_color"],
+                line_width=2,
+                annotation_text=f"Current: {current_price:,.4f}",
+                annotation_position="left",
+                annotation_font=dict(
+                    color=DARK_THEME["current_price_color"],
+                    size=10
+                )
+            )
+
+        # Calculate height based on volume
+        actual_height = height if not volume_row else int(height * 1.2)
+
+        # Update layout with dark theme
+        fig.update_layout(
+            title=dict(
+                text=f"<b>{title}</b>" if title else None,
+                font=dict(
+                    family=DARK_THEME["font_family"],
+                    size=18,
+                    color=DARK_THEME["font_color"]
+                ),
+                x=0.5,
+                xanchor="center"
+            ) if title else None,
+            paper_bgcolor=DARK_THEME["paper_bgcolor"],
+            plot_bgcolor=DARK_THEME["plot_bgcolor"],
+            font=dict(
+                family=DARK_THEME["font_family"],
+                color=DARK_THEME["font_color"]
+            ),
+            xaxis=dict(
+                gridcolor=DARK_THEME["grid_color"],
+                color=DARK_THEME["axis_color"],
+                rangeslider_visible=False,
+                showgrid=True,
+                nticks=8,
+                tickformatstops=[
+                    dict(dtickrange=[None, 3600000], value="%H:%M"),
+                    dict(dtickrange=[3600000, 86400000], value="%H:%M\n%b %d"),
+                    dict(dtickrange=[86400000, None], value="%b %d"),
+                ],
+                tickangle=0,
+            ),
+            yaxis=dict(
+                gridcolor=DARK_THEME["grid_color"],
+                color=DARK_THEME["axis_color"],
+                side="right",
+                showgrid=True
+            ),
+            showlegend=False,
+            width=width,
+            height=actual_height,
+            margin=dict(l=10, r=120, t=50, b=50)
+        )
+
+        # Update volume subplot axes if present
+        if volume_row:
+            fig.update_xaxes(
+                gridcolor=DARK_THEME["grid_color"],
+                showgrid=True,
+                row=2, col=1
+            )
+            fig.update_yaxes(
+                gridcolor=DARK_THEME["grid_color"],
+                color=DARK_THEME["axis_color"],
+                showgrid=True,
+                side="right",
+                row=2, col=1
+            )
+
+        # Convert to PNG bytes
+        img_bytes = io.BytesIO()
+        fig.write_image(img_bytes, format='png', scale=2)
+        img_bytes.seek(0)
+
+        return img_bytes
+
+    except ImportError as e:
+        logger.warning(f"Plotly not available for candlestick chart: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error generating candlestick chart: {e}", exc_info=True)
+        return None
 
 
 def generate_liquidity_chart(
@@ -93,16 +424,16 @@ def generate_liquidity_chart(
             hovertemplate='Price: %{x:.6f}<br>Base Value: %{y:,.2f}<extra></extra>'
         ))
 
-        # Add current price line
+        # Add current price line (use unified theme)
         if current_price:
             fig.add_vline(
                 x=current_price,
                 line_dash="dash",
-                line_color="#ef4444",
+                line_color=DARK_THEME["down_color"],
                 line_width=2,
                 annotation_text=f"Current: {current_price:.6f}",
                 annotation_position="top",
-                annotation_font_color="#ef4444"
+                annotation_font_color=DARK_THEME["down_color"]
             )
 
         # Add lower price range line
@@ -110,11 +441,11 @@ def generate_liquidity_chart(
             fig.add_vline(
                 x=lower_price,
                 line_dash="dot",
-                line_color="#f59e0b",
+                line_color=DARK_THEME["current_price_color"],
                 line_width=2,
                 annotation_text=f"L: {lower_price:.6f}",
                 annotation_position="bottom left",
-                annotation_font_color="#f59e0b"
+                annotation_font_color=DARK_THEME["current_price_color"]
             )
 
         # Add upper price range line
@@ -122,27 +453,33 @@ def generate_liquidity_chart(
             fig.add_vline(
                 x=upper_price,
                 line_dash="dot",
-                line_color="#f59e0b",
+                line_color=DARK_THEME["current_price_color"],
                 line_width=2,
                 annotation_text=f"U: {upper_price:.6f}",
                 annotation_position="bottom right",
-                annotation_font_color="#f59e0b"
+                annotation_font_color=DARK_THEME["current_price_color"]
             )
 
-        # Update layout
+        # Update layout (use unified theme)
         fig.update_layout(
             title=dict(
-                text=f"{pair_name} Liquidity Distribution",
-                font=dict(size=16, color='white'),
+                text=f"<b>{pair_name} Liquidity Distribution</b>",
+                font=dict(
+                    family=DARK_THEME["font_family"],
+                    size=18,
+                    color=DARK_THEME["font_color"]
+                ),
                 x=0.5
             ),
             xaxis_title="Price",
             yaxis_title="Liquidity (Quote Value)",
             barmode='stack',
-            template='plotly_dark',
-            paper_bgcolor='#1a1a2e',
-            plot_bgcolor='#16213e',
-            font=dict(color='white'),
+            paper_bgcolor=DARK_THEME["paper_bgcolor"],
+            plot_bgcolor=DARK_THEME["plot_bgcolor"],
+            font=dict(
+                family=DARK_THEME["font_family"],
+                color=DARK_THEME["font_color"]
+            ),
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
@@ -155,17 +492,19 @@ def generate_liquidity_chart(
             height=500
         )
 
-        # Update axes
+        # Update axes (use unified theme)
         fig.update_xaxes(
             showgrid=True,
             gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)',
+            gridcolor=DARK_THEME["grid_color"],
+            color=DARK_THEME["axis_color"],
             tickformat='.5f'
         )
         fig.update_yaxes(
             showgrid=True,
             gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)'
+            gridcolor=DARK_THEME["grid_color"],
+            color=DARK_THEME["axis_color"]
         )
 
         # Export to bytes
@@ -187,7 +526,7 @@ def generate_ohlcv_chart(
     base_symbol: str = None,
     quote_symbol: str = None
 ) -> Optional[io.BytesIO]:
-    """Generate OHLCV candlestick chart using plotly
+    """Generate OHLCV candlestick chart using the unified candlestick function.
 
     Args:
         ohlcv_data: List of [timestamp, open, high, low, close, volume]
@@ -199,152 +538,22 @@ def generate_ohlcv_chart(
     Returns:
         BytesIO buffer with PNG image or None if failed
     """
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+    # Build title
+    if base_symbol and quote_symbol:
+        title = f"{base_symbol}/{quote_symbol} - {timeframe}"
+    else:
+        title = f"{pair_name} - {timeframe}"
 
-        # Parse OHLCV data
-        times = []
-        opens = []
-        highs = []
-        lows = []
-        closes = []
-        volumes = []
-
-        for candle in reversed(ohlcv_data):  # Reverse for chronological order
-            if len(candle) >= 5:
-                ts, o, h, l, c = candle[:5]
-                v = candle[5] if len(candle) > 5 else 0
-
-                # Handle timestamp formats
-                if isinstance(ts, (int, float)):
-                    times.append(datetime.fromtimestamp(ts))
-                elif hasattr(ts, 'to_pydatetime'):  # pandas Timestamp
-                    times.append(ts.to_pydatetime())
-                elif isinstance(ts, datetime):
-                    times.append(ts)
-                else:
-                    try:
-                        times.append(datetime.fromisoformat(str(ts).replace('Z', '+00:00')))
-                    except Exception:
-                        continue
-
-                opens.append(float(o))
-                highs.append(float(h))
-                lows.append(float(l))
-                closes.append(float(c))
-                volumes.append(float(v) if v else 0)
-
-        if not times:
-            raise ValueError("No valid OHLCV data")
-
-        # Create figure with subplots (candlestick + volume)
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[0.7, 0.3],
-        )
-
-        # Add candlestick chart
-        fig.add_trace(
-            go.Candlestick(
-                x=times,
-                open=opens,
-                high=highs,
-                low=lows,
-                close=closes,
-                name='Price',
-                increasing_line_color='#00ff88',
-                decreasing_line_color='#ff4444',
-                increasing_fillcolor='#00ff88',
-                decreasing_fillcolor='#ff4444',
-            ),
-            row=1, col=1
-        )
-
-        # Volume bar colors based on price direction
-        volume_colors = ['#00ff88' if closes[i] >= opens[i] else '#ff4444' for i in range(len(times))]
-
-        # Add volume bars
-        fig.add_trace(
-            go.Bar(
-                x=times,
-                y=volumes,
-                name='Volume',
-                marker_color=volume_colors,
-                opacity=0.7,
-            ),
-            row=2, col=1
-        )
-
-        # Add latest price horizontal line
-        if closes:
-            latest_price = closes[-1]
-            fig.add_hline(
-                y=latest_price,
-                line_dash="dash",
-                line_color="#ffaa00",
-                opacity=0.5,
-                row=1, col=1,
-                annotation_text=f"${latest_price:.6f}",
-                annotation_position="right",
-                annotation_font_color="#ffaa00",
-            )
-
-        # Build title
-        if base_symbol and quote_symbol:
-            title = f"{base_symbol}/{quote_symbol} - {timeframe}"
-        else:
-            title = f"{pair_name} - {timeframe}"
-
-        # Update layout with dark theme
-        fig.update_layout(
-            title=dict(
-                text=title,
-                font=dict(color='white', size=16),
-                x=0.5,
-            ),
-            paper_bgcolor='#1a1a2e',
-            plot_bgcolor='#1a1a2e',
-            font=dict(color='white'),
-            xaxis_rangeslider_visible=False,
-            showlegend=False,
-            height=600,
-            width=900,
-            margin=dict(l=50, r=80, t=50, b=50),
-        )
-
-        # Update axes styling
-        fig.update_xaxes(
-            gridcolor='rgba(255,255,255,0.1)',
-            showgrid=True,
-            zeroline=False,
-        )
-        fig.update_yaxes(
-            gridcolor='rgba(255,255,255,0.1)',
-            showgrid=True,
-            zeroline=False,
-            side='right',
-        )
-
-        # Set y-axis titles
-        fig.update_yaxes(title_text="Price (USD)", row=1, col=1)
-        fig.update_yaxes(title_text="Volume", row=2, col=1)
-
-        # Save to buffer as PNG
-        buf = io.BytesIO()
-        fig.write_image(buf, format='png', scale=2)
-        buf.seek(0)
-
-        return buf
-
-    except ImportError as e:
-        logger.warning(f"Plotly not available for OHLCV chart: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error generating OHLCV chart: {e}", exc_info=True)
-        return None
+    # Use the unified candlestick chart function
+    # GeckoTerminal returns newest first, so reverse_data=True
+    return generate_candlestick_chart(
+        candles=ohlcv_data,
+        title=title,
+        show_volume=True,
+        width=1100,
+        height=600,
+        reverse_data=True,
+    )
 
 
 def generate_combined_chart(
@@ -464,7 +673,7 @@ def generate_combined_chart(
                 row_heights=[0.7, 0.3],
             )
 
-        # Add candlestick chart
+        # Add candlestick chart (use unified theme colors)
         fig.add_trace(
             go.Candlestick(
                 x=times,
@@ -473,16 +682,16 @@ def generate_combined_chart(
                 low=lows,
                 close=closes,
                 name='Price',
-                increasing_line_color='#00ff88',
-                decreasing_line_color='#ff4444',
-                increasing_fillcolor='#00ff88',
-                decreasing_fillcolor='#ff4444',
+                increasing_line_color=DARK_THEME["up_color"],
+                decreasing_line_color=DARK_THEME["down_color"],
+                increasing_fillcolor=DARK_THEME["up_color"],
+                decreasing_fillcolor=DARK_THEME["down_color"],
             ),
             row=1, col=1
         )
 
-        # Add volume bars
-        volume_colors = ['#00ff88' if closes[i] >= opens[i] else '#ff4444' for i in range(len(times))]
+        # Add volume bars (use unified theme colors)
+        volume_colors = [DARK_THEME["up_color"] if closes[i] >= opens[i] else DARK_THEME["down_color"] for i in range(len(times))]
         fig.add_trace(
             go.Bar(
                 x=times,
@@ -539,24 +748,24 @@ def generate_combined_chart(
                 row=1, col=2
             )
 
-        # Add current price line
+        # Add current price line (use unified theme colors)
         price_to_mark = current_price or (closes[-1] if closes else None)
         if price_to_mark:
             fig.add_hline(
                 y=price_to_mark,
                 line_dash="dash",
-                line_color="#ffaa00",
+                line_color=DARK_THEME["current_price_color"],
                 opacity=0.7,
                 row=1, col=1,
                 annotation_text=f"${price_to_mark:.6f}",
                 annotation_position="left",
-                annotation_font_color="#ffaa00",
+                annotation_font_color=DARK_THEME["current_price_color"],
             )
             if has_liquidity:
                 fig.add_hline(
                     y=price_to_mark,
                     line_dash="dash",
-                    line_color="#ffaa00",
+                    line_color=DARK_THEME["current_price_color"],
                     opacity=0.7,
                     row=1, col=2,
                 )
@@ -567,16 +776,23 @@ def generate_combined_chart(
         else:
             title = f"{pair_name} - {timeframe} + Liquidity"
 
-        # Update layout
+        # Update layout (use unified theme)
         fig.update_layout(
             title=dict(
-                text=title,
-                font=dict(color='white', size=16),
+                text=f"<b>{title}</b>",
+                font=dict(
+                    family=DARK_THEME["font_family"],
+                    color=DARK_THEME["font_color"],
+                    size=18
+                ),
                 x=0.5,
             ),
-            paper_bgcolor='#1a1a2e',
-            plot_bgcolor='#1a1a2e',
-            font=dict(color='white'),
+            paper_bgcolor=DARK_THEME["paper_bgcolor"],
+            plot_bgcolor=DARK_THEME["plot_bgcolor"],
+            font=dict(
+                family=DARK_THEME["font_family"],
+                color=DARK_THEME["font_color"]
+            ),
             xaxis_rangeslider_visible=False,
             showlegend=has_liquidity,  # Show legend when liquidity panel exists
             legend=dict(
@@ -594,14 +810,16 @@ def generate_combined_chart(
             bargap=0.1,  # Gap between bars
         )
 
-        # Update axes styling
+        # Update axes styling (use unified theme)
         fig.update_xaxes(
-            gridcolor='rgba(255,255,255,0.1)',
+            gridcolor=DARK_THEME["grid_color"],
+            color=DARK_THEME["axis_color"],
             showgrid=True,
             zeroline=False,
         )
         fig.update_yaxes(
-            gridcolor='rgba(255,255,255,0.1)',
+            gridcolor=DARK_THEME["grid_color"],
+            color=DARK_THEME["axis_color"],
             showgrid=True,
             zeroline=False,
         )
@@ -760,31 +978,38 @@ def generate_aggregated_liquidity_chart(
             hovertemplate='Price: %{x:.6f}<br>Base: %{y:,.2f}<extra></extra>'
         ))
 
-        # Add average price line
+        # Add average price line (use unified theme)
         if avg_price and min_price <= avg_price <= max_price:
             fig.add_vline(
                 x=avg_price,
                 line_dash="dash",
-                line_color="#ef4444",
+                line_color=DARK_THEME["down_color"],
                 line_width=2,
                 annotation_text=f"Avg: {avg_price:.6f}",
                 annotation_position="top",
-                annotation_font_color="#ef4444"
+                annotation_font_color=DARK_THEME["down_color"]
             )
 
+        # Update layout (use unified theme)
         fig.update_layout(
             title=dict(
-                text=f"{pair_name} Aggregated Liquidity ({len(valid_pools)} pools)",
-                font=dict(size=16, color='white'),
+                text=f"<b>{pair_name} Aggregated Liquidity ({len(valid_pools)} pools)</b>",
+                font=dict(
+                    family=DARK_THEME["font_family"],
+                    size=18,
+                    color=DARK_THEME["font_color"]
+                ),
                 x=0.5
             ),
             xaxis_title="Price",
             yaxis_title="Liquidity (Quote Value)",
             barmode='stack',
-            template='plotly_dark',
-            paper_bgcolor='#1a1a2e',
-            plot_bgcolor='#16213e',
-            font=dict(color='white'),
+            paper_bgcolor=DARK_THEME["paper_bgcolor"],
+            plot_bgcolor=DARK_THEME["plot_bgcolor"],
+            font=dict(
+                family=DARK_THEME["font_family"],
+                color=DARK_THEME["font_color"]
+            ),
             legend=dict(
                 orientation="h",
                 yanchor="bottom",
@@ -797,16 +1022,19 @@ def generate_aggregated_liquidity_chart(
             height=550
         )
 
+        # Update axes (use unified theme)
         fig.update_xaxes(
             showgrid=True,
             gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)',
+            gridcolor=DARK_THEME["grid_color"],
+            color=DARK_THEME["axis_color"],
             tickformat='.5f'
         )
         fig.update_yaxes(
             showgrid=True,
             gridwidth=1,
-            gridcolor='rgba(255,255,255,0.1)'
+            gridcolor=DARK_THEME["grid_color"],
+            color=DARK_THEME["axis_color"]
         )
 
         img_bytes = fig.to_image(format="png", scale=2)

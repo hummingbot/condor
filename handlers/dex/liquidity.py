@@ -13,6 +13,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
+from utils.auth import gateway_required
 from servers import get_client
 from ._shared import (
     get_cached,
@@ -95,6 +96,7 @@ async def _fetch_gateway_balances(client) -> dict:
     data = {
         "balances_by_network": defaultdict(list),
         "total_value": 0,
+        "token_prices": {},  # token symbol -> USD price
     }
 
     try:
@@ -119,13 +121,18 @@ async def _fetch_gateway_balances(client) -> dict:
                         token = balance.get("token", "???")
                         units = balance.get("units", 0)
                         value = balance.get("value", 0)
+                        price = balance.get("price", 0)
                         if value > 0.01:
                             data["balances_by_network"][network].append({
                                 "token": token,
                                 "units": units,
-                                "value": value
+                                "value": value,
+                                "price": price
                             })
                             data["total_value"] += value
+                            # Store token price for PnL conversion
+                            if token and price:
+                                data["token_prices"][token] = price
 
         # Sort by value
         for network in data["balances_by_network"]:
@@ -153,7 +160,8 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
         result = await client.gateway_clmm.search_positions(
             limit=100,
             offset=0,
-            status=status
+            status=status,
+            refresh=True
         )
 
         if not result:
@@ -217,12 +225,16 @@ async def _fetch_lp_positions(client, status: str = "OPEN") -> dict:
     return data
 
 
-def _format_compact_position_line(pos: dict, token_cache: dict = None, index: int = None) -> str:
+def _format_compact_position_line(pos: dict, token_cache: dict = None, index: int = None, token_prices: dict = None) -> str:
     """Format a single position as a compact line for display
 
-    Returns: "1. SOL-USDC (meteora) 🟢 [0.89-1.47] | 10.5 SOL / 123 USDC"
+    Returns: "1. SOL-USDC (meteora) 🟢 [0.89-1.47] | PnL: -$25 | Value: $63"
+
+    Args:
+        token_prices: dict mapping token symbol -> USD price (e.g. {"SOL": 138.82})
     """
     token_cache = token_cache or {}
+    token_prices = token_prices or {}
 
     # Resolve token symbols
     base_token = pos.get('base_token', pos.get('token_a', ''))
@@ -241,16 +253,43 @@ def _format_compact_position_line(pos: dict, token_cache: dict = None, index: in
     in_range = pos.get('in_range', '')
     status_emoji = "🟢" if in_range == "IN_RANGE" else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
 
-    # Format range
+    # Format range with enough decimals to show the full price
+    lower = pos.get('lower_price', pos.get('price_lower', ''))
+    upper = pos.get('upper_price', pos.get('price_upper', ''))
+    current = pos.get('current_price', '')
+
     range_str = ""
+    price_indicator = ""
     if lower and upper:
         try:
             lower_f = float(lower)
             upper_f = float(upper)
+
+            # Determine decimal places needed based on magnitude
             if lower_f >= 1:
-                range_str = f"[{lower_f:.2f}-{upper_f:.2f}]"
+                decimals = 2
+            elif lower_f >= 0.001:
+                decimals = 6
             else:
-                range_str = f"[{lower_f:.4f}-{upper_f:.4f}]"
+                decimals = 8
+
+            range_str = f"[{lower_f:.{decimals}f}-{upper_f:.{decimals}f}]"
+
+            # Add price position indicator if we have current price
+            if current:
+                current_f = float(current)
+                if current_f < lower_f:
+                    # Price below range - show how far below
+                    price_indicator = "▼"  # Below range
+                elif current_f > upper_f:
+                    # Price above range
+                    price_indicator = "▲"  # Above range
+                else:
+                    # In range - show position with bar
+                    pct = (current_f - lower_f) / (upper_f - lower_f)
+                    bar_len = 5
+                    filled = int(pct * bar_len)
+                    price_indicator = f"[{'█' * filled}{'░' * (bar_len - filled)}]"
         except (ValueError, TypeError):
             range_str = f"[{lower}-{upper}]"
 
@@ -258,45 +297,98 @@ def _format_compact_position_line(pos: dict, token_cache: dict = None, index: in
     base_amount = pos.get('base_token_amount', pos.get('amount_a', pos.get('token_a_amount', 0)))
     quote_amount = pos.get('quote_token_amount', pos.get('amount_b', pos.get('token_b_amount', 0)))
 
-    # Build line
+    # Get position value from pnl_summary
+    pnl_summary = pos.get('pnl_summary', {})
+    position_value_quote = pnl_summary.get('current_total_value_quote')
+
+    # Get values from pnl_summary (all values are in quote token units)
+    total_pnl_quote = pnl_summary.get('total_pnl_quote', 0)
+    current_lp_value_quote = pnl_summary.get('current_lp_value_quote', 0)
+
+    # Get PENDING fees (fees available to collect) and COLLECTED fees
+    base_fee_pending = pos.get('base_fee_pending', 0) or 0
+    quote_fee_pending = pos.get('quote_fee_pending', 0) or 0
+    base_fee_collected = pos.get('base_fee_collected', 0) or 0
+    quote_fee_collected = pos.get('quote_fee_collected', 0) or 0
+
+    # Build line with price indicator next to range
     prefix = f"{index}. " if index is not None else "• "
-    line = f"{prefix}{pair} ({connector}) {status_emoji} {range_str}"
+    range_with_indicator = f"{range_str} {price_indicator}" if price_indicator else range_str
+    line = f"{prefix}{pair} ({connector}) {status_emoji} {range_with_indicator}"
 
-    # Add amounts if available
+    # Add PnL + value + pending fees, converted to USD
     try:
-        base_amt = float(base_amount) if base_amount else 0
-        quote_amt = float(quote_amount) if quote_amount else 0
-        if base_amt > 0 or quote_amt > 0:
-            line += f"\n   💰 {_format_token_amount(base_amt)} {base_symbol} / {_format_token_amount(quote_amt)} {quote_symbol}"
-    except (ValueError, TypeError):
-        pass
+        pnl_f = float(total_pnl_quote) if total_pnl_quote else 0
+        lp_value_f = float(current_lp_value_quote) if current_lp_value_quote else 0
 
-    # Add pending fees if any
-    base_fee = pos.get('base_fee_pending', pos.get('unclaimed_fee_a', 0))
-    quote_fee = pos.get('quote_fee_pending', pos.get('unclaimed_fee_b', 0))
-    try:
-        base_fee_f = float(base_fee) if base_fee else 0
-        quote_fee_f = float(quote_fee) if quote_fee else 0
-        if base_fee_f > 0 or quote_fee_f > 0:
-            line += f"\n   🎁 Fees: {_format_token_amount(base_fee_f)} {base_symbol} / {_format_token_amount(quote_fee_f)} {quote_symbol}"
+        # Get token prices for USD conversion (try exact match, then variants)
+        def get_price(symbol, default=0):
+            if symbol in token_prices:
+                return token_prices[symbol]
+            # Try case-insensitive match
+            symbol_lower = symbol.lower()
+            for key, price in token_prices.items():
+                if key.lower() == symbol_lower:
+                    return price
+            # Try common variants (WSOL <-> SOL, WETH <-> ETH, etc.)
+            variants = {
+                "sol": ["wsol", "wrapped sol"],
+                "wsol": ["sol"],
+                "eth": ["weth", "wrapped eth"],
+                "weth": ["eth"],
+            }
+            for variant in variants.get(symbol_lower, []):
+                for key, price in token_prices.items():
+                    if key.lower() == variant:
+                        return price
+            return default
+
+        quote_price = get_price(quote_symbol, 1.0)
+        base_price = get_price(base_symbol, 0)
+
+        # Convert PnL and value from quote token to USD
+        pnl_usd = pnl_f * quote_price
+        value_usd = lp_value_f * quote_price
+
+        # Calculate pending fees in USD (fees available to collect)
+        base_pending_f = float(base_fee_pending) if base_fee_pending else 0
+        quote_pending_f = float(quote_fee_pending) if quote_fee_pending else 0
+        pending_fees_usd = (base_pending_f * base_price) + (quote_pending_f * quote_price)
+
+        # Calculate collected fees in USD (fees already claimed)
+        base_collected_f = float(base_fee_collected) if base_fee_collected else 0
+        quote_collected_f = float(quote_fee_collected) if quote_fee_collected else 0
+        collected_fees_usd = (base_collected_f * base_price) + (quote_collected_f * quote_price)
+
+        # Debug logging
+        logger.info(f"Position {index}: {base_symbol}@${base_price:.4f}, {quote_symbol}@${quote_price:.2f} | pending=${pending_fees_usd:.2f}, collected=${collected_fees_usd:.2f}")
+
+        if value_usd > 0 or pnl_f != 0:
+            # Format: PnL: -$25.12 | Value: $63.45 | 🎁 $3.70 | 💰 $1.20
+            parts = []
+            if pnl_usd >= 0:
+                parts.append(f"PnL: +${pnl_usd:.2f}")
+            else:
+                parts.append(f"PnL: -${abs(pnl_usd):.2f}")
+            parts.append(f"Value: ${value_usd:.2f}")
+            if pending_fees_usd > 0.01:
+                parts.append(f"🎁 ${pending_fees_usd:.2f}")
+            if collected_fees_usd > 0.01:
+                parts.append(f"💰 ${collected_fees_usd:.2f}")
+            line += "\n   " + " | ".join(parts)
     except (ValueError, TypeError):
         pass
 
     return line
 
 
-def _format_closed_position_line(pos: dict, token_cache: dict = None) -> str:
-    """Format a closed position as a compact line
+def _format_closed_position_line(pos: dict, token_cache: dict = None, token_prices: dict = None) -> str:
+    """Format a closed position with same format as active positions
 
-    Shows:
-    - Pair & connector
-    - Price direction: 📈 price went up (ended with more quote), 📉 price went down (ended with more base)
-    - Fees earned (actual profit)
-    - Age
-
-    Returns: "ORE-SOL (met) 📈 Fees: 0.013 ORE  3d"
+    Shows: Pair (connector) ✓ [range] | PnL: +$2.88 | 💰 $1.40 | 1d
     """
     token_cache = token_cache or {}
+    token_prices = token_prices or {}
 
     # Resolve token symbols
     base_token = pos.get('base_token', pos.get('token_a', ''))
@@ -307,71 +399,70 @@ def _format_closed_position_line(pos: dict, token_cache: dict = None) -> str:
 
     connector = pos.get('connector', 'unknown')[:3]
 
-    # Determine price direction based on position changes
-    # If you end with more quote than you started with, price went UP (you sold base for quote)
-    # If you end with more base than you started with, price went DOWN (you bought base with quote)
-    pnl_summary = pos.get('pnl_summary', {})
-    base_pnl = pnl_summary.get('base_pnl', 0) or 0
-    quote_pnl = pnl_summary.get('quote_pnl', 0) or 0
-
-    try:
-        base_pnl_f = float(base_pnl)
-        quote_pnl_f = float(quote_pnl)
-
-        # If quote increased significantly, price went up
-        # If base increased significantly, price went down
-        if abs(quote_pnl_f) > 0.001 or abs(base_pnl_f) > 0.001:
-            if quote_pnl_f > base_pnl_f:
-                direction_emoji = "📈"  # Price went up, you have more quote
+    # Get price range
+    lower = pos.get('lower_price', pos.get('price_lower', ''))
+    upper = pos.get('upper_price', pos.get('price_upper', ''))
+    range_str = ""
+    if lower and upper:
+        try:
+            lower_f = float(lower)
+            upper_f = float(upper)
+            if lower_f >= 1:
+                decimals = 2
+            elif lower_f >= 0.001:
+                decimals = 6
             else:
-                direction_emoji = "📉"  # Price went down, you have more base
-        else:
-            direction_emoji = "➡️"  # Price stayed in range
-    except (ValueError, TypeError):
-        direction_emoji = ""
+                decimals = 8
+            range_str = f"[{lower_f:.{decimals}f}-{upper_f:.{decimals}f}]"
+        except (ValueError, TypeError):
+            pass
 
-    # Fees collected (actual profit!)
-    base_fee = pos.get('base_fee_collected', 0) or 0
-    quote_fee = pos.get('quote_fee_collected', 0) or 0
-    fees_str = ""
+    # Get PnL data - use pre-calculated total_pnl_quote
+    pnl_summary = pos.get('pnl_summary', {})
+    total_pnl_quote = pnl_summary.get('total_pnl_quote', 0) or 0
+    total_fees_value = pnl_summary.get('total_fees_value_quote', 0) or 0
 
     try:
-        base_fee_f = float(base_fee)
-        quote_fee_f = float(quote_fee)
-
-        fee_parts = []
-        if base_fee_f > 0.0001:
-            fee_parts.append(f"{_format_token_amount(base_fee_f)} {base_symbol}")
-        if quote_fee_f > 0.0001:
-            fee_parts.append(f"{_format_token_amount(quote_fee_f)} {quote_symbol}")
-
-        if fee_parts:
-            fees_str = f"💰 {' + '.join(fee_parts)}"
-        else:
-            fees_str = "💰 0"
+        pnl_f = float(total_pnl_quote)
+        fees_f = float(total_fees_value)
     except (ValueError, TypeError):
-        pass
+        pnl_f = 0
+        fees_f = 0
+
+    # Get quote token price for USD conversion
+    quote_price = token_prices.get(quote_symbol, 1.0)
+
+    # Convert to USD
+    pnl_usd = pnl_f * quote_price
+    fees_usd = fees_f * quote_price
 
     # Get close timestamp
     closed_at = pos.get('closed_at', pos.get('updated_at', ''))
     age = format_relative_time(closed_at) if closed_at else ""
 
-    # Build line: "ORE-SOL (met) 📈 💰 0.013 ORE  3d"
-    parts = [f"{pair} ({connector})"]
-    if direction_emoji:
-        parts.append(direction_emoji)
-    if fees_str:
-        parts.append(fees_str)
-    if age:
-        parts.append(f" {age}")
+    # Build line: "MET-USDC (met) ✓ [0.31-0.32]"
+    line = f"{pair} ({connector}) ✓ {range_str}"
 
-    return " ".join(parts)
+    # Add PnL and fees on second line in USD
+    parts = []
+    if pnl_usd >= 0:
+        parts.append(f"PnL: +${pnl_usd:.2f}")
+    else:
+        parts.append(f"PnL: -${abs(pnl_usd):.2f}")
+    if fees_usd > 0.01:
+        parts.append(f"💰 ${fees_usd:.2f}")
+    if age:
+        parts.append(age)
+    line += "\n   " + " | ".join(parts)
+
+    return line
 
 
 # ============================================
 # MENU DISPLAY
 # ============================================
 
+@gateway_required
 async def handle_liquidity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle liquidity pools - unified menu"""
     context.user_data["dex_state"] = "liquidity"
@@ -387,10 +478,11 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     - Recent closed positions (history)
     - Explore pools button
     """
+    chat_id = update.effective_chat.id
     help_text = r"💧 *Liquidity Pools*" + "\n\n"
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Fetch balances (cached)
         gateway_data = await cached_call(
@@ -401,26 +493,46 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
             client
         )
 
-        # Show compact balances
+        # Show compact balances - vertical format with columns
         if gateway_data.get("balances_by_network"):
-            help_text += r"━━━ Wallet ━━━" + "\n"
-
             # Show Solana balances primarily (for LP)
             for network, balances in gateway_data["balances_by_network"].items():
                 if "solana" in network.lower():
-                    for bal in balances[:5]:  # Top 5 tokens
-                        token = bal["token"]
-                        units = _format_token_amount(bal["units"])
-                        value = _format_value(bal["value"])
-                        help_text += f"💰 `{escape_markdown_v2(token)}`: `{escape_markdown_v2(units)}` {escape_markdown_v2(value)}\n"
-                    if len(balances) > 5:
-                        help_text += f"   _\\.\\.\\. and {len(balances) - 5} more_\n"
+                    # Filter tokens with value >= $0.5
+                    tokens = [(bal["token"], _format_value(bal["value"])) for bal in balances if bal["value"] >= 0.5]
+
+                    if tokens:
+                        # Determine columns based on count: 1-5 = 1col, 6-10 = 2col, 11+ = 3col
+                        num_tokens = len(tokens)
+                        if num_tokens <= 5:
+                            cols = 1
+                        elif num_tokens <= 10:
+                            cols = 2
+                        else:
+                            cols = 3
+
+                        # Calculate rows needed
+                        rows = (num_tokens + cols - 1) // cols
+
+                        # Build grid
+                        lines = []
+                        for row in range(rows):
+                            row_parts = []
+                            for col in range(cols):
+                                idx = row + col * rows
+                                if idx < num_tokens:
+                                    token, value = tokens[idx]
+                                    row_parts.append(f"{token} {value}")
+                            lines.append(" · ".join(row_parts))
+
+                        help_text += r"💰 *Wallet*" + "\n"
+                        for line in lines:
+                            help_text += escape_markdown_v2(line) + "\n"
+
+                        if gateway_data["total_value"] > 0:
+                            help_text += rf"*Total: {escape_markdown_v2(_format_value(gateway_data['total_value']))}*" + "\n"
+                        help_text += "\n"
                     break
-
-            if gateway_data["total_value"] > 0:
-                help_text += f"💵 Total: `{escape_markdown_v2(_format_value(gateway_data['total_value']))}`\n"
-
-            help_text += "\n"
 
         # Fetch active positions (cached)
         lp_data = await cached_call(
@@ -434,13 +546,15 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         positions = lp_data.get("positions", [])
         token_cache = lp_data.get("token_cache", {})
+        token_prices = gateway_data.get("token_prices", {})
         context.user_data["token_cache"] = token_cache
+        context.user_data["token_prices"] = token_prices
 
         # Show active positions
         if positions:
             help_text += rf"━━━ Active Positions \({len(positions)}\) ━━━" + "\n"
             for i, pos in enumerate(positions[:5], 1):  # Show max 5
-                line = _format_compact_position_line(pos, token_cache, index=i)
+                line = _format_compact_position_line(pos, token_cache, index=i, token_prices=token_prices)
                 help_text += escape_markdown_v2(line) + "\n"
 
             if len(positions) > 5:
@@ -491,9 +605,9 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         )[:5]  # Most recent 5
 
         if closed_positions:
-            help_text += r"━━━ Closed Positions \(fees earned\) ━━━" + "\n"
+            help_text += r"━━━ Closed Positions ━━━" + "\n"
             for pos in closed_positions:
-                line = _format_closed_position_line(pos, token_cache)
+                line = _format_closed_position_line(pos, token_cache, token_prices)
                 help_text += escape_markdown_v2(line) + "\n"
             help_text += "\n"
 
@@ -512,6 +626,7 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Position action buttons (if positions exist)
     positions = context.user_data.get("lp_positions_cache", [])
+    token_cache = context.user_data.get("token_cache", {})
     if positions:
         # Initialize positions_cache for action handlers
         if "positions_cache" not in context.user_data:
@@ -531,19 +646,19 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             keyboard.append([
                 InlineKeyboardButton(pair_label, callback_data=f"dex:lp_pos_view:{i}"),
-                InlineKeyboardButton("💰", callback_data=f"dex:pos_collect:{i}"),
+                InlineKeyboardButton("🎁", callback_data=f"dex:pos_collect:{i}"),
                 InlineKeyboardButton("❌", callback_data=f"dex:pos_close:{i}"),
             ])
 
         # Quick actions row (only if more than shown)
         if len(positions) > 5:
             keyboard.append([
-                InlineKeyboardButton("💰 Collect All", callback_data="dex:lp_collect_all"),
+                InlineKeyboardButton("🎁 Collect All", callback_data="dex:lp_collect_all"),
                 InlineKeyboardButton("📊 View All", callback_data="dex:manage_positions"),
             ])
         else:
             keyboard.append([
-                InlineKeyboardButton("💰 Collect All Fees", callback_data="dex:lp_collect_all"),
+                InlineKeyboardButton("🎁 Collect All Fees", callback_data="dex:lp_collect_all"),
             ])
 
     # Explore pools row - direct access to pool discovery
@@ -581,16 +696,40 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 disable_web_page_preview=True
             )
     else:
+        msg = update.callback_query.message
         try:
-            await update.callback_query.message.edit_text(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True
-            )
+            # If message is a photo, delete it and send new text message
+            if msg.photo:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                await msg.chat.send_message(
+                    help_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
+            else:
+                await msg.edit_text(
+                    help_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True
+                )
         except Exception as e:
             if "not modified" not in str(e).lower():
                 logger.warning(f"Failed to edit liquidity menu: {e}")
+                # Fallback: send new message
+                try:
+                    await msg.reply_text(
+                        help_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup,
+                        disable_web_page_preview=True
+                    )
+                except Exception:
+                    pass
 
 
 async def handle_lp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -761,7 +900,7 @@ def _format_detailed_position_line(pos: dict, token_cache: dict = None) -> str:
     except (ValueError, TypeError):
         pass
 
-    # Fees earned
+    # Fees earned (collected)
     try:
         base_fee_f = float(base_fee)
         quote_fee_f = float(quote_fee)
@@ -771,9 +910,9 @@ def _format_detailed_position_line(pos: dict, token_cache: dict = None) -> str:
         if quote_fee_f > 0.0001:
             fee_parts.append(f"{_format_token_amount(quote_fee_f)} {quote_symbol}")
         if fee_parts:
-            lines.append(f"   🎁 Fees earned: {' + '.join(fee_parts)}")
+            lines.append(f"   💰 Fees earned: {' + '.join(fee_parts)}")
         else:
-            lines.append(f"   🎁 Fees earned: 0")
+            lines.append(f"   💰 Fees earned: 0")
     except (ValueError, TypeError):
         pass
 
@@ -793,6 +932,8 @@ async def handle_lp_history(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     """Show position history with filters and pagination"""
     from datetime import datetime
 
+    chat_id = update.effective_chat.id
+
     try:
         # Get or initialize filters
         if reset_filters:
@@ -800,7 +941,7 @@ async def handle_lp_history(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         else:
             filters = get_history_filters(context.user_data, "position")
 
-        client = await get_client()
+        client = await get_client(chat_id)
 
         if not hasattr(client, 'gateway_clmm'):
             error_message = format_error_message("Gateway CLMM not available")

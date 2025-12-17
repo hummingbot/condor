@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, resolve_token_symbol, KNOWN_TOKENS
-from handlers.config.user_preferences import get_dex_last_swap
+from handlers.config.user_preferences import get_dex_last_swap, get_all_enabled_networks
 from servers import get_client
 from ._shared import cached_call, invalidate_cache
 
@@ -101,12 +101,14 @@ def _format_price(price) -> str:
         return str(price)
 
 
-async def _fetch_balances(client) -> dict:
-    """Fetch gateway/DEX balances (blockchain wallets like solana, ethereum)"""
-    from collections import defaultdict
+async def _fetch_balances(client, refresh: bool = False) -> dict:
+    """Fetch gateway/DEX balances (blockchain wallets like solana, ethereum)
 
-    # Gateway/blockchain connectors contain these keywords
-    GATEWAY_KEYWORDS = ["solana", "ethereum", "polygon", "arbitrum", "base", "avalanche", "optimism"]
+    Args:
+        client: The API client
+        refresh: If True, force refresh from exchanges. If False, use cached state (default)
+    """
+    from collections import defaultdict
 
     data = {
         "balances_by_network": defaultdict(list),
@@ -118,7 +120,24 @@ async def _fetch_balances(client) -> dict:
             logger.warning("Client has no portfolio attribute")
             return data
 
-        result = await client.portfolio.get_state()
+        # Fetch available gateway networks dynamically
+        gateway_networks = set()
+        if hasattr(client, 'gateway'):
+            try:
+                networks_response = await client.gateway.list_networks()
+                networks = networks_response.get('networks', [])
+                # Networks come as "chain-network" format (e.g., "solana-mainnet-beta")
+                for network in networks:
+                    if isinstance(network, dict):
+                        network_id = network.get('network_id', str(network))
+                    else:
+                        network_id = str(network)
+                    gateway_networks.add(network_id.lower())
+                logger.debug(f"Gateway networks available: {gateway_networks}")
+            except Exception as e:
+                logger.debug(f"Could not fetch gateway networks: {e}")
+
+        result = await client.portfolio.get_state(refresh=refresh)
         if not result:
             logger.info("Portfolio get_state returned empty result")
             return data
@@ -129,8 +148,24 @@ async def _fetch_balances(client) -> dict:
             for connector_name, balances in account_data.items():
                 connector_lower = connector_name.lower()
 
-                # Only include gateway/blockchain connectors (contain solana, ethereum, etc.)
-                is_gateway = any(keyword in connector_lower for keyword in GATEWAY_KEYWORDS)
+                # Only include gateway/blockchain connectors
+                # Check if connector matches any known gateway network
+                is_gateway = False
+                if gateway_networks:
+                    # Match connector name against known gateway networks
+                    # e.g., "solana_mainnet-beta" should match "solana-mainnet-beta"
+                    connector_normalized = connector_lower.replace('_', '-')
+                    is_gateway = connector_normalized in gateway_networks or any(
+                        connector_normalized.startswith(net.split('-')[0])
+                        for net in gateway_networks
+                    )
+                else:
+                    # Fallback: assume connector names containing chain names are gateway connectors
+                    # This handles cases where gateway.list_networks() fails
+                    is_gateway = any(chain in connector_lower for chain in [
+                        'solana', 'ethereum', 'polygon', 'arbitrum', 'base', 'avalanche', 'optimism'
+                    ])
+
                 if not is_gateway:
                     logger.debug(f"Skipping non-gateway connector: {connector_name}")
                     continue
@@ -165,6 +200,48 @@ async def _fetch_balances(client) -> dict:
         logger.error(f"Error fetching balances: {e}", exc_info=True)
 
     return data
+
+
+def _filter_balances_by_networks(balances_data: dict, enabled_networks: set) -> dict:
+    """Filter balances data to only include enabled networks.
+
+    Args:
+        balances_data: Dict with balances_by_network and total_value
+        enabled_networks: Set of enabled network IDs, or None for no filtering
+
+    Returns:
+        Filtered balances data with recalculated total_value and percentages
+    """
+    if enabled_networks is None or not balances_data:
+        return balances_data
+
+    balances_by_network = balances_data.get("balances_by_network", {})
+    if not balances_by_network:
+        return balances_data
+
+    # Filter networks
+    filtered_networks = {
+        network: balances
+        for network, balances in balances_by_network.items()
+        if network in enabled_networks
+    }
+
+    # Recalculate total value
+    total_value = sum(
+        bal["value"]
+        for balances in filtered_networks.values()
+        for bal in balances
+    )
+
+    # Recalculate percentages
+    for balances in filtered_networks.values():
+        for bal in balances:
+            bal["percentage"] = (bal["value"] / total_value * 100) if total_value > 0 else 0
+
+    return {
+        "balances_by_network": filtered_networks,
+        "total_value": total_value,
+    }
 
 
 async def _fetch_lp_positions(client) -> dict:
@@ -362,26 +439,43 @@ async def _load_menu_data_background(
     context: ContextTypes.DEFAULT_TYPE,
     reply_markup,
     last_swap,
-    server_name: str = None
+    server_name: str = None,
+    refresh: bool = False,
+    chat_id: int = None
 ) -> None:
     """Background task to load gateway data and update the menu progressively.
 
     This runs as a background task so users can navigate away without waiting.
     Handles cancellation gracefully.
+
+    Args:
+        refresh: If True, force refresh balances from exchanges (bypasses 5-min API cache)
+        chat_id: Chat ID for per-chat server selection
     """
     gateway_data = {"balances_by_network": {}, "lp_positions": [], "total_value": 0, "token_cache": {}}
 
     try:
-        client = await get_client()
+        client = await get_client(chat_id)
 
         # Step 2: Fetch balances first (usually fast) and update UI immediately
-        balances_data = await cached_call(
-            context.user_data,
-            "gateway_balances",
-            _fetch_balances,
-            60,
-            client
-        )
+        # When refresh=True, bypass local cache and tell API to refresh from exchanges
+        if refresh:
+            # Direct call without caching, with refresh=True for API
+            balances_data = await _fetch_balances(client, refresh=True)
+        else:
+            balances_data = await cached_call(
+                context.user_data,
+                "gateway_balances",
+                _fetch_balances,
+                60,
+                client
+            )
+
+        # Filter by enabled networks from wallet preferences
+        enabled_networks = get_all_enabled_networks(context.user_data)
+        if enabled_networks:
+            logger.info(f"Filtering DEX balances by enabled networks: {enabled_networks}")
+            balances_data = _filter_balances_by_networks(balances_data, enabled_networks)
 
         gateway_data["balances_by_network"] = balances_data.get("balances_by_network", {})
         gateway_data["total_value"] = balances_data.get("total_value", 0)
@@ -443,11 +537,14 @@ async def _load_menu_data_background(
         context.user_data.pop(DEX_LOADING_TASK_KEY, None)
 
 
-async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = False) -> None:
     """Display main DEX trading menu with balances and positions
 
     Uses progressive loading: shows menu immediately, then loads data in background.
     User can navigate away without waiting for data to load.
+
+    Args:
+        refresh: If True, force refresh balances from exchanges (bypasses API cache)
     """
     from servers import server_manager
 
@@ -500,8 +597,9 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     last_swap = get_dex_last_swap(context.user_data)
 
     # Spawn background task to load data - user can navigate away without waiting
+    chat_id = update.effective_chat.id
     task = asyncio.create_task(
-        _load_menu_data_background(message, context, reply_markup, last_swap, server_name)
+        _load_menu_data_background(message, context, reply_markup, last_swap, server_name, refresh=refresh, chat_id=chat_id)
     )
     context.user_data[DEX_LOADING_TASK_KEY] = task
 
@@ -520,12 +618,12 @@ async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle refresh button - clear cache and reload data"""
+    """Handle refresh button - clear local cache and force refresh from exchanges"""
     query = update.callback_query
-    await query.answer("Refreshing...")
+    await query.answer("Refreshing from exchanges...")
 
-    # Invalidate all balance, position, and token caches
+    # Invalidate all local balance, position, and token caches
     invalidate_cache(context.user_data, "balances", "positions", "tokens")
 
-    # Re-show the menu with fresh data
-    await show_dex_menu(update, context)
+    # Re-show the menu with fresh data (refresh=True forces API to fetch from exchanges)
+    await show_dex_menu(update, context, refresh=True)

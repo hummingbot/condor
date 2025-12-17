@@ -27,9 +27,11 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
         else:
             # Build header with server context
+            chat_id = query.message.chat_id
             header, server_online, _ = await build_config_message_header(
                 "🔑 API Keys",
-                include_gateway=False
+                include_gateway=False,
+                chat_id=chat_id
             )
 
             if not server_online:
@@ -39,8 +41,8 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
             else:
-                # Get client from default server
-                client = await server_manager.get_default_client()
+                # Get client from per-chat server
+                client = await server_manager.get_client_for_chat(chat_id)
                 accounts = await client.accounts.list_accounts()
 
                 if not accounts:
@@ -242,13 +244,16 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
     try:
         from servers import server_manager
 
+        chat_id = query.message.chat_id
+
         # Build header with server context
         header, server_online, _ = await build_config_message_header(
             f"🔑 API Keys",
-            include_gateway=False
+            include_gateway=False,
+            chat_id=chat_id
         )
 
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Get list of connected credentials for this account
         credentials = await client.accounts.list_account_credentials(account_name=account_name)
@@ -290,8 +295,8 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
         # Get list of available connectors
         all_connectors = await client.connectors.list_connectors()
 
-        # Filter out testnet connectors
-        connectors = [c for c in all_connectors if 'testnet' not in c.lower()]
+        # Filter out testnet connectors and gateway connectors (those with '/' like "uniswap/ethereum")
+        connectors = [c for c in all_connectors if 'testnet' not in c.lower() and '/' not in c]
 
         # Create connector buttons in grid of 3 per row (for better readability of long names)
         # Store account name and connector list in context to avoid exceeding 64-byte callback_data limit
@@ -337,7 +342,8 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Get config map for this connector
         config_fields = await client.connectors.get_config_map(connector_name)
@@ -475,7 +481,7 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
                 parse_mode="MarkdownV2"
             )
 
-        client = await server_manager.get_default_client()
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Add credentials using the accounts API
         await client.accounts.add_credential(
@@ -536,8 +542,67 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
 
     except Exception as e:
         logger.error(f"Error submitting API key config: {e}", exc_info=True)
-        error_text = f"❌ Error saving configuration: {escape_markdown_v2(str(e))}"
-        await bot.send_message(chat_id=chat_id, text=error_text, parse_mode="MarkdownV2")
+
+        # Get account name for back button before clearing state
+        config_data = context.user_data.get('api_key_config_data', {})
+        account_name = config_data.get('account_name', '')
+        connector_name = config_data.get('connector_name', '')
+        message_id = context.user_data.get('api_key_message_id')
+
+        # Clear context data so user can retry
+        context.user_data.pop('configuring_api_key', None)
+        context.user_data.pop('awaiting_api_key_input', None)
+        context.user_data.pop('api_key_config_data', None)
+        context.user_data.pop('api_key_message_id', None)
+        context.user_data.pop('api_key_chat_id', None)
+
+        # Build error message with more helpful text for timeout
+        error_str = str(e)
+        if "TimeoutError" in error_str or "timeout" in error_str.lower():
+            connector_escaped = escape_markdown_v2(connector_name)
+            error_text = (
+                f"❌ *Connection Timeout*\n\n"
+                f"Failed to verify credentials for *{connector_escaped}*\\.\n\n"
+                "The exchange took too long to respond\\. "
+                "Please check your API keys and try again\\."
+            )
+        else:
+            error_text = f"❌ Error saving configuration: {escape_markdown_v2(error_str)}"
+
+        # Add back button to navigate back to account
+        if account_name:
+            encoded_account = base64.b64encode(account_name.encode()).decode()
+            keyboard = [[InlineKeyboardButton("« Back to Account", callback_data=f"api_key_back_account:{encoded_account}")]]
+        else:
+            keyboard = [[InlineKeyboardButton("« Back", callback_data="api_key_back_to_accounts")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Try to edit existing message, fall back to sending new message
+        try:
+            if message_id and chat_id:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            else:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+        except Exception as msg_error:
+            logger.error(f"Failed to send error message: {msg_error}")
+            # Last resort: send simple message
+            await bot.send_message(
+                chat_id=chat_id,
+                text=error_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
 
 
 async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_name: str, connector_name: str) -> None:
@@ -547,7 +612,8 @@ async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_n
     try:
         from servers import server_manager
 
-        client = await server_manager.get_default_client()
+        chat_id = query.message.chat_id
+        client = await server_manager.get_client_for_chat(chat_id)
 
         # Delete the credential
         await client.accounts.delete_credential(

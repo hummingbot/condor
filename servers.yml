@@ -1,12 +1,7 @@
 servers:
-#  remote:
-#    host: 212.1.12.23
-#    port: 8000
-#    username: admin
-#    password: admin
   local:
     host: localhost
     port: 8000
     username: admin
     password: admin
-default_server: remote
+default_server: local

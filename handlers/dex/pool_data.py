@@ -116,6 +116,7 @@ async def fetch_ohlcv(
     pool_address: str,
     network: str,
     timeframe: str = "1h",
+    currency: str = "usd",
     user_data: dict = None
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
@@ -124,6 +125,7 @@ async def fetch_ohlcv(
         pool_address: Pool contract address
         network: Network identifier (will be converted to GeckoTerminal format)
         timeframe: OHLCV timeframe ("1m", "5m", "15m", "1h", "4h", "1d")
+        currency: Price currency - "usd" or "token" (quote token)
         user_data: Optional user_data dict for caching
 
     Returns:
@@ -136,13 +138,13 @@ async def fetch_ohlcv(
 
         # Check cache
         if user_data is not None:
-            cache_key = f"ohlcv_{gecko_network}_{pool_address}_{timeframe}"
+            cache_key = f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
             cached = get_cached(user_data, cache_key, ttl=OHLCV_CACHE_TTL)
             if cached is not None:
                 return cached, None
 
         client = GeckoTerminalAsyncClient()
-        result = await client.get_ohlcv(gecko_network, pool_address, timeframe)
+        result = await client.get_ohlcv(gecko_network, pool_address, timeframe, currency=currency)
 
         # Parse response - handle different formats
         ohlcv_list = None
@@ -186,7 +188,8 @@ async def fetch_liquidity_bins(
     pool_address: str,
     connector: str = "meteora",
     network: str = "solana-mainnet-beta",
-    user_data: dict = None
+    user_data: dict = None,
+    chat_id: int = None
 ) -> Tuple[Optional[List], Optional[Dict], Optional[str]]:
     """Fetch liquidity bin data for CLMM pools via gateway
 
@@ -195,6 +198,7 @@ async def fetch_liquidity_bins(
         connector: DEX connector (meteora, raydium, orca)
         network: Network identifier
         user_data: Optional user_data dict for caching
+        chat_id: Chat ID for per-chat server selection
 
     Returns:
         Tuple of (bins_list, pool_info, error_message)
@@ -213,7 +217,7 @@ async def fetch_liquidity_bins(
             if cached is not None:
                 return cached.get('bins'), cached, None
 
-        client = await get_client()
+        client = await get_client(chat_id)
         if not client:
             return None, None, "Gateway client not available"
 
