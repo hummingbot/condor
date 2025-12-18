@@ -19,6 +19,7 @@ from handlers.bots import bots_command, bots_callback_handler
 from handlers.cex import trade_command, cex_callback_handler
 from handlers.dex import swap_command, lp_command, dex_callback_handler
 from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
+from handlers.routines import routines_command, routines_callback_handler
 from handlers import clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
@@ -392,6 +393,8 @@ def reload_handlers():
         'handlers.config.api_keys',
         'handlers.config.gateway',
         'handlers.config.user_preferences',
+        'handlers.routines',
+        'routines.base',
         'utils.auth',
         'utils.telegram_formatters',
     ]
@@ -410,6 +413,7 @@ def register_handlers(application: Application) -> None:
     from handlers.cex import trade_command, cex_callback_handler
     from handlers.dex import swap_command, lp_command, dex_callback_handler
     from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
+    from handlers.routines import routines_command, routines_callback_handler
 
     # Clear existing handlers
     application.handlers.clear()
@@ -422,6 +426,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("trade", trade_command))
     application.add_handler(CommandHandler("lp", lp_command))
     application.add_handler(CommandHandler("config", config_command))
+    application.add_handler(CommandHandler("routines", routines_command))
 
     # Add callback query handler for start menu navigation
     application.add_handler(CallbackQueryHandler(start_callback_handler, pattern="^(start:|help:)"))
@@ -430,6 +435,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CallbackQueryHandler(cex_callback_handler, pattern="^cex:"))
     application.add_handler(CallbackQueryHandler(dex_callback_handler, pattern="^dex:"))
     application.add_handler(CallbackQueryHandler(bots_callback_handler, pattern="^bots:"))
+    application.add_handler(CallbackQueryHandler(routines_callback_handler, pattern="^routines:"))
 
     # Add callback query handler for portfolio settings
     application.add_handler(get_portfolio_callback_handler())
@@ -456,6 +462,7 @@ async def post_init(application: Application) -> None:
         BotCommand("trade", "Order book trading (CEX/CLOB) with limit orders"),
         BotCommand("lp", "Liquidity pool management and explorer"),
         BotCommand("config", "Configure API servers and credentials"),
+        BotCommand("routines", "Run configurable Python scripts"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -471,10 +478,11 @@ async def watch_and_reload(application: Application) -> None:
         logger.warning("watchfiles not installed. Auto-reload disabled. Install with: pip install watchfiles")
         return
 
-    watch_path = Path(__file__).parent / "handlers"
-    logger.info(f"👀 Watching for changes in: {watch_path}")
+    handlers_path = Path(__file__).parent / "handlers"
+    routines_path = Path(__file__).parent / "routines"
+    logger.info(f"👀 Watching for changes in: {handlers_path}, {routines_path}")
 
-    async for changes in awatch(watch_path):
+    async for changes in awatch(handlers_path, routines_path):
         logger.info(f"📝 Detected changes: {changes}")
         try:
             reload_handlers()
@@ -487,11 +495,11 @@ def get_persistence() -> PicklePersistence:
     """
     Build a persistence object that works both locally and in Docker.
     - Uses an env var override if provided.
-    - Defaults to <project_root>/data/condor_bot_data.pickle.
+    - Defaults to <project_root>/condor_bot_data.pickle.
     - Ensures the parent directory exists, but does NOT create the file.
     """
     base_dir = Path(__file__).parent
-    default_path = base_dir / "data" / "condor_bot_data.pickle"
+    default_path = base_dir / "condor_bot_data.pickle"
 
     persistence_path = Path(os.getenv("CONDOR_PERSISTENCE_FILE", default_path))
 
