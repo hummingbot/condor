@@ -457,7 +457,7 @@ def _format_pool_table(pools: list) -> str:
                 elif apr_val >= 100:
                     apr_str = f"{apr_val:.0f}"
                 else:
-                    apr_str = f"{apr_val:.1f}"
+                    apr_str = f"{apr_val:.2f}"
             except (ValueError, TypeError):
                 apr_str = "—"
         else:
@@ -967,26 +967,61 @@ async def _show_pool_detail(
         from_callback: Whether triggered from callback (button click)
         has_list_context: Whether there's a pool list to go back to
     """
+    import asyncio
     from io import BytesIO
     from utils.telegram_formatters import resolve_token_symbol
 
     pool_address = pool.get('pool_address', pool.get('address', 'N/A'))
     connector = pool.get('connector', 'meteora')
     network = 'solana-mainnet-beta'
-
-    # Fetch additional pool info with bins (cached with 60s TTL)
     chat_id = update.effective_chat.id
+
+    # Parallel fetch: pool_info, token_cache, and OHLCV data
     cache_key = f"pool_info_{connector}_{pool_address}"
     pool_info = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
-    if pool_info is None:
-        client = await get_client(chat_id)
-        pool_info = await _fetch_pool_info(client, pool_address, connector)
-        set_cached(context.user_data, cache_key, pool_info)
-
-    # Get or fetch token cache for symbol resolution
     token_cache = context.user_data.get("token_cache")
-    if not token_cache:
-        token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
+    gecko_network = get_gecko_network(network)
+
+    # Build list of async tasks to run in parallel
+    async def fetch_pool_info_task():
+        if pool_info is not None:
+            return pool_info
+        client = await get_client(chat_id)
+        return await _fetch_pool_info(client, pool_address, connector)
+
+    async def fetch_token_cache_task():
+        if token_cache is not None:
+            return token_cache
+        return await get_token_cache_from_gateway(chat_id=chat_id)
+
+    async def fetch_ohlcv_task():
+        try:
+            data, error = await fetch_ohlcv(
+                pool_address=pool_address,
+                network=gecko_network,
+                timeframe="1h",
+                currency="token",
+                user_data=context.user_data
+            )
+            if error:
+                logger.warning(f"Failed to fetch OHLCV: {error}")
+                return []
+            return data or []
+        except Exception as e:
+            logger.warning(f"Error fetching OHLCV: {e}")
+            return []
+
+    # Run all fetches in parallel
+    pool_info, token_cache, ohlcv_data = await asyncio.gather(
+        fetch_pool_info_task(),
+        fetch_token_cache_task(),
+        fetch_ohlcv_task()
+    )
+
+    # Cache results
+    if pool_info:
+        set_cached(context.user_data, cache_key, pool_info)
+    if token_cache:
         context.user_data["token_cache"] = token_cache
 
     # Try to get trading pair name from multiple sources
@@ -1275,14 +1310,14 @@ async def _show_pool_detail(
     # Build GeckoTerminal link for pool
     gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
 
-    # Build keyboard - simplified without L/U/B/Q buttons
+    # Build keyboard - simplified without L/U/B/Q buttons (combined chart is default)
     keyboard = [
         # Row 1: Strategy + Add Position
         [
             InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
             InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
-        # Row 2: Refresh + GeckoTerminal link
+        # Row 2: Refresh + Gecko link
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pool_detail_refresh"),
             InlineKeyboardButton("🦎 Gecko", url=gecko_url),
@@ -1307,31 +1342,50 @@ async def _show_pool_detail(
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Generate liquidity chart if bins available
+    # Generate combined OHLCV + Liquidity chart (OHLCV already fetched in parallel above)
     chart_bytes = None
-    if bins:
+    price_float = float(current_price) if current_price else None
+
+    # Parse lower/upper prices for range visualization
+    lower_float = None
+    upper_float = None
+    try:
+        if params.get('lower_price'):
+            lower_float = float(params['lower_price'])
+        if params.get('upper_price'):
+            upper_float = float(params['upper_price'])
+    except (ValueError, TypeError):
+        pass
+
+    # Generate combined chart if we have OHLCV or bins
+    if ohlcv_data or bins:
         try:
-            price_float = float(current_price) if current_price else None
-            # Parse lower/upper prices for range visualization
-            lower_float = None
-            upper_float = None
-            try:
-                if params.get('lower_price'):
-                    lower_float = float(params['lower_price'])
-                if params.get('upper_price'):
-                    upper_float = float(params['upper_price'])
-            except (ValueError, TypeError):
-                pass
-            chart_bytes = generate_liquidity_chart(
-                bins=bins,
-                active_bin_id=active_bin,
-                current_price=price_float,
+            chart_bytes = generate_combined_chart(
+                ohlcv_data=ohlcv_data or [],
+                bins=bins or [],
                 pair_name=pair,
+                timeframe="1h",
+                current_price=price_float,
+                base_symbol=base_symbol,
+                quote_symbol=quote_symbol,
                 lower_price=lower_float,
                 upper_price=upper_float
             )
         except Exception as e:
-            logger.warning(f"Failed to generate chart: {e}")
+            logger.warning(f"Failed to generate combined chart: {e}")
+            # Fallback to liquidity-only chart
+            if bins:
+                try:
+                    chart_bytes = generate_liquidity_chart(
+                        bins=bins,
+                        active_bin_id=active_bin,
+                        current_price=price_float,
+                        pair_name=pair,
+                        lower_price=lower_float,
+                        upper_price=upper_float
+                    )
+                except Exception as e2:
+                    logger.warning(f"Failed to generate fallback chart: {e2}")
 
     # Determine chat for sending
     if from_callback:
@@ -1359,8 +1413,13 @@ async def _show_pool_detail(
     # Send chart as photo with caption, or just text if no chart
     if chart_bytes:
         try:
-            photo_file = BytesIO(chart_bytes)
-            photo_file.name = "liquidity_distribution.png"
+            # Handle both BytesIO objects and raw bytes
+            if isinstance(chart_bytes, BytesIO):
+                photo_file = chart_bytes
+                photo_file.seek(0)  # Ensure we're at the start
+            else:
+                photo_file = BytesIO(chart_bytes)
+            photo_file.name = "ohlcv_liquidity.png"
 
             sent_msg = await chat.send_photo(
                 photo=photo_file,
@@ -1848,13 +1907,27 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
             await loading_msg.edit_text("❌ No data available for this pool")
             return
 
+        # Get lower/upper prices from add_position_params if available
+        params = context.user_data.get("add_position_params", {})
+        lower_price = None
+        upper_price = None
+        try:
+            if params.get('lower_price'):
+                lower_price = float(params['lower_price'])
+            if params.get('upper_price'):
+                upper_price = float(params['upper_price'])
+        except (ValueError, TypeError):
+            pass
+
         # Generate combined chart
         chart_buf = generate_combined_chart(
             ohlcv_data=ohlcv_data or [],
             bins=bins or [],
             pair_name=pair,
             timeframe=_format_timeframe_label(timeframe),
-            current_price=float(current_price) if current_price else None
+            current_price=float(current_price) if current_price else None,
+            lower_price=lower_price,
+            upper_price=upper_price
         )
 
         if not chart_buf:
@@ -2308,21 +2381,123 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
-    """View detailed info about a position"""
+    """View detailed info about a position with combined OHLCV + liquidity chart"""
+    import asyncio
+    from io import BytesIO
+
+    query = update.callback_query
+
     try:
         positions_cache = context.user_data.get("positions_cache", {})
         pos = positions_cache.get(pos_index)
 
         if not pos:
-            await update.callback_query.answer("Position not found. Please refresh.")
+            await query.answer("Position not found. Please refresh.")
             return
 
-        # Get token cache (fetch if not available)
+        await query.answer()
+
+        # Get basic position info for loading message
+        base_token = pos.get('base_token', pos.get('token_a', ''))
+        quote_token = pos.get('quote_token', pos.get('token_b', ''))
+        token_cache = context.user_data.get("token_cache", {})
+        from utils.telegram_formatters import resolve_token_symbol
+        base_symbol = resolve_token_symbol(base_token, token_cache) if base_token else 'BASE'
+        quote_symbol = resolve_token_symbol(quote_token, token_cache) if quote_token else 'QUOTE'
+        pair = f"{base_symbol}/{quote_symbol}"
+
+        # Immediately show loading state
+        loading_msg = f"📍 *Position: {escape_markdown_v2(pair)}*\n\n"
+        loading_msg += r"⏳ _Gathering information\.\.\._" + "\n"
+        loading_msg += r"• Fetching OHLCV data" + "\n"
+        loading_msg += r"• Loading liquidity distribution" + "\n"
+        loading_msg += r"• Generating chart"
+
+        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+
+        try:
+            await query.message.edit_text(
+                loading_msg,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(loading_keyboard)
+            )
+        except Exception:
+            pass  # Message might be a photo, that's ok
+
         chat_id = update.effective_chat.id
-        token_cache = context.user_data.get("token_cache")
-        if not token_cache:
-            token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
+        connector = pos.get('connector', 'meteora')
+        pool_address = pos.get('pool_address', '')
+        network = 'solana-mainnet-beta'
+
+        # Get position price data
+        lower_price = pos.get('lower_price', pos.get('price_lower'))
+        upper_price = pos.get('upper_price', pos.get('price_upper'))
+        pnl_summary = pos.get('pnl_summary', {})
+        entry_price = pnl_summary.get('entry_price')
+        current_price = pnl_summary.get('current_price')
+
+        # Parallel fetch: token_cache (if needed), pool_info (bins), and OHLCV
+        gecko_network = get_gecko_network(network)
+
+        async def fetch_token_cache_task():
+            cached = context.user_data.get("token_cache")
+            if cached is not None:
+                return cached
+            return await get_token_cache_from_gateway(chat_id=chat_id)
+
+        async def fetch_pool_info_task():
+            if not pool_address:
+                return {}
+            cache_key = f"pool_info_{connector}_{pool_address}"
+            cached = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
+            if cached:
+                return cached
+            client = await get_client(chat_id)
+            info = await _fetch_pool_info(client, pool_address, connector)
+            if info:
+                set_cached(context.user_data, cache_key, info)
+            return info or {}
+
+        async def fetch_ohlcv_task():
+            if not pool_address:
+                return []
+            try:
+                data, error = await fetch_ohlcv(
+                    pool_address=pool_address,
+                    network=gecko_network,
+                    timeframe="1h",
+                    currency="token",
+                    user_data=context.user_data
+                )
+                return data or []
+            except Exception as e:
+                logger.warning(f"Error fetching OHLCV for position: {e}")
+                return []
+
+        # Run all fetches in parallel
+        token_cache_new, pool_info, ohlcv_data = await asyncio.gather(
+            fetch_token_cache_task(),
+            fetch_pool_info_task(),
+            fetch_ohlcv_task()
+        )
+
+        # Update token cache if fetched
+        if token_cache_new:
+            token_cache = token_cache_new
             context.user_data["token_cache"] = token_cache
+
+        # Re-resolve symbols with fresh token cache if needed
+        if token_cache_new and token_cache_new != context.user_data.get("token_cache"):
+            base_symbol = resolve_token_symbol(base_token, token_cache) if base_token else 'BASE'
+            quote_symbol = resolve_token_symbol(quote_token, token_cache) if quote_token else 'QUOTE'
+            pair = f"{base_symbol}/{quote_symbol}"
+
+        # Get bins from pool_info
+        bins = pool_info.get('bins', [])
+
+        # Get current price from pool_info if not in pnl_summary
+        if not current_price:
+            current_price = pool_info.get('price')
 
         # Get token prices for USD conversion
         token_prices = context.user_data.get("token_prices", {})
@@ -2333,8 +2508,6 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
         message += escape_markdown_v2(detail)
 
         # Build keyboard with actions
-        connector = pos.get('connector', '')
-        pool_address = pos.get('pool_address', '')
         dex_url = get_dex_pool_url(connector, pool_address)
 
         keyboard = [
@@ -2342,16 +2515,10 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                 InlineKeyboardButton("💰 Collect Fees", callback_data=f"dex:pos_collect:{pos_index}"),
                 InlineKeyboardButton("❌ Close Position", callback_data=f"dex:pos_close:{pos_index}")
             ],
-        ]
-
-        # Add View Pool button to see pool details with chart
-        if pool_address and connector:
-            keyboard.append([
-                InlineKeyboardButton("📊 View Pool", callback_data=f"dex:pos_view_pool:{pos_index}"),
+            [
                 InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")
-            ])
-        else:
-            keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")])
+            ]
+        ]
 
         # Add DEX link if available
         if dex_url:
@@ -2360,15 +2527,89 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
         keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:liquidity")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.edit_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        # Generate combined chart with entry price, lower/upper bounds
+        chart_bytes = None
+        if ohlcv_data or bins:
+            try:
+                # Convert price strings to floats
+                lower_float = float(lower_price) if lower_price else None
+                upper_float = float(upper_price) if upper_price else None
+                entry_float = float(entry_price) if entry_price else None
+                current_float = float(current_price) if current_price else None
+
+                chart_bytes = generate_combined_chart(
+                    ohlcv_data=ohlcv_data or [],
+                    bins=bins or [],
+                    pair_name=pair,
+                    timeframe="1h",
+                    current_price=current_float,
+                    base_symbol=base_symbol,
+                    quote_symbol=quote_symbol,
+                    lower_price=lower_float,
+                    upper_price=upper_float,
+                    entry_price=entry_float
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate position chart: {e}")
+
+        # Send as photo with caption, or edit text if no chart
+        if chart_bytes:
+            try:
+                # Handle both BytesIO and raw bytes
+                if isinstance(chart_bytes, BytesIO):
+                    photo_file = chart_bytes
+                    photo_file.seek(0)
+                else:
+                    photo_file = BytesIO(chart_bytes)
+                photo_file.name = "position_chart.png"
+
+                # Delete loading message and send photo
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+
+                await query.message.chat.send_photo(
+                    photo=photo_file,
+                    caption=message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send position chart: {e}")
+                # Fallback to text - try to edit loading message
+                try:
+                    await query.message.edit_text(
+                        message,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                except Exception:
+                    # Message was deleted, send new one
+                    await query.message.chat.send_message(
+                        message,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+        else:
+            # No chart available, just update the loading message with details
+            try:
+                await query.message.edit_text(
+                    message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception:
+                # Message was deleted, send new one
+                await query.message.chat.send_message(
+                    message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
 
     except Exception as e:
         logger.error(f"Error viewing position: {e}", exc_info=True)
-        await update.callback_query.answer(f"Error: {str(e)[:100]}")
+        await query.answer(f"Error: {str(e)[:100]}")
 
 
 async def handle_pos_view_pool(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
@@ -3391,33 +3632,67 @@ async def show_add_position_menu(
             InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
             InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
-        # Row 2: Refresh + GeckoTerminal link
+        # Row 2: Refresh + Gecko + Back (combined chart is default)
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
             InlineKeyboardButton("🦎 Gecko", url=gecko_url),
-        ],
-        # Row 3: Back to Pool
-        [
-            InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh")
+            InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh"),
         ]
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Generate chart image if bins available (only for main view, not help)
+    # Generate combined OHLCV + Liquidity chart (only for main view, not help)
     chart_bytes = None
-    if bins and not show_help:
+    if not show_help:
+        # Try to get cached OHLCV data for combined chart
         try:
-            chart_bytes = generate_liquidity_chart(
-                bins=bins,
-                active_bin_id=pool_info.get('active_bin_id'),
-                current_price=current_val,
-                pair_name=pair,
-                lower_price=lower_val,
-                upper_price=upper_val
-            )
+            gecko_network = get_gecko_network(network)
+            ohlcv_cache_key = f"ohlcv_{gecko_network}_{pool_address}_1h_token"
+            ohlcv_data = get_cached(context.user_data, ohlcv_cache_key, ttl=300)  # 5min cache
+
+            if ohlcv_data is None:
+                # Fetch OHLCV data
+                ohlcv_data, ohlcv_error = await fetch_ohlcv(
+                    pool_address=pool_address,
+                    network=gecko_network,
+                    timeframe="1h",
+                    currency="token",
+                    user_data=context.user_data
+                )
+                if ohlcv_error:
+                    logger.warning(f"OHLCV fetch error: {ohlcv_error}")
+                    ohlcv_data = []
+
+            # Generate combined chart if we have OHLCV or bins
+            if ohlcv_data or bins:
+                chart_bytes = generate_combined_chart(
+                    ohlcv_data=ohlcv_data or [],
+                    bins=bins or [],
+                    pair_name=pair,
+                    timeframe="1h",
+                    current_price=current_val,
+                    base_symbol=base_symbol,
+                    quote_symbol=quote_symbol,
+                    lower_price=lower_val,
+                    upper_price=upper_val
+                )
         except Exception as e:
-            logger.warning(f"Failed to generate chart for add position: {e}")
+            logger.warning(f"Failed to generate combined chart: {e}")
+
+        # Fallback to liquidity-only chart if combined chart failed
+        if not chart_bytes and bins:
+            try:
+                chart_bytes = generate_liquidity_chart(
+                    bins=bins,
+                    active_bin_id=pool_info.get('active_bin_id'),
+                    current_price=current_val,
+                    pair_name=pair,
+                    lower_price=lower_val,
+                    upper_price=upper_val
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate fallback chart: {e}")
 
     # Add ASCII visualization ONLY if there's NO chart image (ASCII is fallback)
     # This avoids caption too long error on Telegram (1024 char limit for photo captions)
@@ -3436,39 +3711,28 @@ async def show_add_position_menu(
     if send_new or not update.callback_query:
         chat = update.message.chat if update.message else update.callback_query.message.chat
 
-        # Try to edit stored message if available (for text input updates)
+        # For text input updates with chart, delete old message and send new one
+        # (can't replace photo, only edit caption)
         if stored_menu_msg_id and stored_menu_chat_id:
+            # Delete old message to allow sending new one with updated chart
             try:
-                if stored_menu_is_photo:
-                    # Edit caption for photo message
-                    await update.get_bot().edit_message_caption(
-                        chat_id=stored_menu_chat_id,
-                        message_id=stored_menu_msg_id,
-                        caption=help_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
-                    )
-                else:
-                    # Edit text for regular message
-                    await update.get_bot().edit_message_text(
-                        chat_id=stored_menu_chat_id,
-                        message_id=stored_menu_msg_id,
-                        text=help_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
-                    )
-                return
-            except Exception as e:
-                if "not modified" not in str(e).lower():
-                    logger.debug(f"Could not edit stored menu, sending new: {e}")
-                else:
-                    return
+                await update.get_bot().delete_message(
+                    chat_id=stored_menu_chat_id,
+                    message_id=stored_menu_msg_id
+                )
+            except Exception:
+                pass  # Message may already be deleted
 
         # Send new message and store its ID
         if chart_bytes:
             try:
-                photo_file = BytesIO(chart_bytes)
-                photo_file.name = "liquidity.png"
+                # Handle both BytesIO objects and raw bytes
+                if isinstance(chart_bytes, BytesIO):
+                    photo_file = chart_bytes
+                    photo_file.seek(0)  # Ensure we're at the start
+                else:
+                    photo_file = BytesIO(chart_bytes)
+                photo_file.name = "ohlcv_liquidity.png"
                 sent_msg = await chat.send_photo(
                     photo=photo_file,
                     caption=help_text,

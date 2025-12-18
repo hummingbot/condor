@@ -563,7 +563,10 @@ def generate_combined_chart(
     timeframe: str,
     current_price: float = None,
     base_symbol: str = None,
-    quote_symbol: str = None
+    quote_symbol: str = None,
+    lower_price: float = None,
+    upper_price: float = None,
+    entry_price: float = None
 ) -> Optional[io.BytesIO]:
     """Generate combined OHLCV + Liquidity distribution chart
 
@@ -576,9 +579,12 @@ def generate_combined_chart(
         bins: List of bin data with price, base_token_amount, quote_token_amount
         pair_name: Trading pair name
         timeframe: Timeframe string
-        current_price: Current price for reference line
+        current_price: Current price for reference line (orange dashed)
         base_symbol: Base token symbol
         quote_symbol: Quote token symbol
+        lower_price: Lower bound of position range (blue dotted)
+        upper_price: Upper bound of position range (blue dotted)
+        entry_price: Entry price for existing position (green dashed)
 
     Returns:
         BytesIO buffer with PNG image or None if failed
@@ -767,6 +773,69 @@ def generate_combined_chart(
                     line_dash="dash",
                     line_color=DARK_THEME["current_price_color"],
                     opacity=0.7,
+                    row=1, col=2,
+                )
+
+        # Add lower price range line
+        if lower_price:
+            fig.add_hline(
+                y=lower_price,
+                line_dash="dot",
+                line_color="#3b82f6",  # Blue
+                line_width=2,
+                row=1, col=1,
+                annotation_text=f"Lower: {lower_price:.6f}",
+                annotation_position="right",
+                annotation_font_color="#3b82f6",
+            )
+            if has_liquidity:
+                fig.add_hline(
+                    y=lower_price,
+                    line_dash="dot",
+                    line_color="#3b82f6",
+                    line_width=2,
+                    row=1, col=2,
+                )
+
+        # Add upper price range line
+        if upper_price:
+            fig.add_hline(
+                y=upper_price,
+                line_dash="dot",
+                line_color="#3b82f6",  # Blue
+                line_width=2,
+                row=1, col=1,
+                annotation_text=f"Upper: {upper_price:.6f}",
+                annotation_position="right",
+                annotation_font_color="#3b82f6",
+            )
+            if has_liquidity:
+                fig.add_hline(
+                    y=upper_price,
+                    line_dash="dot",
+                    line_color="#3b82f6",
+                    line_width=2,
+                    row=1, col=2,
+                )
+
+        # Add entry price line (green dashed) - for viewing existing positions
+        if entry_price:
+            fig.add_hline(
+                y=entry_price,
+                line_dash="dash",
+                line_color="#22c55e",  # Green
+                line_width=2,
+                row=1, col=1,
+                annotation_text=f"Entry: {entry_price:.6f}",
+                annotation_position="left",
+                annotation_font_color="#22c55e",
+            )
+            if has_liquidity:
+                fig.add_hline(
+                    y=entry_price,
+                    line_dash="dash",
+                    line_color="#22c55e",
+                    line_width=2,
                     row=1, col=2,
                 )
 
