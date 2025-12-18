@@ -956,7 +956,8 @@ async def _show_pool_detail(
     context: ContextTypes.DEFAULT_TYPE,
     pool: dict,
     from_callback: bool = False,
-    has_list_context: bool = True
+    has_list_context: bool = True,
+    timeframe: str = "1h"
 ) -> None:
     """Show detailed pool information with inline add liquidity controls
 
@@ -966,6 +967,7 @@ async def _show_pool_detail(
         pool: Pool data dict
         from_callback: Whether triggered from callback (button click)
         has_list_context: Whether there's a pool list to go back to
+        timeframe: OHLCV timeframe (1m, 1h, 1d) - default 1h
     """
     import asyncio
     from io import BytesIO
@@ -999,7 +1001,7 @@ async def _show_pool_detail(
             data, error = await fetch_ohlcv(
                 pool_address=pool_address,
                 network=gecko_network,
-                timeframe="1h",
+                timeframe=timeframe,
                 currency="token",
                 user_data=context.user_data
             )
@@ -1310,14 +1312,25 @@ async def _show_pool_detail(
     # Build GeckoTerminal link for pool
     gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
 
+    # Timeframe buttons - highlight current
+    tf_1m = "• 1m •" if timeframe == "1m" else "1m"
+    tf_1h = "• 1h •" if timeframe == "1h" else "1h"
+    tf_1d = "• 1d •" if timeframe == "1d" else "1d"
+
     # Build keyboard - simplified without L/U/B/Q buttons (combined chart is default)
     keyboard = [
-        # Row 1: Strategy + Add Position
+        # Row 1: Timeframe selection
+        [
+            InlineKeyboardButton(tf_1m, callback_data="dex:pool_tf:1m"),
+            InlineKeyboardButton(tf_1h, callback_data="dex:pool_tf:1h"),
+            InlineKeyboardButton(tf_1d, callback_data="dex:pool_tf:1d"),
+        ],
+        # Row 2: Strategy + Add Position
         [
             InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
             InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
-        # Row 2: Refresh + Gecko link
+        # Row 3: Refresh + Gecko link
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pool_detail_refresh"),
             InlineKeyboardButton("🦎 Gecko", url=gecko_url),
@@ -1364,7 +1377,7 @@ async def _show_pool_detail(
                 ohlcv_data=ohlcv_data or [],
                 bins=bins or [],
                 pair_name=pair,
-                timeframe="1h",
+                timeframe=timeframe,
                 current_price=price_float,
                 base_symbol=base_symbol,
                 quote_symbol=quote_symbol,
@@ -1390,11 +1403,21 @@ async def _show_pool_detail(
     # Determine chat for sending
     if from_callback:
         chat = update.callback_query.message.chat
-        # Delete the previous message
-        try:
-            await update.callback_query.message.delete()
-        except Exception:
-            pass
+
+        # Check for loading message from timeframe switch and delete it
+        loading_msg_id = context.user_data.pop("_loading_msg_id", None)
+        loading_chat_id = context.user_data.pop("_loading_chat_id", None)
+        if loading_msg_id and loading_chat_id:
+            try:
+                await update.get_bot().delete_message(chat_id=loading_chat_id, message_id=loading_msg_id)
+            except Exception:
+                pass
+        else:
+            # Delete the previous message (normal case, not timeframe switch)
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
     else:
         chat = update.message.chat
         # Delete user input and original message
@@ -1484,28 +1507,63 @@ async def handle_pool_select(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await query.answer("Pool not found. Please search again.")
 
 
-async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Refresh pool detail by clearing cache and re-fetching"""
+async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None) -> None:
+    """Refresh pool detail by clearing cache and re-fetching
+
+    Args:
+        timeframe: Optional OHLCV timeframe (1m, 1h, 1d). If None, uses default 1h.
+    """
     from ._shared import clear_cache
 
+    query = update.callback_query
     selected_pool = context.user_data.get("selected_pool", {})
     if not selected_pool:
-        await update.callback_query.answer("No pool selected")
+        await query.answer("No pool selected")
         return
 
     pool_address = selected_pool.get('pool_address', selected_pool.get('address', ''))
     connector = selected_pool.get('connector', 'meteora')
 
-    # Clear pool info cache
-    cache_key = f"pool_info_{connector}_{pool_address}"
-    clear_cache(context.user_data, cache_key)
-    context.user_data.pop("selected_pool_info", None)
+    # Only clear cache on full refresh (no timeframe switch)
+    if timeframe is None:
+        # Clear pool info cache
+        cache_key = f"pool_info_{connector}_{pool_address}"
+        clear_cache(context.user_data, cache_key)
+        context.user_data.pop("selected_pool_info", None)
 
-    # Also clear add_position_params to get fresh range calculation
-    context.user_data.pop("add_position_params", None)
+        # Also clear add_position_params to get fresh range calculation
+        context.user_data.pop("add_position_params", None)
+        await query.answer("Refreshing...")
+        timeframe = "1h"  # Default timeframe
+    else:
+        # Timeframe switch - show loading transition
+        await query.answer(f"Loading {timeframe} candles...")
 
-    await update.callback_query.answer("Refreshing...")
-    await _show_pool_detail(update, context, selected_pool, from_callback=True)
+        # Show loading state - need to handle both photo and text messages
+        pair = selected_pool.get('trading_pair', selected_pool.get('name', 'Pool'))
+        loading_msg = rf"⏳ *Loading {timeframe} candles\.\.\.*" + "\n\n"
+        loading_msg += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+        loading_msg += r"_Fetching OHLCV data\.\.\._"
+
+        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+
+        try:
+            # Try to delete current message (works for both photo and text)
+            await query.message.delete()
+        except Exception:
+            pass
+
+        # Send loading message
+        loading_sent = await query.message.chat.send_message(
+            loading_msg,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(loading_keyboard)
+        )
+        # Store loading message ID for deletion
+        context.user_data["_loading_msg_id"] = loading_sent.message_id
+        context.user_data["_loading_chat_id"] = loading_sent.chat.id
+
+    await _show_pool_detail(update, context, selected_pool, from_callback=True, timeframe=timeframe)
 
 
 async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2380,8 +2438,15 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
         )
 
 
-async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
-    """View detailed info about a position with combined OHLCV + liquidity chart"""
+async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str, timeframe: str = "1h") -> None:
+    """View detailed info about a position with combined OHLCV + liquidity chart
+
+    Args:
+        update: Telegram update
+        context: Bot context
+        pos_index: Position index in cache
+        timeframe: OHLCV timeframe (1m, 1h, 1d) - default 1h
+    """
     import asyncio
     from io import BytesIO
 
@@ -2415,14 +2480,30 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
 
         loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
 
-        try:
-            await query.message.edit_text(
+        # Handle loading state for both photo and text messages
+        loading_msg_id = None
+        if query.message.photo:
+            # For photo messages, delete and send new text message
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            loading_sent = await query.message.chat.send_message(
                 loading_msg,
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(loading_keyboard)
             )
-        except Exception:
-            pass  # Message might be a photo, that's ok
+            loading_msg_id = loading_sent.message_id
+        else:
+            # For text messages, just edit
+            try:
+                await query.message.edit_text(
+                    loading_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(loading_keyboard)
+                )
+            except Exception:
+                pass
 
         chat_id = update.effective_chat.id
         connector = pos.get('connector', 'meteora')
@@ -2465,7 +2546,7 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                 data, error = await fetch_ohlcv(
                     pool_address=pool_address,
                     network=gecko_network,
-                    timeframe="1h",
+                    timeframe=timeframe,
                     currency="token",
                     user_data=context.user_data
                 )
@@ -2510,21 +2591,34 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
         # Build keyboard with actions
         dex_url = get_dex_pool_url(connector, pool_address)
 
+        # Timeframe buttons - highlight current
+        tf_1m = "• 1m •" if timeframe == "1m" else "1m"
+        tf_1h = "• 1h •" if timeframe == "1h" else "1h"
+        tf_1d = "• 1d •" if timeframe == "1d" else "1d"
+
         keyboard = [
+            # Row 1: Timeframe selection
+            [
+                InlineKeyboardButton(tf_1m, callback_data=f"dex:pos_view_tf:{pos_index}:1m"),
+                InlineKeyboardButton(tf_1h, callback_data=f"dex:pos_view_tf:{pos_index}:1h"),
+                InlineKeyboardButton(tf_1d, callback_data=f"dex:pos_view_tf:{pos_index}:1d"),
+            ],
+            # Row 2: Actions
             [
                 InlineKeyboardButton("💰 Collect Fees", callback_data=f"dex:pos_collect:{pos_index}"),
-                InlineKeyboardButton("❌ Close Position", callback_data=f"dex:pos_close:{pos_index}")
+                InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{pos_index}")
             ],
-            [
-                InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")
-            ]
         ]
 
         # Add DEX link if available
         if dex_url:
-            keyboard.append([InlineKeyboardButton(f"🌐 View on {connector.title()}", url=dex_url)])
+            keyboard.append([
+                InlineKeyboardButton(f"🌐 {connector.title()}", url=dex_url),
+                InlineKeyboardButton("« Back", callback_data="dex:liquidity")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:liquidity")])
 
-        keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:liquidity")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Generate combined chart with entry price, lower/upper bounds
@@ -2541,7 +2635,7 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                     ohlcv_data=ohlcv_data or [],
                     bins=bins or [],
                     pair_name=pair,
-                    timeframe="1h",
+                    timeframe=timeframe,
                     current_price=current_float,
                     base_symbol=base_symbol,
                     quote_symbol=quote_symbol,
@@ -2563,11 +2657,19 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                     photo_file = BytesIO(chart_bytes)
                 photo_file.name = "position_chart.png"
 
-                # Delete loading message and send photo
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
+                # Delete loading message (either the text loading message we sent or original message)
+                if loading_msg_id:
+                    # Delete the loading text message we sent
+                    try:
+                        await query.message.chat.delete_message(loading_msg_id)
+                    except Exception:
+                        pass
+                else:
+                    # Delete the original message (text message case)
+                    try:
+                        await query.message.delete()
+                    except Exception:
+                        pass
 
                 await query.message.chat.send_photo(
                     photo=photo_file,
@@ -2577,7 +2679,27 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                 )
             except Exception as e:
                 logger.warning(f"Failed to send position chart: {e}")
-                # Fallback to text - try to edit loading message
+                # Fallback to text
+                await query.message.chat.send_message(
+                    message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+        else:
+            # No chart available, just update or send message with details
+            if loading_msg_id:
+                # Delete loading message and send new
+                try:
+                    await query.message.chat.delete_message(loading_msg_id)
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
+                    message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            else:
+                # Try to edit the text message
                 try:
                     await query.message.edit_text(
                         message,
@@ -2588,21 +2710,6 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                     # Message was deleted, send new one
                     await query.message.chat.send_message(
                         message,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
-                    )
-        else:
-            # No chart available, just update the loading message with details
-            try:
-                await query.message.edit_text(
-                    message,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
-                )
-            except Exception:
-                # Message was deleted, send new one
-                await query.message.chat.send_message(
-                    message,
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup
                 )
@@ -3280,7 +3387,8 @@ async def show_add_position_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     send_new: bool = False,
-    show_help: bool = False
+    show_help: bool = False,
+    timeframe: str = "1h"
 ) -> None:
     """Display the add position configuration menu with liquidity chart
 
@@ -3289,6 +3397,7 @@ async def show_add_position_menu(
         context: The context object
         send_new: If True, always send a new message instead of editing
         show_help: If True, show detailed help instead of balances/ASCII
+        timeframe: OHLCV timeframe (1m, 1h, 1d) - default 1h
     """
     from io import BytesIO
 
@@ -3626,13 +3735,24 @@ async def show_add_position_menu(
     # Build GeckoTerminal link for pool
     gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
 
+    # Timeframe buttons - highlight current
+    tf_1m = "• 1m •" if timeframe == "1m" else "1m"
+    tf_1h = "• 1h •" if timeframe == "1h" else "1h"
+    tf_1d = "• 1d •" if timeframe == "1d" else "1d"
+
     keyboard = [
-        # Row 1: Strategy + Add Position
+        # Row 1: Timeframe selection
+        [
+            InlineKeyboardButton(tf_1m, callback_data="dex:pos_tf:1m"),
+            InlineKeyboardButton(tf_1h, callback_data="dex:pos_tf:1h"),
+            InlineKeyboardButton(tf_1d, callback_data="dex:pos_tf:1d"),
+        ],
+        # Row 2: Strategy + Add Position
         [
             InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
             InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
-        # Row 2: Refresh + Gecko + Back (combined chart is default)
+        # Row 3: Refresh + Gecko + Back
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
             InlineKeyboardButton("🦎 Gecko", url=gecko_url),
@@ -3648,7 +3768,7 @@ async def show_add_position_menu(
         # Try to get cached OHLCV data for combined chart
         try:
             gecko_network = get_gecko_network(network)
-            ohlcv_cache_key = f"ohlcv_{gecko_network}_{pool_address}_1h_token"
+            ohlcv_cache_key = f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_token"
             ohlcv_data = get_cached(context.user_data, ohlcv_cache_key, ttl=300)  # 5min cache
 
             if ohlcv_data is None:
@@ -3656,7 +3776,7 @@ async def show_add_position_menu(
                 ohlcv_data, ohlcv_error = await fetch_ohlcv(
                     pool_address=pool_address,
                     network=gecko_network,
-                    timeframe="1h",
+                    timeframe=timeframe,
                     currency="token",
                     user_data=context.user_data
                 )
@@ -3670,7 +3790,7 @@ async def show_add_position_menu(
                     ohlcv_data=ohlcv_data or [],
                     bins=bins or [],
                     pair_name=pair,
-                    timeframe="1h",
+                    timeframe=timeframe,
                     current_price=current_val,
                     base_symbol=base_symbol,
                     quote_symbol=quote_symbol,
@@ -3703,17 +3823,32 @@ async def show_add_position_menu(
             help_text += r"_█ in range  ░ out  ◄ current price  ↓↑ your bounds_" + "\n"
 
     # Determine how to send
+    # Check for loading message from timeframe switch
+    loading_msg_id = context.user_data.pop("_loading_msg_id", None)
+    loading_chat_id = context.user_data.pop("_loading_chat_id", None)
+
     # Check if we have a stored menu message we can edit
     stored_menu_msg_id = context.user_data.get("add_position_menu_msg_id")
     stored_menu_chat_id = context.user_data.get("add_position_menu_chat_id")
     stored_menu_is_photo = context.user_data.get("add_position_menu_is_photo", False)
 
-    if send_new or not update.callback_query:
-        chat = update.message.chat if update.message else update.callback_query.message.chat
+    if loading_msg_id or send_new or not update.callback_query:
+        # Loading message case, send_new, or text input - need to send new message
+        chat = update.callback_query.message.chat if update.callback_query else update.message.chat
+
+        # Delete loading message if it exists
+        if loading_msg_id and loading_chat_id:
+            try:
+                await update.get_bot().delete_message(
+                    chat_id=loading_chat_id,
+                    message_id=loading_msg_id
+                )
+            except Exception:
+                pass
 
         # For text input updates with chart, delete old message and send new one
         # (can't replace photo, only edit caption)
-        if stored_menu_msg_id and stored_menu_chat_id:
+        if stored_menu_msg_id and stored_menu_chat_id and not loading_msg_id:
             # Delete old message to allow sending new one with updated chart
             try:
                 await update.get_bot().delete_message(
@@ -3815,9 +3950,15 @@ async def handle_pos_toggle_strategy(update: Update, context: ContextTypes.DEFAU
     await show_add_position_menu(update, context)
 
 
-async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Refresh pool info and token balances by clearing cache"""
+async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None) -> None:
+    """Refresh pool info and token balances by clearing cache
+
+    Args:
+        timeframe: Optional OHLCV timeframe (1m, 1h, 1d). If None, full refresh with default 1h.
+    """
     from ._shared import clear_cache
+
+    query = update.callback_query
 
     # Get current pool info to build cache keys
     params = context.user_data.get("add_position_params", {})
@@ -3829,26 +3970,57 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE)
     base_token = selected_pool.get("base_token", "")
     quote_token = selected_pool.get("quote_token", "")
 
-    # Clear specific cache keys
-    pool_cache_key = f"pool_info_{connector}_{pool_address}"
-    balance_cache_key = f"token_balances_{network}_{base_token}_{quote_token}"
+    # Only clear cache and refetch on full refresh (no timeframe switch)
+    if timeframe is None:
+        # Clear specific cache keys
+        pool_cache_key = f"pool_info_{connector}_{pool_address}"
+        balance_cache_key = f"token_balances_{network}_{base_token}_{quote_token}"
 
-    clear_cache(context.user_data, pool_cache_key)
-    clear_cache(context.user_data, balance_cache_key)
+        clear_cache(context.user_data, pool_cache_key)
+        clear_cache(context.user_data, balance_cache_key)
 
-    # Also clear stored pool info to force refresh
-    context.user_data.pop("selected_pool_info", None)
+        # Also clear stored pool info to force refresh
+        context.user_data.pop("selected_pool_info", None)
 
-    # Refetch pool info
-    if pool_address:
-        chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
-        pool_info = await _fetch_pool_info(client, pool_address, connector)
-        set_cached(context.user_data, pool_cache_key, pool_info)
-        context.user_data["selected_pool_info"] = pool_info
+        # Refetch pool info
+        if pool_address:
+            chat_id = update.effective_chat.id
+            client = await get_client(chat_id)
+            pool_info = await _fetch_pool_info(client, pool_address, connector)
+            set_cached(context.user_data, pool_cache_key, pool_info)
+            context.user_data["selected_pool_info"] = pool_info
 
-    await update.callback_query.answer("Refreshed!")
-    await show_add_position_menu(update, context)
+        await query.answer("Refreshed!")
+        timeframe = "1h"  # Default timeframe
+    else:
+        # Timeframe switch - show loading transition
+        await query.answer(f"Loading {timeframe} candles...")
+
+        # Show loading state - handle both photo and text messages
+        pair = selected_pool.get('trading_pair', selected_pool.get('name', 'Pool'))
+        loading_msg = rf"⏳ *Loading {timeframe} candles\.\.\.*" + "\n\n"
+        loading_msg += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+        loading_msg += r"_Fetching OHLCV data\.\.\._"
+
+        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+
+        try:
+            # Delete current message (works for both photo and text)
+            await query.message.delete()
+        except Exception:
+            pass
+
+        # Send loading message
+        loading_sent = await query.message.chat.send_message(
+            loading_msg,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(loading_keyboard)
+        )
+        # Store loading message ID for deletion
+        context.user_data["_loading_msg_id"] = loading_sent.message_id
+        context.user_data["_loading_chat_id"] = loading_sent.chat.id
+
+    await show_add_position_menu(update, context, timeframe=timeframe)
 
 
 async def handle_pos_use_max_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

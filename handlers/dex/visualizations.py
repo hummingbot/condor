@@ -598,7 +598,7 @@ def generate_combined_chart(
             logger.warning("No OHLCV data for combined chart")
             return None
 
-        # Parse OHLCV data
+        # Parse OHLCV data - filter out empty candles (where all OHLC values are 0 or null)
         times = []
         opens = []
         highs = []
@@ -611,6 +611,20 @@ def generate_combined_chart(
                 ts, o, h, l, c = candle[:5]
                 v = candle[5] if len(candle) > 5 else 0
 
+                # Parse OHLC values
+                try:
+                    o_val = float(o) if o is not None else 0
+                    h_val = float(h) if h is not None else 0
+                    l_val = float(l) if l is not None else 0
+                    c_val = float(c) if c is not None else 0
+                except (ValueError, TypeError):
+                    continue
+
+                # Skip empty candles (all zeros or all same value with zero volume)
+                if o_val == 0 and h_val == 0 and l_val == 0 and c_val == 0:
+                    continue
+
+                # Parse timestamp
                 if isinstance(ts, (int, float)):
                     times.append(datetime.fromtimestamp(ts))
                 elif hasattr(ts, 'to_pydatetime'):
@@ -623,14 +637,25 @@ def generate_combined_chart(
                     except Exception:
                         continue
 
-                opens.append(float(o))
-                highs.append(float(h))
-                lows.append(float(l))
-                closes.append(float(c))
+                opens.append(o_val)
+                highs.append(h_val)
+                lows.append(l_val)
+                closes.append(c_val)
                 volumes.append(float(v) if v else 0)
 
         if not times:
             raise ValueError("No valid OHLCV data")
+
+        # Limit to most recent candles to avoid overcrowding
+        # For 1m: 100 candles = ~1.5 hours, 1h: 100 = ~4 days, 1d: 100 = ~3 months
+        max_candles = 100
+        if len(times) > max_candles:
+            times = times[-max_candles:]
+            opens = opens[-max_candles:]
+            highs = highs[-max_candles:]
+            lows = lows[-max_candles:]
+            closes = closes[-max_candles:]
+            volumes = volumes[-max_candles:]
 
         # Process bin data for liquidity
         bin_data = []
@@ -879,13 +904,32 @@ def generate_combined_chart(
             bargap=0.1,  # Gap between bars
         )
 
+        # Calculate expected interval for rangebreaks (to hide gaps in trading)
+        if len(times) >= 2:
+            # Calculate time delta between candles
+            time_deltas = [(times[i+1] - times[i]).total_seconds() for i in range(len(times)-1) if times[i+1] > times[i]]
+            if time_deltas:
+                # Use median delta as the expected interval
+                expected_interval = sorted(time_deltas)[len(time_deltas)//2]
+                # Set dvalue for rangebreaks (gaps > 2x expected interval)
+                gap_threshold = expected_interval * 2 * 1000  # Convert to ms
+            else:
+                gap_threshold = None
+        else:
+            gap_threshold = None
+
         # Update axes styling (use unified theme)
-        fig.update_xaxes(
+        # Add rangebreaks to hide gaps in trading data
+        xaxis_config = dict(
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
             showgrid=True,
             zeroline=False,
         )
+        if gap_threshold:
+            xaxis_config["rangebreaks"] = [dict(dvalue=gap_threshold)]
+
+        fig.update_xaxes(**xaxis_config)
         fig.update_yaxes(
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
