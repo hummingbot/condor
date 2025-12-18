@@ -146,6 +146,17 @@ from .controller_handlers import (
 )
 from ._shared import clear_bots_state, SIDE_LONG, SIDE_SHORT
 
+# Archived bots handlers
+from .archived import (
+    show_archived_menu,
+    show_archived_detail,
+    show_timeline_chart,
+    show_bot_chart,
+    handle_generate_report,
+    handle_archived_refresh,
+    clear_archived_state,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -624,6 +635,36 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if len(action_parts) > 1:
                 idx = int(action_parts[1])
                 await handle_refresh_controller(update, context, idx)
+
+        # Archived bots handlers
+        elif main_action == "archived":
+            await show_archived_menu(update, context)
+
+        elif main_action == "archived_page":
+            if len(action_parts) > 1:
+                page = int(action_parts[1])
+                await show_archived_menu(update, context, page)
+
+        elif main_action == "archived_select":
+            if len(action_parts) > 1:
+                db_index = int(action_parts[1])
+                await show_archived_detail(update, context, db_index)
+
+        elif main_action == "archived_timeline":
+            await show_timeline_chart(update, context)
+
+        elif main_action == "archived_chart":
+            if len(action_parts) > 1:
+                db_index = int(action_parts[1])
+                await show_bot_chart(update, context, db_index)
+
+        elif main_action == "archived_report":
+            if len(action_parts) > 1:
+                db_index = int(action_parts[1])
+                await handle_generate_report(update, context, db_index)
+
+        elif main_action == "archived_refresh":
+            await handle_archived_refresh(update, context)
 
         else:
             logger.warning(f"Unknown bots action: {action}")

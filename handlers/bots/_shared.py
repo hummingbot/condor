@@ -112,6 +112,11 @@ def clear_bots_state(context) -> None:
     context.user_data.pop("editing_controller_field", None)
     context.user_data.pop("deploy_params", None)
     context.user_data.pop("editing_deploy_field", None)
+    # Archived bots state
+    context.user_data.pop("archived_databases", None)
+    context.user_data.pop("archived_current_db", None)
+    context.user_data.pop("archived_page", None)
+    context.user_data.pop("archived_summaries", None)
 
 
 def get_controller_config(context) -> Dict[str, Any]:
