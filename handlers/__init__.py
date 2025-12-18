@@ -79,3 +79,14 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("editing_controller_field", None)
     context.user_data.pop("deploy_params", None)
     context.user_data.pop("editing_deploy_field", None)
+
+    # Bots - archived states
+    context.user_data.pop("archived_databases", None)
+    context.user_data.pop("archived_current_db", None)
+    context.user_data.pop("archived_page", None)
+    context.user_data.pop("archived_summaries", None)
+    context.user_data.pop("archived_total_count", None)
+
+    # Routines states
+    context.user_data.pop("routines_state", None)
+    context.user_data.pop("routines_editing", None)
