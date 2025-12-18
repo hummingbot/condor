@@ -414,13 +414,13 @@ def _format_pool_table(pools: list) -> str:
 
     # Header - balanced for mobile (~40 chars)
     lines.append("```")
-    lines.append(f"{'#':>2} {'Pair':<12} {'APR%':>7} {'Bin':>3} {'Fee':>4} {'TVL':>5}")
+    lines.append(f"{'#':>2} {'Pair':<11} {'APR%':>7} {'Bin':>3} {'Fee':>5} {'TVL':>5}")
     lines.append("─" * 40)
 
     for i, pool in enumerate(pools):
         idx = str(i + 1)
-        # Truncate pair to 12 chars
-        pair = pool.get('trading_pair', 'N/A')[:12]
+        # Truncate pair to 11 chars
+        pair = pool.get('trading_pair', 'N/A')[:11]
 
         # Get TVL value
         tvl_val = 0
@@ -437,7 +437,7 @@ def _format_pool_table(pools: list) -> str:
         if base_fee:
             try:
                 fee_val = float(base_fee)
-                fee_str = f"{fee_val:.1f}" if fee_val < 10 else f"{int(fee_val)}"
+                fee_str = f"{fee_val:.2f}" if fee_val < 10 else f"{int(fee_val)}"
             except (ValueError, TypeError):
                 fee_str = "—"
         else:
@@ -466,7 +466,7 @@ def _format_pool_table(pools: list) -> str:
         # Bin step
         bin_step = pool.get('bin_step', '—')
 
-        lines.append(f"{idx:>2} {pair:<12} {apr_str:>7} {bin_step:>3} {fee_str:>4} {tvl:>5}")
+        lines.append(f"{idx:>2} {pair:<11} {apr_str:>7} {bin_step:>3} {fee_str:>5} {tvl:>5}")
 
     lines.append("```")
 
@@ -1094,60 +1094,46 @@ async def _show_pool_detail(
     quote_in_gateway = mint_y and mint_y in token_cache
     tokens_in_gateway = base_in_gateway and quote_in_gateway
 
-    # Build message with copyable addresses
-    message = r"📋 *Pool Details*" + "\n\n"
-    message += escape_markdown_v2(f"🏊 Pool: {pair}") + "\n\n"
-
-    # Addresses section - all copyable
-    message += escape_markdown_v2("━━━ Addresses ━━━") + "\n"
-    message += escape_markdown_v2("📍 Pool: ") + f"`{pool_address}`\n"
-    if mint_x:
-        message += escape_markdown_v2(f"🪙 Base ({base_symbol}): ") + f"`{mint_x}`\n"
-    if mint_y:
-        message += escape_markdown_v2(f"💵 Quote ({quote_symbol}): ") + f"`{mint_y}`\n"
-    message += "\n"
-
-    # Pool metrics
+    # Get pool metrics
     tvl = pool.get('liquidity') or pool.get('tvl') or pool_info.get('liquidity') or pool_info.get('tvl')
     vol_24h = pool.get('volume_24h') or pool_info.get('volume_24h')
     fees_24h = pool.get('fees_24h') or pool_info.get('fees_24h')
-
-    if tvl or vol_24h or fees_24h:
-        lines = ["━━━ Metrics ━━━"]
-        if tvl:
-            lines.append(f"💰 TVL: ${_format_number(tvl)}")
-        if vol_24h:
-            lines.append(f"📈 Volume 24h: ${_format_number(vol_24h)}")
-        if fees_24h:
-            lines.append(f"💵 Fees 24h: ${_format_number(fees_24h)}")
-        message += escape_markdown_v2("\n".join(lines)) + "\n\n"
-
-    # Fees and APR
     base_fee = pool.get('base_fee_percentage') or pool_info.get('base_fee_percentage')
     apr = pool.get('apr') or pool_info.get('apr')
 
-    if base_fee or apr:
-        lines = ["━━━ Fees & Yield ━━━"]
-        if base_fee:
-            lines.append(f"💸 Fee: {base_fee}%")
+    # Build message - matching show_add_position_menu format
+    message = r"➕ *Add CLMM Position*" + "\n\n"
+
+    # Pool header - compact info
+    message += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+    addr_short = f"{pool_address[:6]}...{pool_address[-4:]}" if len(pool_address) > 12 else pool_address
+    message += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
+    if current_price:
+        message += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
+    if bin_step:
+        message += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(default 20 bins each side\\)_\n"
+    if base_fee:
+        message += f"💸 *Fee:* `{escape_markdown_v2(str(base_fee))}%`\n"
+
+    # Pool metrics section (if available)
+    if tvl or vol_24h or fees_24h or apr:
+        lines = []
+        if tvl:
+            lines.append(f"💰 TVL: ${_format_number(tvl)}")
+        if vol_24h:
+            lines.append(f"📈 Vol 24h: ${_format_number(vol_24h)}")
+        if fees_24h:
+            lines.append(f"💵 Fees 24h: ${_format_number(fees_24h)}")
         if apr:
             try:
                 apr_val = float(apr)
-                lines.append(f"📈 APR: {apr_val:.2f}%")
+                lines.append(f"📊 APR: {apr_val:.2f}%")
             except (ValueError, TypeError):
                 pass
-        message += escape_markdown_v2("\n".join(lines)) + "\n\n"
+        if lines:
+            message += "\n" + escape_markdown_v2(" | ".join(lines)) + "\n"
 
-    # Pool config - compact
-    if bin_step or current_price:
-        lines = ["━━━ Config ━━━"]
-        if bin_step:
-            lines.append(f"📊 Bin Step: {bin_step}")
-        if current_price:
-            lines.append(f"💱 Price: {current_price}")
-        message += escape_markdown_v2("\n".join(lines)) + "\n\n"
-
-    # Wallet balances for add liquidity
+    # Fetch wallet balances
     try:
         balance_cache_key = f"token_balances_{network}_{base_symbol}_{quote_symbol}"
         balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
@@ -1155,14 +1141,6 @@ async def _show_pool_detail(
             client = await get_client(chat_id)
             balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
             set_cached(context.user_data, balance_cache_key, balances)
-
-        lines = ["━━━ Wallet ━━━"]
-        base_bal_str = _format_number(balances["base_balance"])
-        quote_bal_str = _format_number(balances["quote_balance"])
-        lines.append(f"💰 {base_symbol}: {base_bal_str}")
-        lines.append(f"💵 {quote_symbol}: {quote_bal_str}")
-        message += escape_markdown_v2("\n".join(lines)) + "\n"
-
         context.user_data["token_balances"] = balances
     except Exception as e:
         logger.warning(f"Could not fetch token balances: {e}")
@@ -1173,8 +1151,22 @@ async def _show_pool_detail(
     context.user_data["selected_pool_info"] = pool_info
     context.user_data["dex_state"] = "add_position"
 
+    # ========== WALLET BALANCES ==========
+    base_bal = balances.get("base_balance", 0)
+    quote_bal = balances.get("quote_balance", 0)
+    base_val = balances.get("base_value", 0)
+    quote_val = balances.get("quote_value", 0)
+
+    message += "\n" + escape_markdown_v2("━━━ Wallet Balances ━━━") + "\n"
+    base_bal_str = _format_number(base_bal)
+    base_val_str = f"${_format_number(base_val)}" if base_val > 0 else ""
+    message += f"💰 `{escape_markdown_v2(base_symbol)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
+
+    quote_bal_str = _format_number(quote_bal)
+    quote_val_str = f"${_format_number(quote_val)}" if quote_val > 0 else ""
+    message += f"💵 `{escape_markdown_v2(quote_symbol)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
+
     # ========== POSITION PREVIEW ==========
-    # Show preview of the position to be created
     message += "\n" + escape_markdown_v2("━━━ Position Preview ━━━") + "\n"
 
     # Get amounts and calculate actual values
@@ -1184,7 +1176,7 @@ async def _show_pool_detail(
     try:
         if base_amount_str.endswith('%'):
             base_pct_val = float(base_amount_str[:-1])
-            base_amount = balances.get("base_balance", 0) * base_pct_val / 100
+            base_amount = base_bal * base_pct_val / 100
         else:
             base_amount = float(base_amount_str) if base_amount_str else 0
     except (ValueError, TypeError):
@@ -1193,7 +1185,7 @@ async def _show_pool_detail(
     try:
         if quote_amount_str.endswith('%'):
             quote_pct_val = float(quote_amount_str[:-1])
-            quote_amount = balances.get("quote_balance", 0) * quote_pct_val / 100
+            quote_amount = quote_bal * quote_pct_val / 100
         else:
             quote_amount = float(quote_amount_str) if quote_amount_str else 0
     except (ValueError, TypeError):
@@ -1228,8 +1220,8 @@ async def _show_pool_detail(
             # Show range with percentages
             l_pct_str = f"({lower_pct_preview:+.1f}%)" if lower_pct_preview is not None else ""
             u_pct_str = f"({upper_pct_preview:+.1f}%)" if upper_pct_preview is not None else ""
-            message += f"📉 *L:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
-            message += f"📈 *U:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
+            message += f"📉 *Lower:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
+            message += f"📈 *Upper:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
 
             # Validate bin range and show
             if current_price and bin_step:
@@ -1243,42 +1235,57 @@ async def _show_pool_detail(
         except (ValueError, TypeError):
             pass
 
-    # Show calculated amounts
-    message += f"💰 *{escape_markdown_v2(base_symbol)}:* `{escape_markdown_v2(_format_number(base_amount))}` _\\({escape_markdown_v2(base_amount_str)}\\)_\n"
-    message += f"💵 *{escape_markdown_v2(quote_symbol)}:* `{escape_markdown_v2(_format_number(quote_amount))}` _\\({escape_markdown_v2(quote_amount_str)}\\)_\n"
+    # Show calculated amounts with $ values
+    base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
+    quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
 
-    # Build add position display values - show percentages in buttons
+    # Calculate $ values for amounts
+    try:
+        price_float = float(current_price) if current_price else 0
+        base_usd = base_amount * price_float  # base token value in quote (usually USD)
+        quote_usd = quote_amount  # quote is usually USDC/USDT
+    except (ValueError, TypeError):
+        base_usd, quote_usd = 0, 0
+
+    base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
+    quote_usd_str = f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+
+    message += f"💰 *Add:* `{base_amt_fmt}` {escape_markdown_v2(base_symbol)}{base_usd_str}\n"
+    message += f"💵 *Add:* `{quote_amt_fmt}` {escape_markdown_v2(quote_symbol)}{quote_usd_str}\n"
+
+    # Build edit template - each field on its own line
     lower_pct = params.get('lower_pct')
     upper_pct = params.get('upper_pct')
-    lower_display = f"{lower_pct:.1f}%" if lower_pct is not None else (params.get('lower_price', '—')[:8] if params.get('lower_price') else '—')
-    upper_display = f"+{upper_pct:.1f}%" if upper_pct is not None and upper_pct >= 0 else (f"{upper_pct:.1f}%" if upper_pct is not None else (params.get('upper_price', '—')[:8] if params.get('upper_price') else '—'))
-    base_display = params.get('amount_base') or '10%'
-    quote_display = params.get('amount_quote') or '10%'
+    l_pct_edit = f"{lower_pct:.1f}%" if lower_pct is not None else "-5%"
+    # For upper, don't show + prefix (parser treats unsigned as positive)
+    u_pct_edit = f"{upper_pct:.1f}%" if upper_pct is not None else "5%"
+    base_edit = params.get('amount_base') or '10%'
+    quote_edit = params.get('amount_quote') or '10%'
+
+    message += f"\n_To edit, send:_\n"
+    message += f"`L:{escape_markdown_v2(l_pct_edit)}`\n"
+    message += f"`U:{escape_markdown_v2(u_pct_edit)}`\n"
+    message += f"`B:{escape_markdown_v2(base_edit)}`\n"
+    message += f"`Q:{escape_markdown_v2(quote_edit)}`\n"
+
     strategy_display = params.get('strategy_type', '0')
     strategy_names = {'0': 'Spot', '1': 'Curve', '2': 'BidAsk'}
     strategy_name = strategy_names.get(strategy_display, 'Spot')
 
-    # Build keyboard with inline add liquidity controls
+    # Build GeckoTerminal link for pool
+    gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
+
+    # Build keyboard - simplified without L/U/B/Q buttons
     keyboard = [
-        # Row 1: Price range
-        [
-            InlineKeyboardButton(f"📉 L: {lower_display}", callback_data="dex:pos_set_lower"),
-            InlineKeyboardButton(f"📈 U: {upper_display}", callback_data="dex:pos_set_upper"),
-        ],
-        # Row 2: Amounts
-        [
-            InlineKeyboardButton(f"💰 {base_symbol}: {base_display}", callback_data="dex:pos_set_base"),
-            InlineKeyboardButton(f"💵 {quote_symbol}: {quote_display}", callback_data="dex:pos_set_quote"),
-        ],
-        # Row 3: Strategy + Add Position
+        # Row 1: Strategy + Add Position
         [
             InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
             InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
-        # Row 4: Candles + Refresh
+        # Row 2: Refresh + GeckoTerminal link
         [
-            InlineKeyboardButton("📈 Candles", callback_data="dex:pool_ohlcv:1h"),
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pool_detail_refresh"),
+            InlineKeyboardButton("🦎 Gecko", url=gecko_url),
         ],
     ]
 
@@ -3239,6 +3246,10 @@ async def show_add_position_menu(
             help_text += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
         if bin_step:
             help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(default 20 bins each side\\)_\n"
+        # Add fee if available
+        base_fee = pool_info.get('base_fee_percentage') or selected_pool.get('base_fee_percentage')
+        if base_fee:
+            help_text += f"💸 *Fee:* `{escape_markdown_v2(str(base_fee))}%`\n"
 
         # Fetch and display token balances (cached with 60s TTL)
         try:
@@ -3318,10 +3329,10 @@ async def show_add_position_menu(
                     u_str = f"{upper_p:.6f}"
 
                 # Show range with percentages
-                l_pct_str = f"{lower_pct:+.1f}%" if lower_pct is not None else ""
-                u_pct_str = f"{upper_pct:+.1f}%" if upper_pct is not None else ""
-                help_text += f"📉 *L:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
-                help_text += f"📈 *U:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
+                l_pct_str = f"({lower_pct:+.1f}%)" if lower_pct is not None else ""
+                u_pct_str = f"({upper_pct:+.1f}%)" if upper_pct is not None else ""
+                help_text += f"📉 *Lower:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
+                help_text += f"📈 *Upper:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
 
                 # Validate bin range
                 if current_price and bin_step:
@@ -3335,69 +3346,61 @@ async def show_add_position_menu(
             except (ValueError, TypeError):
                 pass
 
-        # Show amounts
-        help_text += f"💰 *{escape_markdown_v2(base_symbol)}:* `{escape_markdown_v2(_format_number(base_amount))}`\n"
-        help_text += f"💵 *{escape_markdown_v2(quote_symbol)}:* `{escape_markdown_v2(_format_number(quote_amount))}`\n"
+        # Show amounts with $ values
+        base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
+        quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
+
+        # Calculate $ values for amounts
+        try:
+            price_float = float(current_price) if current_price else 0
+            base_usd = base_amount * price_float  # base token value in quote (usually USD)
+            quote_usd = quote_amount  # quote is usually USDC/USDT
+        except (ValueError, TypeError):
+            base_usd, quote_usd = 0, 0
+
+        base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
+        quote_usd_str = f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+
+        help_text += f"💰 *Add:* `{base_amt_fmt}` {escape_markdown_v2(base_symbol)}{base_usd_str}\n"
+        help_text += f"💵 *Add:* `{quote_amt_fmt}` {escape_markdown_v2(quote_symbol)}{quote_usd_str}\n"
+
+        # Add edit template - each field on its own line
+        l_pct_edit = f"{lower_pct:.1f}%" if lower_pct is not None else "-5%"
+        # For upper, don't show + prefix (parser treats unsigned as positive)
+        u_pct_edit = f"{upper_pct:.1f}%" if upper_pct is not None else "5%"
+        help_text += f"\n_To edit, send:_\n"
+        help_text += f"`L:{escape_markdown_v2(l_pct_edit)}`\n"
+        help_text += f"`U:{escape_markdown_v2(u_pct_edit)}`\n"
+        help_text += f"`B:{escape_markdown_v2(base_amount_str)}`\n"
+        help_text += f"`Q:{escape_markdown_v2(quote_amount_str)}`\n"
 
         # NOTE: ASCII visualization is added AFTER we know if chart image is available
         # This is done below, after chart_bytes is generated
 
-    # Build keyboard - show percentages in buttons for L/U
-    lower_pct = params.get('lower_pct')
-    upper_pct = params.get('upper_pct')
-    lower_display = f"{lower_pct:.1f}%" if lower_pct is not None else (params.get('lower_price', '—')[:8] if params.get('lower_price') else '—')
-    upper_display = f"+{upper_pct:.1f}%" if upper_pct is not None and upper_pct >= 0 else (f"{upper_pct:.1f}%" if upper_pct is not None else (params.get('upper_price', '—')[:8] if params.get('upper_price') else '—'))
-    base_display = params.get('amount_base') or '10%'
-    quote_display = params.get('amount_quote') or '10%'
+    # Build simplified keyboard (no L/U/B/Q buttons - use text input instead)
     strategy_display = params.get('strategy_type', '0')
-
-    # Strategy type name mapping
     strategy_names = {'0': 'Spot', '1': 'Curve', '2': 'BidAsk'}
     strategy_name = strategy_names.get(strategy_display, 'Spot')
 
+    # Build GeckoTerminal link for pool
+    gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
+
     keyboard = [
+        # Row 1: Strategy + Add Position
         [
-            InlineKeyboardButton(
-                f"📉 L: {lower_display}",
-                callback_data="dex:pos_set_lower"
-            ),
-            InlineKeyboardButton(
-                f"📈 U: {upper_display}",
-                callback_data="dex:pos_set_upper"
-            )
+            InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
+            InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
+        # Row 2: Refresh + GeckoTerminal link
         [
-            InlineKeyboardButton(
-                f"💰 Base: {base_display}",
-                callback_data="dex:pos_set_base"
-            ),
-            InlineKeyboardButton(
-                f"💵 Quote: {quote_display}",
-                callback_data="dex:pos_set_quote"
-            )
+            InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
+            InlineKeyboardButton("🦎 Gecko", url=gecko_url),
         ],
+        # Row 3: Back to Pool
         [
-            InlineKeyboardButton(
-                f"🎯 Strategy: {strategy_name}",
-                callback_data="dex:pos_toggle_strategy"
-            )
+            InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh")
         ]
     ]
-
-    # Help/Back toggle and action buttons
-    help_button = (
-        InlineKeyboardButton("« Position", callback_data="dex:pool_detail_refresh")
-        if show_help else
-        InlineKeyboardButton("❓ Help", callback_data="dex:pos_help")
-    )
-    keyboard.append([
-        InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
-        InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
-        help_button,
-    ])
-    keyboard.append([
-        InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh")
-    ])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -3730,7 +3733,7 @@ async def handle_pos_set_base(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Get balance for display
     balances = context.user_data.get("token_balances", {})
     base_bal = balances.get("base_balance", 0)
-    bal_info = f"_Balance: {_format_number(base_bal)}_\n\n" if base_bal > 0 else ""
+    bal_info = f"_Balance: {escape_markdown_v2(_format_number(base_bal))}_\n\n" if base_bal > 0 else ""
 
     help_text = (
         r"📝 *Set Base Token Amount*" + "\n\n" +
@@ -3759,7 +3762,7 @@ async def handle_pos_set_quote(update: Update, context: ContextTypes.DEFAULT_TYP
     # Get balance for display
     balances = context.user_data.get("token_balances", {})
     quote_bal = balances.get("quote_balance", 0)
-    bal_info = f"_Balance: {_format_number(quote_bal)}_\n\n" if quote_bal > 0 else ""
+    bal_info = f"_Balance: {escape_markdown_v2(_format_number(quote_bal))}_\n\n" if quote_bal > 0 else ""
 
     help_text = (
         r"📝 *Set Quote Token Amount*" + "\n\n" +
@@ -4020,8 +4023,17 @@ def _parse_multi_field_input(user_input: str, current_price: float = None) -> di
     if ':' not in user_input:
         return {}
 
-    # Split by common separators: ' - ', '-', ',' or spaces
-    parts = re.split(r'\s*[-,]\s*|\s+', user_input.strip())
+    # Use regex to find key:value patterns directly (handles negative numbers correctly)
+    # Pattern: word followed by : followed by value (which may start with - or +)
+    pattern = r'([a-zA-Z]+)\s*:\s*([+-]?[\d.]+%?|[\d.]+)'
+    matches = re.findall(pattern, user_input, re.IGNORECASE)
+
+    # Convert matches to parts format for compatibility with existing logic
+    parts = [f"{k}:{v}" for k, v in matches]
+
+    # If no regex matches, fall back to simple split (for backwards compatibility)
+    if not parts:
+        parts = re.split(r'\s*,\s*|\s+', user_input.strip())
 
     for part in parts:
         part = part.strip()
@@ -4148,14 +4160,14 @@ async def process_add_position(
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
 
-        result = await client.gateway_clmm.add_liquidity(
+        result = await client.gateway_clmm.open_position(
             connector=connector,
             network=network,
             pool_address=params["pool_address"],
             lower_price=Decimal(params["lower_price"]),
             upper_price=Decimal(params["upper_price"]),
-            amount_base=Decimal(params["amount_base"]) if params["amount_base"] else None,
-            amount_quote=Decimal(params["amount_quote"]) if params["amount_quote"] else None,
+            base_token_amount=Decimal(params["amount_base"]) if params["amount_base"] else None,
+            quote_token_amount=Decimal(params["amount_quote"]) if params["amount_quote"] else None,
         )
 
         if result is None:
