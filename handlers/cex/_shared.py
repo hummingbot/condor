@@ -244,7 +244,8 @@ async def fetch_cex_balances(client, account_name: str) -> Dict[str, List[Dict[s
         try:
             portfolio_state = await client.portfolio.get_state(
                 account_names=[account_name],
-                connector_names=cex_connectors
+                connector_names=cex_connectors,
+                refresh=True,
             )
 
             # portfolio.get_state returns {account_name: {connector_name: [balances]}}
