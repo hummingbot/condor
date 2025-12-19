@@ -3,6 +3,9 @@ services:
     build: .
     container_name: condor-bot
     restart: unless-stopped
+    environment:
+      TELEGRAM_TOKEN: your_bot_token
+      AUTHORIZED_USERS: chat_id_1,chat_id_2
     env_file:
       - .env
     volumes:
@@ -10,7 +13,4 @@ services:
       - ./condor_bot_data.pickle:/app/condor_bot_data.pickle
       # Mount servers config
       - ./servers.yml:/app/servers.yml
-    environment:
-      - PYTHONUNBUFFERED=1
-    # Optional: enable if you need to access the host network (e.g., for local Hummingbot instances)
-    # network_mode: host
+    network_mode: host
