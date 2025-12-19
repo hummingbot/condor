@@ -144,7 +144,18 @@ async def fetch_ohlcv(
                 return cached, None
 
         client = GeckoTerminalAsyncClient()
-        result = await client.get_ohlcv(gecko_network, pool_address, timeframe, currency=currency)
+        # Pass all parameters explicitly:
+        # - currency="token" means price in quote token (not USD)
+        # - token="base" means OHLCV for the base token
+        # - limit=100 for reasonable data size
+        result = await client.get_ohlcv(
+            gecko_network,
+            pool_address,
+            timeframe,
+            currency=currency,
+            token="base",
+            limit=100
+        )
 
         # Parse response - handle different formats
         ohlcv_list = None
@@ -172,6 +183,16 @@ async def fetch_ohlcv(
 
         if not ohlcv_list:
             return None, "No OHLCV data available"
+
+        # Debug logging: show price range from OHLCV data
+        if ohlcv_list:
+            try:
+                closes = [float(c[4]) for c in ohlcv_list if len(c) > 4 and c[4]]
+                if closes:
+                    logger.info(f"OHLCV {pool_address[:8]}... {timeframe} currency={currency}: "
+                               f"{len(ohlcv_list)} candles, price range [{min(closes):.6f} - {max(closes):.6f}]")
+            except Exception as e:
+                logger.debug(f"Could not log OHLCV price range: {e}")
 
         # Cache result
         if user_data is not None:

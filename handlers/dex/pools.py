@@ -414,13 +414,13 @@ def _format_pool_table(pools: list) -> str:
 
     # Header - balanced for mobile (~40 chars)
     lines.append("```")
-    lines.append(f"{'#':>2} {'Pair':<12} {'APR%':>7} {'Bin':>3} {'Fee':>4} {'TVL':>5}")
+    lines.append(f"{'#':>2} {'Pair':<11} {'APR%':>7} {'Bin':>3} {'Fee':>5} {'TVL':>5}")
     lines.append("─" * 40)
 
     for i, pool in enumerate(pools):
         idx = str(i + 1)
-        # Truncate pair to 12 chars
-        pair = pool.get('trading_pair', 'N/A')[:12]
+        # Truncate pair to 11 chars
+        pair = pool.get('trading_pair', 'N/A')[:11]
 
         # Get TVL value
         tvl_val = 0
@@ -437,7 +437,7 @@ def _format_pool_table(pools: list) -> str:
         if base_fee:
             try:
                 fee_val = float(base_fee)
-                fee_str = f"{fee_val:.1f}" if fee_val < 10 else f"{int(fee_val)}"
+                fee_str = f"{fee_val:.2f}" if fee_val < 10 else f"{int(fee_val)}"
             except (ValueError, TypeError):
                 fee_str = "—"
         else:
@@ -457,7 +457,7 @@ def _format_pool_table(pools: list) -> str:
                 elif apr_val >= 100:
                     apr_str = f"{apr_val:.0f}"
                 else:
-                    apr_str = f"{apr_val:.1f}"
+                    apr_str = f"{apr_val:.2f}"
             except (ValueError, TypeError):
                 apr_str = "—"
         else:
@@ -466,7 +466,7 @@ def _format_pool_table(pools: list) -> str:
         # Bin step
         bin_step = pool.get('bin_step', '—')
 
-        lines.append(f"{idx:>2} {pair:<12} {apr_str:>7} {bin_step:>3} {fee_str:>4} {tvl:>5}")
+        lines.append(f"{idx:>2} {pair:<11} {apr_str:>7} {bin_step:>3} {fee_str:>5} {tvl:>5}")
 
     lines.append("```")
 
@@ -956,7 +956,8 @@ async def _show_pool_detail(
     context: ContextTypes.DEFAULT_TYPE,
     pool: dict,
     from_callback: bool = False,
-    has_list_context: bool = True
+    has_list_context: bool = True,
+    timeframe: str = "1h"
 ) -> None:
     """Show detailed pool information with inline add liquidity controls
 
@@ -966,27 +967,63 @@ async def _show_pool_detail(
         pool: Pool data dict
         from_callback: Whether triggered from callback (button click)
         has_list_context: Whether there's a pool list to go back to
+        timeframe: OHLCV timeframe (1m, 1h, 1d) - default 1h
     """
+    import asyncio
     from io import BytesIO
     from utils.telegram_formatters import resolve_token_symbol
 
     pool_address = pool.get('pool_address', pool.get('address', 'N/A'))
     connector = pool.get('connector', 'meteora')
     network = 'solana-mainnet-beta'
-
-    # Fetch additional pool info with bins (cached with 60s TTL)
     chat_id = update.effective_chat.id
+
+    # Parallel fetch: pool_info, token_cache, and OHLCV data
     cache_key = f"pool_info_{connector}_{pool_address}"
     pool_info = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
-    if pool_info is None:
-        client = await get_client(chat_id)
-        pool_info = await _fetch_pool_info(client, pool_address, connector)
-        set_cached(context.user_data, cache_key, pool_info)
-
-    # Get or fetch token cache for symbol resolution
     token_cache = context.user_data.get("token_cache")
-    if not token_cache:
-        token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
+    gecko_network = get_gecko_network(network)
+
+    # Build list of async tasks to run in parallel
+    async def fetch_pool_info_task():
+        if pool_info is not None:
+            return pool_info
+        client = await get_client(chat_id)
+        return await _fetch_pool_info(client, pool_address, connector)
+
+    async def fetch_token_cache_task():
+        if token_cache is not None:
+            return token_cache
+        return await get_token_cache_from_gateway(chat_id=chat_id)
+
+    async def fetch_ohlcv_task():
+        try:
+            data, error = await fetch_ohlcv(
+                pool_address=pool_address,
+                network=gecko_network,
+                timeframe=timeframe,
+                currency="token",
+                user_data=context.user_data
+            )
+            if error:
+                logger.warning(f"Failed to fetch OHLCV: {error}")
+                return []
+            return data or []
+        except Exception as e:
+            logger.warning(f"Error fetching OHLCV: {e}")
+            return []
+
+    # Run all fetches in parallel
+    pool_info, token_cache, ohlcv_data = await asyncio.gather(
+        fetch_pool_info_task(),
+        fetch_token_cache_task(),
+        fetch_ohlcv_task()
+    )
+
+    # Cache results
+    if pool_info:
+        set_cached(context.user_data, cache_key, pool_info)
+    if token_cache:
         context.user_data["token_cache"] = token_cache
 
     # Try to get trading pair name from multiple sources
@@ -1094,60 +1131,46 @@ async def _show_pool_detail(
     quote_in_gateway = mint_y and mint_y in token_cache
     tokens_in_gateway = base_in_gateway and quote_in_gateway
 
-    # Build message with copyable addresses
-    message = r"📋 *Pool Details*" + "\n\n"
-    message += escape_markdown_v2(f"🏊 Pool: {pair}") + "\n\n"
-
-    # Addresses section - all copyable
-    message += escape_markdown_v2("━━━ Addresses ━━━") + "\n"
-    message += escape_markdown_v2("📍 Pool: ") + f"`{pool_address}`\n"
-    if mint_x:
-        message += escape_markdown_v2(f"🪙 Base ({base_symbol}): ") + f"`{mint_x}`\n"
-    if mint_y:
-        message += escape_markdown_v2(f"💵 Quote ({quote_symbol}): ") + f"`{mint_y}`\n"
-    message += "\n"
-
-    # Pool metrics
+    # Get pool metrics
     tvl = pool.get('liquidity') or pool.get('tvl') or pool_info.get('liquidity') or pool_info.get('tvl')
     vol_24h = pool.get('volume_24h') or pool_info.get('volume_24h')
     fees_24h = pool.get('fees_24h') or pool_info.get('fees_24h')
-
-    if tvl or vol_24h or fees_24h:
-        lines = ["━━━ Metrics ━━━"]
-        if tvl:
-            lines.append(f"💰 TVL: ${_format_number(tvl)}")
-        if vol_24h:
-            lines.append(f"📈 Volume 24h: ${_format_number(vol_24h)}")
-        if fees_24h:
-            lines.append(f"💵 Fees 24h: ${_format_number(fees_24h)}")
-        message += escape_markdown_v2("\n".join(lines)) + "\n\n"
-
-    # Fees and APR
     base_fee = pool.get('base_fee_percentage') or pool_info.get('base_fee_percentage')
     apr = pool.get('apr') or pool_info.get('apr')
 
-    if base_fee or apr:
-        lines = ["━━━ Fees & Yield ━━━"]
-        if base_fee:
-            lines.append(f"💸 Fee: {base_fee}%")
+    # Build message - matching show_add_position_menu format
+    message = r"➕ *Add CLMM Position*" + "\n\n"
+
+    # Pool header - compact info
+    message += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+    addr_short = f"{pool_address[:6]}...{pool_address[-4:]}" if len(pool_address) > 12 else pool_address
+    message += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
+    if current_price:
+        message += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
+    if bin_step:
+        message += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(default 20 bins each side\\)_\n"
+    if base_fee:
+        message += f"💸 *Fee:* `{escape_markdown_v2(str(base_fee))}%`\n"
+
+    # Pool metrics section (if available)
+    if tvl or vol_24h or fees_24h or apr:
+        lines = []
+        if tvl:
+            lines.append(f"💰 TVL: ${_format_number(tvl)}")
+        if vol_24h:
+            lines.append(f"📈 Vol 24h: ${_format_number(vol_24h)}")
+        if fees_24h:
+            lines.append(f"💵 Fees 24h: ${_format_number(fees_24h)}")
         if apr:
             try:
                 apr_val = float(apr)
-                lines.append(f"📈 APR: {apr_val:.2f}%")
+                lines.append(f"📊 APR: {apr_val:.2f}%")
             except (ValueError, TypeError):
                 pass
-        message += escape_markdown_v2("\n".join(lines)) + "\n\n"
+        if lines:
+            message += "\n" + escape_markdown_v2(" | ".join(lines)) + "\n"
 
-    # Pool config - compact
-    if bin_step or current_price:
-        lines = ["━━━ Config ━━━"]
-        if bin_step:
-            lines.append(f"📊 Bin Step: {bin_step}")
-        if current_price:
-            lines.append(f"💱 Price: {current_price}")
-        message += escape_markdown_v2("\n".join(lines)) + "\n\n"
-
-    # Wallet balances for add liquidity
+    # Fetch wallet balances
     try:
         balance_cache_key = f"token_balances_{network}_{base_symbol}_{quote_symbol}"
         balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
@@ -1155,14 +1178,6 @@ async def _show_pool_detail(
             client = await get_client(chat_id)
             balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
             set_cached(context.user_data, balance_cache_key, balances)
-
-        lines = ["━━━ Wallet ━━━"]
-        base_bal_str = _format_number(balances["base_balance"])
-        quote_bal_str = _format_number(balances["quote_balance"])
-        lines.append(f"💰 {base_symbol}: {base_bal_str}")
-        lines.append(f"💵 {quote_symbol}: {quote_bal_str}")
-        message += escape_markdown_v2("\n".join(lines)) + "\n"
-
         context.user_data["token_balances"] = balances
     except Exception as e:
         logger.warning(f"Could not fetch token balances: {e}")
@@ -1173,8 +1188,22 @@ async def _show_pool_detail(
     context.user_data["selected_pool_info"] = pool_info
     context.user_data["dex_state"] = "add_position"
 
+    # ========== WALLET BALANCES ==========
+    base_bal = balances.get("base_balance", 0)
+    quote_bal = balances.get("quote_balance", 0)
+    base_val = balances.get("base_value", 0)
+    quote_val = balances.get("quote_value", 0)
+
+    message += "\n" + escape_markdown_v2("━━━ Wallet Balances ━━━") + "\n"
+    base_bal_str = _format_number(base_bal)
+    base_val_str = f"${_format_number(base_val)}" if base_val > 0 else ""
+    message += f"💰 `{escape_markdown_v2(base_symbol)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
+
+    quote_bal_str = _format_number(quote_bal)
+    quote_val_str = f"${_format_number(quote_val)}" if quote_val > 0 else ""
+    message += f"💵 `{escape_markdown_v2(quote_symbol)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
+
     # ========== POSITION PREVIEW ==========
-    # Show preview of the position to be created
     message += "\n" + escape_markdown_v2("━━━ Position Preview ━━━") + "\n"
 
     # Get amounts and calculate actual values
@@ -1184,7 +1213,7 @@ async def _show_pool_detail(
     try:
         if base_amount_str.endswith('%'):
             base_pct_val = float(base_amount_str[:-1])
-            base_amount = balances.get("base_balance", 0) * base_pct_val / 100
+            base_amount = base_bal * base_pct_val / 100
         else:
             base_amount = float(base_amount_str) if base_amount_str else 0
     except (ValueError, TypeError):
@@ -1193,7 +1222,7 @@ async def _show_pool_detail(
     try:
         if quote_amount_str.endswith('%'):
             quote_pct_val = float(quote_amount_str[:-1])
-            quote_amount = balances.get("quote_balance", 0) * quote_pct_val / 100
+            quote_amount = quote_bal * quote_pct_val / 100
         else:
             quote_amount = float(quote_amount_str) if quote_amount_str else 0
     except (ValueError, TypeError):
@@ -1228,8 +1257,8 @@ async def _show_pool_detail(
             # Show range with percentages
             l_pct_str = f"({lower_pct_preview:+.1f}%)" if lower_pct_preview is not None else ""
             u_pct_str = f"({upper_pct_preview:+.1f}%)" if upper_pct_preview is not None else ""
-            message += f"📉 *L:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
-            message += f"📈 *U:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
+            message += f"📉 *Lower:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
+            message += f"📈 *Upper:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
 
             # Validate bin range and show
             if current_price and bin_step:
@@ -1243,42 +1272,68 @@ async def _show_pool_detail(
         except (ValueError, TypeError):
             pass
 
-    # Show calculated amounts
-    message += f"💰 *{escape_markdown_v2(base_symbol)}:* `{escape_markdown_v2(_format_number(base_amount))}` _\\({escape_markdown_v2(base_amount_str)}\\)_\n"
-    message += f"💵 *{escape_markdown_v2(quote_symbol)}:* `{escape_markdown_v2(_format_number(quote_amount))}` _\\({escape_markdown_v2(quote_amount_str)}\\)_\n"
+    # Show calculated amounts with $ values
+    base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
+    quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
 
-    # Build add position display values - show percentages in buttons
+    # Calculate $ values for amounts
+    try:
+        price_float = float(current_price) if current_price else 0
+        base_usd = base_amount * price_float  # base token value in quote (usually USD)
+        quote_usd = quote_amount  # quote is usually USDC/USDT
+    except (ValueError, TypeError):
+        base_usd, quote_usd = 0, 0
+
+    base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
+    quote_usd_str = f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+
+    message += f"💰 *Add:* `{base_amt_fmt}` {escape_markdown_v2(base_symbol)}{base_usd_str}\n"
+    message += f"💵 *Add:* `{quote_amt_fmt}` {escape_markdown_v2(quote_symbol)}{quote_usd_str}\n"
+
+    # Build edit template - each field on its own line
     lower_pct = params.get('lower_pct')
     upper_pct = params.get('upper_pct')
-    lower_display = f"{lower_pct:.1f}%" if lower_pct is not None else (params.get('lower_price', '—')[:8] if params.get('lower_price') else '—')
-    upper_display = f"+{upper_pct:.1f}%" if upper_pct is not None and upper_pct >= 0 else (f"{upper_pct:.1f}%" if upper_pct is not None else (params.get('upper_price', '—')[:8] if params.get('upper_price') else '—'))
-    base_display = params.get('amount_base') or '10%'
-    quote_display = params.get('amount_quote') or '10%'
+    l_pct_edit = f"{lower_pct:.1f}%" if lower_pct is not None else "-5%"
+    # For upper, don't show + prefix (parser treats unsigned as positive)
+    u_pct_edit = f"{upper_pct:.1f}%" if upper_pct is not None else "5%"
+    base_edit = params.get('amount_base') or '10%'
+    quote_edit = params.get('amount_quote') or '10%'
+
+    message += f"\n_To edit, send:_\n"
+    message += f"`L:{escape_markdown_v2(l_pct_edit)}`\n"
+    message += f"`U:{escape_markdown_v2(u_pct_edit)}`\n"
+    message += f"`B:{escape_markdown_v2(base_edit)}`\n"
+    message += f"`Q:{escape_markdown_v2(quote_edit)}`\n"
+
     strategy_display = params.get('strategy_type', '0')
     strategy_names = {'0': 'Spot', '1': 'Curve', '2': 'BidAsk'}
     strategy_name = strategy_names.get(strategy_display, 'Spot')
 
-    # Build keyboard with inline add liquidity controls
+    # Build GeckoTerminal link for pool
+    gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
+
+    # Timeframe buttons - highlight current
+    tf_1m = "• 1m •" if timeframe == "1m" else "1m"
+    tf_1h = "• 1h •" if timeframe == "1h" else "1h"
+    tf_1d = "• 1d •" if timeframe == "1d" else "1d"
+
+    # Build keyboard - simplified without L/U/B/Q buttons (combined chart is default)
     keyboard = [
-        # Row 1: Price range
+        # Row 1: Timeframe selection
         [
-            InlineKeyboardButton(f"📉 L: {lower_display}", callback_data="dex:pos_set_lower"),
-            InlineKeyboardButton(f"📈 U: {upper_display}", callback_data="dex:pos_set_upper"),
+            InlineKeyboardButton(tf_1m, callback_data="dex:pool_tf:1m"),
+            InlineKeyboardButton(tf_1h, callback_data="dex:pool_tf:1h"),
+            InlineKeyboardButton(tf_1d, callback_data="dex:pool_tf:1d"),
         ],
-        # Row 2: Amounts
-        [
-            InlineKeyboardButton(f"💰 {base_symbol}: {base_display}", callback_data="dex:pos_set_base"),
-            InlineKeyboardButton(f"💵 {quote_symbol}: {quote_display}", callback_data="dex:pos_set_quote"),
-        ],
-        # Row 3: Strategy + Add Position
+        # Row 2: Strategy + Add Position
         [
             InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
             InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
-        # Row 4: Candles + Refresh
+        # Row 3: Refresh + Gecko link
         [
-            InlineKeyboardButton("📈 Candles", callback_data="dex:pool_ohlcv:1h"),
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pool_detail_refresh"),
+            InlineKeyboardButton("🦎 Gecko", url=gecko_url),
         ],
     ]
 
@@ -1300,40 +1355,69 @@ async def _show_pool_detail(
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Generate liquidity chart if bins available
+    # Generate combined OHLCV + Liquidity chart (OHLCV already fetched in parallel above)
     chart_bytes = None
-    if bins:
+    price_float = float(current_price) if current_price else None
+
+    # Parse lower/upper prices for range visualization
+    lower_float = None
+    upper_float = None
+    try:
+        if params.get('lower_price'):
+            lower_float = float(params['lower_price'])
+        if params.get('upper_price'):
+            upper_float = float(params['upper_price'])
+    except (ValueError, TypeError):
+        pass
+
+    # Generate combined chart if we have OHLCV or bins
+    if ohlcv_data or bins:
         try:
-            price_float = float(current_price) if current_price else None
-            # Parse lower/upper prices for range visualization
-            lower_float = None
-            upper_float = None
-            try:
-                if params.get('lower_price'):
-                    lower_float = float(params['lower_price'])
-                if params.get('upper_price'):
-                    upper_float = float(params['upper_price'])
-            except (ValueError, TypeError):
-                pass
-            chart_bytes = generate_liquidity_chart(
-                bins=bins,
-                active_bin_id=active_bin,
-                current_price=price_float,
+            chart_bytes = generate_combined_chart(
+                ohlcv_data=ohlcv_data or [],
+                bins=bins or [],
                 pair_name=pair,
+                timeframe=timeframe,
+                current_price=price_float,
+                base_symbol=base_symbol,
+                quote_symbol=quote_symbol,
                 lower_price=lower_float,
                 upper_price=upper_float
             )
         except Exception as e:
-            logger.warning(f"Failed to generate chart: {e}")
+            logger.warning(f"Failed to generate combined chart: {e}")
+            # Fallback to liquidity-only chart
+            if bins:
+                try:
+                    chart_bytes = generate_liquidity_chart(
+                        bins=bins,
+                        active_bin_id=active_bin,
+                        current_price=price_float,
+                        pair_name=pair,
+                        lower_price=lower_float,
+                        upper_price=upper_float
+                    )
+                except Exception as e2:
+                    logger.warning(f"Failed to generate fallback chart: {e2}")
 
     # Determine chat for sending
     if from_callback:
         chat = update.callback_query.message.chat
-        # Delete the previous message
-        try:
-            await update.callback_query.message.delete()
-        except Exception:
-            pass
+
+        # Check for loading message from timeframe switch and delete it
+        loading_msg_id = context.user_data.pop("_loading_msg_id", None)
+        loading_chat_id = context.user_data.pop("_loading_chat_id", None)
+        if loading_msg_id and loading_chat_id:
+            try:
+                await update.get_bot().delete_message(chat_id=loading_chat_id, message_id=loading_msg_id)
+            except Exception:
+                pass
+        else:
+            # Delete the previous message (normal case, not timeframe switch)
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
     else:
         chat = update.message.chat
         # Delete user input and original message
@@ -1352,8 +1436,13 @@ async def _show_pool_detail(
     # Send chart as photo with caption, or just text if no chart
     if chart_bytes:
         try:
-            photo_file = BytesIO(chart_bytes)
-            photo_file.name = "liquidity_distribution.png"
+            # Handle both BytesIO objects and raw bytes
+            if isinstance(chart_bytes, BytesIO):
+                photo_file = chart_bytes
+                photo_file.seek(0)  # Ensure we're at the start
+            else:
+                photo_file = BytesIO(chart_bytes)
+            photo_file.name = "ohlcv_liquidity.png"
 
             sent_msg = await chat.send_photo(
                 photo=photo_file,
@@ -1418,28 +1507,63 @@ async def handle_pool_select(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await query.answer("Pool not found. Please search again.")
 
 
-async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Refresh pool detail by clearing cache and re-fetching"""
+async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None) -> None:
+    """Refresh pool detail by clearing cache and re-fetching
+
+    Args:
+        timeframe: Optional OHLCV timeframe (1m, 1h, 1d). If None, uses default 1h.
+    """
     from ._shared import clear_cache
 
+    query = update.callback_query
     selected_pool = context.user_data.get("selected_pool", {})
     if not selected_pool:
-        await update.callback_query.answer("No pool selected")
+        await query.answer("No pool selected")
         return
 
     pool_address = selected_pool.get('pool_address', selected_pool.get('address', ''))
     connector = selected_pool.get('connector', 'meteora')
 
-    # Clear pool info cache
-    cache_key = f"pool_info_{connector}_{pool_address}"
-    clear_cache(context.user_data, cache_key)
-    context.user_data.pop("selected_pool_info", None)
+    # Only clear cache on full refresh (no timeframe switch)
+    if timeframe is None:
+        # Clear pool info cache
+        cache_key = f"pool_info_{connector}_{pool_address}"
+        clear_cache(context.user_data, cache_key)
+        context.user_data.pop("selected_pool_info", None)
 
-    # Also clear add_position_params to get fresh range calculation
-    context.user_data.pop("add_position_params", None)
+        # Also clear add_position_params to get fresh range calculation
+        context.user_data.pop("add_position_params", None)
+        await query.answer("Refreshing...")
+        timeframe = "1h"  # Default timeframe
+    else:
+        # Timeframe switch - show loading transition
+        await query.answer(f"Loading {timeframe} candles...")
 
-    await update.callback_query.answer("Refreshing...")
-    await _show_pool_detail(update, context, selected_pool, from_callback=True)
+        # Show loading state - need to handle both photo and text messages
+        pair = selected_pool.get('trading_pair', selected_pool.get('name', 'Pool'))
+        loading_msg = rf"⏳ *Loading {timeframe} candles\.\.\.*" + "\n\n"
+        loading_msg += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+        loading_msg += r"_Fetching OHLCV data\.\.\._"
+
+        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+
+        try:
+            # Try to delete current message (works for both photo and text)
+            await query.message.delete()
+        except Exception:
+            pass
+
+        # Send loading message
+        loading_sent = await query.message.chat.send_message(
+            loading_msg,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(loading_keyboard)
+        )
+        # Store loading message ID for deletion
+        context.user_data["_loading_msg_id"] = loading_sent.message_id
+        context.user_data["_loading_chat_id"] = loading_sent.chat.id
+
+    await _show_pool_detail(update, context, selected_pool, from_callback=True, timeframe=timeframe)
 
 
 async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1673,7 +1797,7 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             pool_address=pool_address,
             network=network,
             timeframe=timeframe,
-            currency=currency,
+            currency="token",
             user_data=context.user_data
         )
 
@@ -1822,7 +1946,7 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
             pool_address=pool_address,
             network=network,
             timeframe=timeframe,
-            currency=currency,
+            currency="token",
             user_data=context.user_data
         )
 
@@ -1841,13 +1965,27 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
             await loading_msg.edit_text("❌ No data available for this pool")
             return
 
+        # Get lower/upper prices from add_position_params if available
+        params = context.user_data.get("add_position_params", {})
+        lower_price = None
+        upper_price = None
+        try:
+            if params.get('lower_price'):
+                lower_price = float(params['lower_price'])
+            if params.get('upper_price'):
+                upper_price = float(params['upper_price'])
+        except (ValueError, TypeError):
+            pass
+
         # Generate combined chart
         chart_buf = generate_combined_chart(
             ohlcv_data=ohlcv_data or [],
             bins=bins or [],
             pair_name=pair,
             timeframe=_format_timeframe_label(timeframe),
-            current_price=float(current_price) if current_price else None
+            current_price=float(current_price) if current_price else None,
+            lower_price=lower_price,
+            upper_price=upper_price
         )
 
         if not chart_buf:
@@ -2300,22 +2438,147 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
         )
 
 
-async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
-    """View detailed info about a position"""
+async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str, timeframe: str = "1h") -> None:
+    """View detailed info about a position with combined OHLCV + liquidity chart
+
+    Args:
+        update: Telegram update
+        context: Bot context
+        pos_index: Position index in cache
+        timeframe: OHLCV timeframe (1m, 1h, 1d) - default 1h
+    """
+    import asyncio
+    from io import BytesIO
+
+    query = update.callback_query
+
     try:
         positions_cache = context.user_data.get("positions_cache", {})
         pos = positions_cache.get(pos_index)
 
         if not pos:
-            await update.callback_query.answer("Position not found. Please refresh.")
+            await query.answer("Position not found. Please refresh.")
             return
 
-        # Get token cache (fetch if not available)
+        await query.answer()
+
+        # Get basic position info for loading message
+        base_token = pos.get('base_token', pos.get('token_a', ''))
+        quote_token = pos.get('quote_token', pos.get('token_b', ''))
+        token_cache = context.user_data.get("token_cache", {})
+        from utils.telegram_formatters import resolve_token_symbol
+        base_symbol = resolve_token_symbol(base_token, token_cache) if base_token else 'BASE'
+        quote_symbol = resolve_token_symbol(quote_token, token_cache) if quote_token else 'QUOTE'
+        pair = f"{base_symbol}/{quote_symbol}"
+
+        # Immediately show loading state
+        loading_msg = f"📍 *Position: {escape_markdown_v2(pair)}*\n\n"
+        loading_msg += r"⏳ _Gathering information\.\.\._" + "\n"
+        loading_msg += r"• Fetching OHLCV data" + "\n"
+        loading_msg += r"• Loading liquidity distribution" + "\n"
+        loading_msg += r"• Generating chart"
+
+        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+
+        # Handle loading state for both photo and text messages
+        loading_msg_id = None
+        if query.message.photo:
+            # For photo messages, delete and send new text message
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            loading_sent = await query.message.chat.send_message(
+                loading_msg,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(loading_keyboard)
+            )
+            loading_msg_id = loading_sent.message_id
+        else:
+            # For text messages, just edit
+            try:
+                await query.message.edit_text(
+                    loading_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(loading_keyboard)
+                )
+            except Exception:
+                pass
+
         chat_id = update.effective_chat.id
-        token_cache = context.user_data.get("token_cache")
-        if not token_cache:
-            token_cache = await get_token_cache_from_gateway(chat_id=chat_id)
+        connector = pos.get('connector', 'meteora')
+        pool_address = pos.get('pool_address', '')
+        network = 'solana-mainnet-beta'
+
+        # Get position price data
+        lower_price = pos.get('lower_price', pos.get('price_lower'))
+        upper_price = pos.get('upper_price', pos.get('price_upper'))
+        pnl_summary = pos.get('pnl_summary', {})
+        entry_price = pnl_summary.get('entry_price')
+        current_price = pnl_summary.get('current_price')
+
+        # Parallel fetch: token_cache (if needed), pool_info (bins), and OHLCV
+        gecko_network = get_gecko_network(network)
+
+        async def fetch_token_cache_task():
+            cached = context.user_data.get("token_cache")
+            if cached is not None:
+                return cached
+            return await get_token_cache_from_gateway(chat_id=chat_id)
+
+        async def fetch_pool_info_task():
+            if not pool_address:
+                return {}
+            cache_key = f"pool_info_{connector}_{pool_address}"
+            cached = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
+            if cached:
+                return cached
+            client = await get_client(chat_id)
+            info = await _fetch_pool_info(client, pool_address, connector)
+            if info:
+                set_cached(context.user_data, cache_key, info)
+            return info or {}
+
+        async def fetch_ohlcv_task():
+            if not pool_address:
+                return []
+            try:
+                data, error = await fetch_ohlcv(
+                    pool_address=pool_address,
+                    network=gecko_network,
+                    timeframe=timeframe,
+                    currency="token",
+                    user_data=context.user_data
+                )
+                return data or []
+            except Exception as e:
+                logger.warning(f"Error fetching OHLCV for position: {e}")
+                return []
+
+        # Run all fetches in parallel
+        token_cache_new, pool_info, ohlcv_data = await asyncio.gather(
+            fetch_token_cache_task(),
+            fetch_pool_info_task(),
+            fetch_ohlcv_task()
+        )
+
+        # Update token cache if fetched
+        if token_cache_new:
+            token_cache = token_cache_new
             context.user_data["token_cache"] = token_cache
+
+        # Re-resolve symbols with fresh token cache if needed
+        if token_cache_new and token_cache_new != context.user_data.get("token_cache"):
+            base_symbol = resolve_token_symbol(base_token, token_cache) if base_token else 'BASE'
+            quote_symbol = resolve_token_symbol(quote_token, token_cache) if quote_token else 'QUOTE'
+            pair = f"{base_symbol}/{quote_symbol}"
+
+        # Get bins from pool_info
+        bins = pool_info.get('bins', [])
+
+        # Get current price from pool_info if not in pnl_summary
+        if not current_price:
+            current_price = pool_info.get('price')
 
         # Get token prices for USD conversion
         token_prices = context.user_data.get("token_prices", {})
@@ -2326,42 +2589,134 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
         message += escape_markdown_v2(detail)
 
         # Build keyboard with actions
-        connector = pos.get('connector', '')
-        pool_address = pos.get('pool_address', '')
         dex_url = get_dex_pool_url(connector, pool_address)
 
+        # Timeframe buttons - highlight current
+        tf_1m = "• 1m •" if timeframe == "1m" else "1m"
+        tf_1h = "• 1h •" if timeframe == "1h" else "1h"
+        tf_1d = "• 1d •" if timeframe == "1d" else "1d"
+
         keyboard = [
+            # Row 1: Timeframe selection
+            [
+                InlineKeyboardButton(tf_1m, callback_data=f"dex:pos_view_tf:{pos_index}:1m"),
+                InlineKeyboardButton(tf_1h, callback_data=f"dex:pos_view_tf:{pos_index}:1h"),
+                InlineKeyboardButton(tf_1d, callback_data=f"dex:pos_view_tf:{pos_index}:1d"),
+            ],
+            # Row 2: Actions
             [
                 InlineKeyboardButton("💰 Collect Fees", callback_data=f"dex:pos_collect:{pos_index}"),
-                InlineKeyboardButton("❌ Close Position", callback_data=f"dex:pos_close:{pos_index}")
+                InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{pos_index}")
             ],
         ]
 
-        # Add View Pool button to see pool details with chart
-        if pool_address and connector:
-            keyboard.append([
-                InlineKeyboardButton("📊 View Pool", callback_data=f"dex:pos_view_pool:{pos_index}"),
-                InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")
-            ])
-        else:
-            keyboard.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"dex:pos_view:{pos_index}")])
-
         # Add DEX link if available
         if dex_url:
-            keyboard.append([InlineKeyboardButton(f"🌐 View on {connector.title()}", url=dex_url)])
+            keyboard.append([
+                InlineKeyboardButton(f"🌐 {connector.title()}", url=dex_url),
+                InlineKeyboardButton("« Back", callback_data="dex:liquidity")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:liquidity")])
 
-        keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:liquidity")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.edit_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        # Generate combined chart with entry price, lower/upper bounds
+        chart_bytes = None
+        if ohlcv_data or bins:
+            try:
+                # Convert price strings to floats
+                lower_float = float(lower_price) if lower_price else None
+                upper_float = float(upper_price) if upper_price else None
+                entry_float = float(entry_price) if entry_price else None
+                current_float = float(current_price) if current_price else None
+
+                chart_bytes = generate_combined_chart(
+                    ohlcv_data=ohlcv_data or [],
+                    bins=bins or [],
+                    pair_name=pair,
+                    timeframe=timeframe,
+                    current_price=current_float,
+                    base_symbol=base_symbol,
+                    quote_symbol=quote_symbol,
+                    lower_price=lower_float,
+                    upper_price=upper_float,
+                    entry_price=entry_float
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate position chart: {e}")
+
+        # Send as photo with caption, or edit text if no chart
+        if chart_bytes:
+            try:
+                # Handle both BytesIO and raw bytes
+                if isinstance(chart_bytes, BytesIO):
+                    photo_file = chart_bytes
+                    photo_file.seek(0)
+                else:
+                    photo_file = BytesIO(chart_bytes)
+                photo_file.name = "position_chart.png"
+
+                # Delete loading message (either the text loading message we sent or original message)
+                if loading_msg_id:
+                    # Delete the loading text message we sent
+                    try:
+                        await query.message.chat.delete_message(loading_msg_id)
+                    except Exception:
+                        pass
+                else:
+                    # Delete the original message (text message case)
+                    try:
+                        await query.message.delete()
+                    except Exception:
+                        pass
+
+                await query.message.chat.send_photo(
+                    photo=photo_file,
+                    caption=message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send position chart: {e}")
+                # Fallback to text
+                await query.message.chat.send_message(
+                    message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+        else:
+            # No chart available, just update or send message with details
+            if loading_msg_id:
+                # Delete loading message and send new
+                try:
+                    await query.message.chat.delete_message(loading_msg_id)
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
+                    message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            else:
+                # Try to edit the text message
+                try:
+                    await query.message.edit_text(
+                        message,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                except Exception:
+                    # Message was deleted, send new one
+                    await query.message.chat.send_message(
+                        message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
 
     except Exception as e:
         logger.error(f"Error viewing position: {e}", exc_info=True)
-        await update.callback_query.answer(f"Error: {str(e)[:100]}")
+        await query.answer(f"Error: {str(e)[:100]}")
 
 
 async def handle_pos_view_pool(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
@@ -3032,7 +3387,8 @@ async def show_add_position_menu(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     send_new: bool = False,
-    show_help: bool = False
+    show_help: bool = False,
+    timeframe: str = "1h"
 ) -> None:
     """Display the add position configuration menu with liquidity chart
 
@@ -3041,6 +3397,7 @@ async def show_add_position_menu(
         context: The context object
         send_new: If True, always send a new message instead of editing
         show_help: If True, show detailed help instead of balances/ASCII
+        timeframe: OHLCV timeframe (1m, 1h, 1d) - default 1h
     """
     from io import BytesIO
 
@@ -3239,6 +3596,10 @@ async def show_add_position_menu(
             help_text += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
         if bin_step:
             help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(default 20 bins each side\\)_\n"
+        # Add fee if available
+        base_fee = pool_info.get('base_fee_percentage') or selected_pool.get('base_fee_percentage')
+        if base_fee:
+            help_text += f"💸 *Fee:* `{escape_markdown_v2(str(base_fee))}%`\n"
 
         # Fetch and display token balances (cached with 60s TTL)
         try:
@@ -3318,10 +3679,10 @@ async def show_add_position_menu(
                     u_str = f"{upper_p:.6f}"
 
                 # Show range with percentages
-                l_pct_str = f"{lower_pct:+.1f}%" if lower_pct is not None else ""
-                u_pct_str = f"{upper_pct:+.1f}%" if upper_pct is not None else ""
-                help_text += f"📉 *L:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
-                help_text += f"📈 *U:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
+                l_pct_str = f"({lower_pct:+.1f}%)" if lower_pct is not None else ""
+                u_pct_str = f"({upper_pct:+.1f}%)" if upper_pct is not None else ""
+                help_text += f"📉 *Lower:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
+                help_text += f"📈 *Upper:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
 
                 # Validate bin range
                 if current_price and bin_step:
@@ -3335,86 +3696,123 @@ async def show_add_position_menu(
             except (ValueError, TypeError):
                 pass
 
-        # Show amounts
-        help_text += f"💰 *{escape_markdown_v2(base_symbol)}:* `{escape_markdown_v2(_format_number(base_amount))}`\n"
-        help_text += f"💵 *{escape_markdown_v2(quote_symbol)}:* `{escape_markdown_v2(_format_number(quote_amount))}`\n"
+        # Show amounts with $ values
+        base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
+        quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
+
+        # Calculate $ values for amounts
+        try:
+            price_float = float(current_price) if current_price else 0
+            base_usd = base_amount * price_float  # base token value in quote (usually USD)
+            quote_usd = quote_amount  # quote is usually USDC/USDT
+        except (ValueError, TypeError):
+            base_usd, quote_usd = 0, 0
+
+        base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
+        quote_usd_str = f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+
+        help_text += f"💰 *Add:* `{base_amt_fmt}` {escape_markdown_v2(base_symbol)}{base_usd_str}\n"
+        help_text += f"💵 *Add:* `{quote_amt_fmt}` {escape_markdown_v2(quote_symbol)}{quote_usd_str}\n"
+
+        # Add edit template - each field on its own line
+        l_pct_edit = f"{lower_pct:.1f}%" if lower_pct is not None else "-5%"
+        # For upper, don't show + prefix (parser treats unsigned as positive)
+        u_pct_edit = f"{upper_pct:.1f}%" if upper_pct is not None else "5%"
+        help_text += f"\n_To edit, send:_\n"
+        help_text += f"`L:{escape_markdown_v2(l_pct_edit)}`\n"
+        help_text += f"`U:{escape_markdown_v2(u_pct_edit)}`\n"
+        help_text += f"`B:{escape_markdown_v2(base_amount_str)}`\n"
+        help_text += f"`Q:{escape_markdown_v2(quote_amount_str)}`\n"
 
         # NOTE: ASCII visualization is added AFTER we know if chart image is available
         # This is done below, after chart_bytes is generated
 
-    # Build keyboard - show percentages in buttons for L/U
-    lower_pct = params.get('lower_pct')
-    upper_pct = params.get('upper_pct')
-    lower_display = f"{lower_pct:.1f}%" if lower_pct is not None else (params.get('lower_price', '—')[:8] if params.get('lower_price') else '—')
-    upper_display = f"+{upper_pct:.1f}%" if upper_pct is not None and upper_pct >= 0 else (f"{upper_pct:.1f}%" if upper_pct is not None else (params.get('upper_price', '—')[:8] if params.get('upper_price') else '—'))
-    base_display = params.get('amount_base') or '10%'
-    quote_display = params.get('amount_quote') or '10%'
+    # Build simplified keyboard (no L/U/B/Q buttons - use text input instead)
     strategy_display = params.get('strategy_type', '0')
-
-    # Strategy type name mapping
     strategy_names = {'0': 'Spot', '1': 'Curve', '2': 'BidAsk'}
     strategy_name = strategy_names.get(strategy_display, 'Spot')
 
+    # Build GeckoTerminal link for pool
+    gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
+
+    # Timeframe buttons - highlight current
+    tf_1m = "• 1m •" if timeframe == "1m" else "1m"
+    tf_1h = "• 1h •" if timeframe == "1h" else "1h"
+    tf_1d = "• 1d •" if timeframe == "1d" else "1d"
+
     keyboard = [
+        # Row 1: Timeframe selection
         [
-            InlineKeyboardButton(
-                f"📉 L: {lower_display}",
-                callback_data="dex:pos_set_lower"
-            ),
-            InlineKeyboardButton(
-                f"📈 U: {upper_display}",
-                callback_data="dex:pos_set_upper"
-            )
+            InlineKeyboardButton(tf_1m, callback_data="dex:pos_tf:1m"),
+            InlineKeyboardButton(tf_1h, callback_data="dex:pos_tf:1h"),
+            InlineKeyboardButton(tf_1d, callback_data="dex:pos_tf:1d"),
         ],
+        # Row 2: Strategy + Add Position
         [
-            InlineKeyboardButton(
-                f"💰 Base: {base_display}",
-                callback_data="dex:pos_set_base"
-            ),
-            InlineKeyboardButton(
-                f"💵 Quote: {quote_display}",
-                callback_data="dex:pos_set_quote"
-            )
+            InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
+            InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
         ],
+        # Row 3: Refresh + Gecko + Back
         [
-            InlineKeyboardButton(
-                f"🎯 Strategy: {strategy_name}",
-                callback_data="dex:pos_toggle_strategy"
-            )
+            InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
+            InlineKeyboardButton("🦎 Gecko", url=gecko_url),
+            InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh"),
         ]
     ]
 
-    # Help/Back toggle and action buttons
-    help_button = (
-        InlineKeyboardButton("« Position", callback_data="dex:pool_detail_refresh")
-        if show_help else
-        InlineKeyboardButton("❓ Help", callback_data="dex:pos_help")
-    )
-    keyboard.append([
-        InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
-        InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
-        help_button,
-    ])
-    keyboard.append([
-        InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh")
-    ])
-
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Generate chart image if bins available (only for main view, not help)
+    # Generate combined OHLCV + Liquidity chart (only for main view, not help)
     chart_bytes = None
-    if bins and not show_help:
+    if not show_help:
+        # Try to get cached OHLCV data for combined chart
         try:
-            chart_bytes = generate_liquidity_chart(
-                bins=bins,
-                active_bin_id=pool_info.get('active_bin_id'),
-                current_price=current_val,
-                pair_name=pair,
-                lower_price=lower_val,
-                upper_price=upper_val
-            )
+            gecko_network = get_gecko_network(network)
+            ohlcv_cache_key = f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_token"
+            ohlcv_data = get_cached(context.user_data, ohlcv_cache_key, ttl=300)  # 5min cache
+
+            if ohlcv_data is None:
+                # Fetch OHLCV data
+                ohlcv_data, ohlcv_error = await fetch_ohlcv(
+                    pool_address=pool_address,
+                    network=gecko_network,
+                    timeframe=timeframe,
+                    currency="token",
+                    user_data=context.user_data
+                )
+                if ohlcv_error:
+                    logger.warning(f"OHLCV fetch error: {ohlcv_error}")
+                    ohlcv_data = []
+
+            # Generate combined chart if we have OHLCV or bins
+            if ohlcv_data or bins:
+                chart_bytes = generate_combined_chart(
+                    ohlcv_data=ohlcv_data or [],
+                    bins=bins or [],
+                    pair_name=pair,
+                    timeframe=timeframe,
+                    current_price=current_val,
+                    base_symbol=base_symbol,
+                    quote_symbol=quote_symbol,
+                    lower_price=lower_val,
+                    upper_price=upper_val
+                )
         except Exception as e:
-            logger.warning(f"Failed to generate chart for add position: {e}")
+            logger.warning(f"Failed to generate combined chart: {e}")
+
+        # Fallback to liquidity-only chart if combined chart failed
+        if not chart_bytes and bins:
+            try:
+                chart_bytes = generate_liquidity_chart(
+                    bins=bins,
+                    active_bin_id=pool_info.get('active_bin_id'),
+                    current_price=current_val,
+                    pair_name=pair,
+                    lower_price=lower_val,
+                    upper_price=upper_val
+                )
+            except Exception as e:
+                logger.warning(f"Failed to generate fallback chart: {e}")
 
     # Add ASCII visualization ONLY if there's NO chart image (ASCII is fallback)
     # This avoids caption too long error on Telegram (1024 char limit for photo captions)
@@ -3425,47 +3823,51 @@ async def show_add_position_menu(
             help_text += r"_█ in range  ░ out  ◄ current price  ↓↑ your bounds_" + "\n"
 
     # Determine how to send
+    # Check for loading message from timeframe switch
+    loading_msg_id = context.user_data.pop("_loading_msg_id", None)
+    loading_chat_id = context.user_data.pop("_loading_chat_id", None)
+
     # Check if we have a stored menu message we can edit
     stored_menu_msg_id = context.user_data.get("add_position_menu_msg_id")
     stored_menu_chat_id = context.user_data.get("add_position_menu_chat_id")
     stored_menu_is_photo = context.user_data.get("add_position_menu_is_photo", False)
 
-    if send_new or not update.callback_query:
-        chat = update.message.chat if update.message else update.callback_query.message.chat
+    if loading_msg_id or send_new or not update.callback_query:
+        # Loading message case, send_new, or text input - need to send new message
+        chat = update.callback_query.message.chat if update.callback_query else update.message.chat
 
-        # Try to edit stored message if available (for text input updates)
-        if stored_menu_msg_id and stored_menu_chat_id:
+        # Delete loading message if it exists
+        if loading_msg_id and loading_chat_id:
             try:
-                if stored_menu_is_photo:
-                    # Edit caption for photo message
-                    await update.get_bot().edit_message_caption(
-                        chat_id=stored_menu_chat_id,
-                        message_id=stored_menu_msg_id,
-                        caption=help_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
-                    )
-                else:
-                    # Edit text for regular message
-                    await update.get_bot().edit_message_text(
-                        chat_id=stored_menu_chat_id,
-                        message_id=stored_menu_msg_id,
-                        text=help_text,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
-                    )
-                return
-            except Exception as e:
-                if "not modified" not in str(e).lower():
-                    logger.debug(f"Could not edit stored menu, sending new: {e}")
-                else:
-                    return
+                await update.get_bot().delete_message(
+                    chat_id=loading_chat_id,
+                    message_id=loading_msg_id
+                )
+            except Exception:
+                pass
+
+        # For text input updates with chart, delete old message and send new one
+        # (can't replace photo, only edit caption)
+        if stored_menu_msg_id and stored_menu_chat_id and not loading_msg_id:
+            # Delete old message to allow sending new one with updated chart
+            try:
+                await update.get_bot().delete_message(
+                    chat_id=stored_menu_chat_id,
+                    message_id=stored_menu_msg_id
+                )
+            except Exception:
+                pass  # Message may already be deleted
 
         # Send new message and store its ID
         if chart_bytes:
             try:
-                photo_file = BytesIO(chart_bytes)
-                photo_file.name = "liquidity.png"
+                # Handle both BytesIO objects and raw bytes
+                if isinstance(chart_bytes, BytesIO):
+                    photo_file = chart_bytes
+                    photo_file.seek(0)  # Ensure we're at the start
+                else:
+                    photo_file = BytesIO(chart_bytes)
+                photo_file.name = "ohlcv_liquidity.png"
                 sent_msg = await chat.send_photo(
                     photo=photo_file,
                     caption=help_text,
@@ -3548,9 +3950,15 @@ async def handle_pos_toggle_strategy(update: Update, context: ContextTypes.DEFAU
     await show_add_position_menu(update, context)
 
 
-async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Refresh pool info and token balances by clearing cache"""
+async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None) -> None:
+    """Refresh pool info and token balances by clearing cache
+
+    Args:
+        timeframe: Optional OHLCV timeframe (1m, 1h, 1d). If None, full refresh with default 1h.
+    """
     from ._shared import clear_cache
+
+    query = update.callback_query
 
     # Get current pool info to build cache keys
     params = context.user_data.get("add_position_params", {})
@@ -3562,26 +3970,57 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE)
     base_token = selected_pool.get("base_token", "")
     quote_token = selected_pool.get("quote_token", "")
 
-    # Clear specific cache keys
-    pool_cache_key = f"pool_info_{connector}_{pool_address}"
-    balance_cache_key = f"token_balances_{network}_{base_token}_{quote_token}"
+    # Only clear cache and refetch on full refresh (no timeframe switch)
+    if timeframe is None:
+        # Clear specific cache keys
+        pool_cache_key = f"pool_info_{connector}_{pool_address}"
+        balance_cache_key = f"token_balances_{network}_{base_token}_{quote_token}"
 
-    clear_cache(context.user_data, pool_cache_key)
-    clear_cache(context.user_data, balance_cache_key)
+        clear_cache(context.user_data, pool_cache_key)
+        clear_cache(context.user_data, balance_cache_key)
 
-    # Also clear stored pool info to force refresh
-    context.user_data.pop("selected_pool_info", None)
+        # Also clear stored pool info to force refresh
+        context.user_data.pop("selected_pool_info", None)
 
-    # Refetch pool info
-    if pool_address:
-        chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
-        pool_info = await _fetch_pool_info(client, pool_address, connector)
-        set_cached(context.user_data, pool_cache_key, pool_info)
-        context.user_data["selected_pool_info"] = pool_info
+        # Refetch pool info
+        if pool_address:
+            chat_id = update.effective_chat.id
+            client = await get_client(chat_id)
+            pool_info = await _fetch_pool_info(client, pool_address, connector)
+            set_cached(context.user_data, pool_cache_key, pool_info)
+            context.user_data["selected_pool_info"] = pool_info
 
-    await update.callback_query.answer("Refreshed!")
-    await show_add_position_menu(update, context)
+        await query.answer("Refreshed!")
+        timeframe = "1h"  # Default timeframe
+    else:
+        # Timeframe switch - show loading transition
+        await query.answer(f"Loading {timeframe} candles...")
+
+        # Show loading state - handle both photo and text messages
+        pair = selected_pool.get('trading_pair', selected_pool.get('name', 'Pool'))
+        loading_msg = rf"⏳ *Loading {timeframe} candles\.\.\.*" + "\n\n"
+        loading_msg += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
+        loading_msg += r"_Fetching OHLCV data\.\.\._"
+
+        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+
+        try:
+            # Delete current message (works for both photo and text)
+            await query.message.delete()
+        except Exception:
+            pass
+
+        # Send loading message
+        loading_sent = await query.message.chat.send_message(
+            loading_msg,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(loading_keyboard)
+        )
+        # Store loading message ID for deletion
+        context.user_data["_loading_msg_id"] = loading_sent.message_id
+        context.user_data["_loading_chat_id"] = loading_sent.chat.id
+
+    await show_add_position_menu(update, context, timeframe=timeframe)
 
 
 async def handle_pos_use_max_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3730,7 +4169,7 @@ async def handle_pos_set_base(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Get balance for display
     balances = context.user_data.get("token_balances", {})
     base_bal = balances.get("base_balance", 0)
-    bal_info = f"_Balance: {_format_number(base_bal)}_\n\n" if base_bal > 0 else ""
+    bal_info = f"_Balance: {escape_markdown_v2(_format_number(base_bal))}_\n\n" if base_bal > 0 else ""
 
     help_text = (
         r"📝 *Set Base Token Amount*" + "\n\n" +
@@ -3759,7 +4198,7 @@ async def handle_pos_set_quote(update: Update, context: ContextTypes.DEFAULT_TYP
     # Get balance for display
     balances = context.user_data.get("token_balances", {})
     quote_bal = balances.get("quote_balance", 0)
-    bal_info = f"_Balance: {_format_number(quote_bal)}_\n\n" if quote_bal > 0 else ""
+    bal_info = f"_Balance: {escape_markdown_v2(_format_number(quote_bal))}_\n\n" if quote_bal > 0 else ""
 
     help_text = (
         r"📝 *Set Quote Token Amount*" + "\n\n" +
@@ -4020,8 +4459,17 @@ def _parse_multi_field_input(user_input: str, current_price: float = None) -> di
     if ':' not in user_input:
         return {}
 
-    # Split by common separators: ' - ', '-', ',' or spaces
-    parts = re.split(r'\s*[-,]\s*|\s+', user_input.strip())
+    # Use regex to find key:value patterns directly (handles negative numbers correctly)
+    # Pattern: word followed by : followed by value (which may start with - or +)
+    pattern = r'([a-zA-Z]+)\s*:\s*([+-]?[\d.]+%?|[\d.]+)'
+    matches = re.findall(pattern, user_input, re.IGNORECASE)
+
+    # Convert matches to parts format for compatibility with existing logic
+    parts = [f"{k}:{v}" for k, v in matches]
+
+    # If no regex matches, fall back to simple split (for backwards compatibility)
+    if not parts:
+        parts = re.split(r'\s*,\s*|\s+', user_input.strip())
 
     for part in parts:
         part = part.strip()
@@ -4148,14 +4596,14 @@ async def process_add_position(
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
 
-        result = await client.gateway_clmm.add_liquidity(
+        result = await client.gateway_clmm.open_position(
             connector=connector,
             network=network,
             pool_address=params["pool_address"],
             lower_price=Decimal(params["lower_price"]),
             upper_price=Decimal(params["upper_price"]),
-            amount_base=Decimal(params["amount_base"]) if params["amount_base"] else None,
-            amount_quote=Decimal(params["amount_quote"]) if params["amount_quote"] else None,
+            base_token_amount=Decimal(params["amount_base"]) if params["amount_base"] else None,
+            quote_token_amount=Decimal(params["amount_quote"]) if params["amount_quote"] else None,
         )
 
         if result is None:

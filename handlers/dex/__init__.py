@@ -131,6 +131,8 @@ from .geckoterminal import (
     handle_gecko_token_add,
     handle_back_to_list,
     handle_gecko_add_liquidity,
+    handle_gecko_swap,
+    show_gecko_info,
 )
 # Unified liquidity module
 from .liquidity import (
@@ -226,7 +228,7 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         "pool_info", "pool_list", "manage_positions", "pos_add_confirm", "pos_close_exec",
                         "add_to_gateway", "pool_detail_refresh",
                         "gecko_networks", "gecko_trades", "gecko_show_pools", "gecko_refresh", "gecko_token_search", "gecko_token_add",
-                        "gecko_explore"}
+                        "gecko_explore", "gecko_swap", "gecko_info"}
         # Also show typing for actions that start with these prefixes
         slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:",
                          "gecko_token:", "swap_hist_set_", "lp_hist_set_")
@@ -358,6 +360,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pool_list_back(update, context)
         elif action == "pool_detail_refresh":
             await handle_pool_detail_refresh(update, context)
+        elif action.startswith("pool_tf:"):
+            # Format: pool_tf:timeframe
+            timeframe = action.split(":")[1]
+            await handle_pool_detail_refresh(update, context, timeframe=timeframe)
         elif action == "add_to_gateway":
             await handle_add_to_gateway(update, context)
         elif action.startswith("plot_liquidity:"):
@@ -370,6 +376,12 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action.startswith("pos_view:"):
             pos_index = action.split(":")[1]
             await handle_pos_view(update, context, pos_index)
+        elif action.startswith("pos_view_tf:"):
+            # Format: pos_view_tf:pos_index:timeframe
+            parts = action.split(":")
+            pos_index = parts[1]
+            timeframe = parts[2] if len(parts) > 2 else "1h"
+            await handle_pos_view(update, context, pos_index, timeframe=timeframe)
         elif action.startswith("pos_view_pool:"):
             pos_index = action.split(":")[1]
             await handle_pos_view_pool(update, context, pos_index)
@@ -440,6 +452,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_pos_toggle_strategy(update, context)
         elif action == "pos_refresh":
             await handle_pos_refresh(update, context)
+        elif action.startswith("pos_tf:"):
+            # Format: pos_tf:timeframe - switch timeframe in add position menu
+            timeframe = action.split(":")[1]
+            await handle_pos_refresh(update, context, timeframe=timeframe)
 
         # GeckoTerminal explore handlers
         elif action == "gecko_explore":
@@ -498,6 +514,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_gecko_token_search(update, context)
         elif action == "gecko_token_add":
             await handle_gecko_token_add(update, context)
+        elif action == "gecko_swap":
+            await handle_gecko_swap(update, context)
+        elif action == "gecko_info":
+            await show_gecko_info(update, context)
         elif action.startswith("gecko_ohlcv:"):
             timeframe = action.split(":")[1]
             await show_ohlcv_chart(update, context, timeframe)

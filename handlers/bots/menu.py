@@ -51,9 +51,10 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
         InlineKeyboardButton("➕ PMM Mister", callback_data="bots:new_pmm_mister"),
     ])
 
-    # Action buttons - configs
+    # Action buttons - configs and historical
     keyboard.append([
         InlineKeyboardButton("📁 Configs", callback_data="bots:controller_configs"),
+        InlineKeyboardButton("📜 Historical", callback_data="bots:archived"),
     ])
 
     keyboard.append([

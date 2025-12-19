@@ -51,6 +51,7 @@ DEFAULTS: Dict[str, Any] = {
         "take_profit": 0.0005,
         "take_profit_order_type": 3,
     },
+    "coerce_tp_to_step": False,
 }
 
 
@@ -199,6 +200,14 @@ FIELDS: Dict[str, ControllerField] = {
         hint="Order type for take profit",
         default=ORDER_TYPE_LIMIT_MAKER
     ),
+    "coerce_tp_to_step": ControllerField(
+        name="coerce_tp_to_step",
+        label="Coerce TP to Step",
+        type="bool",
+        required=False,
+        hint="Set TP to step size if TP is smaller than step",
+        default=False
+    ),
 }
 
 
@@ -208,7 +217,8 @@ FIELD_ORDER: List[str] = [
     "total_amount_quote", "start_price", "end_price", "limit_price",
     "max_open_orders", "max_orders_per_batch", "order_frequency",
     "min_order_amount_quote", "min_spread_between_orders", "take_profit",
-    "open_order_type", "take_profit_order_type", "keep_position", "activation_bounds"
+    "open_order_type", "take_profit_order_type", "coerce_tp_to_step",
+    "keep_position", "activation_bounds"
 ]
 
 

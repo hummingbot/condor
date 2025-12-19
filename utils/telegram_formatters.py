@@ -410,7 +410,12 @@ def format_active_bots(
 
                     # Format PnL and volume compactly
                     pnl_str = f"{pnl:+.2f}"[:8]
-                    vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
+                    if volume >= 1000000:
+                        vol_str = f"{volume/1000000:.1f}M"
+                    elif volume >= 1000:
+                        vol_str = f"{volume/1000:.1f}k"
+                    else:
+                        vol_str = f"{volume:.0f}"
                     vol_str = vol_str[:7]
 
                     message += f"{ctrl_display:<28} {pnl_str:>8} {vol_str:>7}\n"
@@ -419,7 +424,12 @@ def format_active_bots(
             if len(performance) >= 1:
                 message += f"{'─'*28} {'─'*8} {'─'*7}\n"
                 pnl_total_str = f"{total_pnl:+.2f}"[:8]
-                vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
+                if total_volume >= 1000000:
+                    vol_total = f"{total_volume/1000000:.1f}M"
+                elif total_volume >= 1000:
+                    vol_total = f"{total_volume/1000:.1f}k"
+                else:
+                    vol_total = f"{total_volume:.0f}"
                 vol_total = vol_total[:7]
                 message += f"{'TOTAL':<28} {pnl_total_str:>8} {vol_total:>7}\n"
 
@@ -1040,7 +1050,7 @@ def format_portfolio_overview(
 
         # Show detected movements if any (max 5 most recent)
         if detected_movements:
-            message += f"_\\({len(detected_movements)} movimiento\\(s\\) detectado\\(s\\) ajustados\\)_\n"
+            message += f"_\\({len(detected_movements)} detected movement\\(s\\) adjusted\\)_\n"
             message += "\n"
 
     # ============================================

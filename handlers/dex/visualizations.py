@@ -563,7 +563,10 @@ def generate_combined_chart(
     timeframe: str,
     current_price: float = None,
     base_symbol: str = None,
-    quote_symbol: str = None
+    quote_symbol: str = None,
+    lower_price: float = None,
+    upper_price: float = None,
+    entry_price: float = None
 ) -> Optional[io.BytesIO]:
     """Generate combined OHLCV + Liquidity distribution chart
 
@@ -576,9 +579,12 @@ def generate_combined_chart(
         bins: List of bin data with price, base_token_amount, quote_token_amount
         pair_name: Trading pair name
         timeframe: Timeframe string
-        current_price: Current price for reference line
+        current_price: Current price for reference line (orange dashed)
         base_symbol: Base token symbol
         quote_symbol: Quote token symbol
+        lower_price: Lower bound of position range (blue dotted)
+        upper_price: Upper bound of position range (blue dotted)
+        entry_price: Entry price for existing position (green dashed)
 
     Returns:
         BytesIO buffer with PNG image or None if failed
@@ -592,7 +598,7 @@ def generate_combined_chart(
             logger.warning("No OHLCV data for combined chart")
             return None
 
-        # Parse OHLCV data
+        # Parse OHLCV data - filter out empty candles (where all OHLC values are 0 or null)
         times = []
         opens = []
         highs = []
@@ -605,6 +611,20 @@ def generate_combined_chart(
                 ts, o, h, l, c = candle[:5]
                 v = candle[5] if len(candle) > 5 else 0
 
+                # Parse OHLC values
+                try:
+                    o_val = float(o) if o is not None else 0
+                    h_val = float(h) if h is not None else 0
+                    l_val = float(l) if l is not None else 0
+                    c_val = float(c) if c is not None else 0
+                except (ValueError, TypeError):
+                    continue
+
+                # Skip empty candles (all zeros or all same value with zero volume)
+                if o_val == 0 and h_val == 0 and l_val == 0 and c_val == 0:
+                    continue
+
+                # Parse timestamp
                 if isinstance(ts, (int, float)):
                     times.append(datetime.fromtimestamp(ts))
                 elif hasattr(ts, 'to_pydatetime'):
@@ -617,14 +637,25 @@ def generate_combined_chart(
                     except Exception:
                         continue
 
-                opens.append(float(o))
-                highs.append(float(h))
-                lows.append(float(l))
-                closes.append(float(c))
+                opens.append(o_val)
+                highs.append(h_val)
+                lows.append(l_val)
+                closes.append(c_val)
                 volumes.append(float(v) if v else 0)
 
         if not times:
             raise ValueError("No valid OHLCV data")
+
+        # Limit to most recent candles to avoid overcrowding
+        # For 1m: 100 candles = ~1.5 hours, 1h: 100 = ~4 days, 1d: 100 = ~3 months
+        max_candles = 100
+        if len(times) > max_candles:
+            times = times[-max_candles:]
+            opens = opens[-max_candles:]
+            highs = highs[-max_candles:]
+            lows = lows[-max_candles:]
+            closes = closes[-max_candles:]
+            volumes = volumes[-max_candles:]
 
         # Process bin data for liquidity
         bin_data = []
@@ -770,6 +801,69 @@ def generate_combined_chart(
                     row=1, col=2,
                 )
 
+        # Add lower price range line
+        if lower_price:
+            fig.add_hline(
+                y=lower_price,
+                line_dash="dot",
+                line_color="#3b82f6",  # Blue
+                line_width=2,
+                row=1, col=1,
+                annotation_text=f"Lower: {lower_price:.6f}",
+                annotation_position="right",
+                annotation_font_color="#3b82f6",
+            )
+            if has_liquidity:
+                fig.add_hline(
+                    y=lower_price,
+                    line_dash="dot",
+                    line_color="#3b82f6",
+                    line_width=2,
+                    row=1, col=2,
+                )
+
+        # Add upper price range line
+        if upper_price:
+            fig.add_hline(
+                y=upper_price,
+                line_dash="dot",
+                line_color="#3b82f6",  # Blue
+                line_width=2,
+                row=1, col=1,
+                annotation_text=f"Upper: {upper_price:.6f}",
+                annotation_position="right",
+                annotation_font_color="#3b82f6",
+            )
+            if has_liquidity:
+                fig.add_hline(
+                    y=upper_price,
+                    line_dash="dot",
+                    line_color="#3b82f6",
+                    line_width=2,
+                    row=1, col=2,
+                )
+
+        # Add entry price line (green dashed) - for viewing existing positions
+        if entry_price:
+            fig.add_hline(
+                y=entry_price,
+                line_dash="dash",
+                line_color="#22c55e",  # Green
+                line_width=2,
+                row=1, col=1,
+                annotation_text=f"Entry: {entry_price:.6f}",
+                annotation_position="left",
+                annotation_font_color="#22c55e",
+            )
+            if has_liquidity:
+                fig.add_hline(
+                    y=entry_price,
+                    line_dash="dash",
+                    line_color="#22c55e",
+                    line_width=2,
+                    row=1, col=2,
+                )
+
         # Build title
         if base_symbol and quote_symbol:
             title = f"{base_symbol}/{quote_symbol} - {timeframe} + Liquidity"
@@ -810,13 +904,32 @@ def generate_combined_chart(
             bargap=0.1,  # Gap between bars
         )
 
+        # Calculate expected interval for rangebreaks (to hide gaps in trading)
+        if len(times) >= 2:
+            # Calculate time delta between candles
+            time_deltas = [(times[i+1] - times[i]).total_seconds() for i in range(len(times)-1) if times[i+1] > times[i]]
+            if time_deltas:
+                # Use median delta as the expected interval
+                expected_interval = sorted(time_deltas)[len(time_deltas)//2]
+                # Set dvalue for rangebreaks (gaps > 2x expected interval)
+                gap_threshold = expected_interval * 2 * 1000  # Convert to ms
+            else:
+                gap_threshold = None
+        else:
+            gap_threshold = None
+
         # Update axes styling (use unified theme)
-        fig.update_xaxes(
+        # Add rangebreaks to hide gaps in trading data
+        xaxis_config = dict(
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
             showgrid=True,
             zeroline=False,
         )
+        if gap_threshold:
+            xaxis_config["rangebreaks"] = [dict(dvalue=gap_threshold)]
+
+        fig.update_xaxes(**xaxis_config)
         fig.update_yaxes(
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
