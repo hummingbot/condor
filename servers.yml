@@ -1,22 +1,13 @@
 servers:
   remote:
-    host: 212.85.15.60
+    host: 212.85.34.32
     port: 8000
-    username: eldonero
-    password: barabit
+    username: admin
+    password: admin
   local:
     host: localhost
     port: 8000
     username: admin
     password: admin
-  brigado_server:
-    host: 63.250.52.240
-    port: 8000
-    username: admin
-    password: admin
 default_server: local
-per_chat_defaults:
-  481175164: local
-  -1003055388363: brigado_server
-  -4615022999: brigado_server
-  456181693: remote
+
