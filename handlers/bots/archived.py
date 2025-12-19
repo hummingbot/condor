@@ -518,15 +518,11 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
         lines.append("")
         lines.append(f"📝 *Trades:* {total_trades} • *Orders:* {total_orders}")
-            lines.append(f"📐 *Sharpe Ratio:* {escape_markdown_v2(f'{sharpe_ratio:.2f}')}")
 
-        lines.append("")
-        lines.append(f"📝 *Trades:* {total_trades} • *Orders:* {total_orders}")
-
-        if markets:
-            lines.append(f"📈 *Markets:* {escape_markdown_v2(', '.join(markets[:3]))}")
-        if strategies:
-            lines.append(f"🎮 *Strategies:* {escape_markdown_v2(', '.join(strategies[:3]))}")
+        if trading_pairs:
+            lines.append(f"📈 *Pairs:* {escape_markdown_v2(', '.join(trading_pairs[:5]))}")
+        if exchanges:
+            lines.append(f"🏦 *Exchanges:* {escape_markdown_v2(', '.join(exchanges[:3]))}")
 
         message = "\n".join(lines)
 
@@ -568,6 +564,12 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id
 
     try:
+        # Show loading message
+        loading_msg = await query.message.reply_text(
+            escape_markdown_v2("⏳ Generating timeline... Fetching trade data for all bots."),
+            parse_mode="MarkdownV2"
+        )
+
         # Get cached data or fetch
         databases = context.user_data.get("archived_databases", [])
         summaries = context.user_data.get("archived_summaries", {})
@@ -578,29 +580,37 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Filter to only healthy databases
             databases = await get_healthy_databases(client, all_databases)
             if not databases:
-                await query.message.reply_text(
+                await loading_msg.edit_text(
                     escape_markdown_v2("No healthy archived bots to display."),
                     parse_mode="MarkdownV2"
                 )
                 return
 
-        # Fetch performance for all bots if not already cached
         client = await get_bots_client(chat_id)
         bots_data = []
 
+        # Import chart functions
+        from .archived_chart import calculate_pnl_from_trades
+
         for db_path in databases:
             summary = summaries.get(db_path) or await fetch_database_summary(client, db_path)
-            performance = await fetch_database_performance(client, db_path)
 
             if summary:
+                # Fetch all trades for this bot to calculate accurate PnL
+                trades = await fetch_all_trades(client, db_path)
+
+                # Calculate PnL from trades
+                pnl_data = calculate_pnl_from_trades(trades)
+
                 bots_data.append({
                     "db_path": db_path,
                     "summary": summary,
-                    "performance": performance,
+                    "trades": trades,
+                    "pnl_data": pnl_data,
                 })
 
         if not bots_data:
-            await query.message.reply_text(
+            await loading_msg.edit_text(
                 escape_markdown_v2("No data available for timeline chart."),
                 parse_mode="MarkdownV2"
             )
@@ -612,11 +622,8 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
         chart_bytes = generate_timeline_chart(bots_data)
 
         if chart_bytes:
-            # Calculate total PnL
-            total_pnl = sum(
-                (b.get("performance", {}).get("metrics", {}) or {}).get("total_pnl", 0)
-                for b in bots_data
-            )
+            # Calculate total PnL from all bots
+            total_pnl = sum(b.get("pnl_data", {}).get("total_pnl", 0) for b in bots_data)
 
             caption = (
                 f"📊 *Archived Bots Timeline*\n"
@@ -624,6 +631,9 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
             keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="bots:archived")]]
+
+            # Delete loading message and send chart
+            await loading_msg.delete()
 
             await context.bot.send_photo(
                 chat_id=chat_id,
@@ -633,7 +643,7 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
-            await query.message.reply_text(
+            await loading_msg.edit_text(
                 escape_markdown_v2("Failed to generate timeline chart."),
                 parse_mode="MarkdownV2"
             )
@@ -655,42 +665,51 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             await query.message.reply_text("Bot not found. Please refresh the list.")
             return
 
+        # Show loading message
+        loading_msg = await query.message.reply_text(
+            escape_markdown_v2("⏳ Generating chart... Fetching all trade data."),
+            parse_mode="MarkdownV2"
+        )
+
         client = await get_bots_client(chat_id)
 
-        # Fetch all required data
+        # Fetch summary and ALL trades
         summary = await fetch_database_summary(client, db_path)
-        performance = await fetch_database_performance(client, db_path)
-        trades_response = await fetch_database_trades(client, db_path)
+        trades = await fetch_all_trades(client, db_path)
 
         if not summary:
-            await query.message.reply_text(
+            await loading_msg.edit_text(
                 escape_markdown_v2("Could not fetch bot data for chart."),
                 parse_mode="MarkdownV2"
             )
             return
 
-        trades = trades_response.get("trades", []) if trades_response else []
-
         # Import chart generation
-        from .archived_chart import generate_performance_chart
+        from .archived_chart import generate_performance_chart, calculate_pnl_from_trades
 
-        chart_bytes = generate_performance_chart(summary, performance, trades)
+        # Calculate PnL from trades
+        pnl_data = calculate_pnl_from_trades(trades)
+        total_pnl = pnl_data.get("total_pnl", 0)
+
+        # Generate chart (pass db_path for bot name extraction)
+        chart_bytes = generate_performance_chart(summary, None, trades, db_path=db_path)
 
         if chart_bytes:
-            bot_name = summary.get("bot_name", _extract_bot_name(db_path))
-            metrics = performance.get("metrics", {}) if performance else {}
-            total_pnl = metrics.get("total_pnl", 0)
+            bot_name = _extract_bot_name(db_path)
 
             caption = (
                 f"📊 *{escape_markdown_v2(bot_name)}*\n"
                 f"PnL: `{escape_markdown_v2(_format_pnl(total_pnl))}` • "
-                f"Trades: {summary.get('total_trades', 0)}"
+                f"Trades: {len(trades)}"
             )
 
             keyboard = [[
                 InlineKeyboardButton("💾 Report", callback_data=f"bots:archived_report:{db_index}"),
                 InlineKeyboardButton("🔙 Back", callback_data=f"bots:archived_select:{db_index}"),
             ]]
+
+            # Delete loading message and send chart
+            await loading_msg.delete()
 
             await context.bot.send_photo(
                 chat_id=chat_id,
@@ -700,7 +719,7 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         else:
-            await query.message.reply_text(
+            await loading_msg.edit_text(
                 escape_markdown_v2("Failed to generate performance chart."),
                 parse_mode="MarkdownV2"
             )

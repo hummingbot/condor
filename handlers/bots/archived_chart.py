@@ -129,6 +129,11 @@ def calculate_pnl_from_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     total_fees = 0.0
     total_volume = 0.0
 
+    # Debug counters
+    open_count = 0
+    close_count = 0
+    close_with_position = 0
+
     # Sort trades by timestamp
     sorted_trades = sorted(trades, key=lambda t: t.get("timestamp", 0))
 
@@ -148,6 +153,7 @@ def calculate_pnl_from_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
         ts = _parse_timestamp(timestamp)
 
         if position_action == "OPEN":
+            open_count += 1
             # Opening a new position or adding to existing
             if pair not in positions:
                 positions[pair] = {"amount": 0, "total_cost": 0, "direction": 0}
@@ -166,10 +172,12 @@ def calculate_pnl_from_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
                 pos["direction"] = -1
 
         elif position_action == "CLOSE":
+            close_count += 1
             # Closing a position - realize PnL
             pos = positions.get(pair)
 
             if pos and pos["amount"] > 0:
+                close_with_position += 1
                 # Calculate average entry price
                 avg_entry = pos["total_cost"] / pos["amount"]
 
@@ -203,6 +211,9 @@ def calculate_pnl_from_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "pnl": running_pnl,
                 "pair": pair,
             })
+
+    logger.info(f"PnL calculation: {len(trades)} trades, {open_count} OPEN, {close_count} CLOSE, "
+                f"{close_with_position} CLOSE with matching position, total_pnl=${running_pnl:.4f}")
 
     return {
         "total_pnl": running_pnl,

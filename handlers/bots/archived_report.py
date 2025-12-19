@@ -25,12 +25,24 @@ def ensure_reports_dir() -> Path:
     return REPORTS_DIR
 
 
-def generate_report_filename(bot_name: str) -> str:
+def _extract_bot_name(db_path: str) -> str:
+    """Extract readable bot name from database path."""
+    name = os.path.basename(db_path)
+    if name.endswith(".sqlite"):
+        name = name[:-7]
+    elif name.endswith(".db"):
+        name = name[:-3]
+    return name
+
+
+def generate_report_filename(db_path: str) -> str:
     """
     Generate a unique filename for the report.
 
     Format: {bot_name}_{YYYYMMDD_HHMMSS}
     """
+    # Extract bot name from db_path
+    bot_name = _extract_bot_name(db_path)
     # Sanitize bot name for filename
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in bot_name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -51,6 +63,7 @@ def build_report_json(
     trades: List[Dict[str, Any]],
     orders: List[Dict[str, Any]],
     executors: List[Dict[str, Any]],
+    pnl_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build the complete JSON report structure.
@@ -62,22 +75,40 @@ def build_report_json(
         trades: List of TradeDetail objects
         orders: List of OrderDetail objects
         executors: List of ExecutorInfo objects
+        pnl_data: Calculated PnL data from trades
 
     Returns:
         Complete report dictionary
     """
+    # Calculate time range from trades
+    start_time = None
+    end_time = None
+    if trades:
+        timestamps = [t.get("timestamp") for t in trades if t.get("timestamp")]
+        if timestamps:
+            # Convert milliseconds to ISO format
+            min_ts = min(timestamps)
+            max_ts = max(timestamps)
+            if min_ts > 1e12:
+                min_ts = min_ts / 1000
+            if max_ts > 1e12:
+                max_ts = max_ts / 1000
+            start_time = datetime.fromtimestamp(min_ts).isoformat()
+            end_time = datetime.fromtimestamp(max_ts).isoformat()
+
     return {
         "metadata": {
             "generated_at": datetime.now().isoformat(),
             "db_path": db_path,
+            "bot_name": _extract_bot_name(db_path),
             "generator": "condor",
-            "version": "1.0.0",
+            "version": "1.1.0",
         },
         "summary": summary,
-        "performance": performance.get("metrics", {}) if performance else {},
+        "calculated_pnl": pnl_data or {},
         "period": {
-            "start": performance.get("period_start") if performance else None,
-            "end": performance.get("period_end") if performance else None,
+            "start": start_time,
+            "end": end_time,
         },
         "trades": trades,
         "orders": orders,
@@ -167,9 +198,13 @@ async def save_full_report(
         executors = executors_response.get("executors", []) if executors_response else []
         logger.info(f"Fetched {len(executors)} executors")
 
+        # Calculate PnL from trades
+        from .archived_chart import calculate_pnl_from_trades
+        pnl_data = calculate_pnl_from_trades(all_trades)
+        logger.info(f"Calculated PnL: ${pnl_data.get('total_pnl', 0):.2f}")
+
         # Build report
-        bot_name = summary.get("bot_name", "unknown")
-        filename = generate_report_filename(bot_name)
+        filename = generate_report_filename(db_path)
 
         report_data = build_report_json(
             db_path=db_path,
@@ -178,6 +213,7 @@ async def save_full_report(
             trades=all_trades,
             orders=all_orders,
             executors=executors,
+            pnl_data=pnl_data,
         )
 
         # Save JSON
@@ -197,6 +233,7 @@ async def save_full_report(
                     performance=performance,
                     trades=all_trades,
                     executors=executors,
+                    db_path=db_path,
                 )
 
                 if chart_bytes:
