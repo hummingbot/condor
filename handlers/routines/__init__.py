@@ -155,11 +155,12 @@ def _store_result(
     if chat_id not in _last_results:
         _last_results[chat_id] = {}
 
-    key = f"{routine_name}_{instance_id}" if instance_id else routine_name
-    _last_results[chat_id][key] = {
+    # Always store under routine_name for easy retrieval
+    _last_results[chat_id][routine_name] = {
         "result": result,
         "duration": duration,
         "end_time": time.time(),
+        "instance_id": instance_id,
     }
 
 
@@ -191,12 +192,21 @@ async def _interval_callback(context: CallbackContext) -> None:
     context._instance_id = instance_id
     context._user_data = user_data
 
+    job_name = context.job.name
+    info = _job_info.get(job_name, {})
+    start_time = info.get("start_time", time.time())
+
     try:
         config = routine.config_class(**config_dict)
         result = await routine.run_fn(config, context)
-        logger.debug(f"{routine_name}[{instance_id}]: {str(result)[:50]}")
+        result_text = str(result)[:500] if result else "Running..."
+        logger.debug(f"{routine_name}[{instance_id}]: {result_text[:50]}")
     except Exception as e:
+        result_text = f"Error: {e}"
         logger.error(f"{routine_name}[{instance_id}] error: {e}")
+
+    # Store result for display in detail view
+    _store_result(chat_id, routine_name, result_text, time.time() - start_time)
 
 
 async def _oneshot_callback(context: CallbackContext) -> None:

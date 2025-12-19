@@ -1246,12 +1246,37 @@ async def process_gecko_search(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+# GeckoTerminal to Gateway network mapping
+GECKO_TO_GATEWAY_NETWORK = {
+    "solana": "solana-mainnet-beta",
+    "eth": "ethereum-mainnet",
+    "base": "base-mainnet",
+    "arbitrum": "arbitrum-one",
+    "bsc": "bsc-mainnet",
+    "polygon_pos": "polygon-mainnet",
+    "avalanche": "avalanche-mainnet",
+    "optimism": "optimism-mainnet",
+}
+
+# Default connectors by network chain
+NETWORK_DEFAULT_CONNECTOR = {
+    "solana": "jupiter",
+    "eth": "uniswap",
+    "base": "uniswap",
+    "arbitrum": "uniswap",
+    "bsc": "pancakeswap",
+    "polygon_pos": "quickswap",
+    "avalanche": "traderjoe",
+    "optimism": "uniswap",
+}
+
+
 # ============================================
 # POOL DETAIL VIEW
 # ============================================
 
 async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, pool_index: int) -> None:
-    """Show detailed information for a selected pool"""
+    """Show OHLCV chart automatically when selecting a pool with action buttons"""
     query = update.callback_query
 
     pools = context.user_data.get("gecko_pools", [])
@@ -1266,7 +1291,175 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
     context.user_data["gecko_selected_pool"] = pool_data
     context.user_data["gecko_selected_pool_index"] = pool_index
 
-    # Build detailed view
+    # Default timeframe for initial view
+    default_timeframe = "1h"  # 1h candles showing 1 day of data
+
+    # Show OHLCV chart automatically
+    await _show_pool_chart(update, context, pool_data, default_timeframe)
+
+
+async def _show_pool_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, pool_data: dict, timeframe: str) -> None:
+    """Internal function to show pool OHLCV chart with action buttons"""
+    query = update.callback_query
+
+    await query.answer("Loading chart...")
+
+    # Show loading - handle photo messages (can't edit photo to text)
+    if getattr(query.message, 'photo', None):
+        await query.message.delete()
+        loading_msg = await query.message.chat.send_message(
+            f"📈 *{escape_markdown_v2(pool_data['name'])}*\n\n_Loading chart\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+    else:
+        await query.message.edit_text(
+            f"📈 *{escape_markdown_v2(pool_data['name'])}*\n\n_Loading chart\\.\\.\\._",
+            parse_mode="MarkdownV2"
+        )
+        loading_msg = query.message
+
+    try:
+        network = pool_data["network"]
+        address = pool_data["address"]
+
+        client = GeckoTerminalAsyncClient()
+        result = await client.get_ohlcv(network, address, timeframe)
+
+        logger.info(f"OHLCV raw response type: {type(result)}")
+
+        # Handle various response formats for OHLCV
+        ohlcv_data = []
+
+        # Check for pandas DataFrame first (library often returns DataFrames)
+        try:
+            import pandas as pd
+            if isinstance(result, pd.DataFrame):
+                logger.info(f"OHLCV DataFrame columns: {list(result.columns)}, shape: {result.shape}")
+                if not result.empty:
+                    if result.index.name == 'datetime' or 'datetime' not in result.columns:
+                        result = result.reset_index()
+                    ohlcv_data = result.values.tolist()
+                    logger.info(f"Converted OHLCV DataFrame with {len(ohlcv_data)} rows")
+        except ImportError:
+            pass
+
+        # If not a DataFrame, try other formats
+        if not ohlcv_data:
+            if isinstance(result, dict):
+                ohlcv_data = result.get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+            elif hasattr(result, 'data'):
+                data = result.data
+                if isinstance(data, dict):
+                    ohlcv_data = data.get("attributes", {}).get("ohlcv_list", [])
+                elif hasattr(data, 'attributes'):
+                    ohlcv_data = getattr(data.attributes, 'ohlcv_list', [])
+            elif isinstance(result, list):
+                ohlcv_data = result
+
+        if not ohlcv_data:
+            # Fall back to text view if no chart data
+            await _show_pool_text_detail(loading_msg, context, pool_data)
+            return
+
+        # Generate chart image using visualization module
+        pair_name = pool_data.get('name', 'Pool')
+        base_symbol = pool_data.get('base_token_symbol')
+        quote_symbol = pool_data.get('quote_token_symbol')
+
+        chart_buffer = generate_ohlcv_chart(
+            ohlcv_data=ohlcv_data,
+            pair_name=pair_name,
+            timeframe=_format_timeframe_label(timeframe),
+            base_symbol=base_symbol,
+            quote_symbol=quote_symbol
+        )
+
+        if not chart_buffer:
+            await _show_pool_text_detail(loading_msg, context, pool_data)
+            return
+
+        # Build caption with key info
+        caption_lines = [
+            f"📈 *{escape_markdown_v2(pool_data['name'])}*",
+        ]
+
+        # Add price and change info
+        if pool_data.get("base_token_price_usd"):
+            try:
+                price = float(pool_data["base_token_price_usd"])
+                caption_lines.append(f"💰 {escape_markdown_v2(_format_price(price))}")
+            except (ValueError, TypeError):
+                pass
+
+        change_24h = pool_data.get("price_change_24h")
+        if change_24h is not None:
+            try:
+                change = float(change_24h)
+                caption_lines.append(f"{escape_markdown_v2(_format_change(change))} 24h")
+            except (ValueError, TypeError):
+                pass
+
+        vol_24h = pool_data.get("volume_24h")
+        if vol_24h:
+            try:
+                vol = float(vol_24h)
+                caption_lines.append(f"Vol: {escape_markdown_v2(_format_volume(vol))}")
+            except (ValueError, TypeError):
+                pass
+
+        caption = caption_lines[0] + "\n" + " \\| ".join(caption_lines[1:]) if len(caption_lines) > 1 else caption_lines[0]
+
+        # Build keyboard with timeframe selection and action buttons
+        pool_index = context.user_data.get("gecko_selected_pool_index", 0)
+        dex_id = pool_data.get("dex_id", "")
+        network = pool_data.get("network", "")
+        supports_liquidity = can_fetch_liquidity(dex_id, network)
+
+        keyboard = [
+            # Timeframe row
+            [
+                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data="dex:gecko_ohlcv:1m"),
+                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data="dex:gecko_ohlcv:1h"),
+                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data="dex:gecko_ohlcv:1d"),
+            ],
+            # Action row: Swap + Trades + Info
+            [
+                InlineKeyboardButton("💱 Swap", callback_data="dex:gecko_swap"),
+                InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
+                InlineKeyboardButton("ℹ️ Info", callback_data="dex:gecko_info"),
+            ],
+        ]
+
+        # Add liquidity button for supported DEXes
+        if supports_liquidity:
+            keyboard.append([
+                InlineKeyboardButton("📊 Liquidity", callback_data="dex:gecko_liquidity"),
+                InlineKeyboardButton("➕ Add LP", callback_data="dex:gecko_add_liquidity"),
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton("🔄", callback_data=f"dex:gecko_pool:{pool_index}"),
+            InlineKeyboardButton("« Back", callback_data="dex:gecko_back_to_list"),
+        ])
+
+        # Delete loading message and send photo
+        await loading_msg.delete()
+        await loading_msg.chat.send_photo(
+            photo=chart_buffer,
+            caption=caption,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating pool chart: {e}", exc_info=True)
+        # Fall back to text view on error
+        await _show_pool_text_detail(loading_msg, context, pool_data)
+
+
+async def _show_pool_text_detail(message, context: ContextTypes.DEFAULT_TYPE, pool_data: dict) -> None:
+    """Show pool details as text (fallback when chart unavailable)"""
+    pool_index = context.user_data.get("gecko_selected_pool_index", 0)
     network_name = NETWORK_NAMES.get(pool_data["network"], pool_data["network"])
 
     lines = [
@@ -1340,16 +1533,6 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         except (ValueError, TypeError):
             pass
 
-    # Transactions
-    txns = pool_data.get("transactions_24h", {})
-    if txns:
-        buys = txns.get("buys", 0)
-        sells = txns.get("sells", 0)
-        if buys or sells:
-            lines.append("")
-            lines.append(r"🔄 *24h Transactions:*")
-            lines.append(f"• Buys: {buys} | Sells: {sells}")
-
     # Pool address and link
     lines.append("")
     addr = pool_data.get("address", "")
@@ -1360,35 +1543,18 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             gecko_url = f"https://www.geckoterminal.com/{network}/pools/{addr}"
             lines.append(f"\n🦎 [View on GeckoTerminal]({escape_markdown_v2(gecko_url)})")
 
-    # Build keyboard - compressed menu like Meteora
+    # Build keyboard
     dex_id = pool_data.get("dex_id", "")
-    network = pool_data.get("network", "")
     supports_liquidity = can_fetch_liquidity(dex_id, network)
 
-    keyboard = []
+    keyboard = [
+        [
+            InlineKeyboardButton("📈 Charts", callback_data="dex:gecko_charts"),
+            InlineKeyboardButton("💱 Swap", callback_data="dex:gecko_swap"),
+            InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
+        ],
+    ]
 
-    # Row 1: Charts button + Trades
-    keyboard.append([
-        InlineKeyboardButton("📈 Charts", callback_data="dex:gecko_charts"),
-        InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
-    ])
-
-    # Row 2: Token info buttons if addresses are available
-    base_addr = pool_data.get("base_token_address", "")
-    quote_addr = pool_data.get("quote_token_address", "")
-    base_sym = pool_data.get("base_token_symbol", "Base")[:6]
-    quote_sym = pool_data.get("quote_token_symbol", "Quote")[:6]
-
-    if base_addr or quote_addr:
-        token_row = []
-        if base_addr:
-            token_row.append(InlineKeyboardButton(f"🪙 {base_sym}", callback_data="dex:gecko_token:base"))
-        if quote_addr:
-            token_row.append(InlineKeyboardButton(f"🪙 {quote_sym}", callback_data="dex:gecko_token:quote"))
-        if token_row:
-            keyboard.append(token_row)
-
-    # Row 3: Add Liquidity button - only for supported DEXes (Meteora, Raydium, Orca on Solana)
     if supports_liquidity:
         keyboard.append([
             InlineKeyboardButton("➕ Add Liquidity", callback_data="dex:gecko_add_liquidity"),
@@ -1399,22 +1565,12 @@ async def show_pool_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, p
         InlineKeyboardButton("« Back", callback_data="dex:gecko_back_to_list"),
     ])
 
-    # Handle case when returning from photo (OHLCV chart) - can't edit photo to text
-    if getattr(query.message, 'photo', None):
-        await query.message.delete()
-        await query.message.chat.send_message(
-            "\n".join(lines),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            disable_web_page_preview=True
-        )
-    else:
-        await query.message.edit_text(
-            "\n".join(lines),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            disable_web_page_preview=True
-        )
+    await message.edit_text(
+        "\n".join(lines),
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True
+    )
 
 
 # ============================================
@@ -2573,6 +2729,230 @@ async def handle_gecko_add_liquidity(update: Update, context: ContextTypes.DEFAU
 
 
 # ============================================
+# SWAP INTEGRATION
+# ============================================
+
+async def handle_gecko_swap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set up swap params from GeckoTerminal pool and redirect to swap menu"""
+    from .swap import show_swap_menu
+
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    await query.answer("Opening swap...")
+
+    # Get trading pair from pool
+    base_symbol = pool_data.get("base_token_symbol", "")
+    quote_symbol = pool_data.get("quote_token_symbol", "")
+
+    if not base_symbol or not quote_symbol:
+        await query.answer("Token symbols not available")
+        return
+
+    # Format trading pair as BASE-QUOTE
+    trading_pair = f"{base_symbol}-{quote_symbol}"
+
+    # Map GeckoTerminal network to Gateway network
+    gecko_network = pool_data.get("network", "solana")
+    gateway_network = GECKO_TO_GATEWAY_NETWORK.get(gecko_network, "solana-mainnet-beta")
+
+    # Get default connector for this network
+    connector = NETWORK_DEFAULT_CONNECTOR.get(gecko_network, "jupiter")
+
+    # Set up swap params
+    context.user_data["swap_params"] = {
+        "connector": connector,
+        "network": gateway_network,
+        "trading_pair": trading_pair,
+        "side": "BUY",
+        "amount": "1.0",
+        "slippage": "1.0",
+    }
+
+    context.user_data["dex_state"] = "swap"
+
+    # Store source for back navigation
+    context.user_data["swap_from_gecko"] = True
+    context.user_data["swap_gecko_pool_index"] = context.user_data.get("gecko_selected_pool_index", 0)
+
+    # Delete current message (might be a photo) and show swap menu
+    try:
+        if getattr(query.message, 'photo', None):
+            await query.message.delete()
+        else:
+            await query.message.delete()
+    except Exception:
+        pass
+
+    # Show swap menu
+    await show_swap_menu(update, context)
+
+
+async def show_gecko_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show detailed pool info as text (accessed via Info button)"""
+    query = update.callback_query
+
+    pool_data = context.user_data.get("gecko_selected_pool")
+    if not pool_data:
+        await query.answer("No pool selected")
+        return
+
+    await query.answer()
+
+    pool_index = context.user_data.get("gecko_selected_pool_index", 0)
+    network_name = NETWORK_NAMES.get(pool_data["network"], pool_data["network"])
+
+    lines = [
+        f"📊 *{escape_markdown_v2(pool_data['name'])}*\n",
+        f"🌐 Network: {escape_markdown_v2(network_name)}",
+        f"🏦 DEX: {escape_markdown_v2(pool_data['dex_id'])}",
+        "",
+        r"💰 *Price Info:*",
+    ]
+
+    if pool_data.get("base_token_price_usd"):
+        try:
+            price = float(pool_data["base_token_price_usd"])
+            symbol = escape_markdown_v2(pool_data['base_token_symbol'])
+            lines.append(f"• {symbol}: {escape_markdown_v2(_format_price(price))}")
+        except (ValueError, TypeError):
+            pass
+
+    if pool_data.get("quote_token_price_usd"):
+        try:
+            price = float(pool_data["quote_token_price_usd"])
+            symbol = escape_markdown_v2(pool_data['quote_token_symbol'])
+            lines.append(f"• {symbol}: {escape_markdown_v2(_format_price(price))}")
+        except (ValueError, TypeError):
+            pass
+
+    lines.append("")
+    lines.append(r"📈 *Price Changes:*")
+
+    for period, key in [("1h", "price_change_1h"), ("6h", "price_change_6h"), ("24h", "price_change_24h")]:
+        change = pool_data.get(key)
+        if change is not None:
+            try:
+                change = float(change)
+                lines.append(f"• {period}: {escape_markdown_v2(_format_change(change))}")
+            except (ValueError, TypeError):
+                pass
+
+    lines.append("")
+    lines.append(r"📊 *Volume:*")
+
+    for period, key in [("1h", "volume_1h"), ("6h", "volume_6h"), ("24h", "volume_24h")]:
+        vol = pool_data.get(key)
+        if vol:
+            try:
+                vol = float(vol)
+                lines.append(f"• {period}: {escape_markdown_v2(_format_volume(vol))}")
+            except (ValueError, TypeError):
+                pass
+
+    # Market cap and FDV
+    lines.append("")
+    if pool_data.get("market_cap_usd"):
+        try:
+            mc = float(pool_data["market_cap_usd"])
+            lines.append(f"💎 Market Cap: {escape_markdown_v2(_format_volume(mc))}")
+        except (ValueError, TypeError):
+            pass
+
+    if pool_data.get("fdv_usd"):
+        try:
+            fdv = float(pool_data["fdv_usd"])
+            lines.append(f"📈 FDV: {escape_markdown_v2(_format_volume(fdv))}")
+        except (ValueError, TypeError):
+            pass
+
+    if pool_data.get("reserve_usd"):
+        try:
+            reserve = float(pool_data["reserve_usd"])
+            lines.append(f"💧 Liquidity: {escape_markdown_v2(_format_volume(reserve))}")
+        except (ValueError, TypeError):
+            pass
+
+    # Transactions
+    txns = pool_data.get("transactions_24h", {})
+    if txns:
+        buys = txns.get("buys", 0)
+        sells = txns.get("sells", 0)
+        if buys or sells:
+            lines.append("")
+            lines.append(r"🔄 *24h Transactions:*")
+            lines.append(f"• Buys: {buys} | Sells: {sells}")
+
+    # Pool address and link
+    lines.append("")
+    addr = pool_data.get("address", "")
+    network = pool_data.get("network", "")
+    if addr:
+        lines.append(f"📍 Address:\n`{addr}`")
+        if network:
+            gecko_url = f"https://www.geckoterminal.com/{network}/pools/{addr}"
+            lines.append(f"\n🦎 [View on GeckoTerminal]({escape_markdown_v2(gecko_url)})")
+
+    # Token info buttons
+    base_addr = pool_data.get("base_token_address", "")
+    quote_addr = pool_data.get("quote_token_address", "")
+    base_sym = pool_data.get("base_token_symbol", "Base")[:6]
+    quote_sym = pool_data.get("quote_token_symbol", "Quote")[:6]
+
+    # Build keyboard
+    dex_id = pool_data.get("dex_id", "")
+    supports_liquidity = can_fetch_liquidity(dex_id, network)
+
+    keyboard = []
+
+    # Token info buttons if addresses are available
+    if base_addr or quote_addr:
+        token_row = []
+        if base_addr:
+            token_row.append(InlineKeyboardButton(f"🪙 {base_sym}", callback_data="dex:gecko_token:base"))
+        if quote_addr:
+            token_row.append(InlineKeyboardButton(f"🪙 {quote_sym}", callback_data="dex:gecko_token:quote"))
+        if token_row:
+            keyboard.append(token_row)
+
+    keyboard.append([
+        InlineKeyboardButton("📈 Chart", callback_data=f"dex:gecko_pool:{pool_index}"),
+        InlineKeyboardButton("💱 Swap", callback_data="dex:gecko_swap"),
+        InlineKeyboardButton("📜 Trades", callback_data="dex:gecko_trades"),
+    ])
+
+    if supports_liquidity:
+        keyboard.append([
+            InlineKeyboardButton("➕ Add Liquidity", callback_data="dex:gecko_add_liquidity"),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("« Back", callback_data="dex:gecko_back_to_list"),
+    ])
+
+    # Handle case when returning from photo (OHLCV chart) - can't edit photo to text
+    if getattr(query.message, 'photo', None):
+        await query.message.delete()
+        await query.message.chat.send_message(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    else:
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+
+
+# ============================================
 # EXPORTS
 # ============================================
 
@@ -2607,4 +2987,6 @@ __all__ = [
     'handle_gecko_token_add',
     'handle_back_to_list',
     'handle_gecko_add_liquidity',
+    'handle_gecko_swap',
+    'show_gecko_info',
 ]

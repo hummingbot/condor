@@ -440,11 +440,9 @@ def _format_closed_position_line(pos: dict, token_cache: dict = None, token_pric
     closed_at = pos.get('closed_at', pos.get('updated_at', ''))
     age = format_relative_time(closed_at) if closed_at else ""
 
-    # Build line: "MET-USDC (met) ✓ [0.31-0.32]"
-    line = f"{pair} ({connector}) ✓ {range_str}"
+    # Build single-line format: "MET-USDC (met) ✓ [0.31-0.32] | PnL: -$38.92 | 💰 $5.42 | 17h"
+    parts = [f"{pair} ({connector}) ✓ {range_str}"]
 
-    # Add PnL and fees on second line in USD
-    parts = []
     if pnl_usd >= 0:
         parts.append(f"PnL: +${pnl_usd:.2f}")
     else:
@@ -453,9 +451,8 @@ def _format_closed_position_line(pos: dict, token_cache: dict = None, token_pric
         parts.append(f"💰 ${fees_usd:.2f}")
     if age:
         parts.append(age)
-    line += "\n   " + " | ".join(parts)
 
-    return line
+    return " | ".join(parts)
 
 
 # ============================================

@@ -131,6 +131,8 @@ from .geckoterminal import (
     handle_gecko_token_add,
     handle_back_to_list,
     handle_gecko_add_liquidity,
+    handle_gecko_swap,
+    show_gecko_info,
 )
 # Unified liquidity module
 from .liquidity import (
@@ -226,7 +228,7 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         "pool_info", "pool_list", "manage_positions", "pos_add_confirm", "pos_close_exec",
                         "add_to_gateway", "pool_detail_refresh",
                         "gecko_networks", "gecko_trades", "gecko_show_pools", "gecko_refresh", "gecko_token_search", "gecko_token_add",
-                        "gecko_explore"}
+                        "gecko_explore", "gecko_swap", "gecko_info"}
         # Also show typing for actions that start with these prefixes
         slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:",
                          "gecko_token:", "swap_hist_set_", "lp_hist_set_")
@@ -512,6 +514,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_gecko_token_search(update, context)
         elif action == "gecko_token_add":
             await handle_gecko_token_add(update, context)
+        elif action == "gecko_swap":
+            await handle_gecko_swap(update, context)
+        elif action == "gecko_info":
+            await show_gecko_info(update, context)
         elif action.startswith("gecko_ohlcv:"):
             timeframe = action.split(":")[1]
             await show_ohlcv_chart(update, context, timeframe)
