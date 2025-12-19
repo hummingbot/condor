@@ -1407,7 +1407,11 @@ async def _show_pool_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, p
             except (ValueError, TypeError):
                 pass
 
-        caption = caption_lines[0] + "\n" + " \\| ".join(caption_lines[1:]) if len(caption_lines) > 1 else caption_lines[0]
+        # Join caption lines - use bullet separator instead of | to avoid escaping issues
+        if len(caption_lines) > 1:
+            caption = caption_lines[0] + "\n" + " • ".join(caption_lines[1:])
+        else:
+            caption = caption_lines[0]
 
         # Build keyboard with timeframe selection and action buttons
         pool_index = context.user_data.get("gecko_selected_pool_index", 0)
@@ -2885,7 +2889,7 @@ async def show_gecko_info(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if buys or sells:
             lines.append("")
             lines.append(r"🔄 *24h Transactions:*")
-            lines.append(f"• Buys: {buys} | Sells: {sells}")
+            lines.append(f"• Buys: {buys} • Sells: {sells}")
 
     # Pool address and link
     lines.append("")

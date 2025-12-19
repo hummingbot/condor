@@ -1276,12 +1276,14 @@ async def _show_pool_detail(
     base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
     quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
 
-    # Calculate $ values for amounts
+    # Calculate $ values for amounts using actual token prices from wallet
     try:
-        price_float = float(current_price) if current_price else 0
-        base_usd = base_amount * price_float  # base token value in quote (usually USD)
-        quote_usd = quote_amount  # quote is usually USDC/USDT
-    except (ValueError, TypeError):
+        # Calculate USD price per token from wallet balance (value / units)
+        base_price_usd = (base_val / base_bal) if base_bal > 0 else 0
+        quote_price_usd = (quote_val / quote_bal) if quote_bal > 0 else 0
+        base_usd = base_amount * base_price_usd
+        quote_usd = quote_amount * quote_price_usd
+    except (ValueError, TypeError, ZeroDivisionError):
         base_usd, quote_usd = 0, 0
 
     base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
@@ -3700,12 +3702,18 @@ async def show_add_position_menu(
         base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
         quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
 
-        # Calculate $ values for amounts
+        # Calculate $ values for amounts using actual token prices from wallet
         try:
-            price_float = float(current_price) if current_price else 0
-            base_usd = base_amount * price_float  # base token value in quote (usually USD)
-            quote_usd = quote_amount  # quote is usually USDC/USDT
-        except (ValueError, TypeError):
+            base_bal = balances.get("base_balance", 0)
+            quote_bal = balances.get("quote_balance", 0)
+            base_val = balances.get("base_value", 0)
+            quote_val = balances.get("quote_value", 0)
+            # Calculate USD price per token from wallet balance (value / units)
+            base_price_usd = (base_val / base_bal) if base_bal > 0 else 0
+            quote_price_usd = (quote_val / quote_bal) if quote_bal > 0 else 0
+            base_usd = base_amount * base_price_usd
+            quote_usd = quote_amount * quote_price_usd
+        except (ValueError, TypeError, ZeroDivisionError):
             base_usd, quote_usd = 0, 0
 
         base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
