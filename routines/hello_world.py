@@ -5,7 +5,7 @@ from telegram.ext import ContextTypes
 
 
 class Config(BaseModel):
-    """Simple hello world example"""
+    """Simple hello world example routine."""
 
     name: str = Field(default="World", description="Name to greet")
     repeat: int = Field(default=1, description="Number of times to repeat")

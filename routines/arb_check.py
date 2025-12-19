@@ -8,7 +8,7 @@ from servers import get_client
 
 
 class Config(BaseModel):
-    """Check CEX vs DEX price arbitrage"""
+    """Check CEX vs DEX price arbitrage opportunities."""
 
     trading_pair: str = Field(default="SOL-USDC", description="Trading pair (e.g. SOL-USDC)")
     amount: float = Field(default=1.0, description="Amount to quote")
