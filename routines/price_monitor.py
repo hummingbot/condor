@@ -17,15 +17,15 @@ class Config(BaseModel):
     connector: str = Field(default="binance", description="CEX connector name")
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair to monitor")
     threshold_pct: float = Field(default=1.0, description="Alert threshold in %")
-    interval_sec: int = Field(default=5, description="Refresh interval in seconds")
+    interval_sec: int = Field(default=10, description="Refresh interval in seconds")
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     """
     Monitor price - single iteration.
 
-    This routine is called repeatedly by JobQueue at interval_sec intervals.
-    State is stored in context.user_data to persist between iterations.
+    Runs silently in background. Sends alert messages when threshold is crossed.
+    Returns status string for the routine handler to display.
     """
     chat_id = context._chat_id if hasattr(context, '_chat_id') else None
     client = await get_client(chat_id)
@@ -33,25 +33,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if not client:
         return "No server available"
 
-    # Get user_data and instance_id (use _user_data for job callbacks)
+    # Get user_data and instance_id
     user_data = getattr(context, '_user_data', None) or getattr(context, 'user_data', {})
     instance_id = getattr(context, '_instance_id', 'default')
 
-    # Get message info for live updates
-    msg_id = user_data.get("routines_msg_id")
-
-    if not msg_id or not chat_id:
-        return "Could not get message reference for live updates"
-
-    # State key for this routine instance (includes instance_id for multi-instance support)
+    # State key for this routine instance
     state_key = f"price_monitor_state_{chat_id}_{instance_id}"
 
-    # Initialize or get state
+    # Get or initialize state
     state = user_data.get(state_key, {})
-
-    # Escape config values for MarkdownV2
-    pair_escaped = escape_markdown_v2(config.trading_pair)
-    connector_escaped = escape_markdown_v2(config.connector)
 
     # Get current price
     try:
@@ -61,9 +51,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         )
         current_price = prices["prices"].get(config.trading_pair)
         if not current_price:
-            return f"Could not get price for {config.trading_pair}"
+            return f"No price for {config.trading_pair}"
     except Exception as e:
-        return f"Error getting price: {e}"
+        return f"Error: {e}"
 
     # Initialize state on first run
     if not state:
@@ -78,7 +68,19 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         }
         user_data[state_key] = state
 
-    # Update state
+        # Send start notification
+        try:
+            pair_esc = escape_markdown_v2(config.trading_pair)
+            price_esc = escape_markdown_v2(f"${current_price:,.2f}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🟢 *Price Monitor Started*\n{pair_esc}: `{price_esc}`",
+                parse_mode="MarkdownV2"
+            )
+        except Exception:
+            pass
+
+    # Update tracking
     state["high_price"] = max(state["high_price"], current_price)
     state["low_price"] = min(state["low_price"], current_price)
 
@@ -86,84 +88,40 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     change_from_last = ((current_price - state["last_price"]) / state["last_price"]) * 100
     change_from_start = ((current_price - state["initial_price"]) / state["initial_price"]) * 100
 
-    # Determine trend
-    if change_from_last > 0.01:
-        trend = "📈"
-    elif change_from_last < -0.01:
-        trend = "📉"
-    else:
-        trend = "➡️"
-
-    # Build live dashboard
-    elapsed = int(time.time() - state["start_time"])
-    mins, secs = divmod(elapsed, 60)
-
-    # Escape price values
-    price_str = escape_markdown_v2(f"${current_price:,.2f}")
-    high_str = escape_markdown_v2(f"${state['high_price']:,.2f}")
-    low_str = escape_markdown_v2(f"${state['low_price']:,.2f}")
-    change_start_str = escape_markdown_v2(f"{change_from_start:+.2f}%")
-
-    dashboard = (
-        f"⚡ *PRICE MONITOR*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 _Continuous • Running {mins}m {secs}s_\n\n"
-        f"┌─ {trend} {pair_escaped} ─────────────\n"
-        f"│ `{price_str}`\n"
-        f"│ Change: `{change_start_str}`\n"
-        f"│ High: `{high_str}` Low: `{low_str}`\n"
-        f"└─────────────────────────\n\n"
-        f"┌─ Config ─────────────────\n"
-        f"```\n"
-        f"connector={config.connector}\n"
-        f"interval={config.interval_sec}s\n"
-        f"alert_threshold={config.threshold_pct}%\n"
-        f"```\n"
-        f"└─ _Alerts sent: {state['alerts_sent']}_"
-    )
-
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    keyboard = [
-        [InlineKeyboardButton("⏹ Stop", callback_data="routines:stop:price_monitor")],
-        [InlineKeyboardButton("« Back", callback_data="routines:menu")],
-    ]
-
-    # Update message
-    try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg_id,
-            text=dashboard,
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        logger.debug(f"Price monitor update #{state['updates'] + 1}: ${current_price:,.2f}")
-    except Exception as e:
-        if "not modified" not in str(e).lower():
-            logger.error(f"Price monitor edit failed: {e}")
-
     # Check threshold for alert
     if abs(change_from_last) >= config.threshold_pct:
         direction = "📈" if change_from_last > 0 else "📉"
-        change_str = escape_markdown_v2(f"{change_from_last:+.2f}%")
-        alert_msg = (
-            f"{direction} *{pair_escaped} Alert*\n"
-            f"Price: `{price_str}`\n"
-            f"Change: `{change_str}`"
-        )
+        pair_esc = escape_markdown_v2(config.trading_pair)
+        price_esc = escape_markdown_v2(f"${current_price:,.2f}")
+        change_esc = escape_markdown_v2(f"{change_from_last:+.2f}%")
+
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=alert_msg,
+                text=(
+                    f"{direction} *{pair_esc} Alert*\n"
+                    f"Price: `{price_esc}`\n"
+                    f"Change: `{change_esc}`"
+                ),
                 parse_mode="MarkdownV2"
             )
             state["alerts_sent"] += 1
         except Exception:
             pass
 
-    # Update state for next iteration
+    # Update state
     state["last_price"] = current_price
     state["updates"] += 1
     user_data[state_key] = state
 
-    return f"${current_price:,.2f} ({change_from_start:+.2f}%)"
+    # Build status string for handler display
+    elapsed = int(time.time() - state["start_time"])
+    mins, secs = divmod(elapsed, 60)
+
+    trend = "📈" if change_from_start > 0.01 else "📉" if change_from_start < -0.01 else "➡️"
+
+    return (
+        f"{trend} ${current_price:,.2f} ({change_from_start:+.2f}%)\n"
+        f"High: ${state['high_price']:,.2f} | Low: ${state['low_price']:,.2f}\n"
+        f"Updates: {state['updates']} | Alerts: {state['alerts_sent']} | {mins}m {secs}s"
+    )
