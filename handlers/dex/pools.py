@@ -1797,7 +1797,7 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             pool_address=pool_address,
             network=network,
             timeframe=timeframe,
-            currency=currency,
+            currency="token",
             user_data=context.user_data
         )
 
@@ -1946,7 +1946,7 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
             pool_address=pool_address,
             network=network,
             timeframe=timeframe,
-            currency=currency,
+            currency="token",
             user_data=context.user_data
         )
 
