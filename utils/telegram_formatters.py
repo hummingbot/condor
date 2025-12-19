@@ -1040,7 +1040,7 @@ def format_portfolio_overview(
 
         # Show detected movements if any (max 5 most recent)
         if detected_movements:
-            message += f"_\\({len(detected_movements)} movimiento\\(s\\) detectado\\(s\\) ajustados\\)_\n"
+            message += f"_\\({len(detected_movements)} detected movement\\(s\\) adjusted\\)_\n"
             message += "\n"
 
     # ============================================
