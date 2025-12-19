@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       TELEGRAM_TOKEN: your_bot_token
-      AUTHORIZED_USERS: chat_id_1,chat_id_2
+      AUTHORIZED_USERS: 123,1234
     env_file:
       - .env
     volumes:
