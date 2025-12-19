@@ -67,12 +67,35 @@ def _get_optimal_interval(days: int, max_points: int = 100) -> str:
     return "1d"
 
 
+def _is_gateway_network(connector_name: str) -> bool:
+    """
+    Check if a connector name looks like a Gateway network (not a CEX connector).
+
+    Gateway networks have patterns like: solana-mainnet-beta, ethereum-mainnet, base, arbitrum
+    CEX connectors have patterns like: binance, binance_perpetual, hyperliquid, kucoin
+    """
+    connector_lower = connector_name.lower()
+
+    # Known Gateway network patterns
+    gateway_patterns = [
+        'solana', 'ethereum', 'base', 'arbitrum', 'polygon',
+        'optimism', 'avalanche', 'mainnet', 'devnet', 'testnet'
+    ]
+
+    # Check if connector matches any Gateway pattern
+    for pattern in gateway_patterns:
+        if pattern in connector_lower:
+            return True
+
+    return False
+
+
 def _filter_balances_by_networks(balances: dict, enabled_networks: set) -> dict:
     """
-    Filter portfolio balances to only include enabled networks.
+    Filter portfolio balances to only include enabled networks for Gateway connectors.
 
-    The connector name in the portfolio state corresponds to the network
-    (e.g., 'solana-mainnet-beta', 'ethereum-mainnet', 'base').
+    CEX connectors (binance, hyperliquid, etc.) are never filtered.
+    Only Gateway/DEX connectors (solana-mainnet-beta, ethereum-mainnet, etc.) are filtered.
 
     Args:
         balances: Portfolio state dict {account: {connector: [balances]}}
@@ -91,10 +114,15 @@ def _filter_balances_by_networks(balances: dict, enabled_networks: set) -> dict:
     for account_name, account_data in balances.items():
         filtered_account = {}
         for connector_name, connector_balances in account_data.items():
-            # Check if this connector/network is enabled
             connector_lower = connector_name.lower()
-            if connector_lower in enabled_networks:
+
+            # CEX connectors are never filtered - always include them
+            if not _is_gateway_network(connector_name):
                 filtered_account[connector_name] = connector_balances
+            # Gateway connectors are filtered by enabled networks
+            elif connector_lower in enabled_networks:
+                filtered_account[connector_name] = connector_balances
+
         if filtered_account:
             filtered[account_name] = filtered_account
 
