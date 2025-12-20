@@ -70,8 +70,11 @@ def gateway_required(func):
         try:
             from handlers.config.server_context import get_gateway_status_info, get_server_context_header
 
+            # Get chat_id to use per-chat server default
+            chat_id = update.effective_chat.id if update.effective_chat else None
+
             # Check server status first
-            server_header, server_online = await get_server_context_header()
+            server_header, server_online = await get_server_context_header(chat_id)
 
             if not server_online:
                 await _send_service_unavailable_message(
@@ -83,7 +86,7 @@ def gateway_required(func):
                 return
 
             # Check gateway status
-            _, gateway_running = await get_gateway_status_info()
+            _, gateway_running = await get_gateway_status_info(chat_id)
 
             if not gateway_running:
                 await _send_service_unavailable_message(
@@ -126,8 +129,11 @@ def hummingbot_api_required(func):
         try:
             from handlers.config.server_context import get_server_context_header
 
+            # Get chat_id to use per-chat server default
+            chat_id = update.effective_chat.id if update.effective_chat else None
+
             # Check server status
-            server_header, server_online = await get_server_context_header()
+            server_header, server_online = await get_server_context_header(chat_id)
 
             if not server_online:
                 await _send_service_unavailable_message(
