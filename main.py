@@ -466,6 +466,10 @@ async def post_init(application: Application) -> None:
     ]
     await application.bot.set_my_commands(commands)
 
+    # Restore scheduled routine jobs from persistence
+    from handlers.routines import restore_scheduled_jobs
+    await restore_scheduled_jobs(application)
+
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
 
