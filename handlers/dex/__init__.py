@@ -133,6 +133,9 @@ from .geckoterminal import (
     handle_gecko_add_liquidity,
     handle_gecko_swap,
     show_gecko_info,
+    handle_gecko_pool_tf,
+    handle_gecko_add_tokens,
+    handle_gecko_restart_gateway,
 )
 # Unified liquidity module
 from .liquidity import (
@@ -228,10 +231,10 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         "pool_info", "pool_list", "manage_positions", "pos_add_confirm", "pos_close_exec",
                         "add_to_gateway", "pool_detail_refresh",
                         "gecko_networks", "gecko_trades", "gecko_show_pools", "gecko_refresh", "gecko_token_search", "gecko_token_add",
-                        "gecko_explore", "gecko_swap", "gecko_info"}
+                        "gecko_explore", "gecko_swap", "gecko_info", "gecko_add_tokens", "gecko_restart_gateway"}
         # Also show typing for actions that start with these prefixes
         slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:",
-                         "gecko_token:", "swap_hist_set_", "lp_hist_set_")
+                         "gecko_pool_tf:", "gecko_token:", "swap_hist_set_", "lp_hist_set_")
         if action in slow_actions or action.startswith(slow_prefixes):
             await query.message.reply_chat_action("typing")
 
@@ -532,6 +535,13 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_copy_address(update, context)
         elif action == "gecko_back_to_list":
             await handle_back_to_list(update, context)
+        elif action.startswith("gecko_pool_tf:"):
+            timeframe = action.split(":")[1]
+            await handle_gecko_pool_tf(update, context, timeframe)
+        elif action == "gecko_add_tokens":
+            await handle_gecko_add_tokens(update, context)
+        elif action == "gecko_restart_gateway":
+            await handle_gecko_restart_gateway(update, context)
 
         # Pool OHLCV and combined chart handlers (for Meteora/CLMM pools)
         elif action.startswith("pool_ohlcv:"):
