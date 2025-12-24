@@ -1568,6 +1568,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         order_frequency = config.get("order_frequency", 3)
         leverage = config.get("leverage", 1)
         coerce_tp_to_step = config.get("coerce_tp_to_step", False)
+        activation_bounds = config.get("activation_bounds", 0.01)
         side_value = config.get("side", SIDE_LONG)
         side_str_label = "LONG" if side_value == SIDE_LONG else "SHORT"
 
@@ -1594,7 +1595,8 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             f"`coerce_tp_to_step={str(coerce_tp_to_step).lower()}`\n"
             f"`min_spread_between_orders={min_spread}`\n"
             f"`min_order_amount_quote={min_order_amount:.0f}`\n"
-            f"`max_open_orders={max_open_orders}`\n\n"
+            f"`max_open_orders={max_open_orders}`\n"
+            f"`activation_bounds={activation_bounds}`\n\n"
             f"{grid_valid} Grid: `{grid['num_levels']}` levels "
             f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
             f"@ `${grid['amount_per_level']:.2f}`/lvl \\| step: `{grid.get('spread_pct', 0):.3f}%`"
