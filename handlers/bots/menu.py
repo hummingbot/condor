@@ -273,12 +273,12 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                     "volume": volume,
                 })
 
-                # Collect positions
+                # Collect positions with controller info
                 positions = ctrl_perf.get("positions_summary", [])
                 if positions:
                     trading_pair = _extract_pair_from_name(ctrl_name)
                     for pos in positions:
-                        all_positions.append({"pair": trading_pair, "pos": pos})
+                        all_positions.append({"ctrl": ctrl_name, "pair": trading_pair, "pos": pos})
 
                 # Collect closed counts
                 close_counts = ctrl_perf.get("close_type_counts", {})
@@ -314,22 +314,35 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
             lines.append("```")
 
-            # Open Positions section (combined)
+            # Open Positions section (grouped by controller)
             if all_positions:
                 lines.append("")
                 lines.append(f"*Open Positions* \\({len(all_positions)}\\)")
+
+                # Group positions by controller
+                positions_by_ctrl = {}
                 for item in all_positions:
-                    pos = item["pos"]
-                    trading_pair = item["pair"]
-                    side_raw = pos.get("side", "")
-                    is_long = "BUY" in str(side_raw).upper()
-                    side_emoji = "🟢" if is_long else "🔴"
-                    side_str = "L" if is_long else "S"
-                    amount = pos.get("amount", 0) or 0
-                    breakeven = pos.get("breakeven_price", 0) or 0
-                    pos_value = amount * breakeven
-                    pos_unrealized = pos.get("unrealized_pnl_quote", 0) or 0
-                    lines.append(f"📍 {escape_markdown_v2(trading_pair)} {side_emoji}{side_str} `${escape_markdown_v2(f'{pos_value:.2f}')}` @ `{escape_markdown_v2(f'{breakeven:.4f}')}` \\| U: `{escape_markdown_v2(f'{pos_unrealized:+.2f}')}`")
+                    ctrl = item["ctrl"]
+                    if ctrl not in positions_by_ctrl:
+                        positions_by_ctrl[ctrl] = []
+                    positions_by_ctrl[ctrl].append(item)
+
+                for ctrl_name, ctrl_positions in positions_by_ctrl.items():
+                    # Shorten controller name for display
+                    short_ctrl = ctrl_name[:25] if len(ctrl_name) > 25 else ctrl_name
+                    lines.append(f"_{escape_markdown_v2(short_ctrl)}_")
+                    for item in ctrl_positions:
+                        pos = item["pos"]
+                        trading_pair = item["pair"]
+                        side_raw = pos.get("side", "")
+                        is_long = "BUY" in str(side_raw).upper()
+                        side_emoji = "🟢" if is_long else "🔴"
+                        side_str = "L" if is_long else "S"
+                        amount = pos.get("amount", 0) or 0
+                        breakeven = pos.get("breakeven_price", 0) or 0
+                        pos_value = amount * breakeven
+                        pos_unrealized = pos.get("unrealized_pnl_quote", 0) or 0
+                        lines.append(f"  📍 {side_emoji}{side_str} `${escape_markdown_v2(f'{pos_value:.2f}')}` @ `{escape_markdown_v2(f'{breakeven:.4f}')}` \\| U: `{escape_markdown_v2(f'{pos_unrealized:+.2f}')}`")
 
             # Closed Positions section (combined)
             if all_closed:
