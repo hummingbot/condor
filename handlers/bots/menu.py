@@ -1706,6 +1706,9 @@ def _format_log_entry(log) -> str:
         timestamp = ""
         msg = str(log)
 
+    # Escape backticks in log messages to prevent breaking code blocks
+    msg = str(msg).replace("`", "'")
+
     # Extract time portion (HH:MM:SS) from timestamp
     time_str = ""
     if timestamp:
@@ -1771,7 +1774,11 @@ async def show_bot_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     message = "\n".join(lines)
     if len(message) > 4000:
-        message = message[:4000] + "\n\\.\\.\\."
+        message = message[:4000]
+        # Check if we have an unclosed code block (odd number of ```)
+        if message.count("```") % 2 == 1:
+            message += "\n```"
+        message += "\n\\.\\.\\."
 
     await query.message.edit_text(
         message,
