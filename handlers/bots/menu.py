@@ -225,7 +225,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
             f"{status_emoji} `{escape_markdown_v2(display_name)}`",
         ]
 
-        # Controllers and performance - rich format
+        # Controllers and performance - table format
         performance = bot_info.get("performance", {})
         controller_names = list(performance.keys())
 
@@ -240,6 +240,11 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
             total_volume = 0
             total_realized = 0
             total_unrealized = 0
+
+            # Collect controller data for table
+            ctrl_rows = []
+            all_positions = []
+            all_closed = []
 
             for idx, (ctrl_name, ctrl_info) in enumerate(performance.items()):
                 if not isinstance(ctrl_info, dict):
@@ -258,91 +263,121 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                 total_realized += realized
                 total_unrealized += unrealized
 
-                # Controller section - compact format
-                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                ctrl_rows.append({
+                    "idx": idx,
+                    "name": ctrl_name,
+                    "status": ctrl_status,
+                    "pnl": pnl,
+                    "realized": realized,
+                    "unrealized": unrealized,
+                    "volume": volume,
+                })
 
-                # Controller name and status
-                ctrl_status_emoji = "▶️" if ctrl_status == "running" else "⏸️"
-                lines.append(f"{ctrl_status_emoji} *{escape_markdown_v2(ctrl_name)}*")
-
-                # P&L + Volume in one line (compact)
-                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
-                lines.append(f"{pnl_emoji} pnl: `{escape_markdown_v2(f'{pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{realized:+.2f}')}` / U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`\\) 📦 vol: `{escape_markdown_v2(vol_str)}`")
-
-                # Open Positions section
+                # Collect positions
                 positions = ctrl_perf.get("positions_summary", [])
                 if positions:
-                    lines.append("")
-                    lines.append(f"*Open Positions* \\({len(positions)}\\)")
-                    # Extract trading pair from controller name for display
                     trading_pair = _extract_pair_from_name(ctrl_name)
                     for pos in positions:
-                        side_raw = pos.get("side", "")
-                        is_long = "BUY" in str(side_raw).upper()
-                        side_emoji = "🟢" if is_long else "🔴"
-                        side_str = "L" if is_long else "S"
-                        amount = pos.get("amount", 0) or 0
-                        breakeven = pos.get("breakeven_price", 0) or 0
-                        pos_value = amount * breakeven
-                        pos_unrealized = pos.get("unrealized_pnl_quote", 0) or 0
+                        all_positions.append({"pair": trading_pair, "pos": pos})
 
-                        lines.append(f"📍 {escape_markdown_v2(trading_pair)} {side_emoji}{side_str} `${escape_markdown_v2(f'{pos_value:.2f}')}` @ `{escape_markdown_v2(f'{breakeven:.4f}')}` \\| U: `{escape_markdown_v2(f'{pos_unrealized:+.2f}')}`")
-
-                # Closed Positions section
+                # Collect closed counts
                 close_counts = ctrl_perf.get("close_type_counts", {})
                 if close_counts:
-                    total_closed = sum(close_counts.values())
+                    all_closed.append({"name": ctrl_name, "counts": close_counts})
+
+            # Build table header
+            lines.append("```")
+            lines.append("Controller                        PnL     Vol")
+            lines.append("──────────────────────────── ──────── ───────")
+
+            # Build table rows
+            for row in ctrl_rows:
+                status_char = "▶" if row["status"] == "running" else "⏸"
+                # Truncate controller name to fit table (max 27 chars)
+                name_display = row["name"][:27] if len(row["name"]) > 27 else row["name"]
+                name_padded = f"{status_char}{name_display}".ljust(28)
+
+                pnl_str = f"{row['pnl']:+.2f}".rjust(8)
+                vol_str = f"{row['volume']/1000:.1f}k" if row["volume"] >= 1000 else f"{row['volume']:.0f}"
+                vol_str = vol_str.rjust(7)
+
+                lines.append(f"{name_padded} {pnl_str} {vol_str}")
+
+            # Total row
+            if len(ctrl_rows) > 1:
+                lines.append("──────────────────────────── ──────── ───────")
+                total_name = "TOTAL".ljust(28)
+                pnl_str = f"{total_pnl:+.2f}".rjust(8)
+                vol_str = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
+                vol_str = vol_str.rjust(7)
+                lines.append(f"{total_name} {pnl_str} {vol_str}")
+
+            lines.append("```")
+
+            # Open Positions section (combined)
+            if all_positions:
+                lines.append("")
+                lines.append(f"*Open Positions* \\({len(all_positions)}\\)")
+                for item in all_positions:
+                    pos = item["pos"]
+                    trading_pair = item["pair"]
+                    side_raw = pos.get("side", "")
+                    is_long = "BUY" in str(side_raw).upper()
+                    side_emoji = "🟢" if is_long else "🔴"
+                    side_str = "L" if is_long else "S"
+                    amount = pos.get("amount", 0) or 0
+                    breakeven = pos.get("breakeven_price", 0) or 0
+                    pos_value = amount * breakeven
+                    pos_unrealized = pos.get("unrealized_pnl_quote", 0) or 0
+                    lines.append(f"📍 {escape_markdown_v2(trading_pair)} {side_emoji}{side_str} `${escape_markdown_v2(f'{pos_value:.2f}')}` @ `{escape_markdown_v2(f'{breakeven:.4f}')}` \\| U: `{escape_markdown_v2(f'{pos_unrealized:+.2f}')}`")
+
+            # Closed Positions section (combined)
+            if all_closed:
+                total_tp = total_sl = total_hold = total_early = total_insuf = 0
+                for item in all_closed:
+                    counts = item["counts"]
+                    total_tp += _get_close_count(counts, "TAKE_PROFIT")
+                    total_sl += _get_close_count(counts, "STOP_LOSS")
+                    total_hold += _get_close_count(counts, "POSITION_HOLD")
+                    total_early += _get_close_count(counts, "EARLY_STOP")
+                    total_insuf += _get_close_count(counts, "INSUFFICIENT_BALANCE")
+
+                total_closed_count = total_tp + total_sl + total_hold + total_early + total_insuf
+                if total_closed_count > 0:
                     lines.append("")
-                    lines.append(f"*Closed Positions* \\({total_closed}\\)")
+                    lines.append(f"*Closed Positions* \\({total_closed_count}\\)")
 
-                    # Extract counts for each type
-                    tp = _get_close_count(close_counts, "TAKE_PROFIT")
-                    sl = _get_close_count(close_counts, "STOP_LOSS")
-                    hold = _get_close_count(close_counts, "POSITION_HOLD")
-                    early = _get_close_count(close_counts, "EARLY_STOP")
-                    insuf = _get_close_count(close_counts, "INSUFFICIENT_BALANCE")
+                    row_parts = []
+                    if total_tp > 0:
+                        row_parts.append(f"🎯 TP: `{total_tp}`")
+                    if total_sl > 0:
+                        row_parts.append(f"🛑 SL: `{total_sl}`")
+                    if total_hold > 0:
+                        row_parts.append(f"✋ Hold: `{total_hold}`")
+                    if total_early > 0:
+                        row_parts.append(f"⚡ Early: `{total_early}`")
+                    if total_insuf > 0:
+                        row_parts.append(f"⚠️ Insuf: `{total_insuf}`")
 
-                    # Row 1: TP | SL (if any)
-                    row1_parts = []
-                    if tp > 0:
-                        row1_parts.append(f"🎯 TP: `{tp}`")
-                    if sl > 0:
-                        row1_parts.append(f"🛑 SL: `{sl}`")
-                    if row1_parts:
-                        lines.append(" \\| ".join(row1_parts))
+                    if row_parts:
+                        lines.append(" \\| ".join(row_parts))
 
-                    # Row 2: Hold | Early (if any)
-                    row2_parts = []
-                    if hold > 0:
-                        row2_parts.append(f"✋ Hold: `{hold}`")
-                    if early > 0:
-                        row2_parts.append(f"⚡ Early: `{early}`")
-                    if row2_parts:
-                        lines.append(" \\| ".join(row2_parts))
+            # Add controller buttons
+            for row in ctrl_rows:
+                idx = row["idx"]
+                ctrl_status = row["status"]
+                ctrl_name = row["name"]
 
-                    # Row 3: Insufficient balance (if any)
-                    if insuf > 0:
-                        lines.append(f"⚠️ Insuf\\. Balance: `{insuf}`")
-
-                # Add controller button row: [✏️ controller_name] [▶️/⏸️]
                 toggle_emoji = "⏸" if ctrl_status == "running" else "▶️"
                 toggle_action = "stop_ctrl_quick" if ctrl_status == "running" else "start_ctrl_quick"
 
                 if idx < 8:  # Max 8 controllers with buttons
-                    # Use shortened name for button but keep it readable
-                    btn_name = _shorten_controller_name(ctrl_name, 22)
+                    # Use controller name directly, truncate if needed
+                    btn_name = ctrl_name[:26] if len(ctrl_name) > 26 else ctrl_name
                     keyboard.append([
                         InlineKeyboardButton(f"✏️ {btn_name}", callback_data=f"bots:ctrl_idx:{idx}"),
                         InlineKeyboardButton(toggle_emoji, callback_data=f"bots:{toggle_action}:{idx}"),
                     ])
-
-            # Total summary (only if multiple controllers)
-            if len(performance) > 1:
-                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
-                vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-                lines.append(f"*TOTAL* {pnl_emoji} pnl: `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{total_realized:+.2f}')}` / U: `{escape_markdown_v2(f'{total_unrealized:+.2f}')}`\\) 📦 vol: `{escape_markdown_v2(vol_total)}`")
 
         # Error summary at the bottom
         error_logs = bot_info.get("error_logs", [])
@@ -600,7 +635,8 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = []
     is_running = ctrl_status == "running"
 
-    if (is_grid_strike or is_pmm_mister) and ctrl_config:
+    if is_grid_strike and ctrl_config:
+        # Grid Strike: show Chart + Stop/Start
         if is_running:
             keyboard.append([
                 InlineKeyboardButton("📊 Chart", callback_data="bots:ctrl_chart"),
@@ -609,6 +645,16 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
         else:
             keyboard.append([
                 InlineKeyboardButton("📊 Chart", callback_data="bots:ctrl_chart"),
+                InlineKeyboardButton("▶️ Start", callback_data="bots:start_ctrl"),
+            ])
+    elif is_pmm_mister and ctrl_config:
+        # PMM Mister: just Stop/Start (no chart for now)
+        if is_running:
+            keyboard.append([
+                InlineKeyboardButton("🛑 Stop", callback_data="bots:stop_ctrl"),
+            ])
+        else:
+            keyboard.append([
                 InlineKeyboardButton("▶️ Start", callback_data="bots:start_ctrl"),
             ])
     else:
@@ -922,7 +968,7 @@ async def handle_quick_start_controller(update: Update, context: ContextTypes.DE
 # ============================================
 
 async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate and show OHLC chart for grid strike controller"""
+    """Generate and show OHLC chart for controller"""
     query = update.callback_query
     chat_id = update.effective_chat.id
     controller_idx = context.user_data.get("current_controller_idx", 0)
@@ -931,6 +977,10 @@ async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TY
     if not ctrl_config:
         await query.answer("Config not found", show_alert=True)
         return
+
+    # Detect controller type
+    controller_type = ctrl_config.get("controller_name", "")
+    is_pmm_mister = "pmm_mister" in controller_type.lower()
 
     # Show loading message
     short_name = _shorten_controller_name(ctrl_config.get("id", ""), 30)
@@ -959,24 +1009,37 @@ async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TY
         )
         current_price = prices.get("prices", {}).get(pair)
 
-        # Generate chart
-        from .controllers.grid_strike import generate_chart
+        # Generate chart based on controller type
+        if is_pmm_mister:
+            from .controllers.pmm_mister import generate_chart
+        else:
+            from .controllers.grid_strike import generate_chart
         chart_bytes = generate_chart(ctrl_config, candles, current_price)
 
         if chart_bytes:
-            # Build caption
-            side_val = ctrl_config.get("side", 1)
-            side_str = "LONG" if side_val == 1 else "SHORT"
+            # Build caption based on controller type
             leverage = ctrl_config.get("leverage", 1)
-            start_p = ctrl_config.get("start_price", 0)
-            end_p = ctrl_config.get("end_price", 0)
-            limit_p = ctrl_config.get("limit_price", 0)
 
-            caption = (
-                f"📊 *{escape_markdown_v2(pair)}* \\| {escape_markdown_v2(side_str)} {leverage}x\n"
-                f"Grid: `{escape_markdown_v2(f'{start_p:.6g}')}` → `{escape_markdown_v2(f'{end_p:.6g}')}`\n"
-                f"Limit: `{escape_markdown_v2(f'{limit_p:.6g}')}`"
-            )
+            if is_pmm_mister:
+                buy_spreads = ctrl_config.get("buy_spreads", "0.0002,0.001")
+                sell_spreads = ctrl_config.get("sell_spreads", "0.0002,0.001")
+                take_profit = ctrl_config.get("take_profit", 0.0001)
+                caption = (
+                    f"📊 *{escape_markdown_v2(pair)}* \\| PMM {leverage}x\n"
+                    f"Buy: `{escape_markdown_v2(buy_spreads)}` \\| Sell: `{escape_markdown_v2(sell_spreads)}`\n"
+                    f"TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`"
+                )
+            else:
+                side_val = ctrl_config.get("side", 1)
+                side_str = "LONG" if side_val == 1 else "SHORT"
+                start_p = ctrl_config.get("start_price", 0)
+                end_p = ctrl_config.get("end_price", 0)
+                limit_p = ctrl_config.get("limit_price", 0)
+                caption = (
+                    f"📊 *{escape_markdown_v2(pair)}* \\| {escape_markdown_v2(side_str)} {leverage}x\n"
+                    f"Grid: `{escape_markdown_v2(f'{start_p:.6g}')}` → `{escape_markdown_v2(f'{end_p:.6g}')}`\n"
+                    f"Limit: `{escape_markdown_v2(f'{limit_p:.6g}')}`"
+                )
 
             keyboard = [[
                 InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}"),
@@ -1400,7 +1463,16 @@ async def process_controller_field_input(update: Update, context: ContextTypes.D
             config=update_config
         )
 
-        if result.get("status") == "success":
+        # Check for success - API may return status="success" or message containing "successfully"
+        result_status = result.get("status", "")
+        result_message = result.get("message", "")
+        is_success = (
+            result_status == "success" or
+            "successfully" in str(result_message).lower() or
+            "updated" in str(result_message).lower()
+        )
+
+        if is_success:
             # Update local config cache
             for key, value in updates.items():
                 if key == "take_profit":
@@ -1437,7 +1509,7 @@ async def process_controller_field_input(update: Update, context: ContextTypes.D
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
         else:
-            error_msg = result.get("message", "Update failed")
+            error_msg = result_message or "Update failed"
             keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}")]]
 
             if message_id:
