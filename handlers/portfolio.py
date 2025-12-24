@@ -667,8 +667,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         pnl_start_time = _calculate_start_time(30)
         graph_interval = _get_optimal_interval(days)
 
-        # Check if this is a refresh request (from callback)
-        refresh = context.user_data.pop("_portfolio_refresh", False)
+        # Always refresh balances for /portfolio command (CEX balances need real-time data)
+        refresh = True
+        context.user_data.pop("_portfolio_refresh", None)  # Clear any stale flag
 
         # ========================================
         # START ALL FETCHES IN PARALLEL
@@ -898,11 +899,11 @@ async def handle_portfolio_refresh(update: Update, context: ContextTypes.DEFAULT
     await refresh_portfolio_dashboard(update, context, refresh=True)
 
 
-async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = False) -> None:
+async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = True) -> None:
     """Refresh both the text message and photo with new settings
 
     Args:
-        refresh: If True, force refresh balances from exchanges (bypasses API cache)
+        refresh: If True, force refresh balances from exchanges (bypasses API cache). Defaults to True.
     """
     query = update.callback_query
     bot = query.get_bot()
