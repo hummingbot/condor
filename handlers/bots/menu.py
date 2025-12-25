@@ -16,7 +16,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_number
+from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_number, format_uptime
 from ._shared import get_bots_client, clear_bots_state
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,18 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         client = await get_bots_client(chat_id)
         bots_data = await client.bot_orchestration.get_active_bots_status()
 
+        # Fetch bot runs to get deployment times
+        bot_runs_map = {}
+        try:
+            bot_runs_data = await client.bot_orchestration.get_bot_runs()
+            if isinstance(bot_runs_data, dict) and "data" in bot_runs_data:
+                for run in bot_runs_data.get("data", []):
+                    # Only include DEPLOYED bots (not ARCHIVED)
+                    if run.get("deployment_status") == "DEPLOYED" and run.get("deployed_at"):
+                        bot_runs_map[run.get("bot_name")] = run.get("deployed_at")
+        except Exception as e:
+            logger.debug(f"Could not fetch bot runs for uptime: {e}")
+
         # Extract bots dictionary for building keyboard
         if isinstance(bots_data, dict) and "data" in bots_data:
             bots_dict = bots_data.get("data", {})
@@ -102,9 +114,10 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Store bots data for later use
         context.user_data["active_bots_data"] = bots_data
+        context.user_data["bot_runs_map"] = bot_runs_map
 
         # Format the bot status message
-        status_message = format_active_bots(bots_data)
+        status_message = format_active_bots(bots_data, bot_runs=bot_runs_map)
 
         # Build the menu with bot buttons
         reply_markup = _build_main_menu_keyboard(bots_dict)
@@ -219,10 +232,18 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
         # Truncate bot name for display
         display_name = bot_name[:45] + "..." if len(bot_name) > 45 else bot_name
 
+        # Get uptime if available
+        bot_runs_map = context.user_data.get("bot_runs_map", {})
+        uptime_str = ""
+        if bot_name in bot_runs_map:
+            uptime = format_uptime(bot_runs_map[bot_name])
+            if uptime:
+                uptime_str = f" ⏱️ {uptime}"
+
         lines = [
             f"*Bot Details*",
             "",
-            f"{status_emoji} `{escape_markdown_v2(display_name)}`",
+            f"{status_emoji} `{escape_markdown_v2(display_name)}`{uptime_str}",
         ]
 
         # Controllers and performance - table format
@@ -1172,6 +1193,8 @@ def _get_editable_controller_fields(ctrl_config: Dict[str, Any], is_pmm_mister: 
             "buy_amounts_pct": ctrl_config.get("buy_amounts_pct", "1,2"),
             "sell_amounts_pct": ctrl_config.get("sell_amounts_pct", "1,2"),
             "take_profit": ctrl_config.get("take_profit", 0.0001),
+            "take_profit_order_type": ctrl_config.get("take_profit_order_type", "LIMIT_MAKER"),
+            "open_order_type": ctrl_config.get("open_order_type", "LIMIT"),
             "portfolio_allocation": ctrl_config.get("portfolio_allocation", 0.05),
             "target_base_pct": ctrl_config.get("target_base_pct", 0.5),
             "min_base_pct": ctrl_config.get("min_base_pct", 0.4),
@@ -1180,9 +1203,12 @@ def _get_editable_controller_fields(ctrl_config: Dict[str, Any], is_pmm_mister: 
             "executor_refresh_time": ctrl_config.get("executor_refresh_time", 30),
             "buy_cooldown_time": ctrl_config.get("buy_cooldown_time", 15),
             "sell_cooldown_time": ctrl_config.get("sell_cooldown_time", 15),
+            "buy_position_effectivization_time": ctrl_config.get("buy_position_effectivization_time", 3600),
+            "sell_position_effectivization_time": ctrl_config.get("sell_position_effectivization_time", 3600),
             "min_buy_price_distance_pct": ctrl_config.get("min_buy_price_distance_pct", 0.003),
             "min_sell_price_distance_pct": ctrl_config.get("min_sell_price_distance_pct", 0.003),
             "max_active_executors_by_level": ctrl_config.get("max_active_executors_by_level", 4),
+            "tick_mode": ctrl_config.get("tick_mode", False),
         }
     else:
         # Grid Strike editable fields

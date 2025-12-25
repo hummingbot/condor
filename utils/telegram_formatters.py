@@ -3,7 +3,52 @@ Telegram message formatters for Hummingbot data
 """
 
 from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
 import re
+
+
+def format_uptime(deployed_at: str) -> str:
+    """
+    Format time elapsed since deployment as a compact uptime string.
+
+    Args:
+        deployed_at: ISO format datetime string (e.g., "2025-12-24T22:22:50.879680+00:00")
+
+    Returns:
+        Formatted uptime string (e.g., "2h 15m", "1d 5h", "3d")
+    """
+    try:
+        # Parse the deployed_at timestamp
+        if deployed_at.endswith('Z'):
+            deployed_at = deployed_at[:-1] + '+00:00'
+        deploy_time = datetime.fromisoformat(deployed_at)
+
+        # Get current time in UTC
+        now = datetime.now(timezone.utc)
+
+        # Calculate the difference
+        delta = now - deploy_time
+
+        total_seconds = int(delta.total_seconds())
+        if total_seconds < 0:
+            return "0m"
+
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        minutes = (total_seconds % 3600) // 60
+
+        if days > 0:
+            if hours > 0:
+                return f"{days}d {hours}h"
+            return f"{days}d"
+        elif hours > 0:
+            if minutes > 0:
+                return f"{hours}h {minutes}m"
+            return f"{hours}h"
+        else:
+            return f"{minutes}m"
+    except Exception:
+        return ""
 
 
 def escape_markdown_v2(text: str) -> str:
@@ -330,7 +375,8 @@ def _shorten_controller_for_table(name: str, max_len: int = 28) -> str:
 def format_active_bots(
     bots_data: Dict[str, Any],
     server_name: Optional[str] = None,
-    server_status: Optional[str] = None
+    server_status: Optional[str] = None,
+    bot_runs: Optional[Dict[str, str]] = None
 ) -> str:
     """
     Format active bots status for Telegram with clean table layout.
@@ -339,11 +385,13 @@ def format_active_bots(
         bots_data: Active bots data from client.bot_orchestration.get_active_bots_status()
         server_name: Name of the server (optional)
         server_status: Status of the server (optional)
+        bot_runs: Dict mapping bot_name -> deployed_at ISO timestamp (optional)
 
     Returns:
         Formatted Telegram message
     """
     message = "🤖 *Active Bots*\n\n"
+    bot_runs = bot_runs or {}
 
     # Handle different response formats
     # New format: {"status": "success", "data": {"bot_name": {...}}}
@@ -378,7 +426,15 @@ def format_active_bots(
 
         # Truncate long bot names for display
         display_name = bot_name[:45] + "..." if len(bot_name) > 45 else bot_name
-        message += f"{status_emoji} `{escape_markdown_v2(display_name)}`\n"
+
+        # Add uptime if available
+        uptime_str = ""
+        if bot_name in bot_runs:
+            uptime = format_uptime(bot_runs[bot_name])
+            if uptime:
+                uptime_str = f" ⏱️ {uptime}"
+
+        message += f"{status_emoji} `{escape_markdown_v2(display_name)}`{uptime_str}\n"
 
         # Performance is a dict of controller_name -> controller_info
         performance = bot_info.get("performance", {})
