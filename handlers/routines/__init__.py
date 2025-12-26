@@ -935,10 +935,10 @@ async def _run_once(
 
     if background:
         await update.callback_query.answer("🔄 Running in background...")
+        await _show_detail(update, context, routine_name)
     else:
+        # Don't refresh detail view - job callback will update it with result
         await update.callback_query.answer("▶️ Running...")
-
-    await _show_detail(update, context, routine_name)
 
 
 async def _start_continuous(
