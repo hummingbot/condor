@@ -94,9 +94,9 @@ def calculate_pnl_from_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Calculate realized PnL from a list of trades using position tracking.
 
-    For perpetual futures:
-    - OPEN trades establish positions (long or short)
-    - CLOSE trades realize PnL
+    Supports two modes:
+    1. Perpetual futures: Uses OPEN/CLOSE position tracking
+    2. Spot/Market Making (NIL positions): Uses average cost basis inventory tracking
 
     Args:
         trades: List of trade dicts with timestamp, trading_pair, trade_type,
@@ -119,6 +119,130 @@ def calculate_pnl_from_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
             "total_volume": 0,
         }
 
+    # Detect if this is OPEN/CLOSE mode or NIL mode (market making)
+    position_types = set(t.get("position", "").upper() for t in trades)
+    has_open_close = "OPEN" in position_types or "CLOSE" in position_types
+    is_nil_mode = "NIL" in position_types and not has_open_close
+
+    if is_nil_mode:
+        return _calculate_pnl_average_cost(trades)
+    else:
+        return _calculate_pnl_open_close(trades)
+
+
+def _calculate_pnl_average_cost(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Calculate PnL using average cost basis for spot/market making trades.
+
+    This handles NIL position trades where:
+    - BUY adds to inventory at that price
+    - SELL realizes PnL based on weighted average cost of inventory
+    """
+    # Track inventory per trading pair using average cost
+    # inventory = {amount: float, total_cost: float}
+    inventory: Dict[str, Dict[str, float]] = {}
+
+    pnl_by_pair: Dict[str, float] = defaultdict(float)
+    cumulative_pnl: List[Dict[str, Any]] = []
+    running_pnl = 0.0
+    total_fees = 0.0
+    total_volume = 0.0
+
+    # Debug counters
+    buy_count = 0
+    sell_count = 0
+    realized_trades = 0
+
+    # Sort trades by timestamp
+    sorted_trades = sorted(trades, key=lambda t: t.get("timestamp", 0))
+
+    for trade in sorted_trades:
+        pair = trade.get("trading_pair", "Unknown")
+        amount = float(trade.get("amount", 0))
+        price = float(trade.get("price", 0))
+        trade_type = trade.get("trade_type", "").upper()
+        fee = float(trade.get("trade_fee_in_quote", 0))
+        timestamp = trade.get("timestamp", 0)
+
+        total_fees += fee
+        total_volume += amount * price
+
+        # Parse timestamp for cumulative chart
+        ts = _parse_timestamp(timestamp)
+
+        # Initialize inventory for this pair if needed
+        if pair not in inventory:
+            inventory[pair] = {"amount": 0.0, "total_cost": 0.0}
+
+        inv = inventory[pair]
+
+        if trade_type == "BUY":
+            buy_count += 1
+            # Add to inventory at this price
+            inv["amount"] += amount
+            inv["total_cost"] += amount * price
+
+        elif trade_type == "SELL":
+            sell_count += 1
+            # Realize PnL if we have inventory
+            if inv["amount"] > 0:
+                realized_trades += 1
+                # Calculate average cost of inventory
+                avg_cost = inv["total_cost"] / inv["amount"] if inv["amount"] > 0 else 0
+
+                # Determine how much we can actually sell from inventory
+                sell_amount = min(amount, inv["amount"])
+
+                # PnL = (sell_price - avg_cost) * amount - fee
+                pnl = (price - avg_cost) * sell_amount - fee
+
+                pnl_by_pair[pair] += pnl
+                running_pnl += pnl
+
+                # Reduce inventory
+                if sell_amount >= inv["amount"]:
+                    # Fully depleted
+                    inv["amount"] = 0.0
+                    inv["total_cost"] = 0.0
+                else:
+                    # Partially depleted - reduce proportionally
+                    ratio = sell_amount / inv["amount"]
+                    inv["amount"] -= sell_amount
+                    inv["total_cost"] -= inv["total_cost"] * ratio
+            else:
+                # Short selling (no inventory) - track as negative PnL for now
+                # This means we're selling something we don't have (going short)
+                # For simplicity, just count fees
+                running_pnl -= fee
+
+        # Record cumulative PnL point for charting
+        if ts:
+            cumulative_pnl.append({
+                "timestamp": ts,
+                "pnl": running_pnl,
+                "pair": pair,
+            })
+
+    logger.info(f"PnL calculation (avg cost): {len(trades)} trades, {buy_count} BUY, {sell_count} SELL, "
+                f"{realized_trades} realized, total_pnl=${running_pnl:.4f}")
+
+    return {
+        "total_pnl": running_pnl,
+        "total_fees": total_fees,
+        "pnl_by_pair": dict(pnl_by_pair),
+        "cumulative_pnl": cumulative_pnl,
+        "total_volume": total_volume,
+    }
+
+
+def _calculate_pnl_open_close(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Calculate PnL using OPEN/CLOSE position tracking for perpetual futures.
+
+    For perpetual futures:
+    - OPEN trades establish positions (long or short)
+    - CLOSE trades realize PnL
+    """
     # Track positions per trading pair
     # position = {amount: float, total_cost: float, direction: int (1=long, -1=short)}
     positions: Dict[str, Dict[str, Any]] = {}
@@ -212,7 +336,7 @@ def calculate_pnl_from_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "pair": pair,
             })
 
-    logger.info(f"PnL calculation: {len(trades)} trades, {open_count} OPEN, {close_count} CLOSE, "
+    logger.info(f"PnL calculation (open/close): {len(trades)} trades, {open_count} OPEN, {close_count} CLOSE, "
                 f"{close_with_position} CLOSE with matching position, total_pnl=${running_pnl:.4f}")
 
     return {

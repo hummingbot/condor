@@ -348,6 +348,11 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
         # Get config map for this connector
         config_fields = await client.connectors.get_config_map(connector_name)
 
+        # Filter out fields that should be handled automatically
+        if connector_name == "xrpl":
+            # custom_markets expects a dict, we'll default to empty
+            config_fields = [f for f in config_fields if f != "custom_markets"]
+
         # Initialize context storage for API key configuration
         context.user_data['configuring_api_key'] = True
         context.user_data['api_key_config_data'] = {
@@ -482,6 +487,12 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
             )
 
         client = await server_manager.get_client_for_chat(chat_id)
+
+        # Handle special cases for certain connectors
+        if connector_name == "xrpl":
+            # XRPL connector expects custom_markets as a dict, default to empty
+            if "custom_markets" not in values or values.get("custom_markets") is None:
+                values["custom_markets"] = {}
 
         # Add credentials using the accounts API
         await client.accounts.add_credential(
