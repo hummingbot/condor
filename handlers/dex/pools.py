@@ -1538,6 +1538,10 @@ async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAU
         await query.answer("Refreshing...")
         timeframe = "1h"  # Default timeframe
     else:
+        # Store current timeframe in add_position_params to persist across param changes
+        if "add_position_params" not in context.user_data:
+            context.user_data["add_position_params"] = {}
+        context.user_data["add_position_params"]["timeframe"] = timeframe
         # Timeframe switch - show loading transition
         await query.answer(f"Loading {timeframe} candles...")
 
@@ -2950,9 +2954,13 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
         )
 
         if result:
-            # Clear the positions cache to force fresh fetch
-            context.user_data.pop("positions_cache", None)
+            # Remove this specific position from cache, but keep others (for LP monitor alerts)
+            positions_cache = context.user_data.get("positions_cache", {})
+            if pos_index in positions_cache:
+                del positions_cache[pos_index]
+            # Clear the full position list cache to force refresh on next view
             context.user_data.pop("all_positions", None)
+            context.user_data.pop("lp_positions_cache", None)  # Also clear LP list cache
 
             pair = pos.get('trading_pair', 'Unknown')
             success_msg = escape_markdown_v2(f"✅ Position closed: {pair}")
@@ -4710,7 +4718,8 @@ async def process_pos_set_lower(
     # Refresh pool detail to show updated chart with range lines
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
 
 
 async def process_pos_set_upper(
@@ -4729,7 +4738,8 @@ async def process_pos_set_upper(
     # Refresh pool detail to show updated chart with range lines
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
 
 
 async def process_pos_set_base(
@@ -4748,7 +4758,9 @@ async def process_pos_set_base(
     # Refresh pool detail view
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        params = context.user_data.get("add_position_params", {})
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
 
 
 async def process_pos_set_quote(
@@ -4767,4 +4779,5 @@ async def process_pos_set_quote(
     # Refresh pool detail view
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)

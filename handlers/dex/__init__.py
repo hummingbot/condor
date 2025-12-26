@@ -203,6 +203,129 @@ async def lp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ============================================
+# LP MONITOR NAVIGATION HELPER
+# ============================================
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from utils.telegram_formatters import escape_markdown_v2, resolve_token_symbol
+
+
+async def _handle_lpm_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE, instance_id: str, new_index: int) -> None:
+    """Handle navigation in LP monitor alert message."""
+    query = update.callback_query
+    positions_cache = context.user_data.get("positions_cache", {})
+    token_cache = context.user_data.get("token_cache", {})
+
+    # Find all positions for this instance
+    positions = []
+    i = 0
+    while True:
+        cache_key = f"lpm_{instance_id}_{i}"
+        if cache_key in positions_cache:
+            positions.append(positions_cache[cache_key])
+            i += 1
+        else:
+            break
+
+    if not positions:
+        await query.answer("Positions not found")
+        return
+
+    # Clamp index
+    new_index = max(0, min(new_index, len(positions) - 1))
+    pos = positions[new_index]
+
+    # Format the position
+    base_token = pos.get('base_token', pos.get('token_a', ''))
+    quote_token = pos.get('quote_token', pos.get('token_b', ''))
+    base_symbol = resolve_token_symbol(base_token, token_cache)
+    quote_symbol = resolve_token_symbol(quote_token, token_cache)
+    pair = f"{base_symbol}-{quote_symbol}"
+    connector = pos.get('connector', 'unknown')
+
+    # Price info
+    lower = pos.get('lower_price', pos.get('price_lower', ''))
+    upper = pos.get('upper_price', pos.get('price_upper', ''))
+    current = pos.get('current_price', '')
+
+    range_str = ""
+    if lower and upper:
+        try:
+            lower_f = float(lower)
+            upper_f = float(upper)
+            decimals = 2 if lower_f >= 1 else (6 if lower_f >= 0.001 else 8)
+            range_str = f"Range: {lower_f:.{decimals}f} - {upper_f:.{decimals}f}"
+        except (ValueError, TypeError):
+            range_str = f"Range: {lower} - {upper}"
+
+    current_str = ""
+    direction = ""
+    if current:
+        try:
+            current_f = float(current)
+            lower_f = float(lower) if lower else 0
+            upper_f = float(upper) if upper else 0
+            decimals = 2 if current_f >= 1 else (6 if current_f >= 0.001 else 8)
+            current_str = f"Current: {current_f:.{decimals}f}"
+            if current_f < lower_f:
+                direction = "▼ Below range"
+            elif current_f > upper_f:
+                direction = "▲ Above range"
+        except (ValueError, TypeError):
+            current_str = f"Current: {current}"
+
+    # Value
+    pnl_summary = pos.get('pnl_summary', {})
+    value = pnl_summary.get('current_lp_value_quote', 0)
+    value_str = ""
+    if value:
+        try:
+            value_str = f"Value: {float(value):.2f} {quote_symbol}"
+        except (ValueError, TypeError):
+            pass
+
+    # Build message
+    total = len(positions)
+    header = f"🚨 *Out of Range* \\({new_index + 1}/{total}\\)" if total > 1 else "🚨 *Position Out of Range*"
+    lines = [header, "", f"*{escape_markdown_v2(pair)}* \\({escape_markdown_v2(connector)}\\)"]
+    if direction:
+        lines.append(f"_{escape_markdown_v2(direction)}_")
+    if range_str:
+        lines.append(escape_markdown_v2(range_str))
+    if current_str:
+        lines.append(escape_markdown_v2(current_str))
+    if value_str:
+        lines.append(escape_markdown_v2(value_str))
+
+    text = "\n".join(lines)
+
+    # Build keyboard
+    cache_key = f"lpm_{instance_id}_{new_index}"
+    keyboard = []
+
+    if total > 1:
+        nav_row = []
+        if new_index > 0:
+            nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"dex:lpm_nav:{instance_id}:{new_index - 1}"))
+        nav_row.append(InlineKeyboardButton(f"{new_index + 1}/{total}", callback_data="dex:lpm_noop"))
+        if new_index < total - 1:
+            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"dex:lpm_nav:{instance_id}:{new_index + 1}"))
+        keyboard.append(nav_row)
+
+    keyboard.append([
+        InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{cache_key}"),
+        InlineKeyboardButton("⏭ Skip", callback_data=f"dex:lpm_skip:{cache_key}"),
+        InlineKeyboardButton("✅ Dismiss", callback_data=f"dex:lpm_dismiss:{instance_id}"),
+    ])
+
+    try:
+        await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            logger.warning(f"Failed to update LPM navigation: {e}")
+
+
+# ============================================
 # CALLBACK HANDLER
 # ============================================
 
@@ -234,7 +357,8 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         "gecko_explore", "gecko_swap", "gecko_info", "gecko_add_tokens", "gecko_restart_gateway"}
         # Also show typing for actions that start with these prefixes
         slow_prefixes = ("gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:",
-                         "gecko_pool_tf:", "gecko_token:", "swap_hist_set_", "lp_hist_set_")
+                         "gecko_pool_tf:", "gecko_token:", "swap_hist_set_", "lp_hist_set_",
+                         "lpm_nav:", "pos_close:")
         if action in slow_actions or action.startswith(slow_prefixes):
             await query.message.reply_chat_action("typing")
 
@@ -397,6 +521,47 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         elif action.startswith("pos_close_exec:"):
             pos_index = action.split(":")[1]
             await handle_pos_close_execute(update, context, pos_index)
+        elif action.startswith("lpm_skip:"):
+            # Handle skip action from LP monitor routine
+            cache_key = action.split(":")[1]
+            await query.answer("Skipped")
+            # Remove position from cache
+            positions_cache = context.user_data.get("positions_cache", {})
+            if cache_key in positions_cache:
+                del positions_cache[cache_key]
+            # Delete or update the alert message
+            try:
+                await query.message.edit_text(
+                    "⏭ _Position skipped_",
+                    parse_mode="MarkdownV2"
+                )
+            except Exception:
+                pass
+        elif action.startswith("lpm_nav:"):
+            # Handle navigation in LP monitor alert - lpm_nav:{instance_id}:{index}
+            parts = action.split(":")
+            if len(parts) >= 3:
+                instance_id = parts[1]
+                new_index = int(parts[2])
+                await _handle_lpm_navigation(update, context, instance_id, new_index)
+            else:
+                await query.answer()
+        elif action.startswith("lpm_dismiss:"):
+            # Handle dismiss action from LP monitor routine
+            await query.answer("Dismissed")
+            try:
+                await query.message.delete()
+            except Exception:
+                try:
+                    await query.message.edit_text(
+                        "✅ _Alert dismissed_",
+                        parse_mode="MarkdownV2"
+                    )
+                except Exception:
+                    pass
+        elif action == "lpm_noop":
+            # No-op for page indicator button
+            await query.answer()
         elif action == "position_list":
             await handle_position_list(update, context)
 
