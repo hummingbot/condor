@@ -4712,14 +4712,26 @@ async def process_pos_set_lower(
     params["lower_price"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Lower price set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail to show updated chart with range lines
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Lower set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
         timeframe = params.get("timeframe", "1h")
         await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Lower price set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )
 
 
 async def process_pos_set_upper(
@@ -4732,14 +4744,26 @@ async def process_pos_set_upper(
     params["upper_price"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Upper price set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail to show updated chart with range lines
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Upper set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
         timeframe = params.get("timeframe", "1h")
         await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Upper price set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )
 
 
 async def process_pos_set_base(
@@ -4752,15 +4776,26 @@ async def process_pos_set_base(
     params["amount_base"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Base amount set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail view
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        params = context.user_data.get("add_position_params", {})
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Base set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
         timeframe = params.get("timeframe", "1h")
         await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Base amount set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )
 
 
 async def process_pos_set_quote(
@@ -4773,11 +4808,23 @@ async def process_pos_set_quote(
     params["amount_quote"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Quote amount set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail view
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Quote set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
         timeframe = params.get("timeframe", "1h")
         await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Quote amount set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )
