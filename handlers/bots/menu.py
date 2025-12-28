@@ -17,7 +17,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_number, format_uptime
-from ._shared import get_bots_client, clear_bots_state
+from ._shared import get_bots_client, clear_bots_state, set_controller_config
 
 logger = logging.getLogger(__name__)
 
@@ -682,14 +682,16 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
                 InlineKeyboardButton("▶️ Start", callback_data="bots:start_ctrl"),
             ])
     elif is_pmm_mister and ctrl_config:
-        # PMM Mister: just Stop/Start (no chart for now)
+        # PMM Mister: Stop/Start + Clone
         if is_running:
             keyboard.append([
                 InlineKeyboardButton("🛑 Stop", callback_data="bots:stop_ctrl"),
+                InlineKeyboardButton("📋 Clone", callback_data="bots:clone_ctrl"),
             ])
         else:
             keyboard.append([
                 InlineKeyboardButton("▶️ Start", callback_data="bots:start_ctrl"),
+                InlineKeyboardButton("📋 Clone", callback_data="bots:clone_ctrl"),
             ])
     else:
         if is_running:
@@ -923,6 +925,56 @@ async def handle_confirm_start_controller(update: Update, context: ContextTypes.
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+
+async def handle_clone_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clone current controller config - opens PMM wizard in review mode"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    ctrl_config = context.user_data.get("current_controller_config")
+    if not ctrl_config:
+        await query.answer("No config to clone", show_alert=True)
+        return
+
+    controller_type = ctrl_config.get("controller_name", "")
+    if "pmm_mister" not in controller_type.lower():
+        await query.answer("Clone only supported for PMM Mister", show_alert=True)
+        return
+
+    await query.answer("Cloning config...")
+
+    try:
+        # Fetch existing configs to generate new ID
+        client = await get_bots_client(chat_id)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+
+        # Import generate_id from pmm_mister
+        from .controllers.pmm_mister import generate_id as pmm_generate_id
+
+        # Create a copy of the config
+        new_config = dict(ctrl_config)
+
+        # Generate new ID
+        new_config["id"] = pmm_generate_id(new_config, configs)
+
+        # Set the config for the wizard
+        set_controller_config(context, new_config)
+
+        # Set up wizard state for review mode
+        context.user_data["bots_state"] = "pmm_wizard"
+        context.user_data["pmm_wizard_step"] = "review"
+        context.user_data["pmm_wizard_message_id"] = query.message.message_id
+        context.user_data["pmm_wizard_chat_id"] = query.message.chat_id
+
+        # Import and show the review step
+        from .controller_handlers import _pmm_show_review
+        await _pmm_show_review(context, chat_id, query.message.message_id, new_config)
+
+    except Exception as e:
+        logger.error(f"Error cloning controller: {e}", exc_info=True)
+        await query.answer(f"Error: {str(e)[:50]}", show_alert=True)
 
 
 async def handle_quick_stop_controller(update: Update, context: ContextTypes.DEFAULT_TYPE, controller_idx: int) -> None:
@@ -1186,27 +1238,40 @@ async def show_controller_edit(update: Update, context: ContextTypes.DEFAULT_TYP
 def _get_editable_controller_fields(ctrl_config: Dict[str, Any], is_pmm_mister: bool = False) -> Dict[str, Any]:
     """Extract editable fields from controller config"""
     if is_pmm_mister:
-        # PMM Mister editable fields
+        # PMM Mister editable fields - match review step order
         return {
+            # Identification fields
+            "id": ctrl_config.get("id", ""),
+            "connector_name": ctrl_config.get("connector_name", ""),
+            "trading_pair": ctrl_config.get("trading_pair", ""),
+            "leverage": ctrl_config.get("leverage", 20),
+            "position_mode": ctrl_config.get("position_mode", "HEDGE"),
+            # Amount settings
+            "total_amount_quote": ctrl_config.get("total_amount_quote", 100),
+            "portfolio_allocation": ctrl_config.get("portfolio_allocation", 0.05),
+            # Base percentages
+            "target_base_pct": ctrl_config.get("target_base_pct", 0.5),
+            "min_base_pct": ctrl_config.get("min_base_pct", 0.4),
+            "max_base_pct": ctrl_config.get("max_base_pct", 0.6),
+            # Spreads and amounts
             "buy_spreads": ctrl_config.get("buy_spreads", "0.0002,0.001"),
             "sell_spreads": ctrl_config.get("sell_spreads", "0.0002,0.001"),
             "buy_amounts_pct": ctrl_config.get("buy_amounts_pct", "1,2"),
             "sell_amounts_pct": ctrl_config.get("sell_amounts_pct", "1,2"),
+            # Take profit settings
             "take_profit": ctrl_config.get("take_profit", 0.0001),
             "take_profit_order_type": ctrl_config.get("take_profit_order_type", "LIMIT_MAKER"),
             "open_order_type": ctrl_config.get("open_order_type", "LIMIT"),
-            "portfolio_allocation": ctrl_config.get("portfolio_allocation", 0.05),
-            "target_base_pct": ctrl_config.get("target_base_pct", 0.5),
-            "min_base_pct": ctrl_config.get("min_base_pct", 0.4),
-            "max_base_pct": ctrl_config.get("max_base_pct", 0.6),
-            "leverage": ctrl_config.get("leverage", 20),
+            # Timing settings
             "executor_refresh_time": ctrl_config.get("executor_refresh_time", 30),
             "buy_cooldown_time": ctrl_config.get("buy_cooldown_time", 15),
             "sell_cooldown_time": ctrl_config.get("sell_cooldown_time", 15),
             "buy_position_effectivization_time": ctrl_config.get("buy_position_effectivization_time", 3600),
             "sell_position_effectivization_time": ctrl_config.get("sell_position_effectivization_time", 3600),
+            # Distance settings
             "min_buy_price_distance_pct": ctrl_config.get("min_buy_price_distance_pct", 0.003),
             "min_sell_price_distance_pct": ctrl_config.get("min_sell_price_distance_pct", 0.003),
+            # Executor settings
             "max_active_executors_by_level": ctrl_config.get("max_active_executors_by_level", 4),
             "tick_mode": ctrl_config.get("tick_mode", False),
         }

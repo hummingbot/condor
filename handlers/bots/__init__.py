@@ -30,6 +30,7 @@ from .menu import (
     handle_confirm_stop_controller,
     handle_start_controller,
     handle_confirm_start_controller,
+    handle_clone_controller,
     handle_quick_stop_controller,
     handle_quick_start_controller,
     handle_stop_bot,
@@ -68,6 +69,7 @@ from .controller_handlers import (
     handle_cfg_edit_save,
     handle_cfg_edit_save_all,
     handle_cfg_edit_cancel,
+    handle_cfg_branch,
     show_new_grid_strike_form,
     show_new_pmm_mister_form,
     show_config_form,
@@ -308,6 +310,9 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "cfg_edit_cancel":
             await handle_cfg_edit_cancel(update, context)
+
+        elif main_action == "cfg_branch":
+            await handle_cfg_branch(update, context)
 
         elif main_action == "noop":
             pass  # Do nothing - used for pagination display button
@@ -622,6 +627,10 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "confirm_start_ctrl":
             await handle_confirm_start_controller(update, context)
+
+        # Clone controller (PMM Mister only)
+        elif main_action == "clone_ctrl":
+            await handle_clone_controller(update, context)
 
         # Quick stop/start controller (from bot detail view)
         elif main_action == "stop_ctrl_quick":

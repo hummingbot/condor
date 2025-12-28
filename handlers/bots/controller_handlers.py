@@ -13,6 +13,7 @@ Provides:
 """
 
 import asyncio
+import copy
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -565,6 +566,23 @@ def _get_editable_config_fields(config: dict) -> dict:
             "activation_bounds": config.get("activation_bounds", 0.01),
             "take_profit": take_profit,
         }
+    elif "pmm" in controller_type:
+        return {
+            "total_amount_quote": config.get("total_amount_quote", 100),
+            "portfolio_allocation": config.get("portfolio_allocation", 0.05),
+            "target_base_pct": config.get("target_base_pct", 0.5),
+            "min_base_pct": config.get("min_base_pct", 0.4),
+            "max_base_pct": config.get("max_base_pct", 0.6),
+            "buy_spreads": config.get("buy_spreads", "0.0002,0.001"),
+            "sell_spreads": config.get("sell_spreads", "0.0002,0.001"),
+            "take_profit": config.get("take_profit", take_profit),
+            "executor_refresh_time": config.get("executor_refresh_time", 30),
+            "buy_cooldown_time": config.get("buy_cooldown_time", 15),
+            "sell_cooldown_time": config.get("sell_cooldown_time", 15),
+            "min_buy_price_distance_pct": config.get("min_buy_price_distance_pct", 0.003),
+            "min_sell_price_distance_pct": config.get("min_sell_price_distance_pct", 0.003),
+            "max_active_executors_by_level": config.get("max_active_executors_by_level", 4),
+        }
     # Default fields for other controller types
     return {
         "total_amount_quote": config.get("total_amount_quote", 0),
@@ -626,6 +644,11 @@ async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if current_idx < total - 1:
         nav_row.append(InlineKeyboardButton("Next ▶️", callback_data="bots:cfg_edit_next"))
     keyboard.append(nav_row)
+
+    # Branch button row
+    keyboard.append([
+        InlineKeyboardButton("🔀 Branch", callback_data="bots:cfg_branch"),
+    ])
 
     # Final row
     keyboard.append([
@@ -793,19 +816,63 @@ async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_T
         configs_to_edit[current_idx] = config
 
     # Update editable fields for display
-    context.user_data["cfg_editable_fields"] = _get_editable_config_fields(config)
+    editable_fields = _get_editable_config_fields(config)
+    context.user_data["cfg_editable_fields"] = editable_fields
 
-    # Format updated fields
-    updated_lines = [f"`{escape_markdown_v2(k)}` \\= `{escape_markdown_v2(str(v))}`" for k, v in updates.items()]
+    # Try to delete the user's input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
-    keyboard = [[InlineKeyboardButton("✅ Continue", callback_data="bots:cfg_edit_form")]]
+    # Rebuild the edit form with updated values
+    total = len(configs_to_edit)
+    config_id = config.get("id", "unknown")
 
-    await update.get_bot().send_message(
-        chat_id=chat_id,
-        text=f"✅ *Updated*\n\n" + "\n".join(updated_lines) + "\n\n_Tap to continue editing_",
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    lines = [f"*Edit Config* \\({current_idx + 1}/{total}\\)", ""]
+    lines.append(f"`{escape_markdown_v2(config_id)}`")
+    lines.append("")
+
+    for key, value in editable_fields.items():
+        lines.append(f"`{key}={value}`")
+    lines.append("")
+    lines.append("✏️ _Send `key=value` to update_")
+
+    # Build keyboard
+    keyboard = []
+    nav_row = []
+    if current_idx > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="bots:cfg_edit_prev"))
+    nav_row.append(InlineKeyboardButton(f"💾 Save", callback_data="bots:cfg_edit_save"))
+    if current_idx < total - 1:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data="bots:cfg_edit_next"))
+    keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("🔀 Branch", callback_data="bots:cfg_branch")])
+    keyboard.append([
+        InlineKeyboardButton("💾 Save All & Exit", callback_data="bots:cfg_edit_save_all"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:cfg_edit_cancel"),
+    ])
+
+    # Edit the original message
+    message_id = context.user_data.get("cfg_edit_message_id")
+    if message_id:
+        try:
+            await update.get_bot().edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception:
+            # If edit fails, send a new message
+            msg = await update.get_bot().send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["cfg_edit_message_id"] = msg.message_id
 
 
 async def handle_cfg_edit_prev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -924,6 +991,82 @@ async def handle_cfg_edit_cancel(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop("bots_state", None)
 
     await show_controller_configs_menu(update, context)
+
+
+async def handle_cfg_branch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Branch (duplicate) the current config with a new ID"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    configs_to_edit = context.user_data.get("cfg_edit_loop", [])
+    current_idx = context.user_data.get("cfg_edit_index", 0)
+    modified = context.user_data.get("cfg_edit_modified", {})
+
+    if not configs_to_edit or current_idx >= len(configs_to_edit):
+        await query.answer("No config to branch")
+        return
+
+    # Get current config (use modified version if exists)
+    config = configs_to_edit[current_idx]
+    config_id = config.get("id", "unknown")
+    if config_id in modified:
+        config = modified[config_id]
+
+    # Generate new ID by incrementing the sequence number
+    # Format: NNN_type_connector_pair -> increment NNN
+    old_id = config.get("id", "")
+    parts = old_id.split("_", 1)
+
+    # Find highest sequence number across all configs
+    client = await get_bots_client(chat_id)
+    try:
+        all_configs = await client.controllers.get_all_controller_configs()
+    except Exception:
+        all_configs = []
+
+    max_num = 0
+    for cfg in all_configs:
+        cfg_id = cfg.get("id", "")
+        cfg_parts = cfg_id.split("_", 1)
+        if cfg_parts and cfg_parts[0].isdigit():
+            max_num = max(max_num, int(cfg_parts[0]))
+
+    # Also check configs in edit loop and modified
+    for cfg in configs_to_edit:
+        cfg_id = cfg.get("id", "")
+        cfg_parts = cfg_id.split("_", 1)
+        if cfg_parts and cfg_parts[0].isdigit():
+            max_num = max(max_num, int(cfg_parts[0]))
+
+    for cfg_id in modified.keys():
+        cfg_parts = cfg_id.split("_", 1)
+        if cfg_parts and cfg_parts[0].isdigit():
+            max_num = max(max_num, int(cfg_parts[0]))
+
+    # Create new ID
+    new_num = str(max_num + 1).zfill(3)
+    if len(parts) > 1:
+        new_id = f"{new_num}_{parts[1]}"
+    else:
+        new_id = f"{new_num}_{old_id}"
+
+    # Deep copy the config with new ID
+    new_config = copy.deepcopy(config)
+    new_config["id"] = new_id
+
+    # Add to edit loop right after current config
+    configs_to_edit.insert(current_idx + 1, new_config)
+    context.user_data["cfg_edit_loop"] = configs_to_edit
+
+    # Mark as modified so it gets saved
+    modified[new_id] = new_config
+    context.user_data["cfg_edit_modified"] = modified
+
+    # Navigate to the new config
+    context.user_data["cfg_edit_index"] = current_idx + 1
+
+    await query.answer(f"Branched to {new_id}")
+    await show_cfg_edit_form(update, context)
 
 
 async def handle_configs_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
