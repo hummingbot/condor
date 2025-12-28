@@ -413,7 +413,7 @@ def _create_scheduled_instance(
     job_data = {
         "instance_id": instance_id,
         "routine_name": routine_name,
-        "config_dict": config_dict,
+        "config_dict": config_dict.copy(),  # Copy to isolate from draft changes
         "chat_id": chat_id,
         "msg_id": msg_id,
         "background": background,
@@ -476,13 +476,14 @@ def _create_continuous_instance(
         "run_count": 0,
     }
 
-    # Create and store asyncio task
+    # Create and store asyncio task (copy config to isolate from draft changes)
+    frozen_config = config_dict.copy()
     task = asyncio.create_task(
         _run_continuous_routine(
             context.application,
             instance_id,
             routine_name,
-            config_dict,
+            frozen_config,
             chat_id,
         )
     )
