@@ -91,7 +91,14 @@ def _format_number(value, decimals: int = 2) -> str:
             return f"{num:.{decimals}f}"
         if abs(num) >= 0.01:
             return f"{num:.4f}"
-        return f"{num:.6f}"
+        if abs(num) >= 0.0001:
+            return f"{num:.6f}"
+        if abs(num) >= 0.000001:
+            return f"{num:.8f}"
+        if abs(num) >= 0.00000001:
+            return f"{num:.10f}"
+        # For extremely small numbers, use scientific notation
+        return f"{num:.2e}"
     except (ValueError, TypeError):
         return "—"
 
@@ -541,21 +548,38 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
 
     # Send or edit message
     message = None
-    if send_new or not update.callback_query:
+    if send_new:
+        # Send new message - determine chat from callback query or message
+        if update.callback_query:
+            chat = update.callback_query.message.chat
+        else:
+            chat = update.message.chat
+        message = await chat.send_message(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+    elif update.callback_query:
+        try:
+            await update.callback_query.message.edit_text(
+                help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            # Ignore "Message is not modified" error
+            if "not modified" not in str(e).lower():
+                raise
+        message = update.callback_query.message
+    else:
         message = await update.message.reply_text(
             help_text,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
-    else:
-        await update.callback_query.message.edit_text(
-            help_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup,
-            disable_web_page_preview=True
-        )
-        message = update.callback_query.message
 
     # Launch background quote fetch if no quote yet and auto_quote is enabled
     if auto_quote and quote_result is None and message:

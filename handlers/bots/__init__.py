@@ -28,6 +28,9 @@ from .menu import (
     show_controller_detail,
     handle_stop_controller,
     handle_confirm_stop_controller,
+    handle_start_controller,
+    handle_confirm_start_controller,
+    handle_clone_controller,
     handle_quick_stop_controller,
     handle_quick_start_controller,
     handle_stop_bot,
@@ -66,6 +69,7 @@ from .controller_handlers import (
     handle_cfg_edit_save,
     handle_cfg_edit_save_all,
     handle_cfg_edit_cancel,
+    handle_cfg_branch,
     show_new_grid_strike_form,
     show_new_pmm_mister_form,
     show_config_form,
@@ -133,8 +137,10 @@ from .controller_handlers import (
     handle_pmm_wizard_pair,
     handle_pmm_wizard_leverage,
     handle_pmm_wizard_allocation,
+    handle_pmm_wizard_amount,
     handle_pmm_wizard_spreads,
     handle_pmm_wizard_tp,
+    handle_pmm_back,
     handle_pmm_save,
     handle_pmm_review_back,
     handle_pmm_edit_id,
@@ -304,6 +310,9 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "cfg_edit_cancel":
             await handle_cfg_edit_cancel(update, context)
+
+        elif main_action == "cfg_branch":
+            await handle_cfg_branch(update, context)
 
         elif main_action == "noop":
             pass  # Do nothing - used for pagination display button
@@ -527,6 +536,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 allocation = float(action_parts[1])
                 await handle_pmm_wizard_allocation(update, context, allocation)
 
+        elif main_action == "pmm_amount":
+            if len(action_parts) > 1:
+                amount = float(action_parts[1])
+                await handle_pmm_wizard_amount(update, context, amount)
+
         elif main_action == "pmm_spreads":
             if len(action_parts) > 1:
                 spreads = action_parts[1]
@@ -536,6 +550,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if len(action_parts) > 1:
                 tp = float(action_parts[1])
                 await handle_pmm_wizard_tp(update, context, tp)
+
+        elif main_action == "pmm_back":
+            if len(action_parts) > 1:
+                target = action_parts[1]
+                await handle_pmm_back(update, context, target)
 
         elif main_action == "pmm_save":
             await handle_pmm_save(update, context)
@@ -601,6 +620,17 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "confirm_stop_ctrl":
             await handle_confirm_stop_controller(update, context)
+
+        # Start controller (uses context)
+        elif main_action == "start_ctrl":
+            await handle_start_controller(update, context)
+
+        elif main_action == "confirm_start_ctrl":
+            await handle_confirm_start_controller(update, context)
+
+        # Clone controller (PMM Mister only)
+        elif main_action == "clone_ctrl":
+            await handle_clone_controller(update, context)
 
         # Quick stop/start controller (from bot detail view)
         elif main_action == "stop_ctrl_quick":

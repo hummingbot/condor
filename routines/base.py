@@ -2,8 +2,9 @@
 Base classes and discovery for routines.
 
 Routine Types:
-- Interval: Has `interval_sec` field in Config → runs repeatedly at interval
-- One-shot: No `interval_sec` field → runs once and returns result
+- One-shot: Runs once and returns result. Can be scheduled externally.
+- Continuous: Has CONTINUOUS = True. Contains internal loop (while True).
+              Runs forever until cancelled. Handles its own timing.
 """
 
 import importlib
@@ -26,27 +27,21 @@ class RoutineInfo:
         name: str,
         config_class: type[BaseModel],
         run_fn: Callable[[BaseModel, Any], Awaitable[str]],
+        is_continuous: bool = False,
     ):
         self.name = name
         self.config_class = config_class
         self.run_fn = run_fn
+        self._is_continuous = is_continuous
 
         # Extract description from Config docstring
         doc = config_class.__doc__ or name
         self.description = doc.strip().split("\n")[0]
 
     @property
-    def is_interval(self) -> bool:
-        """Check if this is an interval routine (has interval_sec field)."""
-        return "interval_sec" in self.config_class.model_fields
-
-    @property
-    def default_interval(self) -> int:
-        """Get default interval in seconds (only for interval routines)."""
-        if not self.is_interval:
-            return 0
-        field = self.config_class.model_fields["interval_sec"]
-        return field.default if field.default is not None else 5
+    def is_continuous(self) -> bool:
+        """Check if this is a continuous routine (has CONTINUOUS = True in module)."""
+        return self._is_continuous
 
     def get_default_config(self) -> BaseModel:
         """Create config instance with default values."""
@@ -73,6 +68,7 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     Each routine module needs:
     - Config: Pydantic BaseModel with optional docstring description
     - run(config, context) -> str: Async function that executes the routine
+    - CONTINUOUS = True (optional): Mark as continuous routine with internal loop
 
     Args:
         force_reload: Force reimport of all modules
@@ -106,12 +102,16 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 logger.warning(f"Routine {file_path.stem}: missing Config or run")
                 continue
 
+            # Check for CONTINUOUS flag
+            is_continuous = getattr(module, "CONTINUOUS", False)
+
             routines[file_path.stem] = RoutineInfo(
                 name=file_path.stem,
                 config_class=module.Config,
                 run_fn=module.run,
+                is_continuous=is_continuous,
             )
-            logger.debug(f"Discovered routine: {file_path.stem}")
+            logger.debug(f"Discovered routine: {file_path.stem} (continuous={is_continuous})")
 
         except Exception as e:
             logger.error(f"Failed to load routine {file_path.stem}: {e}")
