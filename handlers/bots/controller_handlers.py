@@ -568,6 +568,8 @@ def _get_editable_config_fields(config: dict) -> dict:
         }
     elif "pmm" in controller_type:
         return {
+            "connector_name": config.get("connector_name", ""),
+            "trading_pair": config.get("trading_pair", ""),
             "total_amount_quote": config.get("total_amount_quote", 100),
             "portfolio_allocation": config.get("portfolio_allocation", 0.05),
             "target_base_pct": config.get("target_base_pct", 0.5),

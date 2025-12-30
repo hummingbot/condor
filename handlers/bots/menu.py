@@ -945,9 +945,9 @@ async def handle_clone_controller(update: Update, context: ContextTypes.DEFAULT_
     await query.answer("Cloning config...")
 
     try:
-        # Fetch existing configs to generate new ID
+        # Fetch existing configs to generate new ID (use get_all to find max number)
         client = await get_bots_client(chat_id)
-        configs = await client.controllers.list_controller_configs()
+        configs = await client.controllers.get_all_controller_configs()
         context.user_data["controller_configs_list"] = configs
 
         # Import generate_id from pmm_mister
