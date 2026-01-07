@@ -6,7 +6,7 @@ import time
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
-from servers import get_client
+from config_manager import get_client
 from utils.telegram_formatters import escape_markdown_v2
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     chat_id = context._chat_id if hasattr(context, '_chat_id') else None
     instance_id = getattr(context, '_instance_id', 'default')
 
-    client = await get_client(chat_id)
+    client = await get_client(chat_id, context=context)
     if not client:
         return "No server available"
 
