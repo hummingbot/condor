@@ -305,19 +305,33 @@ class ConfigManager:
             raise
 
     async def get_client_for_chat(self, chat_id: int, user_id: int = None, preferred_server: str = None):
-        """Get the API client for a user's preferred or first accessible server."""
+        """Get the API client for a user's preferred or first accessible server.
+
+        Priority:
+        1. preferred_server (from user preferences/context) if accessible
+        2. chat_defaults[chat_id] if accessible
+        3. First accessible server for the user
+        4. If no user_id, use chat default or any available server
+        """
         if user_id:
             accessible = self.get_accessible_servers(user_id)
             if not accessible:
                 raise ValueError("No servers available. Ask the admin to share a server with you.")
 
-            # User's preferred server if accessible, else first accessible
+            # 1. User's preferred server if accessible
             if preferred_server and preferred_server in accessible:
                 return await self.get_client(preferred_server)
+
+            # 2. Chat's default server if accessible
+            chat_default = self._data.get('chat_defaults', {}).get(chat_id)
+            if chat_default and chat_default in accessible:
+                return await self.get_client(chat_default)
+
+            # 3. First accessible server
             return await self.get_client(accessible[0])
 
-        # No user_id - system/admin calls use global default
-        server_name = self.get_default_server() or (list(self._data['servers'].keys())[0] if self._data['servers'] else None)
+        # No user_id - use chat default with proper fallbacks
+        server_name = self.get_chat_default_server(chat_id)
         if not server_name:
             raise ValueError("No servers configured")
         return await self.get_client(server_name)
@@ -711,14 +725,48 @@ def get_config_manager() -> ConfigManager:
     return ConfigManager.instance()
 
 
-async def get_client(chat_id: int, user_id: int = None, context=None):
-    """Get the API client for the user's preferred server."""
+def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
+    """Get the effective default server for a chat, checking both user_data and config.yml.
+
+    Priority:
+    1. user_data active_server (from pickle, fast in-memory)
+    2. chat_defaults from config.yml (persistent across hard kills)
+    3. None if nothing configured
+
+    Args:
+        chat_id: The chat ID
+        user_data: Optional user_data dict from context
+
+    Returns:
+        Server name or None
+    """
     from handlers.config.user_preferences import get_active_server
 
+    # First check user_data (pickle - might be lost on hard kill)
+    if user_data:
+        active = get_active_server(user_data)
+        if active:
+            return active
+
+    # Fall back to chat_defaults in config.yml (always persisted)
+    cm = get_config_manager()
+    chat_default = cm._data.get('chat_defaults', {}).get(chat_id)
+    if chat_default and chat_default in cm._data.get('servers', {}):
+        # Also sync back to user_data for fast future access
+        if user_data is not None:
+            from handlers.config.user_preferences import set_active_server
+            set_active_server(user_data, chat_default)
+        return chat_default
+
+    return None
+
+
+async def get_client(chat_id: int, user_id: int = None, context=None):
+    """Get the API client for the user's preferred server."""
     preferred_server = None
     if context is not None:
         if user_id is None:
             user_id = context.user_data.get('_user_id')
-        preferred_server = get_active_server(context.user_data)
+        preferred_server = get_effective_server(chat_id, context.user_data)
 
     return await get_config_manager().get_client_for_chat(chat_id, user_id, preferred_server)

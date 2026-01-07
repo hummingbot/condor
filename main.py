@@ -37,6 +37,7 @@ def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     ]
     if is_admin:
         keyboard.append([InlineKeyboardButton("👑 Admin", callback_data="start:admin")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="start:cancel")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -102,22 +103,29 @@ You will be notified when approved\.
     is_admin = role == UserRole.ADMIN
 
     # Build status information
-    from handlers.config.user_preferences import get_active_server
+    from config_manager import get_effective_server
     from utils.telegram_formatters import escape_markdown_v2
 
-    # Get all servers and their statuses
+    # Get all servers and their statuses in parallel
     servers = cm.list_servers()
-    active_server = get_active_server(context.user_data) or cm.get_default_server()
+    active_server = get_effective_server(chat_id, context.user_data) or cm.get_default_server()
 
     server_statuses = {}
     active_server_online = False
 
-    for server_name in servers:
-        status_result = await cm.check_server_status(server_name)
-        status = status_result.get("status", "unknown")
-        server_statuses[server_name] = status
-        if server_name == active_server and status == "online":
-            active_server_online = True
+    if servers:
+        # Query all server statuses in parallel
+        status_tasks = [cm.check_server_status(name) for name in servers]
+        status_results = await asyncio.gather(*status_tasks, return_exceptions=True)
+
+        for server_name, status_result in zip(servers, status_results):
+            if isinstance(status_result, Exception):
+                status = "error"
+            else:
+                status = status_result.get("status", "unknown")
+            server_statuses[server_name] = status
+            if server_name == active_server and status == "online":
+                active_server_online = True
 
     # Build servers list display
     servers_display = ""
@@ -145,7 +153,7 @@ You will be notified when approved\.
             gateway_header, _ = await get_gateway_status_info(chat_id, context.user_data)
             extra_info += gateway_header
 
-            client = await cm.get_client_for_chat(chat_id)
+            client = await cm.get_client_for_chat(chat_id, preferred_server=active_server)
             accounts = await client.accounts.list_accounts()
             if accounts:
                 total_creds = 0
@@ -173,7 +181,14 @@ You will be notified when approved\.
         offline_help = """
 ⚠️ *Active server is offline*
 • Ensure `hummingbot\\-backend\\-api` is running
-• Or select an online server via /config \\> Servers
+• Or select an online server below
+"""
+
+    # Menu descriptions
+    menu_help = r"""
+🔌 *Servers* \- Add/manage Hummingbot API servers
+🔑 *Keys* \- Connect exchange API credentials
+🌐 *Gateway* \- Deploy Gateway for DEX trading
 """
 
     reply_text = rf"""
@@ -181,9 +196,7 @@ You will be notified when approved\.
 {capabilities}
 
 *Servers:*
-{servers_display}{offline_help}{extra_info}
-Select a command below:
-"""
+{servers_display}{offline_help}{extra_info}{menu_help}"""
     keyboard = _get_start_menu_keyboard(is_admin=is_admin)
     await update.message.reply_text(reply_text, parse_mode="MarkdownV2", reply_markup=keyboard)
 
@@ -196,6 +209,11 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     data = query.data
     action = data.split(":")[1] if ":" in data else data
+
+    # Handle cancel - delete the message
+    if action == "cancel":
+        await query.message.delete()
+        return
 
     # Handle navigation to config options
     if data.startswith("start:"):
@@ -274,7 +292,7 @@ def register_handlers(application: Application) -> None:
     from handlers.trading.router import unified_trade_callback_handler
     from handlers.cex import cex_callback_handler
     from handlers.dex import lp_command, dex_callback_handler
-    from handlers.config import config_command, get_config_callback_handler, get_modify_value_handler
+    from handlers.config import get_config_callback_handler, get_modify_value_handler
     from handlers.routines import routines_command, routines_callback_handler
 
     # Clear existing handlers
@@ -287,7 +305,6 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("trade", unified_trade_command))  # Unified trade (CEX + DEX)
     application.add_handler(CommandHandler("swap", unified_trade_command))   # Alias for /trade
     application.add_handler(CommandHandler("lp", lp_command))
-    application.add_handler(CommandHandler("config", config_command))
     application.add_handler(CommandHandler("routines", routines_command))
 
     # Add callback query handler for start menu navigation
@@ -349,7 +366,6 @@ async def post_init(application: Application) -> None:
         BotCommand("bots", "Check status of all active trading bots"),
         BotCommand("trade", "Unified trading - CEX orders and DEX swaps"),
         BotCommand("lp", "Liquidity pool management and explorer"),
-        BotCommand("config", "Configure API servers and credentials"),
         BotCommand("routines", "Run configurable Python scripts"),
     ]
     await application.bot.set_my_commands(commands)
