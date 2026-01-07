@@ -10,13 +10,13 @@ Provides:
 """
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_number, format_uptime
+from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_uptime
 from ._shared import get_bots_client, clear_bots_state, set_controller_config
 
 logger = logging.getLogger(__name__)
@@ -335,7 +335,8 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
             lines.append("```")
 
-            # Open Positions section (grouped by controller)
+            # Open Positions section (grouped by controller) - limit to avoid message too long
+            MAX_POSITIONS_DISPLAY = 8
             if all_positions:
                 lines.append("")
                 lines.append(f"*Open Positions* \\({len(all_positions)}\\)")
@@ -348,11 +349,18 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                         positions_by_ctrl[ctrl] = []
                     positions_by_ctrl[ctrl].append(item)
 
+                positions_shown = 0
                 for ctrl_name, ctrl_positions in positions_by_ctrl.items():
+                    if positions_shown >= MAX_POSITIONS_DISPLAY:
+                        remaining = len(all_positions) - positions_shown
+                        lines.append(f"_\\.\\.\\.and {remaining} more_")
+                        break
                     # Shorten controller name for display
                     short_ctrl = ctrl_name[:25] if len(ctrl_name) > 25 else ctrl_name
                     lines.append(f"_{escape_markdown_v2(short_ctrl)}_")
                     for item in ctrl_positions:
+                        if positions_shown >= MAX_POSITIONS_DISPLAY:
+                            break
                         pos = item["pos"]
                         trading_pair = item["pair"]
                         side_raw = pos.get("side", "")
@@ -364,6 +372,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                         pos_value = amount * breakeven
                         pos_unrealized = pos.get("unrealized_pnl_quote", 0) or 0
                         lines.append(f"  📍 {side_emoji}{side_str} `${escape_markdown_v2(f'{pos_value:.2f}')}` @ `{escape_markdown_v2(f'{breakeven:.4f}')}` \\| U: `{escape_markdown_v2(f'{pos_unrealized:+.2f}')}`")
+                        positions_shown += 1
 
             # Closed Positions section (combined)
             if all_closed:
@@ -418,9 +427,12 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
         if error_logs:
             lines.append("")
             lines.append(f"⚠️ *{len(error_logs)} error\\(s\\):*")
-            # Show last 3 errors with full message
+            # Show last 3 errors with truncated message
             for err in error_logs[-3:]:
                 err_msg = err.get("msg", str(err)) if isinstance(err, dict) else str(err)
+                # Truncate long error messages
+                if len(err_msg) > 80:
+                    err_msg = err_msg[:77] + "..."
                 lines.append(f"  `{escape_markdown_v2(err_msg)}`")
 
         # Bot-level actions
@@ -436,6 +448,13 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # Build message and ensure it doesn't exceed Telegram's limit
+        message_text = "\n".join(lines)
+        MAX_MESSAGE_LENGTH = 4000  # Leave some buffer below 4096
+        if len(message_text) > MAX_MESSAGE_LENGTH:
+            # Truncate and add indicator
+            message_text = message_text[:MAX_MESSAGE_LENGTH - 50] + "\n\n_\\.\\.\\. truncated_"
+
         try:
             # Check if current message is a photo (from controller detail view)
             if getattr(query.message, 'photo', None):
@@ -445,13 +464,13 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                 except Exception:
                     pass
                 await query.message.chat.send_message(
-                    "\n".join(lines),
+                    message_text,
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup
                 )
             else:
                 await query.message.edit_text(
-                    "\n".join(lines),
+                    message_text,
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup
                 )
@@ -1004,8 +1023,9 @@ async def handle_quick_stop_controller(update: Update, context: ContextTypes.DEF
             config={"manual_kill_switch": True}
         )
 
-        # Refresh bot detail view
+        # Clear caches to force fresh data fetch
         context.user_data.pop("current_bot_info", None)
+        context.user_data.pop("active_bots_data", None)
         await show_bot_detail(update, context, bot_name)
 
     except Exception as e:
@@ -1040,8 +1060,9 @@ async def handle_quick_start_controller(update: Update, context: ContextTypes.DE
             config={"manual_kill_switch": False}
         )
 
-        # Refresh bot detail view
+        # Clear caches to force fresh data fetch
         context.user_data.pop("current_bot_info", None)
+        context.user_data.pop("active_bots_data", None)
         await show_bot_detail(update, context, bot_name)
 
     except Exception as e:

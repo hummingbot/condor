@@ -8,7 +8,7 @@ Provides:
 - Grid metrics calculation
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)

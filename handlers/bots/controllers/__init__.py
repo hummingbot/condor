@@ -9,7 +9,7 @@ Each controller type (grid_strike, pmm, etc.) has its own module with:
 - ID generation with chronological numbering
 """
 
-from typing import Any, Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type
 
 from ._base import BaseController, ControllerField
 from .grid_strike import GridStrikeController

@@ -15,7 +15,7 @@ Provides:
 import asyncio
 import copy
 import logging
-from typing import Dict, Any, List, Optional
+from typing import List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
@@ -28,7 +28,6 @@ from ._shared import (
     get_controller_config,
     set_controller_config,
     init_new_controller_config,
-    format_controller_config_summary,
     format_config_field_value,
     get_available_cex_connectors,
     fetch_current_price,
@@ -36,11 +35,10 @@ from ._shared import (
     calculate_auto_prices,
     generate_config_id,
     generate_candles_chart,
-    SUPPORTED_CONTROLLERS,
     GRID_STRIKE_DEFAULTS,
     GRID_STRIKE_FIELDS,
     GRID_STRIKE_FIELD_ORDER,
-    GS_WIZARD_STEPS,
+    GS_EDITABLE_FIELDS,
     SIDE_LONG,
     SIDE_SHORT,
     ORDER_TYPE_MARKET,
@@ -48,17 +46,17 @@ from ._shared import (
     ORDER_TYPE_LIMIT_MAKER,
     ORDER_TYPE_LABELS,
 )
+from .controllers.pmm_mister import (
+    FIELDS as PMM_FIELDS,
+    FIELD_ORDER as PMM_FIELD_ORDER,
+)
 from .controllers.grid_strike.grid_analysis import (
     calculate_natr,
-    calculate_price_stats,
     suggest_grid_params,
     generate_theoretical_grid,
-    format_grid_summary,
 )
 from handlers.cex._shared import (
-    fetch_cex_balances,
     get_cex_balances,
-    fetch_trading_rules,
     get_trading_rules,
 )
 
@@ -270,6 +268,7 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
             ])
 
         keyboard.append([
+            InlineKeyboardButton("📤 Upload", callback_data="bots:upload_config"),
             InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu"),
         ])
 
@@ -549,42 +548,35 @@ async def handle_cfg_edit_loop(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def _get_editable_config_fields(config: dict) -> dict:
-    """Extract editable fields from a controller config"""
+    """Extract editable fields from a controller config using centralized field definitions"""
     controller_type = config.get("controller_name", "grid_strike")
     tp_cfg = config.get("triple_barrier_config", {})
     take_profit = tp_cfg.get("take_profit", 0.0001) if isinstance(tp_cfg, dict) else 0.0001
 
     if "grid_strike" in controller_type:
-        return {
-            "start_price": config.get("start_price", 0),
-            "end_price": config.get("end_price", 0),
-            "limit_price": config.get("limit_price", 0),
-            "total_amount_quote": config.get("total_amount_quote", 0),
-            "max_open_orders": config.get("max_open_orders", 3),
-            "max_orders_per_batch": config.get("max_orders_per_batch", 1),
-            "min_spread_between_orders": config.get("min_spread_between_orders", 0.0001),
-            "activation_bounds": config.get("activation_bounds", 0.01),
-            "take_profit": take_profit,
-        }
+        # Use centralized GS_EDITABLE_FIELDS for consistency between wizard and edit views
+        result = {}
+        for field_name in GS_EDITABLE_FIELDS:
+            if field_name == "take_profit":
+                result[field_name] = take_profit
+            else:
+                default_val = GRID_STRIKE_DEFAULTS.get(field_name, "")
+                result[field_name] = config.get(field_name, default_val)
+        return result
     elif "pmm" in controller_type:
-        return {
-            "connector_name": config.get("connector_name", ""),
-            "trading_pair": config.get("trading_pair", ""),
-            "total_amount_quote": config.get("total_amount_quote", 100),
-            "portfolio_allocation": config.get("portfolio_allocation", 0.05),
-            "target_base_pct": config.get("target_base_pct", 0.5),
-            "min_base_pct": config.get("min_base_pct", 0.4),
-            "max_base_pct": config.get("max_base_pct", 0.6),
-            "buy_spreads": config.get("buy_spreads", "0.0002,0.001"),
-            "sell_spreads": config.get("sell_spreads", "0.0002,0.001"),
-            "take_profit": config.get("take_profit", take_profit),
-            "executor_refresh_time": config.get("executor_refresh_time", 30),
-            "buy_cooldown_time": config.get("buy_cooldown_time", 15),
-            "sell_cooldown_time": config.get("sell_cooldown_time", 15),
-            "min_buy_price_distance_pct": config.get("min_buy_price_distance_pct", 0.003),
-            "min_sell_price_distance_pct": config.get("min_sell_price_distance_pct", 0.003),
-            "max_active_executors_by_level": config.get("max_active_executors_by_level", 4),
-        }
+        # Use centralized PMM_FIELDS and PMM_FIELD_ORDER for consistency
+        # between config creation and editing
+        from .controllers.pmm_mister import DEFAULTS as PMM_DEFAULTS
+        result = {}
+        for field_name in PMM_FIELD_ORDER:
+            # Skip 'id' - it's shown in the header already
+            if field_name == "id":
+                continue
+            if field_name in PMM_FIELDS:
+                # Get value from config, fallback to PMM_DEFAULTS
+                default_val = PMM_DEFAULTS.get(field_name, "")
+                result[field_name] = config.get(field_name, default_val)
+        return result
     # Default fields for other controller types
     return {
         "total_amount_quote": config.get("total_amount_quote", 0),
@@ -592,7 +584,7 @@ def _get_editable_config_fields(config: dict) -> dict:
     }
 
 
-async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE, status_msg: str = None) -> None:
     """Show edit form for current config in bulk edit format (key=value)"""
     query = update.callback_query
 
@@ -625,9 +617,22 @@ async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["cfg_edit_chat_id"] = query.message.chat_id
 
     # Build message with key=value format
-    lines = [f"*Edit Config* \\({current_idx + 1}/{total}\\)", ""]
+    header = f"*Edit Config* \\({current_idx + 1}/{total}\\)"
+    if status_msg:
+        header += f" — {escape_markdown_v2(status_msg)}"
+    lines = [header, ""]
     lines.append(f"`{escape_markdown_v2(config_id)}`")
     lines.append("")
+
+    # Add context info for Grid Strike (connector, trading pair, side)
+    controller_type = config.get("controller_name", "")
+    if "grid_strike" in controller_type:
+        connector = config.get("connector_name", "")
+        pair = config.get("trading_pair", "")
+        side = config.get("side", SIDE_LONG)
+        side_str = "LONG" if side == SIDE_LONG else "SHORT"
+        lines.append(f"*{escape_markdown_v2(pair)}* {side_str} on {escape_markdown_v2(connector)}")
+        lines.append("")
 
     # Build config text for display (each line copyable)
     for key, value in editable_fields.items():
@@ -797,6 +802,7 @@ async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     # Apply updates to config
+    old_config_id = config.get("id", "")
     for key, value in updates.items():
         if key == "take_profit":
             if "triple_barrier_config" not in config:
@@ -805,10 +811,36 @@ async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_T
         else:
             config[key] = value
 
-    # Store modified config
-    config_id = config.get("id")
+    # Auto-update ID if connector_name or trading_pair changed
+    if "connector_name" in updates or "trading_pair" in updates:
+        # Extract sequence number from old ID
+        parts = old_config_id.split("_", 1)
+        seq_num = parts[0] if parts and parts[0].isdigit() else "001"
+
+        # Determine controller type abbreviation
+        controller_name = config.get("controller_name", "")
+        if controller_name == "grid_strike":
+            type_abbrev = "gs"
+        elif controller_name == "pmm_mister":
+            type_abbrev = "pmm"
+        else:
+            type_abbrev = parts[1].split("_")[0] if len(parts) > 1 and "_" in parts[1] else "cfg"
+
+        # Build new ID with current values
+        connector = config.get("connector_name", "unknown")
+        conn_clean = connector.replace("_perpetual", "").replace("_spot", "")
+        pair = config.get("trading_pair", "UNKNOWN").upper()
+        new_config_id = f"{seq_num}_{type_abbrev}_{conn_clean}_{pair}"
+
+        config["id"] = new_config_id
+    else:
+        new_config_id = old_config_id
+
+    # Store modified config (remove old key if ID changed)
     modified = context.user_data.get("cfg_edit_modified", {})
-    modified[config_id] = config
+    if old_config_id != new_config_id and old_config_id in modified:
+        del modified[old_config_id]
+    modified[new_config_id] = config
     context.user_data["cfg_edit_modified"] = modified
 
     # Update in edit loop
@@ -834,6 +866,16 @@ async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_T
     lines = [f"*Edit Config* \\({current_idx + 1}/{total}\\)", ""]
     lines.append(f"`{escape_markdown_v2(config_id)}`")
     lines.append("")
+
+    # Add context info for Grid Strike (connector, trading pair, side)
+    controller_type = config.get("controller_name", "")
+    if "grid_strike" in controller_type:
+        connector = config.get("connector_name", "")
+        pair = config.get("trading_pair", "")
+        side = config.get("side", SIDE_LONG)
+        side_str = "LONG" if side == SIDE_LONG else "SHORT"
+        lines.append(f"*{escape_markdown_v2(pair)}* {side_str} on {escape_markdown_v2(connector)}")
+        lines.append("")
 
     for key, value in editable_fields.items():
         lines.append(f"`{key}={value}`")
@@ -909,12 +951,15 @@ async def handle_cfg_edit_save(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         client = await get_bots_client(chat_id)
         await client.controllers.create_or_update_controller_config(config_id, config)
-        await query.answer(f"✅ Saved {config_id[:20]}")
+        await query.answer()
 
         # Remove from modified since it's now saved
         modified = context.user_data.get("cfg_edit_modified", {})
         modified.pop(config_id, None)
         context.user_data["cfg_edit_modified"] = modified
+
+        # Refresh form with saved status
+        await show_cfg_edit_form(update, context, status_msg="✅ Saved!")
 
     except Exception as e:
         logger.error(f"Failed to save config {config_id}: {e}")
@@ -1019,38 +1064,57 @@ async def handle_cfg_branch(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     old_id = config.get("id", "")
     parts = old_id.split("_", 1)
 
-    # Find highest sequence number across all configs
+    # Find highest sequence number across all configs from multiple sources
     client = await get_bots_client(chat_id)
+
+    # Source 1: Fresh list from API
     try:
-        all_configs = await client.controllers.get_all_controller_configs()
+        api_configs = await client.controllers.list_controller_configs()
     except Exception:
-        all_configs = []
+        api_configs = []
+
+    # Source 2: Cached list in user_data (may have configs not yet saved)
+    cached_configs = context.user_data.get("controller_configs_list", [])
 
     max_num = 0
-    for cfg in all_configs:
-        cfg_id = cfg.get("id", "")
-        cfg_parts = cfg_id.split("_", 1)
-        if cfg_parts and cfg_parts[0].isdigit():
-            max_num = max(max_num, int(cfg_parts[0]))
 
-    # Also check configs in edit loop and modified
-    for cfg in configs_to_edit:
-        cfg_id = cfg.get("id", "")
-        cfg_parts = cfg_id.split("_", 1)
-        if cfg_parts and cfg_parts[0].isdigit():
-            max_num = max(max_num, int(cfg_parts[0]))
+    # Check all sources for highest sequence number
+    all_config_sources = [api_configs, cached_configs, configs_to_edit]
+    for config_list in all_config_sources:
+        for cfg in config_list:
+            cfg_id = cfg.get("id", "") if isinstance(cfg, dict) else ""
+            cfg_parts = cfg_id.split("_", 1)
+            if cfg_parts and cfg_parts[0].isdigit():
+                max_num = max(max_num, int(cfg_parts[0]))
 
+    # Also check modified config IDs (keys)
     for cfg_id in modified.keys():
         cfg_parts = cfg_id.split("_", 1)
         if cfg_parts and cfg_parts[0].isdigit():
             max_num = max(max_num, int(cfg_parts[0]))
 
-    # Create new ID
+    # Create new ID based on current config values
     new_num = str(max_num + 1).zfill(3)
-    if len(parts) > 1:
-        new_id = f"{new_num}_{parts[1]}"
+
+    # Determine controller type abbreviation
+    controller_name = config.get("controller_name", "")
+    if controller_name == "grid_strike":
+        type_abbrev = "gs"
+    elif controller_name == "pmm_mister":
+        type_abbrev = "pmm"
     else:
-        new_id = f"{new_num}_{old_id}"
+        # Fallback: try to extract from old ID
+        if len(parts) > 1:
+            type_abbrev = parts[1].split("_")[0] if "_" in parts[1] else parts[1]
+        else:
+            type_abbrev = "cfg"
+
+    # Get connector and trading pair from current config values
+    connector = config.get("connector_name", "unknown")
+    conn_clean = connector.replace("_perpetual", "").replace("_spot", "")
+    pair = config.get("trading_pair", "UNKNOWN").upper()
+
+    new_id = f"{new_num}_{type_abbrev}_{conn_clean}_{pair}"
 
     # Deep copy the config with new ID
     new_config = copy.deepcopy(config)
@@ -1097,6 +1161,16 @@ async def show_new_grid_strike_form(update: Update, context: ContextTypes.DEFAUL
     """Start the progressive Grid Strike wizard - Step 1: Connector"""
     query = update.callback_query
     chat_id = update.effective_chat.id
+
+    # Clear any cached market data from previous wizard runs
+    # This prevents showing stale data when starting a new grid for a different pair
+    gs_keys_to_clear = [
+        "gs_current_price", "gs_candles", "gs_candles_interval",
+        "gs_chart_interval", "gs_natr", "gs_trading_rules",
+        "gs_theoretical_grid", "gs_market_data_ready", "gs_market_data_error"
+    ]
+    for key in gs_keys_to_clear:
+        context.user_data.pop(key, None)
 
     # Fetch existing configs for sequence numbering
     try:
@@ -1187,6 +1261,14 @@ async def handle_gs_wizard_pair(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     chat_id = update.effective_chat.id
     config = get_controller_config(context)
+
+    # Clear old market data if pair changed (prevents stale data)
+    old_pair = config.get("trading_pair", "")
+    if old_pair and old_pair.upper() != pair.upper():
+        for key in ["gs_current_price", "gs_candles", "gs_candles_interval",
+                    "gs_natr", "gs_trading_rules", "gs_theoretical_grid",
+                    "gs_market_data_ready", "gs_market_data_error"]:
+            context.user_data.pop(key, None)
 
     config["trading_pair"] = pair.upper()
     set_controller_config(context, config)
@@ -2550,6 +2632,14 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             if "-" not in pair:
                 pair = pair.replace("/", "-").replace("_", "-")
 
+            # Clear old market data if pair changed (prevents stale data)
+            old_pair = config.get("trading_pair", "")
+            if old_pair and old_pair.upper() != pair:
+                for key in ["gs_current_price", "gs_candles", "gs_candles_interval",
+                            "gs_natr", "gs_trading_rules", "gs_theoretical_grid",
+                            "gs_market_data_ready", "gs_market_data_error"]:
+                    context.user_data.pop(key, None)
+
             config["trading_pair"] = pair
             set_controller_config(context, config)
 
@@ -2999,6 +3089,8 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     max_open_orders = config.get("max_open_orders", 3)
     order_frequency = config.get("order_frequency", 3)
     leverage = config.get("leverage", 1)
+    coerce_tp_to_step = config.get("coerce_tp_to_step", False)
+    activation_bounds = config.get("activation_bounds", 0.01)
     side_value = config.get("side", SIDE_LONG)
     side_str = "LONG" if side_value == SIDE_LONG else "SHORT"
 
@@ -3017,12 +3109,14 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
         f"`limit_price={limit:.6g}`\n"
         f"`leverage={leverage}`\n"
         f"`take_profit={take_profit}`\n"
+        f"`coerce_tp_to_step={str(coerce_tp_to_step).lower()}`\n"
         f"`min_spread_between_orders={min_spread}`\n"
         f"`min_order_amount_quote={min_order_amount:.0f}`\n"
-        f"`max_open_orders={max_open_orders}`\n\n"
+        f"`max_open_orders={max_open_orders}`\n"
+        f"`activation_bounds={activation_bounds}`\n\n"
         f"{grid_valid} Grid: `{grid['num_levels']}` levels "
         f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
-        f"@ `${grid['amount_per_level']:.2f}`/lvl"
+        f"@ `${grid['amount_per_level']:.2f}`/lvl \\| step: `{grid.get('spread_pct', 0):.3f}%`"
     )
 
     # Add warnings if any
@@ -4504,9 +4598,11 @@ async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_
         controllers_block,
         "```",
         "",
-        f"*Name:*     `{escape_markdown_v2(instance_name)}`",
-        f"*Account:*  `{escape_markdown_v2(creds)}`",
-        f"*Image:*    `{escape_markdown_v2(image_short)}`",
+        r"*Configuration*",
+        "",
+        f"  📝  *Name:*      `{escape_markdown_v2(instance_name)}`",
+        f"  👤  *Account:*   `{escape_markdown_v2(creds)}`",
+        f"  🐳  *Image:*     `{escape_markdown_v2(image_short)}`",
         "",
         r"_Tap buttons below to change settings_",
     ]
@@ -4931,12 +5027,8 @@ async def process_deploy_custom_name_input(update: Update, context: ContextTypes
 # ============================================
 
 from .controllers.pmm_mister import (
-    DEFAULTS as PMM_DEFAULTS,
-    WIZARD_STEPS as PMM_WIZARD_STEPS,
     validate_config as pmm_validate_config,
     generate_id as pmm_generate_id,
-    parse_spreads,
-    format_spreads,
 )
 
 
@@ -6284,3 +6376,129 @@ async def _pmm_show_advanced(context, chat_id, message_id, config):
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+# ============================================
+# CUSTOM CONFIG UPLOAD
+# ============================================
+
+async def show_upload_config_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show message prompting user to upload a YAML config file"""
+    query = update.callback_query
+
+    # Set state to expect file upload
+    context.user_data["bots_state"] = "awaiting_config_upload"
+
+    message_text = (
+        r"*Upload Custom Config*" + "\n\n"
+        r"Upload a YAML file \(`.yml` or `.yaml`\) with your controller configuration\." + "\n\n"
+        r"The file should contain a valid controller config with at least an `id` field\."
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:upload_cancel")],
+    ]
+
+    await query.message.edit_text(
+        message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_upload_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel the upload and return to configs menu"""
+    clear_bots_state(context)
+    await show_controller_configs_menu(update, context)
+
+
+async def handle_config_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle uploaded YAML config file"""
+    import yaml
+
+    # Only process if we're expecting a config upload
+    if context.user_data.get("bots_state") != "awaiting_config_upload":
+        return
+
+    chat_id = update.effective_chat.id
+    document = update.message.document
+
+    # Check file extension
+    file_name = document.file_name or ""
+    if not file_name.lower().endswith(('.yml', '.yaml')):
+        await update.message.reply_text(
+            format_error_message("Please upload a YAML file (.yml or .yaml)"),
+            parse_mode="MarkdownV2"
+        )
+        return
+
+    try:
+        # Download the file
+        file = await context.bot.get_file(document.file_id)
+        file_bytes = await file.download_as_bytearray()
+        content = file_bytes.decode('utf-8')
+
+        # Parse YAML
+        try:
+            config = yaml.safe_load(content)
+        except yaml.YAMLError as e:
+            await update.message.reply_text(
+                format_error_message(f"Invalid YAML file: {str(e)}"),
+                parse_mode="MarkdownV2"
+            )
+            return
+
+        if not isinstance(config, dict):
+            await update.message.reply_text(
+                format_error_message("YAML file must contain a dictionary/object"),
+                parse_mode="MarkdownV2"
+            )
+            return
+
+        # Validate minimum required field
+        config_id = config.get("id")
+        if not config_id:
+            await update.message.reply_text(
+                format_error_message("Config must have an 'id' field"),
+                parse_mode="MarkdownV2"
+            )
+            return
+
+        # Save to backend
+        client = await get_bots_client(chat_id)
+        result = await client.controllers.create_or_update_controller_config(config_id, config)
+
+        # Clear state
+        clear_bots_state(context)
+
+        # Check result
+        if result.get("status") == "success" or "success" in str(result).lower():
+            controller_name = config.get("controller_name", "unknown")
+            success_msg = (
+                f"✅ *Config uploaded successfully\\!*\n\n"
+                f"ID: `{escape_markdown_v2(config_id)}`\n"
+                f"Type: `{escape_markdown_v2(controller_name)}`"
+            )
+            keyboard = [
+                [InlineKeyboardButton("📁 View Configs", callback_data="bots:controller_configs")],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="bots:main_menu")],
+            ]
+            await update.message.reply_text(
+                success_msg,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            error_detail = result.get("message", result.get("error", str(result)))
+            await update.message.reply_text(
+                format_error_message(f"Failed to save config: {error_detail}"),
+                parse_mode="MarkdownV2"
+            )
+
+    except Exception as e:
+        logger.error(f"Error uploading config file: {e}", exc_info=True)
+        clear_bots_state(context)
+        await update.message.reply_text(
+            format_error_message(f"Failed to upload config: {str(e)}"),
+            parse_mode="MarkdownV2"
+        )

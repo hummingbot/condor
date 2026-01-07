@@ -235,6 +235,23 @@ WIZARD_STEPS: List[str] = [
 ]
 
 
+# Editable fields for config editing (excludes id, connector, trading_pair, side which are fixed)
+# This is the standard list shown in both wizard final step and edit views
+EDITABLE_FIELDS: List[str] = [
+    "total_amount_quote",
+    "start_price",
+    "end_price",
+    "limit_price",
+    "leverage",
+    "take_profit",
+    "coerce_tp_to_step",
+    "min_spread_between_orders",
+    "min_order_amount_quote",
+    "max_open_orders",
+    "activation_bounds",
+]
+
+
 def validate_config(config: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """
     Validate a grid strike configuration.

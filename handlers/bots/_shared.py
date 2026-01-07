@@ -12,7 +12,7 @@ Controller-specific code (defaults, fields, charts) is in handlers/bots/controll
 
 import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ DEFAULT_CACHE_TTL = 60
 from .controllers import SUPPORTED_CONTROLLERS, get_controller
 from .controllers.grid_strike import (
     DEFAULTS as GRID_STRIKE_DEFAULTS,
+    EDITABLE_FIELDS as GS_EDITABLE_FIELDS,
     SIDE_LONG,
     SIDE_SHORT,
     ORDER_TYPE_MARKET,
@@ -58,41 +59,33 @@ GRID_STRIKE_FIELDS = {
 # SERVER CLIENT HELPER
 # ============================================
 
-async def get_bots_client(chat_id: Optional[int] = None):
+async def get_bots_client(chat_id: Optional[int] = None, user_data: Optional[Dict] = None):
     """Get the API client for bot operations
 
     Args:
-        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
+        chat_id: Optional chat ID (legacy, not used for server selection)
+        user_data: Optional user_data dict to get user's preferred server
 
     Returns:
         Client instance with bot_orchestration and controller endpoints
-
-    Raises:
-        ValueError: If no enabled servers available
     """
-    from servers import server_manager
+    from config_manager import get_config_manager
 
-    servers = server_manager.list_servers()
+    servers = get_config_manager().list_servers()
     enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
 
     if not enabled_servers:
         raise ValueError("No enabled API servers available")
 
-    # Use per-chat server if chat_id provided, otherwise global default
-    if chat_id is not None:
-        default_server = server_manager.get_default_server_for_chat(chat_id)
-    else:
-        default_server = server_manager.get_default_server()
+    # Use user's preferred server if user_data provided
+    preferred = None
+    if user_data:
+        from handlers.config.user_preferences import get_active_server
+        preferred = get_active_server(user_data)
 
-    if default_server and default_server in enabled_servers:
-        server_name = default_server
-    else:
-        server_name = enabled_servers[0]
-
-    logger.info(f"Bots using server: {server_name}" + (f" (chat_id={chat_id})" if chat_id else ""))
-    client = await server_manager.get_client(server_name)
-
-    return client
+    server_name = preferred if preferred and preferred in enabled_servers else enabled_servers[0]
+    logger.info(f"Bots using server: {server_name}")
+    return await get_config_manager().get_client(server_name)
 
 
 # ============================================

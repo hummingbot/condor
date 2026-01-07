@@ -90,7 +90,6 @@ from .controller_handlers import (
     process_deploy_field_input,
     handle_execute_deploy,
     # Progressive deploy flow
-    show_deploy_progressive_form,
     handle_deploy_progressive_input,
     handle_deploy_use_default,
     handle_deploy_skip_field,
@@ -149,9 +148,11 @@ from .controller_handlers import (
     handle_pmm_edit_advanced,
     handle_pmm_adv_setting,
     process_pmm_wizard_input,
+    # Custom config upload
+    show_upload_config_prompt,
+    handle_upload_cancel,
+    handle_config_file_upload,
 )
-from ._shared import clear_bots_state, SIDE_LONG, SIDE_SHORT
-
 # Archived bots handlers
 from .archived import (
     show_archived_menu,
@@ -160,7 +161,6 @@ from .archived import (
     show_bot_chart,
     handle_generate_report,
     handle_archived_refresh,
-    clear_archived_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -314,6 +314,13 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "cfg_branch":
             await handle_cfg_branch(update, context)
 
+        # Custom config upload
+        elif main_action == "upload_config":
+            await show_upload_config_prompt(update, context)
+
+        elif main_action == "upload_cancel":
+            await handle_upload_cancel(update, context)
+
         elif main_action == "noop":
             pass  # Do nothing - used for pagination display button
 
@@ -409,7 +416,8 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "select_image":
             if len(action_parts) > 1:
-                image = action_parts[1]
+                # Rejoin parts to preserve colons in image tag (e.g., "hummingbot:development")
+                image = ":".join(action_parts[1:])
                 await handle_select_image(update, context, image)
 
         elif main_action == "select_name":
@@ -794,10 +802,28 @@ def get_bots_message_handler():
     )
 
 
+@restricted
+async def bots_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle document uploads for bots module (e.g., config file uploads)"""
+    # Only process if we're expecting a config upload
+    if context.user_data.get("bots_state") == "awaiting_config_upload":
+        await handle_config_file_upload(update, context)
+
+
+def get_bots_document_handler():
+    """Get the document handler for bots module"""
+    return MessageHandler(
+        filters.Document.ALL,
+        bots_document_handler
+    )
+
+
 __all__ = [
     'bots_command',
     'bots_callback_handler',
     'bots_message_handler',
+    'bots_document_handler',
     'get_bots_callback_handler',
     'get_bots_message_handler',
+    'get_bots_document_handler',
 ]
