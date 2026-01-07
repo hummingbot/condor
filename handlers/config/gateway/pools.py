@@ -13,12 +13,12 @@ from utils.telegram_formatters import resolve_token_address
 async def show_pools_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show liquidity pools menu - select connector first"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         await query.answer("Loading connectors...")
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
         response = await client.gateway.list_connectors()
         connectors = response.get('connectors', [])
 
@@ -167,7 +167,7 @@ async def handle_pool_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_pool_networks(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
     """Show network selection for viewing pools - only connector-specific networks"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         await query.answer("Loading networks...")
 
@@ -178,7 +178,7 @@ async def show_pool_networks(query, context: ContextTypes.DEFAULT_TYPE, connecto
         if not connector_info:
             # Fallback: fetch connector info again if not in context
             chat_id = query.message.chat_id
-            client = await server_manager.get_client_for_chat(chat_id)
+            client = await get_config_manager().get_client_for_chat(chat_id)
             response = await client.gateway.list_connectors()
             connectors = response.get('connectors', [])
             connector_info = next((c for c in connectors if c.get('name') == connector_name), None)
@@ -248,12 +248,12 @@ async def show_pool_networks(query, context: ContextTypes.DEFAULT_TYPE, connecto
 async def show_connector_pools(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str) -> None:
     """Show pools for a specific connector and network"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         await query.answer("Loading pools...")
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
         pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
 
         connector_escaped = escape_markdown_v2(connector_name)
@@ -367,7 +367,7 @@ async def prompt_add_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_n
 async def prompt_remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str) -> None:
     """Show list of pools to remove with numbered buttons"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         connector_escaped = escape_markdown_v2(connector_name)
         network_escaped = escape_markdown_v2(network)
@@ -375,7 +375,7 @@ async def prompt_remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connecto
         chat_id = query.message.chat_id
 
         # Fetch pools to display as options
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
         pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
 
         if not pools:
@@ -476,7 +476,7 @@ async def show_delete_pool_confirmation(query, context: ContextTypes.DEFAULT_TYP
 async def remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str, pool_address: str, pool_type: str) -> None:
     """Remove a pool from Gateway"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         try:
             await query.answer("Removing pool...")
@@ -484,7 +484,7 @@ async def remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name:
             pass  # Mock query doesn't support answer
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
         await client.gateway.delete_pool(connector=connector_name, network=network, pool_type=pool_type, address=pool_address)
 
         connector_escaped = escape_markdown_v2(connector_name)
@@ -533,7 +533,7 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         pass
 
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
         from types import SimpleNamespace
 
         connector_name = context.user_data.get('pool_connector')
@@ -583,7 +583,7 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
 
             try:
-                client = await server_manager.get_client_for_chat(chat_id)
+                client = await get_config_manager().get_client_for_chat(chat_id)
 
                 logger.info(f"Adding pool: connector={connector_name}, network={network}, "
                            f"pool_type={pool_type}, base={base}, quote={quote}, address={address}, "

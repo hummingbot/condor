@@ -2,7 +2,7 @@
 Gateway menu and server selection
 """
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from ..server_context import build_config_message_header, format_server_selection_needed
@@ -14,9 +14,9 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     Show gateway configuration menu with status for default server
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
-        servers = server_manager.list_servers()
+        servers = get_config_manager().list_servers()
 
         if not servers:
             message_text = format_server_selection_needed()
@@ -98,10 +98,10 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_server_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show server selection menu for gateway configuration"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
-        servers = server_manager.list_servers()
-        default_server = server_manager.get_default_server()
+        servers = get_config_manager().list_servers()
+        default_server = get_config_manager().get_default_server()
 
         message_text = (
             "🔄 *Select Server*\n\n"
@@ -138,13 +138,13 @@ async def show_server_selection(query, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_server_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle server selection for gateway configuration"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         server_name = query.data.replace("gateway_server_", "")
 
         # Set as default server temporarily for this session
         # Or we could store it in context for this specific flow
-        success = server_manager.set_default_server(server_name)
+        success = get_config_manager().set_default_server(server_name)
 
         if success:
             await query.answer(f"✅ Switched to {server_name}")

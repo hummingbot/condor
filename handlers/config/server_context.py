@@ -5,33 +5,33 @@ Provides consistent server information display across all config modules.
 """
 
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Tuple
 from utils.telegram_formatters import escape_markdown_v2
 
 logger = logging.getLogger(__name__)
 
 
-async def get_server_context_header(chat_id: int = None) -> Tuple[str, bool]:
+async def get_server_context_header(user_data: dict = None) -> Tuple[str, bool]:
     """
     Get a standardized server context header showing current server and status.
 
     Args:
-        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
+        user_data: Optional user_data dict to get user's preferred server
 
     Returns:
         Tuple of (header_text: str, is_online: bool)
-        header_text: Formatted markdown text with server info and status
-        is_online: True if server is online, False otherwise
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
-        # Get default server (per-chat if chat_id provided)
-        if chat_id is not None:
-            default_server = server_manager.get_default_server_for_chat(chat_id)
-        else:
-            default_server = server_manager.get_default_server()
-        servers = server_manager.list_servers()
+        # Get user's preferred server
+        default_server = None
+        if user_data:
+            from handlers.config.user_preferences import get_active_server
+            default_server = get_active_server(user_data)
+        if not default_server:
+            default_server = get_config_manager().get_default_server()
+        servers = get_config_manager().list_servers()
 
         if not servers:
             return "⚠️ _No servers configured_\n", False
@@ -40,12 +40,12 @@ async def get_server_context_header(chat_id: int = None) -> Tuple[str, bool]:
             return "⚠️ _No default server set_\n", False
 
         # Get server config
-        server_config = server_manager.get_server(default_server)
+        server_config = get_config_manager().get_server(default_server)
         if not server_config:
             return "⚠️ _Server configuration not found_\n", False
 
         # Check server status
-        status_result = await server_manager.check_server_status(default_server)
+        status_result = await get_config_manager().check_server_status(default_server)
         status = status_result.get("status", "unknown")
 
         # Format status with icon
@@ -79,25 +79,25 @@ async def get_server_context_header(chat_id: int = None) -> Tuple[str, bool]:
         return f"⚠️ _Error loading server info: {escape_markdown_v2(str(e))}_\n", False
 
 
-async def get_gateway_status_info(chat_id: int = None) -> Tuple[str, bool]:
+async def get_gateway_status_info(chat_id: int = None, user_data: dict = None) -> Tuple[str, bool]:
     """
     Get gateway status information for the current server.
 
     Args:
-        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
+        chat_id: Optional chat ID for getting the API client
+        user_data: Optional user_data dict to get user's preferred server
 
     Returns:
-        Tuple of (status_text: str, is_running: bool)
-        status_text: Formatted markdown text with gateway status
-        is_running: True if gateway is running, False otherwise
+        Tuple of (gateway_info: str, is_running: bool)
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
-        if chat_id is not None:
-            client = await server_manager.get_client_for_chat(chat_id)
-        else:
-            client = await server_manager.get_default_client()
+        preferred = None
+        if user_data:
+            from handlers.config.user_preferences import get_active_server
+            preferred = get_active_server(user_data)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=preferred)
 
         # Check gateway status
         try:
@@ -131,39 +131,24 @@ async def get_gateway_status_info(chat_id: int = None) -> Tuple[str, bool]:
 async def build_config_message_header(
     title: str,
     include_gateway: bool = False,
-    chat_id: int = None
+    chat_id: int = None,
+    user_data: dict = None
 ) -> Tuple[str, bool, bool]:
-    """
-    Build a standardized header for configuration messages.
-
-    Args:
-        title: The title/heading for this config screen (will be bolded automatically)
-        include_gateway: Whether to include gateway status info
-        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
-
-    Returns:
-        Tuple of (header_text: str, server_online: bool, gateway_running: bool)
-    """
-    # Escape and bold the title
+    """Build a standardized header for configuration messages."""
     title_escaped = escape_markdown_v2(title)
     header = f"*{title_escaped}*\n\n"
 
-    # Add server context
-    server_context, server_online = await get_server_context_header(chat_id)
+    server_context, server_online = await get_server_context_header(user_data)
     header += server_context
 
-    # Add gateway status if requested (but only if server is online to avoid long timeouts)
     gateway_running = False
-    if include_gateway:
-        if server_online:
-            gateway_info, gateway_running = await get_gateway_status_info(chat_id)
-            header += gateway_info
-        else:
-            # Server is offline, skip gateway check to avoid timeout
-            header += f"*Gateway:* ⚪️ {escape_markdown_v2('N/A')}\n"
+    if include_gateway and server_online:
+        gateway_info, gateway_running = await get_gateway_status_info(chat_id, user_data)
+        header += gateway_info
+    elif include_gateway:
+        header += f"*Gateway:* ⚪️ {escape_markdown_v2('N/A')}\n"
 
     header += "\n"
-
     return header, server_online, gateway_running
 
 

@@ -22,6 +22,7 @@ from .deployment import (
     stop_gateway,
     restart_gateway,
     show_gateway_logs,
+    handle_deployment_input,
 )
 from .wallets import show_wallets_menu, handle_wallet_action, handle_wallet_input
 from .connectors import show_connectors_menu, handle_connector_action, handle_connector_config_input
@@ -82,7 +83,9 @@ async def handle_gateway_callback(update: Update, context: ContextTypes.DEFAULT_
 async def handle_gateway_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route text input to the appropriate gateway module"""
     # Check which type of input we're awaiting
-    if context.user_data.get('awaiting_wallet_input'):
+    if context.user_data.get('awaiting_gateway_input'):
+        await handle_deployment_input(update, context)
+    elif context.user_data.get('awaiting_wallet_input'):
         await handle_wallet_input(update, context)
     elif context.user_data.get('awaiting_token_input'):
         await handle_token_input(update, context)

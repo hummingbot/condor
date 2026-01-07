@@ -18,9 +18,9 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     Show API keys configuration with account selection
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
-        servers = server_manager.list_servers()
+        servers = get_config_manager().list_servers()
 
         if not servers:
             message_text = format_server_selection_needed()
@@ -42,7 +42,7 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
             else:
                 # Get client from per-chat server
-                client = await server_manager.get_client_for_chat(chat_id)
+                client = await get_config_manager().get_client_for_chat(chat_id)
                 accounts = await client.accounts.list_accounts()
 
                 if not accounts:
@@ -242,7 +242,7 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
     Show connected credentials for a specific account
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
 
@@ -253,7 +253,7 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
             chat_id=chat_id
         )
 
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
 
         # Get list of connected credentials for this account
         credentials = await client.accounts.list_account_credentials(account_name=account_name)
@@ -340,10 +340,10 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
     Start progressive configuration flow for a specific connector
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
 
         # Get config map for this connector
         config_fields = await client.connectors.get_config_map(connector_name)
@@ -457,7 +457,7 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
     Submit the API key configuration to Hummingbot
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         config_data = context.user_data.get('api_key_config_data', {})
         account_name = config_data.get('account_name')
@@ -486,7 +486,7 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
                 parse_mode="MarkdownV2"
             )
 
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
 
         # Handle special cases for certain connectors
         if connector_name == "xrpl":
@@ -621,10 +621,10 @@ async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_n
     Delete a credential for a specific account and connector
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id)
 
         # Delete the credential
         await client.accounts.delete_credential(

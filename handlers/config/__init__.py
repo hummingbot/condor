@@ -23,9 +23,10 @@ def clear_config_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_all_input_states(context)
 
 
-def _get_config_menu_markup_and_text():
+def _get_config_menu_markup_and_text(is_admin: bool = False):
     """
-    Build the main config menu keyboard and message text
+    Build the main config menu keyboard and message text.
+    Shows Admin button only for admin users.
     """
     keyboard = [
         [
@@ -33,10 +34,18 @@ def _get_config_menu_markup_and_text():
             InlineKeyboardButton("🔑 API Keys", callback_data="config_api_keys"),
             InlineKeyboardButton("🌐 Gateway", callback_data="config_gateway"),
         ],
-        [
-            InlineKeyboardButton("❌ Cancel", callback_data="config_close"),
-        ],
     ]
+
+    # Show Admin button only for admin users
+    if is_admin:
+        keyboard.append([
+            InlineKeyboardButton("👑 Admin Panel", callback_data="config_admin"),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("❌ Cancel", callback_data="config_close"),
+    ])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     message_text = (
@@ -47,6 +56,9 @@ def _get_config_menu_markup_and_text():
         r"🌐 *Gateway* \- Manage Gateway container and DEX configuration"
     )
 
+    if is_admin:
+        message_text += "\n" + r"👑 *Admin Panel* \- Manage users and access"
+
     return reply_markup, message_text
 
 
@@ -54,7 +66,13 @@ async def show_config_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Show the main config menu
     """
-    reply_markup, message_text = _get_config_menu_markup_and_text()
+    from config_manager import get_config_manager
+
+    user_id = query.from_user.id
+    cm = get_config_manager()
+    is_admin = cm.is_admin(user_id)
+
+    reply_markup, message_text = _get_config_menu_markup_and_text(is_admin=is_admin)
 
     await query.message.edit_text(
         message_text,
@@ -72,11 +90,18 @@ async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     - API Servers (Hummingbot instances)
     - API Keys (Exchange API credentials)
     - Gateway (Gateway container and DEX operations)
+    - Admin Panel (admin only)
     """
+    from config_manager import get_config_manager
+
     # Clear all pending input states to prevent interference
     clear_config_state(context)
 
-    reply_markup, message_text = _get_config_menu_markup_and_text()
+    user_id = update.effective_user.id
+    cm = get_config_manager()
+    is_admin = cm.is_admin(user_id)
+
+    reply_markup, message_text = _get_config_menu_markup_and_text(is_admin=is_admin)
 
     # Handle both direct command and callback query invocations
     if update.message:
@@ -119,6 +144,9 @@ async def config_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await handle_api_keys_callback(update, context)
     elif query.data == "config_gateway" or query.data.startswith("gateway_"):
         await handle_gateway_callback(update, context)
+    elif query.data == "config_admin" or query.data.startswith("admin:"):
+        from handlers.admin import admin_callback_handler
+        await admin_callback_handler(update, context)
 
 
 # Create callback handler instance for registration
@@ -126,7 +154,7 @@ def get_config_callback_handler():
     """Get the callback query handler for config menu"""
     return CallbackQueryHandler(
         config_callback_handler,
-        pattern="^config_|^modify_field_|^add_server_|^api_server_|^api_key_|^gateway_"
+        pattern="^config_|^modify_field_|^add_server_|^api_server_|^api_key_|^gateway_|^admin:"
     )
 
 
@@ -189,6 +217,12 @@ def get_modify_value_handler():
         if context.user_data.get('routines_state'):
             from handlers.routines import routines_message_handler
             await routines_message_handler(update, context)
+            return
+
+        # 8. Check server share state
+        if context.user_data.get('awaiting_share_user_id'):
+            from handlers.config.servers import handle_share_user_id_input
+            await handle_share_user_id_input(update, context)
             return
 
         # No active state - ignore the message
