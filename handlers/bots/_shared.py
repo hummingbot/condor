@@ -29,9 +29,17 @@ DEFAULT_CACHE_TTL = 60
 from .controllers import SUPPORTED_CONTROLLERS, get_controller
 from .controllers.grid_strike import (
     SIDE_LONG,
+    SIDE_SHORT,
+    ORDER_TYPE_MARKET,
+    ORDER_TYPE_LIMIT,
+    ORDER_TYPE_LIMIT_MAKER,
     ORDER_TYPE_LABELS,
     generate_chart as _gs_generate_chart,
     generate_id as _gs_generate_id,
+    calculate_auto_prices,
+    DEFAULTS as GRID_STRIKE_DEFAULTS,
+    FIELD_ORDER as GRID_STRIKE_FIELD_ORDER,
+    EDITABLE_FIELDS as GS_EDITABLE_FIELDS,
 )
 
 # Convert ControllerField objects to dicts for backwards compatibility
