@@ -566,7 +566,9 @@ async def _fetch_trade_data_background(
     # Define safe fetch functions
     async def fetch_balances_safe():
         try:
-            return await get_cex_balances(context.user_data, client, account)
+            # Check if force refresh is needed (e.g., after trade execution)
+            force_refresh = context.user_data.pop("_force_cex_balance_refresh", False)
+            return await get_cex_balances(context.user_data, client, account, refresh=force_refresh)
         except Exception as e:
             logger.warning(f"Could not fetch balances: {e}")
             # Cache empty dict so display shows "No balance found" instead of "Loading..."
@@ -1185,8 +1187,9 @@ async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYP
             position_action=position_action,
         )
 
-        # Invalidate cache
+        # Invalidate cache and flag for refresh on next fetch
         invalidate_cache(context.user_data, "balances", "orders", "positions")
+        context.user_data["_force_cex_balance_refresh"] = True
 
         # Save for quick repeat
         set_clob_last_order(context.user_data, {
@@ -1356,8 +1359,9 @@ async def process_trade(
             position_action=position_action,
         )
 
-        # Invalidate cache
+        # Invalidate cache and flag for refresh on next fetch
         invalidate_cache(context.user_data, "balances", "orders", "positions")
+        context.user_data["_force_cex_balance_refresh"] = True
 
         # Update params for next trade
         context.user_data["trade_params"] = {
