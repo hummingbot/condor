@@ -8,35 +8,31 @@ echo ""
 # Prompt for Telegram Bot Token
 read -p "Enter your Telegram Bot Token: " telegram_token
 
-# Prompt for Authorized User IDs
+# Prompt for Admin User ID
 echo ""
-echo "Enter the User IDs that are allowed to talk with the bot."
-echo "Separate multiple User IDs with a comma (e.g., 12345,67890,23456)."
-echo "(Tip: Run /start in the bot to see your User ID)"
-read -p "User IDs: " user_ids
+echo "Enter your Telegram User ID (you will be the admin)."
+echo "(Tip: Message @userinfobot on Telegram to get your ID)"
+read -p "Admin User ID: " admin_id
 
-# Prompt for Pydantic Gateway Key (optional)
+# Prompt for OpenAI API Key (optional)
 echo ""
-echo "Enter your Pydantic Gateway Key (optional, for AI features)."
+echo "Enter your OpenAI API Key (optional, for AI features)."
 echo "Press Enter to skip if not using AI features."
-read -p "Pydantic Gateway Key: " pydantic_key
+read -p "OpenAI API Key: " openai_key
 
-# Remove spaces from user IDs
-user_ids=$(echo $user_ids | tr -d '[:space:]')
+# Remove spaces
+admin_id=$(echo $admin_id | tr -d '[:space:]')
 
 # Create or update .env file
 echo "TELEGRAM_TOKEN=$telegram_token" > .env
-echo "AUTHORIZED_USERS=$user_ids" >> .env
-if [ -n "$pydantic_key" ]; then
-    echo "PYDANTIC_GATEWAY_KEY=$pydantic_key" >> .env
+echo "ADMIN_USER_ID=$admin_id" >> .env
+if [ -n "$openai_key" ]; then
+    echo "OPENAI_API_KEY=$openai_key" >> .env
 fi
 
 echo ""
 echo ".env file created successfully!"
 
-echo ""
-echo "Installing Chrome for Plotly image generation..."
-plotly_get_chrome || kaleido_get_chrome || python -c "import kaleido; kaleido.get_chrome_sync()" 2>/dev/null || echo "Chrome installation skipped (not required for basic usage)"
 echo ""
 echo "Ensuring data directory exists for persistence..."
 mkdir -p data
@@ -49,7 +45,10 @@ echo "Option 1: Docker (Recommended)"
 echo "  docker compose up -d"
 echo ""
 echo "Option 2: Local Python"
-echo "  make install" 
+echo "  make install"
 echo "  conda activate condor"
 echo "  python main.py"
+echo ""
+echo "On first run, config.yml will be auto-created."
+echo "Use /config in the bot to add servers and manage access."
 echo ""
