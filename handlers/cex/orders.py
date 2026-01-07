@@ -12,63 +12,108 @@ from handlers.config.user_preferences import get_clob_account
 logger = logging.getLogger(__name__)
 
 
-async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, status: str = "OPEN") -> None:
-    """Handle search orders operation"""
+async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, status: str = "ALL") -> None:
+    """Handle search orders operation
+
+    Status options:
+    - ALL: All orders with open orders section at top (default)
+    - FILLED: Only filled orders
+    - CANCELLED: Only cancelled orders
+    """
     try:
         from config_manager import get_client
+        import asyncio
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        # Search for orders with specified status
-        if status == "OPEN":
-            # Use get_active_orders for real-time open orders from exchange
-            result = await client.trading.get_active_orders(limit=100)
-            status_label = "Open Orders"
-        elif status == "ALL":
-            result = await client.trading.search_orders(limit=100)
-            status_label = "All Orders"
-        else:
-            result = await client.trading.search_orders(
-                status=status,
-                limit=100
-            )
-            status_label = f"{status.title()} Orders"
+        keyboard = []
 
-        orders = result.get("data", [])
+        if status == "ALL":
+            # Fetch open orders (from active endpoint) and all orders in parallel
+            async def get_open():
+                try:
+                    result = await client.trading.get_active_orders(limit=50)
+                    return result.get("data", [])
+                except Exception as e:
+                    logger.warning(f"Error fetching open orders: {e}")
+                    return []
 
-        # Store orders for cancel operations
-        context.user_data["current_orders"] = orders
+            async def get_all():
+                try:
+                    result = await client.trading.search_orders(limit=100)
+                    return result.get("data", [])
+                except Exception as e:
+                    logger.warning(f"Error fetching all orders: {e}")
+                    return []
 
-        if not orders:
-            message = f"🔍 *{escape_markdown_v2(status_label)}*\n\nNo orders found\\."
-            keyboard = []
-        else:
-            from utils.telegram_formatters import format_orders_table
-            orders_table = format_orders_table(orders)
-            message = f"🔍 *{escape_markdown_v2(status_label)}* \\({len(orders)} found\\)\n\n```\n{orders_table}\n```"
+            open_orders, all_orders = await asyncio.gather(get_open(), get_all())
 
-            # Build keyboard with cancel buttons for open orders
-            keyboard = []
-            if status == "OPEN":
-                for i, order in enumerate(orders[:5]):
+            # Store open orders for cancel operations
+            context.user_data["current_orders"] = open_orders
+
+            # Build set of truly open order IDs for status correction
+            open_order_ids = {
+                o.get('client_order_id') or o.get('order_id')
+                for o in open_orders
+            }
+
+            # Correct stale "OPEN" status in all_orders based on actual open orders
+            for order in all_orders:
+                order_id = order.get('client_order_id') or order.get('order_id')
+                if order.get('status') == 'OPEN' and order_id not in open_order_ids:
+                    order['status'] = 'FILLED'  # Most likely filled
+
+            # Build message with sections
+            sections = []
+
+            # Open orders section with cancel buttons
+            if open_orders:
+                from utils.telegram_formatters import format_orders_table
+                open_table = format_orders_table(open_orders[:10])
+                sections.append(f"*🟢 Open Orders* \\({len(open_orders)}\\)\n```\n{open_table}\n```")
+
+                # Cancel buttons for open orders
+                for i, order in enumerate(open_orders[:3]):
                     pair = order.get('trading_pair', 'N/A')
                     side = order.get('trade_type', order.get('side', 'N/A'))
-                    order_type = order.get('order_type', 'N/A')
-                    button_label = f"❌ Cancel {pair} {side} {order_type}"
+                    button_label = f"❌ Cancel {pair} {side}"
                     keyboard.append([InlineKeyboardButton(button_label, callback_data=f"cex:cancel_order:{i}")])
+            else:
+                sections.append("*🟢 Open Orders*\n_No open orders_")
 
-                if len(orders) > 5:
-                    keyboard.append([InlineKeyboardButton("⋯ More Orders", callback_data="cex:orders_list")])
+            # All orders section
+            if all_orders:
+                from utils.telegram_formatters import format_orders_table
+                all_table = format_orders_table(all_orders)
+                sections.append(f"\n*📋 All Orders* \\({len(all_orders)}\\)\n```\n{all_table}\n```")
 
-        # Filter buttons
+            message = "\n".join(sections)
+
+        else:
+            # Specific status filter (FILLED, CANCELLED)
+            result = await client.trading.search_orders(status=status, limit=100)
+            orders = result.get("data", [])
+            context.user_data["current_orders"] = []
+            status_label = f"{status.title()} Orders"
+            emoji = "✅" if status == "FILLED" else "❌" if status == "CANCELLED" else "📋"
+
+            if not orders:
+                message = f"{emoji} *{escape_markdown_v2(status_label)}*\n\n_No orders found_"
+            else:
+                from utils.telegram_formatters import format_orders_table
+                orders_table = format_orders_table(orders)
+                message = f"{emoji} *{escape_markdown_v2(status_label)}* \\({len(orders)}\\)\n\n```\n{orders_table}\n```"
+
+        # Filter buttons - highlight current filter
+        def btn(label, action, current):
+            prefix = "• " if current else ""
+            return InlineKeyboardButton(f"{prefix}{label}", callback_data=f"cex:{action}")
+
         keyboard.append([
-            InlineKeyboardButton("Open Orders", callback_data="cex:search_orders"),
-            InlineKeyboardButton("All Orders", callback_data="cex:search_all"),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("Filled", callback_data="cex:search_filled"),
-            InlineKeyboardButton("Cancelled", callback_data="cex:search_cancelled")
+            btn("All", "search_orders", status == "ALL"),
+            btn("Filled", "search_filled", status == "FILLED"),
+            btn("Cancelled", "search_cancelled", status == "CANCELLED"),
         ])
         keyboard.append([InlineKeyboardButton("« Back", callback_data="cex:trade")])
 

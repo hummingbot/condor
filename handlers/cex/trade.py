@@ -19,6 +19,7 @@ from handlers.config.user_preferences import (
     get_clob_order_defaults,
     set_clob_last_order,
     set_last_trade_connector,
+    get_all_enabled_networks,
 )
 from config_manager import get_client
 from ._shared import (
@@ -881,35 +882,97 @@ async def handle_trade_toggle_position(update: Update, context: ContextTypes.DEF
 
 
 async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show available CEX connectors for selection"""
-    help_text = r"🔌 *Select Connector*"
-
+    """Show available CEX connectors and DEX networks for selection"""
+    chat_id = update.effective_chat.id
     keyboard = []
 
     try:
-        chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
-        cex_connectors = await get_available_cex_connectors(context.user_data, client)
 
-        # Build buttons (2 per row)
-        row = []
-        for connector in cex_connectors:
-            row.append(InlineKeyboardButton(
-                connector,
-                callback_data=f"cex:trade_connector_{connector}"
-            ))
-            if len(row) == 2:
+        # Fetch CEX connectors and DEX networks
+        from handlers import is_gateway_network
+
+        async def get_cex_connectors_list():
+            try:
+                return await get_available_cex_connectors(context.user_data, client)
+            except Exception as e:
+                logger.warning(f"Could not fetch CEX connectors: {e}")
+                return []
+
+        async def get_dex_networks():
+            try:
+                response = await client.gateway.list_networks()
+                all_networks = response.get('networks', [])
+
+                # Filter to only show networks enabled in user's wallet configurations
+                enabled_networks = get_all_enabled_networks(context.user_data)
+                if enabled_networks is None:
+                    # No wallets configured, show all networks
+                    return all_networks
+
+                # Filter networks to only those enabled for user's wallets
+                filtered = []
+                for network_item in all_networks:
+                    if isinstance(network_item, dict):
+                        network_id = network_item.get('network_id') or network_item.get('id') or str(network_item)
+                    else:
+                        network_id = str(network_item)
+
+                    if network_id in enabled_networks:
+                        filtered.append(network_item)
+
+                return filtered
+            except Exception as e:
+                logger.warning(f"Could not fetch DEX networks: {e}")
+                return []
+
+        cex_connectors, dex_networks = await asyncio.gather(
+            get_cex_connectors_list(),
+            get_dex_networks()
+        )
+
+        # CEX section
+        if cex_connectors:
+            keyboard.append([InlineKeyboardButton("━━ CEX ━━", callback_data="cex:noop")])
+            row = []
+            for connector in cex_connectors:
+                row.append(InlineKeyboardButton(
+                    connector,
+                    callback_data=f"cex:trade_connector_{connector}"
+                ))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
                 keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
 
-        if not cex_connectors:
-            help_text += "\n\n_No CEX connectors available_"
+        # DEX section
+        if dex_networks:
+            keyboard.append([InlineKeyboardButton("━━ DEX ━━", callback_data="cex:noop")])
+            row = []
+            for network_item in dex_networks:
+                if isinstance(network_item, dict):
+                    network_id = network_item.get('network_id') or network_item.get('id') or str(network_item)
+                else:
+                    network_id = str(network_item)
+                row.append(InlineKeyboardButton(
+                    network_id,
+                    callback_data=f"cex:switch_dex_{network_id}"
+                ))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+        if not cex_connectors and not dex_networks:
+            help_text = r"🔄 *Select Connector*" + "\n\n" + r"_No connectors available\._"
+        else:
+            help_text = r"🔄 *Select Connector*"
 
     except Exception as e:
         logger.error(f"Error fetching connectors: {e}", exc_info=True)
-        help_text += "\n\n_Could not fetch connectors_"
+        help_text = r"🔄 *Select Connector*" + "\n\n" + r"_Could not fetch connectors_"
 
     keyboard.append([InlineKeyboardButton("« Back", callback_data="cex:trade")])
     reply_markup = InlineKeyboardMarkup(keyboard)

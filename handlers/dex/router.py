@@ -286,6 +286,36 @@ SIMPLE_ACTIONS: dict[str, HandlerFunc] = {
 
 
 # ============================================
+# CEX SWITCH HANDLER
+# ============================================
+
+async def _handle_switch_to_cex(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    connector_name: str
+) -> None:
+    """Switch from DEX to CEX trading"""
+    from handlers.config.user_preferences import (
+        set_last_trade_connector,
+        get_clob_order_defaults,
+    )
+    from handlers.cex.trade import handle_trade as cex_handle_trade
+
+    # Clear DEX state
+    context.user_data.pop("dex_state", None)
+    context.user_data.pop("swap_params", None)
+
+    # Save preference and set up CEX trade
+    set_last_trade_connector(context.user_data, "cex", connector_name)
+    defaults = get_clob_order_defaults(context.user_data)
+    defaults["connector"] = connector_name
+    context.user_data["trade_params"] = defaults
+
+    # Route to CEX trade menu
+    await cex_handle_trade(update, context)
+
+
+# ============================================
 # PARAMETERIZED ACTION HANDLERS
 # ============================================
 
@@ -310,6 +340,12 @@ async def _handle_parameterized_action(
     if action.startswith("swap_network_"):
         network_id = action.replace("swap_network_", "")
         await handle_swap_network_select(update, context, network_id)
+        return True
+
+    # Switch to CEX: switch_cex_{connector}
+    if action.startswith("switch_cex_"):
+        connector_name = action.replace("switch_cex_", "")
+        await _handle_switch_to_cex(update, context, connector_name)
         return True
 
     # Swap history filters

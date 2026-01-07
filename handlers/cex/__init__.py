@@ -34,6 +34,33 @@ def clear_cex_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("trade_menu_chat_id", None)
 
 
+async def _handle_switch_to_dex(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    network_id: str
+) -> None:
+    """Switch from CEX to DEX trading"""
+    from handlers.config.user_preferences import (
+        set_last_trade_connector,
+        get_dex_swap_defaults,
+    )
+    from handlers.dex.swap import handle_swap as dex_handle_swap
+
+    # Clear CEX state
+    clear_cex_state(context)
+
+    # Save preference (DEX stores network ID)
+    set_last_trade_connector(context.user_data, "dex", network_id)
+
+    # Set up DEX swap params with the selected network
+    defaults = get_dex_swap_defaults(context.user_data)
+    defaults["network"] = network_id
+    context.user_data["swap_params"] = defaults
+
+    # Route to DEX swap menu
+    await dex_handle_swap(update, context)
+
+
 @restricted
 @hummingbot_api_required
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -140,8 +167,6 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Orders
         elif action == "search_orders":
-            await handle_search_orders(update, context, status="OPEN")
-        elif action == "search_all":
             await handle_search_orders(update, context, status="ALL")
         elif action == "search_filled":
             await handle_search_orders(update, context, status="FILLED")
@@ -170,6 +195,15 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Close
         elif action == "close":
             await handle_close(update, context)
+
+        # Switch to DEX
+        elif action.startswith("switch_dex_"):
+            network_id = action.replace("switch_dex_", "")
+            await _handle_switch_to_dex(update, context, network_id)
+
+        # No-op for separator buttons
+        elif action == "noop":
+            pass
 
         else:
             await query.message.reply_text(f"Unknown action: {action}")
