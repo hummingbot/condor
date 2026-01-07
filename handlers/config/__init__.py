@@ -44,8 +44,7 @@ async def _show_start_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     Mirrors the logic from main.py start() but for callback query context.
     """
     import asyncio
-    from config_manager import get_config_manager
-    from handlers.config.user_preferences import get_active_server
+    from config_manager import get_config_manager, get_effective_server
     from handlers.config.server_context import get_gateway_status_info
     from utils.telegram_formatters import escape_markdown_v2
 
@@ -56,7 +55,7 @@ async def _show_start_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Get all servers and their statuses in parallel
     servers = cm.list_servers()
-    active_server = get_active_server(context.user_data) or cm.get_default_server()
+    active_server = get_effective_server(chat_id, context.user_data) or cm.get_default_server()
 
     server_statuses = {}
     active_server_online = False

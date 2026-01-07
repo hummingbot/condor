@@ -26,7 +26,7 @@ async def _notify_admin_new_user(context: ContextTypes.DEFAULT_TYPE, user_id: in
             f"👤 *New Access Request*\n\n"
             f"User ID: `{user_id}`\n"
             f"Username: @{username or 'N/A'}\n\n"
-            f"Use /config \\> Admin Panel to approve or reject\\."
+            f"Use /start \\> Admin Panel to approve or reject\\."
         )
         await context.bot.send_message(
             chat_id=admin_id,
@@ -226,7 +226,7 @@ def gateway_required(func):
                     update,
                     title="Server Offline",
                     status_line="🔴 The API server is not reachable\\.",
-                    instruction="Check your server configuration in /config \\> API Servers\\."
+                    instruction="Check your server configuration in /start \\> API Servers\\."
                 )
                 return
 
@@ -238,7 +238,7 @@ def gateway_required(func):
                     update,
                     title="Gateway Not Running",
                     status_line="🔴 The Gateway is not deployed or not running on this server\\.",
-                    instruction="Deploy the Gateway in /config \\> Gateway to use this feature\\."
+                    instruction="Deploy the Gateway in /start \\> Gateway to use this feature\\."
                 )
                 return
 
@@ -250,7 +250,7 @@ def gateway_required(func):
                 update,
                 title="Service Unavailable",
                 status_line="⚠️ Could not verify service status\\.",
-                instruction="Please try again or check /config for server status\\."
+                instruction="Please try again or check /start for server status\\."
             )
             return
 
@@ -282,7 +282,7 @@ def hummingbot_api_required(func):
                     update,
                     title="API Server Offline",
                     status_line="🔴 The Hummingbot API server is not reachable\\.",
-                    instruction="Check your server configuration in /config \\> API Servers\\."
+                    instruction="Check your server configuration in /start \\> API Servers\\."
                 )
                 return
 
@@ -294,7 +294,7 @@ def hummingbot_api_required(func):
                 update,
                 title="Service Unavailable",
                 status_line="⚠️ Could not verify service status\\.",
-                instruction="Please try again or check /config for server status\\."
+                instruction="Please try again or check /start for server status\\."
             )
             return
 

@@ -47,9 +47,9 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Get only accessible servers
         servers = cm.list_accessible_servers(user_id)
-        # User's preferred server
-        from handlers.config.user_preferences import get_active_server
-        default_server = get_active_server(context.user_data)
+        # User's preferred server (checks both user_data and config.yml)
+        from config_manager import get_effective_server
+        default_server = get_effective_server(query.message.chat_id, context.user_data)
 
         if not servers:
             message_text = (
@@ -264,8 +264,8 @@ async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_
         is_owner = perm == ServerPermission.OWNER
         can_trade = perm in (ServerPermission.OWNER, ServerPermission.TRADER)
 
-        from handlers.config.user_preferences import get_active_server
-        is_user_default = server_name == get_active_server(context.user_data)
+        from config_manager import get_effective_server
+        is_user_default = server_name == get_effective_server(query.message.chat_id, context.user_data)
 
         # Check status
         status_result = await get_config_manager().check_server_status(server_name)
@@ -353,12 +353,18 @@ async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_
 
 
 async def set_default_server(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
-    """Set server as default for this user"""
+    """Set server as default for this user/chat"""
     try:
         from handlers.dex._shared import invalidate_cache
         from handlers.config.user_preferences import set_active_server
+        from config_manager import get_config_manager
 
+        # Save to user_data (in-memory, pickle persistence)
         set_active_server(context.user_data, server_name)
+
+        # Also save to config.yml for immediate persistence (survives hard kills)
+        chat_id = query.message.chat_id
+        get_config_manager().set_chat_default_server(chat_id, server_name)
 
         # Invalidate ALL cached data since we're switching to a different server
         invalidate_cache(context.user_data, "all")

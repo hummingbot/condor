@@ -52,7 +52,7 @@ DEFAULT_DEX_AMOUNT = "1.0"
 
 # Unified trade defaults
 DEFAULT_TRADE_CONNECTOR_TYPE = "dex"  # "cex" or "dex"
-DEFAULT_TRADE_CONNECTOR_NAME = "jupiter"
+DEFAULT_TRADE_CONNECTOR_NAME = "solana-mainnet-beta"  # For DEX: network ID, for CEX: connector name
 
 
 # ============================================
@@ -663,7 +663,8 @@ def get_last_trade_connector(user_data: Dict) -> tuple:
 
     Returns:
         Tuple of (connector_type, connector_name)
-        e.g., ("dex", "jupiter") or ("cex", "binance_perpetual")
+        - For DEX: ("dex", "solana-mainnet-beta") - connector_name is the NETWORK ID
+        - For CEX: ("cex", "binance_perpetual") - connector_name is the connector
     """
     prefs = get_unified_trade_prefs(user_data)
     return (
@@ -678,7 +679,8 @@ def set_last_trade_connector(user_data: Dict, connector_type: str, connector_nam
     Args:
         user_data: User data dict
         connector_type: "cex" or "dex"
-        connector_name: Connector name (e.g., "jupiter", "binance_perpetual")
+        connector_name: For DEX: network ID (e.g., "solana-mainnet-beta")
+                        For CEX: connector name (e.g., "binance_perpetual")
     """
     prefs = _ensure_preferences(user_data)
     if "unified_trade" not in prefs:

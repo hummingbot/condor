@@ -865,7 +865,9 @@ def _format_pnl_value(value: float) -> str:
 
 def format_lp_positions(positions_data: Dict[str, Any], token_cache: Optional[Dict[str, str]] = None) -> str:
     """
-    Format LP (CLMM) positions for Telegram display, grouped by connector.
+    Format LP (CLMM) positions for Telegram display - compact summary with value and PNL.
+
+    Only shows active positions with their value and PNL in a scannable format.
 
     Args:
         positions_data: Dictionary with 'positions' list and 'total' count
@@ -879,83 +881,64 @@ def format_lp_positions(positions_data: Dict[str, Any], token_cache: Optional[Di
     token_cache = token_cache or {}
 
     if not positions or total == 0:
-        return "🏊 *LP Positions \\(CLMM\\)*\n_No active LP positions_\n"
+        return ""  # Don't show section if no positions
 
-    message = f"🏊 *LP Positions \\(CLMM\\)* \\({escape_markdown_v2(str(total))}\\)\n"
+    # Calculate totals and filter active positions
+    total_value_usd = 0.0
+    total_pnl_usd = 0.0
+    active_count = 0
+    out_of_range_count = 0
 
-    # Group positions by connector
-    from collections import defaultdict
-    by_connector = defaultdict(list)
     for pos in positions:
-        connector = pos.get('connector', 'unknown')
-        by_connector[connector].append(pos)
+        in_range = pos.get('in_range', '')
+        if in_range == 'IN_RANGE':
+            active_count += 1
+        elif in_range == 'OUT_OF_RANGE':
+            out_of_range_count += 1
 
-    # Format each connector's positions
-    for connector, conn_positions in by_connector.items():
-        # Get network/chain from first position
-        first_pos = conn_positions[0]
-        chain = _get_chain_from_network(first_pos.get('network', ''))
+        # Get value from pnl_summary (in quote token)
+        pnl_summary = pos.get('pnl_summary', {})
+        current_value = pnl_summary.get('current_lp_value_quote', 0)
+        total_pnl = pnl_summary.get('total_pnl_quote', 0)
 
-        message += f"\n*{escape_markdown_v2(connector)}* \\({escape_markdown_v2(chain)}\\)\n"
+        try:
+            # For now, assume quote token is a stablecoin (value ~= $1)
+            # A more accurate approach would use token_prices
+            value_f = float(current_value) if current_value else 0
+            pnl_f = float(total_pnl) if total_pnl else 0
+            total_value_usd += value_f
+            total_pnl_usd += pnl_f
+        except (ValueError, TypeError):
+            pass
 
-        # Create table with PNL info
-        # Pair(10) Range(9) Status(3) BasePNL(8) QuotePNL(8)
-        table_content = "```\n"
-        table_content += f"{'Pair':<10} {'Range':<9} {'St':>2} {'B.PNL':>7} {'Q.PNL':>7}\n"
-        table_content += f"{'─'*10} {'─'*9} {'─'*2} {'─'*7} {'─'*7}\n"
+    # Build compact message
+    message = f"🏊 *LP Positions* \\({escape_markdown_v2(str(total))}\\)\n"
 
-        for pos in conn_positions[:8]:  # Max 8 per connector
-            # Resolve token pair using cache
-            base_token = pos.get('base_token', '')
-            quote_token = pos.get('quote_token', '')
-            base_symbol = resolve_token_symbol(base_token, token_cache)
-            quote_symbol = resolve_token_symbol(quote_token, token_cache)
-            pair_str = f"{base_symbol[:4]}-{quote_symbol[:4]}"
+    # Summary line: 3 active 🟢 | 1 out 🔴 | Value: $1,234 | PnL: +$56
+    parts = []
+    if active_count > 0:
+        parts.append(f"{active_count} 🟢")
+    if out_of_range_count > 0:
+        parts.append(f"{out_of_range_count} 🔴")
 
-            # Format range
-            lower_price = pos.get('lower_price', 0)
-            upper_price = pos.get('upper_price', 0)
-            if lower_price and upper_price:
-                try:
-                    low = float(lower_price)
-                    high = float(upper_price)
-                    if low >= 1000:
-                        range_str = f"{low/1000:.1f}k-{high/1000:.1f}k"
-                    elif low >= 1:
-                        range_str = f"{low:.2f}-{high:.2f}"
-                    else:
-                        range_str = f"{low:.3f}-{high:.3f}"
-                    range_str = range_str[:8]
-                except:
-                    range_str = "N/A"
-            else:
-                range_str = "N/A"
+    if total_value_usd > 0:
+        value_str = format_number(total_value_usd)
+        parts.append(f"Value: {value_str}")
 
-            # Status (IN_RANGE -> "IN", OUT_OF_RANGE -> "OUT")
-            in_range = pos.get('in_range', '')
-            if in_range == 'IN_RANGE':
-                status = "✓"
-            elif in_range == 'OUT_OF_RANGE':
-                status = "✗"
-            else:
-                status = "?"
+    if total_pnl_usd != 0:
+        pnl_str = format_number(abs(total_pnl_usd))
+        if total_pnl_usd >= 0:
+            parts.append(f"PnL: +{pnl_str}")
+        else:
+            parts.append(f"PnL: -{pnl_str}")
 
-            # PNL from pnl_summary
-            pnl_summary = pos.get('pnl_summary', {})
-            base_pnl = pnl_summary.get('base_pnl')
-            quote_pnl = pnl_summary.get('quote_pnl')
+    if parts:
+        summary = " \\| ".join([escape_markdown_v2(p) for p in parts])
+        message += summary
+    else:
+        message += "_No value data available_"
 
-            base_pnl_str = _format_pnl_value(base_pnl)[:7] if base_pnl is not None else "—"
-            quote_pnl_str = _format_pnl_value(quote_pnl)[:7] if quote_pnl is not None else "—"
-
-            table_content += f"{pair_str:<10} {range_str:<9} {status:>2} {base_pnl_str:>7} {quote_pnl_str:>7}\n"
-
-        if len(conn_positions) > 8:
-            table_content += f"... +{len(conn_positions) - 8} more\n"
-
-        table_content += "```\n"
-        message += table_content
-
+    message += "\n_Use /lp for details_\n\n"
     return message
 
 
@@ -1044,13 +1027,336 @@ def format_change_compact(value: Optional[float]) -> str:
     return f"{sign}{value:.1f}%"
 
 
+def format_exchange_distribution(
+    accounts_distribution: Dict[str, Any],
+    changes_24h: Optional[Dict[str, Any]] = None,
+    total_value: float = 0.0
+) -> str:
+    """
+    Format exchange/connector distribution as a compact table.
+
+    Args:
+        accounts_distribution: From client.portfolio.get_accounts_distribution()
+        changes_24h: 24h change data with connector changes
+        total_value: Total portfolio value for percentage calculation
+
+    Returns:
+        MarkdownV2 formatted string with exchange distribution table
+    """
+    if not accounts_distribution:
+        return ""
+
+    # Parse distribution data (supports both list and dict formats)
+    accounts_list = accounts_distribution.get("distribution", [])
+    accounts_dict = accounts_distribution.get("accounts", {})
+
+    # Build connector -> value mapping (aggregated across accounts)
+    connector_totals = {}  # {connector: {"value": float, "account": str}}
+    connector_changes = changes_24h.get("connectors", {}) if changes_24h else {}
+
+    if accounts_list:
+        for account_info in accounts_list:
+            account_name = account_info.get("account", account_info.get("name", "Unknown"))
+            connectors = account_info.get("connectors", {})
+
+            for connector_name, connector_value in connectors.items():
+                if isinstance(connector_value, dict):
+                    connector_value = connector_value.get("value", 0)
+                if isinstance(connector_value, str):
+                    try:
+                        connector_value = float(connector_value)
+                    except (ValueError, TypeError):
+                        connector_value = 0
+
+                key = f"{account_name}:{connector_name}"
+                connector_totals[key] = {
+                    "value": float(connector_value),
+                    "account": account_name,
+                    "connector": connector_name
+                }
+
+    elif accounts_dict:
+        for account_name, account_info in accounts_dict.items():
+            connectors = account_info.get("connectors", {})
+            for connector_name, connector_info in connectors.items():
+                if isinstance(connector_info, dict):
+                    value = connector_info.get("value", 0)
+                else:
+                    value = connector_info
+
+                if isinstance(value, str):
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError):
+                        value = 0
+
+                key = f"{account_name}:{connector_name}"
+                connector_totals[key] = {
+                    "value": float(value),
+                    "account": account_name,
+                    "connector": connector_name
+                }
+
+    if not connector_totals:
+        return ""
+
+    # Sort by value descending
+    sorted_connectors = sorted(connector_totals.items(), key=lambda x: x[1]["value"], reverse=True)
+
+    # Build table
+    message = "*Exchanges:*\n"
+    message += "```\n"
+    message += f"{'Exchange':<20} {'Value':<10} {'%':>6} {'24h':>8}\n"
+    message += f"{'─'*20} {'─'*10} {'─'*6} {'─'*8}\n"
+
+    for key, data in sorted_connectors:
+        connector = data["connector"]
+        account = data["account"]
+        value = data["value"]
+
+        if value < 1:  # Skip tiny values
+            continue
+
+        # Show full connector name (up to 19 chars)
+        display_name = connector[:19] if len(connector) > 19 else connector
+
+        # Format value
+        value_str = format_number(value)
+
+        # Calculate percentage
+        pct = (value / total_value * 100) if total_value > 0 else 0
+        pct_str = f"{pct:.1f}%" if pct < 100 else f"{pct:.0f}%"
+
+        # Get 24h change
+        conn_change = connector_changes.get(account, {}).get(connector, {})
+        conn_pct = conn_change.get("pct_change")
+        if conn_pct is not None:
+            change_str = format_change_compact(conn_pct)
+        else:
+            change_str = "—"
+
+        message += f"{display_name:<20} {value_str:<10} {pct_str:>6} {change_str:>8}\n"
+
+    message += "```\n\n"
+    return message
+
+
+def format_aggregated_tokens(
+    balances: Dict[str, Any],
+    changes_24h: Optional[Dict[str, Any]] = None,
+    total_value: float = 0.0,
+    max_tokens: int = 10
+) -> str:
+    """
+    Format aggregated token holdings across all exchanges.
+
+    Args:
+        balances: Portfolio state from get_state() {account: {connector: [holdings]}}
+        changes_24h: 24h change data with token price changes
+        total_value: Total portfolio value for percentage calculation
+        max_tokens: Maximum number of tokens to display
+
+    Returns:
+        MarkdownV2 formatted string with token holdings table
+    """
+    if not balances:
+        return ""
+
+    # Aggregate tokens across all accounts/connectors
+    token_totals = {}  # {token: {"units": float, "value": float}}
+
+    for account_name, account_data in balances.items():
+        for connector_name, connector_balances in account_data.items():
+            if not connector_balances:
+                continue
+            for balance in connector_balances:
+                token = balance.get("token", "???")
+                units = balance.get("units", 0)
+                value = balance.get("value", 0)
+
+                if isinstance(units, str):
+                    try:
+                        units = float(units)
+                    except (ValueError, TypeError):
+                        units = 0
+                if isinstance(value, str):
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError):
+                        value = 0
+
+                if token not in token_totals:
+                    token_totals[token] = {"units": 0.0, "value": 0.0}
+
+                token_totals[token]["units"] += float(units)
+                token_totals[token]["value"] += float(value)
+
+    if not token_totals:
+        return ""
+
+    # Sort by value descending
+    sorted_tokens = sorted(token_totals.items(), key=lambda x: x[1]["value"], reverse=True)
+
+    # Filter out tiny values
+    sorted_tokens = [(t, d) for t, d in sorted_tokens if d["value"] >= 1]
+
+    if not sorted_tokens:
+        return ""
+
+    # Get 24h changes
+    token_changes = changes_24h.get("tokens", {}) if changes_24h else {}
+
+    # Build table
+    message = "*Token Holdings:*\n"
+    message += "```\n"
+    message += f"{'Token':<6} {'Price':<9} {'Value':<8} {'%':>5} {'24h':>7}\n"
+    message += f"{'─'*6} {'─'*9} {'─'*8} {'─'*5} {'─'*7}\n"
+
+    for token, data in sorted_tokens[:max_tokens]:
+        units = data["units"]
+        value = data["value"]
+
+        # Truncate token name
+        token_display = token[:5] if len(token) > 5 else token
+
+        # Calculate price
+        price = value / units if units > 0 else 0
+        price_str = format_price(price)[:9]
+
+        # Format value
+        value_str = format_number(value)[:8]
+
+        # Calculate percentage
+        pct = (value / total_value * 100) if total_value > 0 else 0
+        pct_str = f"{pct:.1f}%" if pct < 100 else f"{pct:.0f}%"
+
+        # Get 24h price change
+        token_change = token_changes.get(token, {})
+        price_change = token_change.get("price_change")
+        if price_change is not None:
+            change_str = format_change_compact(price_change)[:7]
+        else:
+            change_str = "—"
+
+        message += f"{token_display:<6} {price_str:<9} {value_str:<8} {pct_str:>5} {change_str:>7}\n"
+
+    # Show count if more tokens exist
+    if len(sorted_tokens) > max_tokens:
+        message += f"\n... +{len(sorted_tokens) - max_tokens} more tokens\n"
+
+    message += "```\n\n"
+    return message
+
+
+def format_connector_detail(
+    balances: Dict[str, Any],
+    connector_key: str,
+    changes_24h: Optional[Dict[str, Any]] = None,
+    total_value: float = 0.0
+) -> str:
+    """
+    Format detailed token holdings for a specific connector.
+
+    Args:
+        balances: Portfolio state from get_state()
+        connector_key: "account:connector" identifier
+        changes_24h: 24h change data
+        total_value: Total portfolio value for percentage calculation
+
+    Returns:
+        MarkdownV2 formatted string with connector-specific token table
+    """
+    if not balances or not connector_key:
+        return "_No data available_"
+
+    # Parse connector key
+    parts = connector_key.split(":", 1)
+    if len(parts) != 2:
+        return "_Invalid connector_"
+
+    account_name, connector_name = parts
+
+    # Get connector balances
+    account_data = balances.get(account_name, {})
+    connector_balances = account_data.get(connector_name, [])
+
+    if not connector_balances:
+        return f"_No holdings found for {escape_markdown_v2(connector_name)}_"
+
+    # Calculate connector total
+    connector_total = sum(b.get("value", 0) for b in connector_balances if b.get("value", 0) > 0)
+
+    # Get changes
+    token_changes = changes_24h.get("tokens", {}) if changes_24h else {}
+    connector_changes = changes_24h.get("connectors", {}) if changes_24h else {}
+    conn_change = connector_changes.get(account_name, {}).get(connector_name, {})
+    conn_pct = conn_change.get("pct_change")
+
+    # Build header
+    message = f"🏦 *{escape_markdown_v2(connector_name)}* "
+    message += f"\\| `{escape_markdown_v2(format_number(connector_total))}`"
+    if conn_pct is not None:
+        message += f" \\({escape_markdown_v2(format_change_compact(conn_pct))}\\)"
+    message += "\n"
+    message += f"_Account: {escape_markdown_v2(account_name)}_\n\n"
+
+    # Sort balances by value
+    sorted_balances = sorted(
+        [b for b in connector_balances if b.get("value", 0) >= 1],
+        key=lambda x: x.get("value", 0),
+        reverse=True
+    )
+
+    if not sorted_balances:
+        message += "_No significant holdings_"
+        return message
+
+    # Build table
+    message += "```\n"
+    message += f"{'Token':<6} {'Price':<9} {'Value':<8} {'%':>5} {'24h':>7}\n"
+    message += f"{'─'*6} {'─'*9} {'─'*8} {'─'*5} {'─'*7}\n"
+
+    for balance in sorted_balances:
+        token = balance.get("token", "???")
+        units = balance.get("units", 0)
+        value = balance.get("value", 0)
+
+        # Truncate token name
+        token_display = token[:5] if len(token) > 5 else token
+
+        # Calculate price
+        price = value / units if units > 0 else 0
+        price_str = format_price(price)[:9]
+
+        # Format value
+        value_str = format_number(value)[:8]
+
+        # Calculate percentage of portfolio
+        pct = (value / total_value * 100) if total_value > 0 else 0
+        pct_str = f"{pct:.1f}%" if pct < 100 else f"{pct:.0f}%"
+
+        # Get 24h price change
+        token_change = token_changes.get(token, {})
+        price_change = token_change.get("price_change")
+        if price_change is not None:
+            change_str = format_change_compact(price_change)[:7]
+        else:
+            change_str = "—"
+
+        message += f"{token_display:<6} {price_str:<9} {value_str:<8} {pct_str:>5} {change_str:>7}\n"
+
+    message += "```\n"
+    return message
+
+
 def format_portfolio_overview(
     overview_data: Dict[str, Any],
     server_name: Optional[str] = None,
     server_status: Optional[str] = None,
     pnl_indicators: Optional[Dict[str, Optional[float]]] = None,
     changes_24h: Optional[Dict[str, Any]] = None,
-    token_cache: Optional[Dict[str, str]] = None
+    token_cache: Optional[Dict[str, str]] = None,
+    accounts_distribution: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Format complete portfolio overview with all sections
@@ -1066,6 +1372,7 @@ def format_portfolio_overview(
         pnl_indicators: Dict with pnl_24h, pnl_7d, pnl_30d percentages (optional)
         changes_24h: Dict with token and connector 24h changes (optional)
         token_cache: Dict mapping token addresses to symbols for LP position resolution (optional)
+        accounts_distribution: From get_accounts_distribution() for exchange breakdown (optional)
 
     Returns:
         Formatted Telegram message with all portfolio sections
@@ -1084,146 +1391,68 @@ def format_portfolio_overview(
     else:
         message = "💼 *Portfolio Details*\n\n"
 
-    # Add PNL indicators bar if available
+    # ============================================
+    # SECTION 1: TOTAL VALUE AND PNL
+    # ============================================
+    balances = overview_data.get('balances') if overview_data else None
+
+    # Calculate total portfolio value
+    total_value = 0.0
+    if balances:
+        for account_data in balances.values():
+            for connector_balances in account_data.values():
+                if connector_balances:
+                    for balance in connector_balances:
+                        value = balance.get("value", 0)
+                        if value > 0:
+                            total_value += value
+
+    # Show total value prominently with 24h PNL inline
+    pnl_24h = pnl_indicators.get("pnl_24h") if pnl_indicators else None
+    if total_value > 0:
+        total_str = format_number(total_value)
+        if pnl_24h is not None:
+            pnl_str = format_pnl_indicator(pnl_24h)
+            message += f"💵 *Total:* `{escape_markdown_v2(total_str)}` \\({escape_markdown_v2(pnl_str)} 24h\\)\n"
+        else:
+            message += f"💵 *Total:* `{escape_markdown_v2(total_str)}`\n"
+    else:
+        message += f"💵 *Total:* `{escape_markdown_v2('$0.00')}`\n"
+
+    # Show additional PNL indicators (7d, 30d) if available
     if pnl_indicators:
-        pnl_24h = pnl_indicators.get("pnl_24h")
         pnl_7d = pnl_indicators.get("pnl_7d")
         pnl_30d = pnl_indicators.get("pnl_30d")
         detected_movements = pnl_indicators.get("detected_movements", [])
 
-        # Only show if we have at least one value
-        if any(v is not None for v in [pnl_24h, pnl_7d, pnl_30d]):
-            pnl_parts = []
-            if pnl_24h is not None:
-                pnl_parts.append(f"24h: `{escape_markdown_v2(format_pnl_indicator(pnl_24h))}`")
-            if pnl_7d is not None:
-                pnl_parts.append(f"7d: `{escape_markdown_v2(format_pnl_indicator(pnl_7d))}`")
-            if pnl_30d is not None:
-                pnl_parts.append(f"30d: `{escape_markdown_v2(format_pnl_indicator(pnl_30d))}`")
+        pnl_parts = []
+        if pnl_7d is not None:
+            pnl_parts.append(f"7d: `{escape_markdown_v2(format_pnl_indicator(pnl_7d))}`")
+        if pnl_30d is not None:
+            pnl_parts.append(f"30d: `{escape_markdown_v2(format_pnl_indicator(pnl_30d))}`")
 
-            if pnl_parts:
-                message += "📈 *PNL:* " + " \\| ".join(pnl_parts) + "\n"
+        if pnl_parts:
+            message += "📈 " + " \\| ".join(pnl_parts) + "\n"
 
-        # Show detected movements if any (max 5 most recent)
         if detected_movements:
-            message += f"_\\({len(detected_movements)} detected movement\\(s\\) adjusted\\)_\n"
-            message += "\n"
+            message += f"_\\({len(detected_movements)} movement\\(s\\) adjusted\\)_\n"
+
+    message += "\n"
 
     # ============================================
-    # SECTION 1: BALANCES - Detailed tables by account and connector
+    # SECTION 2: EXCHANGE DISTRIBUTION (compact)
     # ============================================
-    balances = overview_data.get('balances')
+    if accounts_distribution:
+        message += format_exchange_distribution(accounts_distribution, changes_24h, total_value)
+
+    # ============================================
+    # SECTION 3: AGGREGATED TOKEN HOLDINGS (compact)
+    # ============================================
     if balances:
-        total_value = 0.0
-        all_balances = []
-
-        # Collect all balances with metadata
-        for account_name, account_data in balances.items():
-            for connector_name, connector_balances in account_data.items():
-                if connector_balances:
-                    for balance in connector_balances:
-                        token = balance.get("token", "???")
-                        units = balance.get("units", 0)
-                        value = balance.get("value", 0)
-
-                        if value > 1:  # Only show balances > $1
-                            all_balances.append({
-                                "account": account_name,
-                                "connector": connector_name,
-                                "token": token,
-                                "units": units,
-                                "value": value
-                            })
-                            total_value += value
-
-        # Calculate percentages
-        for balance in all_balances:
-            balance["percentage"] = (balance["value"] / total_value * 100) if total_value > 0 else 0
-
-        # Group by account and connector
-        from collections import defaultdict
-        grouped = defaultdict(lambda: defaultdict(list))
-
-        for balance in all_balances:
-            account = balance["account"]
-            connector = balance["connector"]
-            grouped[account][connector].append(balance)
-
-        # Sort each group by value
-        for account in grouped:
-            for connector in grouped[account]:
-                grouped[account][connector].sort(key=lambda x: x["value"], reverse=True)
-
-        # Get 24h changes data
-        token_changes = changes_24h.get("tokens", {}) if changes_24h else {}
-        connector_changes = changes_24h.get("connectors", {}) if changes_24h else {}
-
-        # Build the balances section by iterating through accounts and connectors
-        for account, connectors in grouped.items():
-            message += f"*Account:* {escape_markdown_v2(account)}\n"
-
-            for connector, balances_list in connectors.items():
-                # Calculate total value for this connector
-                connector_total = sum(balance["value"] for balance in balances_list)
-                connector_total_str = format_number(connector_total)
-
-                # Get connector 24h change
-                conn_change = connector_changes.get(account, {}).get(connector, {})
-                conn_pct = conn_change.get("pct_change")
-
-                if conn_pct is not None:
-                    change_str = format_change_compact(conn_pct)
-                    message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}` \\({escape_markdown_v2(change_str)}\\)\n\n"
-                else:
-                    message += f"  🏦 *{escape_markdown_v2(connector)}* \\- `{escape_markdown_v2(connector_total_str)}`\n\n"
-
-                # Start table - Token, Price, Value, %Total, 24h
-                table_content = "```\n"
-                table_content += f"{'Token':<6} {'Price':<8} {'Value':<7} {'%Tot':>5} {'24h':>6}\n"
-                table_content += f"{'─'*6} {'─'*8} {'─'*7} {'─'*5} {'─'*6}\n"
-
-                for balance in balances_list:
-                    token = balance["token"]
-                    units = balance["units"]
-                    value = balance["value"]
-
-                    # Calculate price per token
-                    price = value / units if units > 0 else 0
-                    price_str = format_price(price)[:8]
-
-                    # Calculate percentage of total portfolio
-                    pct = (value / total_value * 100) if total_value > 0 else 0
-                    pct_str = f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
-
-                    value_str = format_number(value).replace('$', '')[:7]
-
-                    # Get 24h price change for this token
-                    token_change = token_changes.get(token, {})
-                    price_change = token_change.get("price_change")
-                    if price_change is not None:
-                        sign = "+" if price_change >= 0 else ""
-                        change_24h_str = f"{sign}{price_change:.1f}%"[:6]
-                    else:
-                        change_24h_str = "—"
-
-                    # Truncate long token names
-                    token_display = token[:5] if len(token) > 5 else token
-
-                    # Add row to table
-                    table_content += f"{token_display:<6} {price_str:<8} {value_str:<7} {pct_str:>5} {change_24h_str:>6}\n"
-
-                # Close table
-                table_content += "```\n\n"
-                message += table_content
-
-        # Show total
-        if total_value > 0:
-            message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2(format_number(total_value))}`\n\n"
-        else:
-            message += f"💵 *Total Portfolio Value:* `{escape_markdown_v2('$0.00')}`\n\n"
+        message += format_aggregated_tokens(balances, changes_24h, total_value, max_tokens=10)
 
     # ============================================
-    # SECTION 2: PERPETUAL POSITIONS
+    # SECTION 4: PERPETUAL POSITIONS
     # ============================================
     perp_positions = overview_data.get('perp_positions', {"positions": [], "total": 0})
     message += format_perpetual_positions(perp_positions)
