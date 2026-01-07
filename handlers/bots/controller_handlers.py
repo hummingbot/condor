@@ -1678,7 +1678,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 await query.message.edit_text(
                     r"*❌ Error*" + "\n\n"
                     f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
-                    r"Please check the trading pair and try again\\.",
+                    r"Please check the trading pair and try again\.",
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -1688,7 +1688,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                     text=(
                         r"*❌ Error*" + "\n\n"
                         f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
-                        r"Please check the trading pair and try again\\."
+                        r"Please check the trading pair and try again\."
                     ),
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup(keyboard)
@@ -2053,16 +2053,20 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
     pair = config.get("trading_pair", "")
     side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
     leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "HEDGE")
     amount = config.get("total_amount_quote", 0)
     start_price = config.get("start_price", 0)
     end_price = config.get("end_price", 0)
     limit_price = config.get("limit_price", 0)
     tp = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    open_order_type = config.get("triple_barrier_config", {}).get("open_order_type", ORDER_TYPE_LIMIT_MAKER)
+    tp_order_type = config.get("triple_barrier_config", {}).get("take_profit_order_type", ORDER_TYPE_LIMIT_MAKER)
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
+    order_frequency = config.get("order_frequency", 3)
     min_order_amount = config.get("min_order_amount_quote", 6)
     min_spread = config.get("min_spread_between_orders", 0.0001)
     coerce_tp_to_step = config.get("coerce_tp_to_step", False)
@@ -2089,16 +2093,20 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
         f"trading_pair: {pair}\n"
         f"side: {side_value}\n"
         f"leverage: {leverage}\n"
+        f"position_mode: {position_mode}\n"
         f"total_amount_quote: {amount:.0f}\n"
         f"start_price: {start_price:.6g}\n"
         f"end_price: {end_price:.6g}\n"
         f"limit_price: {limit_price:.6g}\n"
         f"take_profit: {tp}\n"
+        f"open_order_type: {open_order_type}\n"
+        f"take_profit_order_type: {tp_order_type}\n"
         f"coerce_tp_to_step: {str(coerce_tp_to_step).lower()}\n"
         f"keep_position: {str(keep_position).lower()}\n"
         f"activation_bounds: {activation_bounds}\n"
         f"max_open_orders: {max_open_orders}\n"
         f"max_orders_per_batch: {max_orders_per_batch}\n"
+        f"order_frequency: {order_frequency}\n"
         f"min_order_amount_quote: {min_order_amount}\n"
         f"min_spread_between_orders: {min_spread}"
     )
@@ -2166,16 +2174,20 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
     pair = config.get("trading_pair", "")
     side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
     leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "HEDGE")
     amount = config.get("total_amount_quote", 0)
     start_price = config.get("start_price", 0)
     end_price = config.get("end_price", 0)
     limit_price = config.get("limit_price", 0)
     tp = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    open_order_type = config.get("triple_barrier_config", {}).get("open_order_type", ORDER_TYPE_LIMIT_MAKER)
+    tp_order_type = config.get("triple_barrier_config", {}).get("take_profit_order_type", ORDER_TYPE_LIMIT_MAKER)
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
+    order_frequency = config.get("order_frequency", 3)
     min_order_amount = config.get("min_order_amount_quote", 6)
     min_spread = config.get("min_spread_between_orders", 0.0001)
     coerce_tp_to_step = config.get("coerce_tp_to_step", False)
@@ -2188,16 +2200,20 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
         f"trading_pair: {pair}\n"
         f"side: {side_value}\n"
         f"leverage: {leverage}\n"
+        f"position_mode: {position_mode}\n"
         f"total_amount_quote: {amount:.0f}\n"
         f"start_price: {start_price:.6g}\n"
         f"end_price: {end_price:.6g}\n"
         f"limit_price: {limit_price:.6g}\n"
         f"take_profit: {tp}\n"
+        f"open_order_type: {open_order_type}\n"
+        f"take_profit_order_type: {tp_order_type}\n"
         f"coerce_tp_to_step: {str(coerce_tp_to_step).lower()}\n"
         f"keep_position: {str(keep_position).lower()}\n"
         f"activation_bounds: {activation_bounds}\n"
         f"max_open_orders: {max_open_orders}\n"
         f"max_orders_per_batch: {max_orders_per_batch}\n"
+        f"order_frequency: {order_frequency}\n"
         f"min_order_amount_quote: {min_order_amount}\n"
         f"min_spread_between_orders: {min_spread}"
     )
@@ -2876,15 +2892,20 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                 "trading_pair": "trading_pair",
                 "side": "side",
                 "leverage": "leverage",
+                "position_mode": "position_mode",
                 "total_amount_quote": "total_amount_quote",
                 "start_price": "start_price",
                 "end_price": "end_price",
                 "limit_price": "limit_price",
                 "take_profit": "triple_barrier_config.take_profit",
+                "open_order_type": "triple_barrier_config.open_order_type",
+                "take_profit_order_type": "triple_barrier_config.take_profit_order_type",
+                "coerce_tp_to_step": "coerce_tp_to_step",
                 "keep_position": "keep_position",
                 "activation_bounds": "activation_bounds",
                 "max_open_orders": "max_open_orders",
                 "max_orders_per_batch": "max_orders_per_batch",
+                "order_frequency": "order_frequency",
                 "min_order_amount_quote": "min_order_amount_quote",
                 "min_spread_between_orders": "min_spread_between_orders",
             }
@@ -2915,13 +2936,26 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                         config["side"] = SIDE_LONG
                     else:
                         config["side"] = SIDE_SHORT
+                elif key == "position_mode":
+                    # Accept HEDGE or ONEWAY (case insensitive)
+                    config["position_mode"] = "ONEWAY" if value.upper() == "ONEWAY" else "HEDGE"
                 elif key == "keep_position":
                     config["keep_position"] = value.lower() in ("true", "yes", "y", "1")
+                elif key == "coerce_tp_to_step":
+                    config["coerce_tp_to_step"] = value.lower() in ("true", "yes", "y", "1")
                 elif key == "take_profit":
                     if "triple_barrier_config" not in config:
                         config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
                     config["triple_barrier_config"]["take_profit"] = float(value)
-                elif field in ["leverage", "max_open_orders", "max_orders_per_batch"]:
+                elif key == "open_order_type":
+                    if "triple_barrier_config" not in config:
+                        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+                    config["triple_barrier_config"]["open_order_type"] = int(value)
+                elif key == "take_profit_order_type":
+                    if "triple_barrier_config" not in config:
+                        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+                    config["triple_barrier_config"]["take_profit_order_type"] = int(value)
+                elif field in ["leverage", "max_open_orders", "max_orders_per_batch", "order_frequency"]:
                     config[field] = int(value)
                 elif field in ["total_amount_quote", "start_price", "end_price", "limit_price",
                               "activation_bounds", "min_order_amount_quote", "min_spread_between_orders"]:
@@ -3278,31 +3312,32 @@ async def show_config_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         InlineKeyboardButton("Pair", callback_data="bots:set_field:trading_pair"),
     ])
 
-    # Row 2: Side and Leverage
+    # Row 2: Side, Leverage, Position Mode
     keyboard.append([
         InlineKeyboardButton("Side", callback_data="bots:toggle_side"),
         InlineKeyboardButton("Leverage", callback_data="bots:set_field:leverage"),
+        InlineKeyboardButton("Pos Mode", callback_data="bots:toggle_position_mode"),
+    ])
+
+    # Row 3: Amount and Prices
+    keyboard.append([
         InlineKeyboardButton("Amount", callback_data="bots:set_field:total_amount_quote"),
+        InlineKeyboardButton("Start", callback_data="bots:set_field:start_price"),
+        InlineKeyboardButton("End", callback_data="bots:set_field:end_price"),
     ])
 
-    # Row 3: Prices
+    # Row 4: Limit Price and Order Settings
     keyboard.append([
-        InlineKeyboardButton("Start Price", callback_data="bots:set_field:start_price"),
-        InlineKeyboardButton("End Price", callback_data="bots:set_field:end_price"),
-        InlineKeyboardButton("Limit Price", callback_data="bots:set_field:limit_price"),
-    ])
-
-    # Row 4: Advanced
-    keyboard.append([
+        InlineKeyboardButton("Limit", callback_data="bots:set_field:limit_price"),
         InlineKeyboardButton("Max Orders", callback_data="bots:set_field:max_open_orders"),
         InlineKeyboardButton("Min Spread", callback_data="bots:set_field:min_spread_between_orders"),
-        InlineKeyboardButton("Take Profit", callback_data="bots:set_field:take_profit"),
     ])
 
-    # Row 5: Order Types
+    # Row 5: Take Profit and Order Types
     keyboard.append([
-        InlineKeyboardButton("Open Order Type", callback_data="bots:cycle_order_type:open"),
-        InlineKeyboardButton("TP Order Type", callback_data="bots:cycle_order_type:tp"),
+        InlineKeyboardButton("Take Profit", callback_data="bots:set_field:take_profit"),
+        InlineKeyboardButton("Open Type", callback_data="bots:cycle_order_type:open"),
+        InlineKeyboardButton("TP Type", callback_data="bots:cycle_order_type:tp"),
     ])
 
     # Row 6: Actions
@@ -3578,6 +3613,21 @@ async def handle_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 config["trading_pair"],
                 existing_configs=existing_configs
             )
+
+    set_controller_config(context, config)
+
+    # Refresh the form
+    await show_config_form(update, context)
+
+
+async def handle_toggle_position_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle the position mode between HEDGE and ONEWAY"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    current_mode = config.get("position_mode", "HEDGE")
+    new_mode = "ONEWAY" if current_mode == "HEDGE" else "HEDGE"
+    config["position_mode"] = new_mode
 
     set_controller_config(context, config)
 

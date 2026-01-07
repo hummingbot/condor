@@ -92,6 +92,14 @@ FIELDS: Dict[str, ControllerField] = {
         required=True,
         hint="e.g. 1, 5, 10"
     ),
+    "position_mode": ControllerField(
+        name="position_mode",
+        label="Position Mode",
+        type="str",
+        required=False,
+        hint="HEDGE or ONEWAY",
+        default="HEDGE"
+    ),
     "total_amount_quote": ControllerField(
         name="total_amount_quote",
         label="Total Amount (Quote)",
@@ -213,7 +221,7 @@ FIELDS: Dict[str, ControllerField] = {
 
 # Field display order
 FIELD_ORDER: List[str] = [
-    "id", "connector_name", "trading_pair", "side", "leverage",
+    "id", "connector_name", "trading_pair", "side", "leverage", "position_mode",
     "total_amount_quote", "start_price", "end_price", "limit_price",
     "max_open_orders", "max_orders_per_batch", "order_frequency",
     "min_order_amount_quote", "min_spread_between_orders", "take_profit",
@@ -243,6 +251,7 @@ EDITABLE_FIELDS: List[str] = [
     "end_price",
     "limit_price",
     "leverage",
+    "position_mode",
     "take_profit",
     "coerce_tp_to_step",
     "min_spread_between_orders",

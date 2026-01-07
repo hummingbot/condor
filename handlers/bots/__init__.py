@@ -75,6 +75,7 @@ from .controller_handlers import (
     show_config_form,
     handle_set_field,
     handle_toggle_side,
+    handle_toggle_position_mode,
     handle_cycle_order_type,
     handle_select_connector,
     process_field_input,
@@ -346,6 +347,9 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "toggle_side":
             await handle_toggle_side(update, context)
+
+        elif main_action == "toggle_position_mode":
+            await handle_toggle_position_mode(update, context)
 
         elif main_action == "cycle_order_type":
             if len(action_parts) > 1:
