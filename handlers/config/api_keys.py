@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2
 from .server_context import build_config_message_header, format_server_selection_needed
+from .user_preferences import get_active_server
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,8 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             header, server_online, _ = await build_config_message_header(
                 "🔑 API Keys",
                 include_gateway=False,
-                chat_id=chat_id
+                chat_id=chat_id,
+                user_data=context.user_data
             )
 
             if not server_online:
@@ -42,7 +44,7 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
             else:
                 # Get client from per-chat server
-                client = await get_config_manager().get_client_for_chat(chat_id)
+                client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
                 accounts = await client.accounts.list_accounts()
 
                 if not accounts:
@@ -250,10 +252,11 @@ async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, ac
         header, server_online, _ = await build_config_message_header(
             f"🔑 API Keys",
             include_gateway=False,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Get list of connected credentials for this account
         credentials = await client.accounts.list_account_credentials(account_name=account_name)
@@ -343,7 +346,7 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
         from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Get config map for this connector
         config_fields = await client.connectors.get_config_map(connector_name)
@@ -486,7 +489,7 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
                 parse_mode="MarkdownV2"
             )
 
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Handle special cases for certain connectors
         if connector_name == "xrpl":
@@ -624,7 +627,7 @@ async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_n
         from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Delete the credential
         await client.accounts.delete_credential(

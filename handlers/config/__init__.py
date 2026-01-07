@@ -23,99 +23,121 @@ def clear_config_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     clear_all_input_states(context)
 
 
-def _get_config_menu_markup_and_text(is_admin: bool = False):
-    """
-    Build the main config menu keyboard and message text.
-    Shows Admin button only for admin users.
-    """
+def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Build the start menu inline keyboard."""
     keyboard = [
         [
-            InlineKeyboardButton("🔌 API Servers", callback_data="config_api_servers"),
-            InlineKeyboardButton("🔑 API Keys", callback_data="config_api_keys"),
-            InlineKeyboardButton("🌐 Gateway", callback_data="config_gateway"),
+            InlineKeyboardButton("🔌 Servers", callback_data="start:config_servers"),
+            InlineKeyboardButton("🔑 Keys", callback_data="start:config_keys"),
+            InlineKeyboardButton("🌐 Gateway", callback_data="start:config_gateway"),
         ],
     ]
-
-    # Show Admin button only for admin users
     if is_admin:
-        keyboard.append([
-            InlineKeyboardButton("👑 Admin Panel", callback_data="config_admin"),
-        ])
-
-    keyboard.append([
-        InlineKeyboardButton("❌ Cancel", callback_data="config_close"),
-    ])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    message_text = (
-        r"⚙️ *Configuration Menu*" + "\n\n"
-        r"Select a configuration category:" + "\n\n"
-        r"🔌 *API Servers* \- Manage Hummingbot API instances" + "\n"
-        r"🔑 *API Keys* \- Manage exchange credentials" + "\n"
-        r"🌐 *Gateway* \- Manage Gateway container and DEX configuration"
-    )
-
-    if is_admin:
-        message_text += "\n" + r"👑 *Admin Panel* \- Manage users and access"
-
-    return reply_markup, message_text
+        keyboard.append([InlineKeyboardButton("👑 Admin", callback_data="start:admin")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="start:cancel")])
+    return InlineKeyboardMarkup(keyboard)
 
 
-async def show_config_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _show_start_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Show the main config menu
+    Show the /start menu (replaces config menu for Back navigation).
+    Mirrors the logic from main.py start() but for callback query context.
     """
+    import asyncio
     from config_manager import get_config_manager
+    from handlers.config.user_preferences import get_active_server
+    from handlers.config.server_context import get_gateway_status_info
+    from utils.telegram_formatters import escape_markdown_v2
 
     user_id = query.from_user.id
+    chat_id = query.message.chat_id
     cm = get_config_manager()
     is_admin = cm.is_admin(user_id)
 
-    reply_markup, message_text = _get_config_menu_markup_and_text(is_admin=is_admin)
+    # Get all servers and their statuses in parallel
+    servers = cm.list_servers()
+    active_server = get_active_server(context.user_data) or cm.get_default_server()
 
-    await query.message.edit_text(
-        message_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
-    )
+    server_statuses = {}
+    active_server_online = False
 
+    if servers:
+        # Query all server statuses in parallel
+        status_tasks = [cm.check_server_status(name) for name in servers]
+        status_results = await asyncio.gather(*status_tasks, return_exceptions=True)
 
-@restricted
-async def config_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle /config command - Show configuration options
+        for server_name, status_result in zip(servers, status_results):
+            if isinstance(status_result, Exception):
+                status = "error"
+            else:
+                status = status_result.get("status", "unknown")
+            server_statuses[server_name] = status
+            if server_name == active_server and status == "online":
+                active_server_online = True
 
-    Displays a menu with configuration categories:
-    - API Servers (Hummingbot instances)
-    - API Keys (Exchange API credentials)
-    - Gateway (Gateway container and DEX operations)
-    - Admin Panel (admin only)
-    """
-    from config_manager import get_config_manager
+    # Build servers list display
+    servers_display = ""
+    if servers:
+        for server_name in servers:
+            status = server_statuses.get(server_name, "unknown")
+            icon = "🟢" if status == "online" else "🔴"
+            is_active = " ⭐" if server_name == active_server else ""
+            server_escaped = escape_markdown_v2(server_name)
+            servers_display += f"  {icon} `{server_escaped}`{is_active}\n"
+    else:
+        servers_display = "  _No servers configured_\n"
 
-    # Clear all pending input states to prevent interference
-    clear_config_state(context)
+    # Get gateway and accounts info only if active server is online
+    extra_info = ""
+    if active_server_online:
+        try:
+            gateway_header, _ = await get_gateway_status_info(chat_id, context.user_data)
+            extra_info += gateway_header
 
-    user_id = update.effective_user.id
-    cm = get_config_manager()
-    is_admin = cm.is_admin(user_id)
+            client = await cm.get_client_for_chat(chat_id, preferred_server=active_server)
+            accounts = await client.accounts.list_accounts()
+            if accounts:
+                total_creds = 0
+                for account in accounts:
+                    try:
+                        creds = await client.accounts.list_account_credentials(account_name=str(account))
+                        total_creds += len(creds) if creds else 0
+                    except Exception:
+                        pass
+                accounts_escaped = escape_markdown_v2(str(len(accounts)))
+                creds_escaped = escape_markdown_v2(str(total_creds))
+                extra_info += f"*Accounts:* {accounts_escaped} \\({creds_escaped} keys\\)\n"
+        except Exception as e:
+            logger.warning(f"Failed to get extra info: {e}")
 
-    reply_markup, message_text = _get_config_menu_markup_and_text(is_admin=is_admin)
+    # Build the message
+    admin_badge = " 👑" if is_admin else ""
+    capabilities = """_Trade CEX/DEX, manage bots, monitor portfolio_"""
 
-    # Handle both direct command and callback query invocations
-    if update.message:
-        await update.message.reply_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
-    elif update.callback_query:
-        await update.callback_query.message.reply_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+    # Offline help message
+    offline_help = ""
+    if not active_server_online and servers:
+        offline_help = """
+⚠️ *Active server is offline*
+• Ensure `hummingbot\\-backend\\-api` is running
+• Or select an online server below
+"""
+
+    # Menu descriptions
+    menu_help = r"""
+🔌 *Servers* \- Add/manage Hummingbot API servers
+🔑 *Keys* \- Connect exchange API credentials
+🌐 *Gateway* \- Deploy Gateway for DEX trading
+"""
+
+    reply_text = rf"""
+🦅 *Condor*{admin_badge}
+{capabilities}
+
+*Servers:*
+{servers_display}{offline_help}{extra_info}{menu_help}"""
+    keyboard = _get_start_menu_keyboard(is_admin=is_admin)
+    await query.message.edit_text(reply_text, parse_mode="MarkdownV2", reply_markup=keyboard)
 
 
 async def config_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -134,7 +156,7 @@ async def config_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         await query.message.delete()
         return
     elif query.data == "config_back":
-        await show_config_menu(query, context)
+        await _show_start_menu(query, context)
         return
 
     # Route to appropriate sub-module based on callback data prefix

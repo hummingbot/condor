@@ -12,6 +12,7 @@ from ..user_preferences import (
     remove_wallet_networks,
     get_default_networks_for_chain,
     get_all_networks_for_chain,
+    get_active_server,
 )
 from ._shared import logger, escape_markdown_v2
 
@@ -24,7 +25,7 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("Loading wallets...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Get list of gateway wallets
         try:
@@ -37,7 +38,8 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         header, server_online, gateway_running = await build_config_message_header(
             "🔑 Wallet Management",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         if not server_online:
@@ -252,7 +254,8 @@ async def prompt_add_wallet_chain(query, context: ContextTypes.DEFAULT_TYPE) -> 
         header, server_online, gateway_running = await build_config_message_header(
             "➕ Add Wallet",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         # Base blockchain chains (wallets are at blockchain level, not network level)
@@ -297,7 +300,8 @@ async def prompt_create_wallet_chain(query, context: ContextTypes.DEFAULT_TYPE) 
         header, server_online, gateway_running = await build_config_message_header(
             "🆕 Create Wallet",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         # Base blockchain chains (wallets are at blockchain level, not network level)
@@ -346,7 +350,7 @@ async def create_wallet(query, context: ContextTypes.DEFAULT_TYPE, chain: str) -
         await query.answer("Creating wallet...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         chain_escaped = escape_markdown_v2(chain.replace("-", " ").title())
 
@@ -425,7 +429,8 @@ async def show_wallet_details(query, context: ContextTypes.DEFAULT_TYPE, chain: 
         header, server_online, gateway_running = await build_config_message_header(
             "🔑 Wallet Details",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         chain_escaped = escape_markdown_v2(chain.title())
@@ -500,7 +505,8 @@ async def show_wallet_network_edit(query, context: ContextTypes.DEFAULT_TYPE, ch
         header, server_online, gateway_running = await build_config_message_header(
             "🌐 Edit Networks",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         chain_escaped = escape_markdown_v2(chain.title())
@@ -601,7 +607,8 @@ async def prompt_add_wallet_private_key(query, context: ContextTypes.DEFAULT_TYP
         header, server_online, gateway_running = await build_config_message_header(
             f"➕ Add {chain.replace('-', ' ').title()} Wallet",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         context.user_data['awaiting_wallet_input'] = 'add_wallet'
@@ -641,7 +648,7 @@ async def prompt_remove_wallet_chain(query, context: ContextTypes.DEFAULT_TYPE) 
         from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Get list of gateway wallets
         try:
@@ -662,7 +669,8 @@ async def prompt_remove_wallet_chain(query, context: ContextTypes.DEFAULT_TYPE) 
         header, server_online, gateway_running = await build_config_message_header(
             "➖ Remove Wallet",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         message_text = (
@@ -703,7 +711,7 @@ async def prompt_remove_wallet_address(query, context: ContextTypes.DEFAULT_TYPE
         from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Get wallets for this chain
         try:
@@ -731,7 +739,8 @@ async def prompt_remove_wallet_address(query, context: ContextTypes.DEFAULT_TYPE
         header, server_online, gateway_running = await build_config_message_header(
             f"➖ Remove {chain.replace('-', ' ').title()} Wallet",
             include_gateway=True,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         chain_escaped = escape_markdown_v2(chain.replace("-", " ").title())
@@ -779,7 +788,7 @@ async def remove_wallet(query, context: ContextTypes.DEFAULT_TYPE, chain: str, a
         await query.answer("Removing wallet...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Remove the wallet from Gateway
         await client.accounts.remove_gateway_wallet(chain=chain, address=address)
@@ -856,7 +865,7 @@ async def handle_wallet_input(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
 
             try:
-                client = await get_config_manager().get_client_for_chat(chat_id)
+                client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
                 # Add the wallet
                 response = await client.accounts.add_gateway_wallet(chain=chain, private_key=private_key)

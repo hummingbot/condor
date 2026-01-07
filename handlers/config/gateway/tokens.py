@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from geckoterminal_py import GeckoTerminalAsyncClient
 
 from ._shared import logger, escape_markdown_v2, extract_network_id
+from ..user_preferences import get_active_server
 
 
 # Gateway network ID -> GeckoTerminal network ID mapping
@@ -36,7 +37,7 @@ async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("Loading networks...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.list_networks()
 
         networks = response.get('networks', [])
@@ -183,7 +184,7 @@ async def show_network_tokens(query, context: ContextTypes.DEFAULT_TYPE, network
         await query.answer("Loading tokens...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Try to get tokens - the method might not exist in older versions
         try:
@@ -339,7 +340,7 @@ async def prompt_remove_token(query, context: ContextTypes.DEFAULT_TYPE, network
         await query.answer("Loading tokens...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Get tokens for the network
         try:
@@ -519,7 +520,7 @@ async def show_delete_token_confirmation(query, context: ContextTypes.DEFAULT_TY
         chat_id = query.message.chat_id
 
         # Get token details to show in confirmation
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Try to get tokens - the method might not exist in older versions
         try:
@@ -590,7 +591,7 @@ async def remove_token(query, context: ContextTypes.DEFAULT_TYPE, network_id: st
         await query.answer("Removing token...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         await client.gateway.delete_token(network_id=network_id, token_address=token_address)
 
         network_escaped = escape_markdown_v2(network_id)
@@ -724,7 +725,7 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
 
             try:
-                client = await get_config_manager().get_client_for_chat(chat_id)
+                client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
                 await client.gateway.add_token(
                     network_id=network_id,
                     address=address,
@@ -857,7 +858,7 @@ async def handle_token_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
 
             try:
-                client = await get_config_manager().get_client_for_chat(chat_id)
+                client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
                 # Delete old token first, then add with new values
                 await client.gateway.delete_token(network_id=network_id, token_address=token_address)

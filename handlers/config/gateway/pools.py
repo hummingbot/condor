@@ -7,6 +7,7 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from ._shared import logger, escape_markdown_v2, filter_pool_connectors, extract_network_id
+from ..user_preferences import get_active_server
 from utils.telegram_formatters import resolve_token_address
 
 
@@ -18,7 +19,7 @@ async def show_pools_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("Loading connectors...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.list_connectors()
         connectors = response.get('connectors', [])
 
@@ -178,7 +179,7 @@ async def show_pool_networks(query, context: ContextTypes.DEFAULT_TYPE, connecto
         if not connector_info:
             # Fallback: fetch connector info again if not in context
             chat_id = query.message.chat_id
-            client = await get_config_manager().get_client_for_chat(chat_id)
+            client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
             response = await client.gateway.list_connectors()
             connectors = response.get('connectors', [])
             connector_info = next((c for c in connectors if c.get('name') == connector_name), None)
@@ -253,7 +254,7 @@ async def show_connector_pools(query, context: ContextTypes.DEFAULT_TYPE, connec
         await query.answer("Loading pools...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
 
         connector_escaped = escape_markdown_v2(connector_name)
@@ -375,7 +376,7 @@ async def prompt_remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connecto
         chat_id = query.message.chat_id
 
         # Fetch pools to display as options
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         pools = await client.gateway.list_pools(connector_name=connector_name, network=network)
 
         if not pools:
@@ -484,7 +485,7 @@ async def remove_pool(query, context: ContextTypes.DEFAULT_TYPE, connector_name:
             pass  # Mock query doesn't support answer
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         await client.gateway.delete_pool(connector=connector_name, network=network, pool_type=pool_type, address=pool_address)
 
         connector_escaped = escape_markdown_v2(connector_name)
@@ -583,7 +584,7 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
 
             try:
-                client = await get_config_manager().get_client_for_chat(chat_id)
+                client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
                 logger.info(f"Adding pool: connector={connector_name}, network={network}, "
                            f"pool_type={pool_type}, base={base}, quote={quote}, address={address}, "

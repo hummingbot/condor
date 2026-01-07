@@ -5,6 +5,7 @@ Shared utilities and imports for gateway modules
 import logging
 from typing import List, Dict, Any
 
+from utils.telegram_formatters import escape_markdown_v2
 
 logger = logging.getLogger(__name__)
 

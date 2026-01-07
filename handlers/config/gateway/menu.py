@@ -27,7 +27,8 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             header, server_online, gateway_running = await build_config_message_header(
                 "🌐 Gateway Configuration",
                 include_gateway=True,
-                chat_id=chat_id
+                chat_id=chat_id,
+                user_data=context.user_data
             )
 
             message_text = header

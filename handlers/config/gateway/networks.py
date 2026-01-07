@@ -6,6 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from ._shared import logger, escape_markdown_v2, extract_network_id
+from ..user_preferences import get_active_server
 
 
 async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -16,7 +17,7 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("Loading networks...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.list_networks()
 
         networks = response.get('networks', [])
@@ -115,7 +116,7 @@ async def show_network_details(query, context: ContextTypes.DEFAULT_TYPE, networ
         from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.get_network_config(network_id)
 
         # Try to extract config - it might be directly in response or nested under 'config'
@@ -292,7 +293,7 @@ async def submit_network_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
         context.user_data.pop('awaiting_network_input', None)
 
         # Submit configuration to Gateway
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         await client.gateway.update_network_config(network_id, final_config)
 
         success_text = f"✅ Configuration saved for {escape_markdown_v2(network_id)}\\!"

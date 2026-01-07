@@ -6,6 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from ..server_context import build_config_message_header
+from ..user_preferences import get_active_server
 from ._shared import logger, escape_markdown_v2
 
 
@@ -16,7 +17,8 @@ async def start_deploy_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> Non
         header, server_online, _ = await build_config_message_header(
             "🚀 Deploy Gateway",
             include_gateway=False,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         if not server_online:
@@ -77,7 +79,8 @@ async def prompt_passphrase(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         header, server_online, _ = await build_config_message_header(
             "🔐 Gateway Passphrase",
             include_gateway=False,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         docker_image = context.user_data.get('gateway_deploy_image', 'hummingbot/gateway:latest')
@@ -116,7 +119,7 @@ async def execute_gateway_deploy(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     from .menu import show_gateway_menu
 
     try:
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Gateway configuration
         config = {
@@ -201,7 +204,8 @@ async def prompt_custom_image(query, context: ContextTypes.DEFAULT_TYPE) -> None
         header, server_online, _ = await build_config_message_header(
             "✏️ Custom Gateway Image",
             include_gateway=False,
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         context.user_data['awaiting_gateway_input'] = 'custom_image'
@@ -241,7 +245,7 @@ async def stop_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("⏹ Stopping Gateway...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.stop()
 
         if response.get('status') == 'success' or response.get('status') == 'stopped':
@@ -275,7 +279,8 @@ async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         header, _, _ = await build_config_message_header(
             "🌐 Gateway Configuration",
             include_gateway=False,  # Don't check status during restart
-            chat_id=chat_id
+            chat_id=chat_id,
+            user_data=context.user_data
         )
 
         restarting_text = (
@@ -293,7 +298,7 @@ async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass  # Ignore if message can't be edited
 
         # Perform the restart
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.restart()
 
         # Wait a moment for the restart to take effect
@@ -344,7 +349,7 @@ async def show_gateway_logs(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("📋 Loading logs...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.get_logs(tail=50)
 
         logs = response.get('logs', 'No logs available')
