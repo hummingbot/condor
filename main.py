@@ -106,9 +106,13 @@ You will be notified when approved\.
     from config_manager import get_effective_server
     from utils.telegram_formatters import escape_markdown_v2
 
-    # Get all servers and their statuses in parallel
-    servers = cm.list_servers()
-    active_server = get_effective_server(chat_id, context.user_data) or cm.get_default_server()
+    # Get servers the user has access to (not all servers)
+    servers = cm.get_accessible_servers(user_id)
+    active_server = get_effective_server(chat_id, context.user_data)
+
+    # If no active server, default to first accessible server (not global default)
+    if not active_server and servers:
+        active_server = servers[0]
 
     server_statuses = {}
     active_server_online = False
