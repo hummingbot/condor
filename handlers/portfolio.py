@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes, CallbackQueryHandler
 from utils.auth import restricted, hummingbot_api_required
 from utils.telegram_formatters import (
     format_portfolio_overview,
+    format_connector_detail,
     format_error_message,
     escape_markdown_v2
 )
@@ -603,6 +604,81 @@ async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
     return overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval
 
 
+def _get_connector_keys(balances: dict) -> list:
+    """
+    Extract connector keys from balances for keyboard buttons.
+
+    Args:
+        balances: Portfolio state {account: {connector: [holdings]}}
+
+    Returns:
+        List of "account:connector" keys, sorted by total value descending
+    """
+    if not balances:
+        return []
+
+    connector_values = []
+    for account_name, account_data in balances.items():
+        for connector_name, connector_balances in account_data.items():
+            if connector_balances:
+                total = sum(b.get("value", 0) for b in connector_balances if b.get("value", 0) > 0)
+                if total > 0:
+                    connector_values.append({
+                        "key": f"{account_name}:{connector_name}",
+                        "value": total
+                    })
+
+    # Sort by value descending
+    connector_values.sort(key=lambda x: x["value"], reverse=True)
+    return [c["key"] for c in connector_values]
+
+
+def build_portfolio_keyboard(connector_keys: list, days: int) -> InlineKeyboardMarkup:
+    """
+    Build keyboard with connector buttons and controls.
+
+    Args:
+        connector_keys: List of "account:connector" keys
+        days: Current days setting for Settings button
+
+    Returns:
+        InlineKeyboardMarkup with connector buttons
+    """
+    keyboard = []
+
+    # Row(s) of connector buttons (max 2 per row for longer names)
+    if connector_keys:
+        connector_row = []
+        for conn_key in connector_keys:
+            # Extract connector name for display (after the colon)
+            display_name = conn_key.split(":")[-1]
+
+            connector_row.append(
+                InlineKeyboardButton(display_name, callback_data=f"portfolio:connector:{conn_key}")
+            )
+            # Use max 2 per row to fit longer names like "solana-mainnet-beta"
+            if len(connector_row) == 2:
+                keyboard.append(connector_row)
+                connector_row = []
+        if connector_row:
+            keyboard.append(connector_row)
+
+    # Bottom row: Refresh + Settings
+    keyboard.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
+        InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_connector_detail_keyboard() -> InlineKeyboardMarkup:
+    """Build keyboard for connector detail view with Back button."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⬅️ Back to Overview", callback_data="portfolio:back_overview")
+    ]])
+
+
 @restricted
 @hummingbot_api_required
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -690,6 +766,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         current_value = 0.0
         token_cache = {}  # Will be populated with Gateway tokens
 
+        # Track accounts_distribution for UI updates
+        accounts_distribution = None
+
         # Helper to update UI
         async def update_ui(loading_text: str = None):
             nonlocal current_value
@@ -710,18 +789,19 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 'lp_positions': lp_positions,
                 'active_orders': active_orders,
             }
-            message = format_portfolio_overview(
+            formatted_message = format_portfolio_overview(
                 overview_data,
                 server_name=server_name,
                 server_status=server_status,
                 pnl_indicators=pnl_indicators,
                 changes_24h=changes_24h,
-                token_cache=token_cache
+                token_cache=token_cache,
+                accounts_distribution=accounts_distribution
             )
             if loading_text:
-                message += f"\n_{escape_markdown_v2(loading_text)}_"
+                formatted_message += f"\n_{escape_markdown_v2(loading_text)}_"
             try:
-                await text_msg.edit_text(message, parse_mode="MarkdownV2")
+                await text_msg.edit_text(formatted_message, parse_mode="MarkdownV2")
             except Exception:
                 pass
 
@@ -782,7 +862,6 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # ========================================
         history = None
         token_distribution = None
-        accounts_distribution = None
 
         try:
             graph_results = await asyncio.gather(
@@ -808,12 +887,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create buttons row with Refresh and Settings
-        keyboard = [[
-            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
-            InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Build keyboard with connector buttons
+        connector_keys = _get_connector_keys(balances)
+        reply_markup = build_portfolio_keyboard(connector_keys, days)
 
         # Send the dashboard image with buttons
         photo_msg = await message.reply_photo(
@@ -822,7 +898,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             reply_markup=reply_markup
         )
 
-        # Store message IDs and data for later updates
+        # Store message IDs and data for later updates (including data for connector detail view)
         context.user_data["portfolio_text_message_id"] = text_msg.message_id
         context.user_data["portfolio_photo_message_id"] = photo_msg.message_id
         context.user_data["portfolio_chat_id"] = message.chat_id
@@ -830,6 +906,12 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data["portfolio_server_name"] = server_name
         context.user_data["portfolio_server_status"] = server_status
         context.user_data["portfolio_current_value"] = current_value
+        # Cache data for connector detail callbacks
+        context.user_data["portfolio_balances"] = balances
+        context.user_data["portfolio_accounts_distribution"] = accounts_distribution
+        context.user_data["portfolio_changes_24h"] = changes_24h
+        context.user_data["portfolio_pnl_indicators"] = pnl_indicators
+        context.user_data["portfolio_connector_keys"] = connector_keys
 
     except Exception as e:
         logger.error(f"Error fetching portfolio: {e}", exc_info=True)
@@ -872,6 +954,13 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             except Exception:
                 pass
             await refresh_portfolio_dashboard(update, context)
+        elif action.startswith("connector:"):
+            # Show detailed view for a specific connector
+            connector_key = action.replace("connector:", "")
+            await handle_connector_detail(update, context, connector_key)
+        elif action == "back_overview":
+            # Return to main portfolio overview
+            await handle_back_to_overview(update, context)
         else:
             logger.warning(f"Unknown portfolio action: {action}")
 
@@ -894,6 +983,136 @@ async def handle_portfolio_refresh(update: Update, context: ContextTypes.DEFAULT
 
     # Refresh the dashboard with fresh data
     await refresh_portfolio_dashboard(update, context, refresh=True)
+
+
+async def handle_connector_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_key: str) -> None:
+    """
+    Handle connector inspection - show tokens for specific connector.
+
+    Args:
+        connector_key: "account:connector" format (e.g., "main:binance")
+    """
+    query = update.callback_query
+    await query.answer()
+
+    # Get cached data
+    balances = context.user_data.get("portfolio_balances")
+    changes_24h = context.user_data.get("portfolio_changes_24h")
+    total_value = context.user_data.get("portfolio_current_value", 0.0)
+    text_message_id = context.user_data.get("portfolio_text_message_id")
+    photo_message_id = context.user_data.get("portfolio_photo_message_id")
+    chat_id = context.user_data.get("portfolio_chat_id")
+    server_name = context.user_data.get("portfolio_server_name", "")
+
+    if not balances or not text_message_id or not chat_id:
+        logger.warning("Missing cached data for connector detail view")
+        return
+
+    try:
+        bot = query.get_bot()
+
+        # Format connector detail message
+        detail_message = format_connector_detail(
+            balances=balances,
+            connector_key=connector_key,
+            changes_24h=changes_24h,
+            total_value=total_value
+        )
+
+        # Update text message with connector detail (no keyboard on text)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=text_message_id,
+            text=detail_message,
+            parse_mode="MarkdownV2"
+        )
+
+        # Update photo message keyboard to show "Back to Overview" button
+        if photo_message_id:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=photo_message_id,
+                    reply_markup=build_connector_detail_keyboard()
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update photo keyboard: {e}")
+
+        # Store current view mode
+        context.user_data["portfolio_view_mode"] = f"connector:{connector_key}"
+
+    except Exception as e:
+        logger.error(f"Error showing connector detail: {e}", exc_info=True)
+
+
+async def handle_back_to_overview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle 'Back' button - return to main portfolio overview."""
+    query = update.callback_query
+    await query.answer()
+
+    # Get cached data
+    balances = context.user_data.get("portfolio_balances")
+    accounts_distribution = context.user_data.get("portfolio_accounts_distribution")
+    changes_24h = context.user_data.get("portfolio_changes_24h")
+    pnl_indicators = context.user_data.get("portfolio_pnl_indicators")
+    server_name = context.user_data.get("portfolio_server_name")
+    server_status = context.user_data.get("portfolio_server_status")
+    connector_keys = context.user_data.get("portfolio_connector_keys", [])
+    text_message_id = context.user_data.get("portfolio_text_message_id")
+    photo_message_id = context.user_data.get("portfolio_photo_message_id")
+    chat_id = context.user_data.get("portfolio_chat_id")
+
+    if not text_message_id or not chat_id:
+        logger.warning("Missing message IDs for back to overview")
+        return
+
+    try:
+        bot = query.get_bot()
+        config = get_portfolio_prefs(context.user_data)
+        days = config.get("days", 3)
+
+        # Build overview data
+        overview_data = {
+            'balances': balances,
+            'perp_positions': {"positions": [], "total": 0},
+            'lp_positions': {"positions": [], "total": 0},
+            'active_orders': {"orders": [], "total": 0},
+        }
+
+        # Format overview message
+        overview_message = format_portfolio_overview(
+            overview_data,
+            server_name=server_name,
+            server_status=server_status,
+            pnl_indicators=pnl_indicators,
+            changes_24h=changes_24h,
+            accounts_distribution=accounts_distribution
+        )
+
+        # Update text message with overview (no keyboard on text)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=text_message_id,
+            text=overview_message,
+            parse_mode="MarkdownV2"
+        )
+
+        # Update photo message keyboard to show connector buttons
+        if photo_message_id:
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=photo_message_id,
+                    reply_markup=build_portfolio_keyboard(connector_keys, days)
+                )
+            except Exception as e:
+                logger.warning(f"Failed to update photo keyboard: {e}")
+
+        # Clear view mode
+        context.user_data["portfolio_view_mode"] = "overview"
+
+    except Exception as e:
+        logger.error(f"Error returning to overview: {e}", exc_info=True)
 
 
 async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = True) -> None:
@@ -987,21 +1206,26 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
                 except Exception as e:
                     logger.debug(f"Failed to fetch tokens for LP networks: {e}")
 
+        # Get balances for connector keys
+        balances = overview_data.get('balances') if overview_data else None
+        connector_keys = _get_connector_keys(balances)
+
         # Update text message if we have it
         if text_message_id:
-            message = format_portfolio_overview(
+            formatted_message = format_portfolio_overview(
                 overview_data,
                 server_name=server_name,
                 server_status=server_status,
                 pnl_indicators=pnl_indicators,
                 changes_24h=changes_24h,
-                token_cache=token_cache
+                token_cache=token_cache,
+                accounts_distribution=accounts_distribution
             )
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=text_message_id,
-                    text=message,
+                    text=formatted_message,
                     parse_mode="MarkdownV2"
                 )
             except Exception as e:
@@ -1014,12 +1238,8 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
             accounts_distribution_data=accounts_distribution
         )
 
-        # Create buttons row with Refresh and Settings
-        keyboard = [[
-            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
-            InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
-        ]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Build keyboard with connector buttons
+        reply_markup = build_portfolio_keyboard(connector_keys, days)
 
         # Update photo with new image
         from telegram import InputMediaPhoto
@@ -1038,6 +1258,12 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         context.user_data["portfolio_server_name"] = server_name
         context.user_data["portfolio_server_status"] = server_status
         context.user_data["portfolio_current_value"] = current_value
+        # Cache data for connector detail callbacks
+        context.user_data["portfolio_balances"] = balances
+        context.user_data["portfolio_accounts_distribution"] = accounts_distribution
+        context.user_data["portfolio_changes_24h"] = changes_24h
+        context.user_data["portfolio_pnl_indicators"] = pnl_indicators
+        context.user_data["portfolio_connector_keys"] = connector_keys
 
     except Exception as e:
         logger.error(f"Failed to refresh portfolio dashboard: {e}", exc_info=True)
