@@ -31,7 +31,7 @@ def _get_admin_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Stats", callback_data="admin:stats"),
         ],
         [
-            InlineKeyboardButton("« Back to Config", callback_data="config_back"),
+            InlineKeyboardButton("« Back", callback_data="config_back"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)

@@ -19,7 +19,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackContext
 
 from handlers import clear_all_input_states
-from routines.base import discover_routines, get_routine
+from routines.base import discover_routines, get_routine, get_routine_by_state
 from utils.auth import restricted
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -187,6 +187,12 @@ def _stop_instance(context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id
     instances = _get_instances(context)
     if instance_id in instances:
         routine_name = instances[instance_id].get("routine_name", "unknown")
+
+        # Call routine cleanup if available
+        routine = get_routine(routine_name)
+        if routine and routine.cleanup_fn:
+            asyncio.create_task(routine.cleanup_fn(context, instance_id, chat_id))
+
         del instances[instance_id]
         logger.info(f"Stopped instance {instance_id} ({routine_name})")
         return True
@@ -1296,47 +1302,20 @@ async def routines_callback_handler(update: Update, context: ContextTypes.DEFAUL
         await query.answer()
         await _show_help(update, context, parts[2])
 
-    elif action == "tpsl_continue" and len(parts) >= 4:
-        # Reset triggered state for a position in LP TP/SL monitor
-        instance_id = parts[2]
-        pos_id_short = parts[3]
-        await query.answer("Continuing to monitor...")
-        state_key = f"lp_tpsl_{instance_id}"
-        if state_key in context.user_data:
-            state = context.user_data[state_key]
-            for pid, pdata in state.get("tracked_positions", {}).items():
-                if pid.startswith(pos_id_short) or pid[:8] == pos_id_short:
-                    pdata["triggered"] = None
-                    break
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-
-    elif action == "tpsl_remove" and len(parts) >= 4:
-        # Remove position from LP TP/SL monitor
-        instance_id = parts[2]
-        pos_id_short = parts[3]
-        await query.answer("Removed from monitor")
-        state_key = f"lp_tpsl_{instance_id}"
-        if state_key in context.user_data:
-            state = context.user_data[state_key]
-            tracked = state.get("tracked_positions", {})
-            for pid in list(tracked.keys()):
-                if pid.startswith(pos_id_short) or pid[:8] == pos_id_short:
-                    del tracked[pid]
-                    break
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-
     else:
-        await query.answer()
+        # Check for routine-specific callbacks
+        # Pattern: routines:{routine_name}:{action}:{params...}
+        routine = get_routine(action)
+        if routine and routine.callback_handler and len(parts) >= 3:
+            routine_action = parts[2]
+            routine_params = parts[3:] if len(parts) > 3 else []
+            await routine.callback_handler(update, context, routine_action, routine_params)
+        else:
+            await query.answer()
 
 
 async def routines_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Handle text input for config editing or daily time."""
+    """Handle text input for config editing, daily time, or routine-specific messages."""
     state = context.user_data.get("routines_state")
 
     if state == "editing":
@@ -1345,11 +1324,11 @@ async def routines_message_handler(update: Update, context: ContextTypes.DEFAULT
     elif state == "daily_time":
         await _process_daily_time(update, context, update.message.text.strip())
         return True
-    elif state == "tpsl_interactive":
-        # Route to LP TP/SL routine's message handler
-        from routines.lp_tpsl import handle_tpsl_message
-        await handle_tpsl_message(update, context)
-        return True
+
+    # Check for routine-specific message handlers
+    routine = get_routine_by_state(state)
+    if routine and routine.message_handler:
+        return await routine.message_handler(update, context)
 
     return False
 

@@ -28,11 +28,19 @@ class RoutineInfo:
         config_class: type[BaseModel],
         run_fn: Callable[[BaseModel, Any], Awaitable[str]],
         is_continuous: bool = False,
+        callback_handler: Callable | None = None,
+        message_handler: Callable | None = None,
+        message_states: list[str] | None = None,
+        cleanup_fn: Callable | None = None,
     ):
         self.name = name
         self.config_class = config_class
         self.run_fn = run_fn
         self._is_continuous = is_continuous
+        self.callback_handler = callback_handler
+        self.message_handler = message_handler
+        self.message_states = message_states or []
+        self.cleanup_fn = cleanup_fn
 
         # Extract description from Config docstring
         doc = config_class.__doc__ or name
@@ -105,11 +113,21 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
             # Check for CONTINUOUS flag
             is_continuous = getattr(module, "CONTINUOUS", False)
 
+            # Detect optional handlers
+            callback_handler = getattr(module, "handle_callback", None)
+            message_handler = getattr(module, "handle_message", None)
+            message_states = getattr(module, "MESSAGE_STATES", None)
+            cleanup_fn = getattr(module, "cleanup", None)
+
             routines[file_path.stem] = RoutineInfo(
                 name=file_path.stem,
                 config_class=module.Config,
                 run_fn=module.run,
                 is_continuous=is_continuous,
+                callback_handler=callback_handler,
+                message_handler=message_handler,
+                message_states=message_states,
+                cleanup_fn=cleanup_fn,
             )
             logger.debug(f"Discovered routine: {file_path.stem} (continuous={is_continuous})")
 
@@ -123,3 +141,11 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
 def get_routine(name: str) -> RoutineInfo | None:
     """Get a specific routine by name."""
     return discover_routines().get(name)
+
+
+def get_routine_by_state(state: str) -> RoutineInfo | None:
+    """Find a routine that handles the given message state."""
+    for routine in discover_routines().values():
+        if state in routine.message_states:
+            return routine
+    return None
