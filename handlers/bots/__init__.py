@@ -16,7 +16,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
-from utils.auth import restricted
+from utils.auth import restricted, hummingbot_api_required
 from handlers import clear_all_input_states
 
 # Import submodule handlers
@@ -171,6 +171,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 @restricted
+@hummingbot_api_required
 async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /bots command - Display bots dashboard
