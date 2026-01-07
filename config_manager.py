@@ -51,10 +51,13 @@ class ConfigManager:
 
     def __init__(self, config_path: str = "config.yml"):
         self.config_path = Path(config_path)
+        self.audit_log_path = Path("audit_log.yml")
         self._data: dict = {}
+        self._audit_log: list = []
         self._clients: Dict[str, Tuple[Any, float]] = {}  # server_name -> (client, connect_time)
         self._client_ttl = 300  # 5 minutes
         self._load_config()
+        self._load_audit_log()
 
     @classmethod
     def instance(cls, config_path: str = "config.yml") -> 'ConfigManager':
@@ -89,7 +92,11 @@ class ConfigManager:
             self._data.setdefault('users', {})
             self._data.setdefault('server_access', {})
             self._data.setdefault('chat_defaults', {})
-            self._data.setdefault('audit_log', [])
+            # Migrate audit_log from config.yml to separate file (one-time)
+            if 'audit_log' in self._data:
+                self._audit_log = self._data.pop('audit_log')
+                self._save_audit_log()
+                self._save_config()  # Save config without audit_log
 
             # Always trust admin_id from env
             admin_id = self._get_admin_from_env()
@@ -112,9 +119,9 @@ class ConfigManager:
             'users': {},
             'server_access': {},
             'chat_defaults': {},
-            'audit_log': [],
             'version': self.VERSION
         }
+        self._audit_log = []
         if admin_id:
             self._ensure_admin_user(admin_id)
         self._save_config()
@@ -141,7 +148,6 @@ class ConfigManager:
                 'users': self._data.get('users', {}),
                 'server_access': self._data.get('server_access', {}),
                 'chat_defaults': self._data.get('chat_defaults', {}),
-                'audit_log': self._data.get('audit_log', [])[-self.MAX_AUDIT_LOG_ENTRIES:],
                 'version': self._data.get('version', self.VERSION)
             }
             with open(self.config_path, 'w') as f:
@@ -151,9 +157,39 @@ class ConfigManager:
             logger.error(f"Failed to save config: {e}")
             raise
 
+    def _load_audit_log(self):
+        """Load audit log from separate file."""
+        if not self.audit_log_path.exists():
+            self._audit_log = []
+            return
+
+        try:
+            with open(self.audit_log_path, 'r') as f:
+                data = yaml.safe_load(f) or {}
+                self._audit_log = data.get('entries', [])
+            logger.debug(f"Loaded {len(self._audit_log)} audit log entries")
+        except Exception as e:
+            logger.error(f"Failed to load audit log: {e}")
+            self._audit_log = []
+
+    def _save_audit_log(self):
+        """Save audit log to separate file."""
+        try:
+            # Trim to max entries
+            if len(self._audit_log) > self.MAX_AUDIT_LOG_ENTRIES:
+                self._audit_log = self._audit_log[-self.MAX_AUDIT_LOG_ENTRIES:]
+
+            data = {'entries': self._audit_log}
+            with open(self.audit_log_path, 'w') as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            logger.debug(f"Saved {len(self._audit_log)} audit log entries")
+        except Exception as e:
+            logger.error(f"Failed to save audit log: {e}")
+
     def reload(self):
         """Reload configuration from file."""
         self._load_config()
+        self._load_audit_log()
 
     @property
     def admin_id(self) -> Optional[int]:
@@ -702,8 +738,7 @@ class ConfigManager:
 
     def _audit(self, action: str, target_type: str, target_id: str,
                actor_id: int, details: dict = None):
-        log = self._data['audit_log']
-        log.append({
+        self._audit_log.append({
             'timestamp': time.time(),
             'actor_id': actor_id,
             'action': action,
@@ -711,12 +746,10 @@ class ConfigManager:
             'target_id': target_id,
             'details': details
         })
-        if len(log) > self.MAX_AUDIT_LOG_ENTRIES:
-            self._data['audit_log'] = log[-self.MAX_AUDIT_LOG_ENTRIES:]
+        self._save_audit_log()
 
     def get_audit_log(self, limit: int = 50) -> list:
-        log = self._data.get('audit_log', [])
-        return list(reversed(log))[:limit]
+        return list(reversed(self._audit_log))[:limit]
 
 
 # Convenience functions
