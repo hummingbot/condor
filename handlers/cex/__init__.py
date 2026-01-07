@@ -13,7 +13,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
-from utils.auth import restricted
+from utils.auth import restricted, hummingbot_api_required
 from utils.telegram_formatters import format_error_message
 from handlers import clear_all_input_states
 
@@ -35,6 +35,7 @@ def clear_cex_state(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 @restricted
+@hummingbot_api_required
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /trade command - CEX trading interface with order books

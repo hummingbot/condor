@@ -10,7 +10,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from utils.auth import restricted
+from utils.auth import restricted, hummingbot_api_required
 from utils.telegram_formatters import escape_markdown_v2
 from handlers import clear_all_input_states, is_gateway_network
 from handlers.config.user_preferences import (
@@ -81,6 +81,7 @@ async def _get_portfolio_connectors(client) -> tuple:
 
 
 @restricted
+@hummingbot_api_required
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Unified /trade command - routes to CEX or DEX based on last-used connector"""
     clear_all_input_states(context)
