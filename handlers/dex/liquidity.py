@@ -16,10 +16,8 @@ from utils.telegram_formatters import escape_markdown_v2, format_error_message, 
 from utils.auth import gateway_required
 from config_manager import get_client
 from ._shared import (
-    set_cached,
     cached_call,
     invalidate_cache,
-    get_explorer_url,
     format_relative_time,
     get_history_filters,
     set_history_filters,

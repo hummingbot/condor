@@ -398,8 +398,6 @@ async def show_gateway_logs(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_deployment_input(update, context) -> None:
     """Handle text input during gateway deployment flow"""
-    from telegram import Update
-    from telegram.ext import ContextTypes
 
     awaiting_field = context.user_data.get('awaiting_gateway_input')
     if not awaiting_field:

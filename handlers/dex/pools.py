@@ -16,7 +16,7 @@ from telegram.error import BadRequest
 from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
 from handlers.config.user_preferences import set_dex_last_pool, get_dex_last_pool
 from config_manager import get_client
-from ._shared import get_cached, set_cached, cached_call, DEFAULT_CACHE_TTL, invalidate_cache
+from ._shared import get_cached, set_cached, DEFAULT_CACHE_TTL, invalidate_cache
 from .visualizations import generate_liquidity_chart, generate_ohlcv_chart, generate_combined_chart, generate_aggregated_liquidity_chart
 from .pool_data import fetch_ohlcv, fetch_liquidity_bins, get_gecko_network
 
@@ -1754,7 +1754,6 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         timeframe: OHLCV timeframe (1m, 5m, 15m, 1h, 4h, 1d)
         currency: Price currency - "usd" or "token" (quote token)
     """
-    from io import BytesIO
     from telegram import InputMediaPhoto
 
     query = update.callback_query
@@ -1903,7 +1902,6 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
         timeframe: OHLCV timeframe
         currency: Price currency - "usd" or "token" (quote token)
     """
-    from io import BytesIO
 
     query = update.callback_query
     await query.answer("Loading combined chart...")

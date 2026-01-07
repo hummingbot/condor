@@ -654,7 +654,7 @@ def clear_dex_state(context) -> None:
 # HISTORY FILTER & PAGINATION HELPERS
 # ============================================
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 HistoryType = Literal["swap", "position"]

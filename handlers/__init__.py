@@ -5,6 +5,31 @@ Command handlers for Condor Telegram bot
 from telegram.ext import ContextTypes
 
 
+def is_gateway_network(connector_name: str) -> bool:
+    """
+    Check if a connector name is a Gateway network (DEX) vs a CEX connector.
+
+    Gateway networks: solana-mainnet-beta, ethereum-mainnet, base, arbitrum, etc.
+    CEX connectors: binance, binance_perpetual, hyperliquid, kucoin, etc.
+    """
+    if not connector_name:
+        return False
+
+    connector_lower = connector_name.lower()
+
+    # Known Gateway network patterns
+    gateway_patterns = [
+        'solana', 'ethereum', 'base', 'arbitrum', 'polygon',
+        'optimism', 'avalanche', 'mainnet', 'devnet', 'testnet'
+    ]
+
+    for pattern in gateway_patterns:
+        if pattern in connector_lower:
+            return True
+
+    return False
+
+
 def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Clear ALL input-related states from user context.
@@ -90,3 +115,14 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Routines states
     context.user_data.pop("routines_state", None)
     context.user_data.pop("routines_editing", None)
+
+    # Signals states
+    context.user_data.pop("signals_state", None)
+    context.user_data.pop("signals_editing", None)
+
+    # Access share states
+    context.user_data.pop("sharing_server", None)
+    context.user_data.pop("awaiting_share_user_id", None)
+    context.user_data.pop("share_target_user_id", None)
+    context.user_data.pop("share_message_id", None)
+    context.user_data.pop("share_chat_id", None)

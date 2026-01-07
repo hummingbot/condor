@@ -17,7 +17,6 @@ from utils.telegram_formatters import escape_markdown_v2, format_error_message
 from handlers.config.user_preferences import (
     get_dex_swap_defaults,
     get_dex_connector,
-    get_dex_last_swap,
     set_dex_last_swap,
     get_all_enabled_networks,
     DEFAULT_DEX_NETWORK,
@@ -30,7 +29,6 @@ from ._shared import (
     invalidate_cache,
     get_explorer_url,
     format_relative_time,
-    _format_amount,
     get_history_filters,
     set_history_filters,
     HistoryFilters,

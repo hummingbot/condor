@@ -10,10 +10,8 @@ Provides comprehensive pool exploration using GeckoTerminal API:
 - Recent trades
 """
 
-import asyncio
 import io
 import logging
-from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -21,7 +19,7 @@ from telegram.ext import ContextTypes
 
 from geckoterminal_py import GeckoTerminalAsyncClient
 from utils.telegram_formatters import escape_markdown_v2
-from ._shared import cached_call, set_cached, get_cached, clear_cache
+from ._shared import cached_call
 from .visualizations import generate_ohlcv_chart, generate_liquidity_chart, generate_combined_chart
 from .pool_data import can_fetch_liquidity, get_connector_for_dex, fetch_liquidity_bins
 

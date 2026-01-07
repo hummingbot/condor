@@ -64,7 +64,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 @restricted
 async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline button callbacks for CEX trading operations"""
-    from .menu import show_cex_menu, cancel_cex_loading_task
+    from .menu import cancel_cex_loading_task
     from .trade import (
         handle_trade,
         handle_trade_refresh,

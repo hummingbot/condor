@@ -10,7 +10,6 @@ Provides:
 
 import asyncio
 import logging
-from decimal import Decimal
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
@@ -18,7 +17,6 @@ from utils.telegram_formatters import escape_markdown_v2, format_error_message
 from handlers.config.user_preferences import (
     get_clob_account,
     get_clob_order_defaults,
-    get_clob_last_order,
     set_clob_last_order,
     set_last_trade_connector,
 )

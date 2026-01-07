@@ -592,7 +592,6 @@ def generate_combined_chart(
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
-        import numpy as np
 
         if not ohlcv_data:
             logger.warning("No OHLCV data for combined chart")
@@ -977,7 +976,6 @@ def generate_aggregated_liquidity_chart(
     try:
         import plotly.graph_objects as go
         from collections import defaultdict
-        import numpy as np
 
         if not pools_data:
             logger.warning("No pools_data provided to aggregated chart")

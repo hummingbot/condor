@@ -1317,7 +1317,7 @@ async def start_manual_share_flow(query, context: ContextTypes.DEFAULT_TYPE, ser
 
 async def handle_share_user_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle user ID input for sharing."""
-    from config_manager import get_config_manager, ServerPermission
+    from config_manager import get_config_manager
 
     if not context.user_data.get('awaiting_share_user_id'):
         return

@@ -13,7 +13,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from datetime import datetime, time as dt_time
+from datetime import time as dt_time
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackContext
@@ -1296,6 +1296,41 @@ async def routines_callback_handler(update: Update, context: ContextTypes.DEFAUL
         await query.answer()
         await _show_help(update, context, parts[2])
 
+    elif action == "tpsl_continue" and len(parts) >= 4:
+        # Reset triggered state for a position in LP TP/SL monitor
+        instance_id = parts[2]
+        pos_id_short = parts[3]
+        await query.answer("Continuing to monitor...")
+        state_key = f"lp_tpsl_{instance_id}"
+        if state_key in context.user_data:
+            state = context.user_data[state_key]
+            for pid, pdata in state.get("tracked_positions", {}).items():
+                if pid.startswith(pos_id_short) or pid[:8] == pos_id_short:
+                    pdata["triggered"] = None
+                    break
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    elif action == "tpsl_remove" and len(parts) >= 4:
+        # Remove position from LP TP/SL monitor
+        instance_id = parts[2]
+        pos_id_short = parts[3]
+        await query.answer("Removed from monitor")
+        state_key = f"lp_tpsl_{instance_id}"
+        if state_key in context.user_data:
+            state = context.user_data[state_key]
+            tracked = state.get("tracked_positions", {})
+            for pid in list(tracked.keys()):
+                if pid.startswith(pos_id_short) or pid[:8] == pos_id_short:
+                    del tracked[pid]
+                    break
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
     else:
         await query.answer()
 
@@ -1309,6 +1344,11 @@ async def routines_message_handler(update: Update, context: ContextTypes.DEFAULT
         return True
     elif state == "daily_time":
         await _process_daily_time(update, context, update.message.text.strip())
+        return True
+    elif state == "tpsl_interactive":
+        # Route to LP TP/SL routine's message handler
+        from routines.lp_tpsl import handle_tpsl_message
+        await handle_tpsl_message(update, context)
         return True
 
     return False
