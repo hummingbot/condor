@@ -4,7 +4,7 @@ Portfolio graph generation using Plotly
 
 import io
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 import plotly.graph_objects as go
 from datetime import datetime
 
