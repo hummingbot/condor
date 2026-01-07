@@ -8,10 +8,8 @@ from datetime import timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
-from utils.auth import restricted
+from utils.auth import restricted, hummingbot_api_required
 from utils.telegram_formatters import (
-    format_portfolio_summary,
-    format_portfolio_state,
     format_portfolio_overview,
     format_error_message,
     escape_markdown_v2
@@ -606,6 +604,7 @@ async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
 
 
 @restricted
+@hummingbot_api_required
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /portfolio command - Display comprehensive portfolio dashboard
@@ -628,11 +627,11 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
         from utils.trading_data import get_lp_positions, get_perpetual_positions, get_active_orders, get_tokens_for_networks
 
         # Get first enabled server
-        servers = server_manager.list_servers()
+        servers = get_config_manager().list_servers()
         enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
 
         if not enabled_servers:
@@ -640,12 +639,10 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             await message.reply_text(error_message, parse_mode="MarkdownV2")
             return
 
-        # Use per-chat default server, falling back to global default
-        default_server = server_manager.get_default_server_for_chat(chat_id)
-        if default_server and default_server in enabled_servers:
-            server_name = default_server
-        else:
-            server_name = enabled_servers[0]
+        # Use user's preferred server
+        from handlers.config.user_preferences import get_active_server
+        preferred = get_active_server(context.user_data)
+        server_name = preferred if preferred and preferred in enabled_servers else enabled_servers[0]
 
         # Send initial loading message immediately
         text_msg = await message.reply_text(
@@ -654,10 +651,10 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             parse_mode="MarkdownV2"
         )
 
-        client = await server_manager.get_client(server_name)
+        client = await get_config_manager().get_client(server_name)
 
         # Check server status
-        server_status_info = await server_manager.check_server_status(server_name)
+        server_status_info = await get_config_manager().check_server_status(server_name)
         server_status = server_status_info.get("status", "online")
 
         # Get portfolio config
@@ -917,21 +914,19 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         return
 
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
         from utils.trading_data import get_tokens_for_networks
 
-        # Use per-chat default server from server_manager
-        servers = server_manager.list_servers()
+        # Use user's preferred server
+        servers = get_config_manager().list_servers()
         enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
 
         if not enabled_servers:
             return
 
-        default_server = server_manager.get_default_server_for_chat(chat_id)
-        if default_server and default_server in enabled_servers:
-            server_name = default_server
-        else:
-            server_name = enabled_servers[0]
+        from handlers.config.user_preferences import get_active_server
+        preferred = get_active_server(context.user_data)
+        server_name = preferred if preferred and preferred in enabled_servers else enabled_servers[0]
 
         # Update caption to show "Updating..." status
         try:
@@ -943,8 +938,8 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         except Exception as e:
             logger.warning(f"Failed to update caption to 'Updating': {e}")
 
-        client = await server_manager.get_client(server_name)
-        server_status_info = await server_manager.check_server_status(server_name)
+        client = await get_config_manager().get_client(server_name)
+        server_status_info = await get_config_manager().check_server_status(server_name)
         server_status = server_status_info.get("status", "online")
 
         # Get current config (only days, interval is auto-calculated)
