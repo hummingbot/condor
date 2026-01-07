@@ -258,9 +258,17 @@ async def _run_continuous_routine(
         def __init__(self):
             self._chat_id = chat_id
             self._instance_id = instance_id
-            self._user_data = application.user_data.get(chat_id, {})
+            # Ensure user_data dict exists in application
+            if chat_id not in application.user_data:
+                application.user_data[chat_id] = {}
+            self._user_data = application.user_data[chat_id]
             self.bot = application.bot
             self.application = application
+
+        @property
+        def user_data(self):
+            """Provide user_data property for compatibility."""
+            return self._user_data
 
     context = MockContext()
 
