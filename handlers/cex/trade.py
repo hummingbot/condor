@@ -278,7 +278,6 @@ def _build_trade_keyboard(params: dict, is_perpetual: bool = False,
     keyboard.append([
         InlineKeyboardButton("📋 Orders", callback_data="cex:search_orders"),
         InlineKeyboardButton("📊 Positions", callback_data="cex:positions"),
-        InlineKeyboardButton("🔄 Switch", callback_data="trade:select_connector"),
         InlineKeyboardButton("❌ Close", callback_data="cex:close")
     ])
 

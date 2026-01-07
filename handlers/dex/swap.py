@@ -404,7 +404,6 @@ def _build_swap_keyboard(params: dict) -> list:
         [
             InlineKeyboardButton("📋 Quote", callback_data="dex:swap_get_quote"),
             InlineKeyboardButton("🔍 History", callback_data="dex:swap_history"),
-            InlineKeyboardButton("🔄 Switch", callback_data="trade:select_connector"),
             InlineKeyboardButton("✕ Close", callback_data="dex:close")
         ]
     ]
@@ -686,34 +685,29 @@ async def handle_swap_connector_select(update: Update, context: ContextTypes.DEF
 
 
 async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show available networks from portfolio for selection"""
+    """Show available networks from Gateway for selection"""
     chat_id = update.effective_chat.id
     try:
         client = await get_client(chat_id, context=context)
 
-        # Get networks from portfolio (ones with wallets configured)
-        from handlers import is_gateway_network
-        portfolio_networks = set()
+        # Get networks from Gateway API (blockchain networks)
+        networks = await _fetch_networks(client)
 
-        try:
-            state = await client.portfolio.get_state()
-            for account_data in state.values():
-                if isinstance(account_data, dict):
-                    for connector_name in account_data.keys():
-                        if is_gateway_network(connector_name):
-                            portfolio_networks.add(connector_name)
-        except Exception as e:
-            logger.warning(f"Error fetching portfolio for networks: {e}")
-
-        if not portfolio_networks:
-            help_text = r"🌐 *Select Network*" + "\n\n" + r"_No networks found in portfolio\._"
+        if not networks:
+            help_text = r"🌐 *Select Network*" + "\n\n" + r"_No networks available\. Ensure Gateway is running\._"
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
         else:
             help_text = r"🌐 *Select Network*"
 
             network_buttons = []
             row = []
-            for network_id in sorted(portfolio_networks):
+            for network_item in networks:
+                # Extract network_id from dict or string
+                if isinstance(network_item, dict):
+                    network_id = network_item.get('network_id') or network_item.get('id') or str(network_item)
+                else:
+                    network_id = str(network_item)
+
                 display = _format_network_display(network_id)
                 row.append(InlineKeyboardButton(display, callback_data=f"dex:swap_network_{network_id}"))
                 if len(row) == 3:
@@ -740,18 +734,30 @@ async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_swap_network_select(update: Update, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
     """Handle network selection from button"""
+    chat_id = update.effective_chat.id
     params = context.user_data.get("swap_params", {})
     params["network"] = network_id
 
-    # Auto-update connector
+    # Auto-update connector based on network
     chain = network_id.split("-")[0] if network_id else ""
-    network = network_id.split("-", 1)[1] if "-" in network_id else ""
+    network_part = network_id.split("-", 1)[1] if "-" in network_id else ""
 
+    # Fetch connectors if not cached
     cache_key = "router_connectors"
     connectors = get_cached(context.user_data, cache_key, ttl=300)
+    if connectors is None:
+        try:
+            client = await get_client(chat_id, context=context)
+            connectors = await _fetch_router_connectors(client)
+            set_cached(context.user_data, cache_key, connectors)
+        except Exception as e:
+            logger.warning(f"Could not fetch connectors: {e}")
+            connectors = []
+
+    # Find matching connector for the network
     if connectors:
         for c in connectors:
-            if c.get('chain') == chain and network in c.get('networks', []):
+            if c.get('chain') == chain and network_part in c.get('networks', []):
                 params["connector"] = c.get('name')
                 break
 
