@@ -15,10 +15,6 @@ from telegram.ext import (
     PicklePersistence,
 )
 
-from handlers.portfolio import portfolio_command
-from handlers.bots import bots_command
-from handlers.trading import trade_command  # Unified trade command for CEX and DEX
-from handlers.dex import lp_command
 from handlers import clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
