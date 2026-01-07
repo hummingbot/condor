@@ -219,12 +219,13 @@ def get_cex_connectors(connectors: Dict[str, Any]) -> List[str]:
 # BALANCE FETCHING
 # ============================================
 
-async def fetch_cex_balances(client, account_name: str) -> Dict[str, List[Dict[str, Any]]]:
+async def fetch_cex_balances(client, account_name: str, refresh: bool = False) -> Dict[str, List[Dict[str, Any]]]:
     """Fetch balances for all CEX connectors.
 
     Args:
         client: API client
         account_name: Account name to fetch balances for
+        refresh: If True, force fresh fetch from exchange (slow). Default False uses cached data.
 
     Returns:
         Dict of connector_name -> list of balances
@@ -245,7 +246,7 @@ async def fetch_cex_balances(client, account_name: str) -> Dict[str, List[Dict[s
             portfolio_state = await client.portfolio.get_state(
                 account_names=[account_name],
                 connector_names=cex_connectors,
-                refresh=True,
+                refresh=refresh,
             )
 
             # portfolio.get_state returns {account_name: {connector_name: [balances]}}
@@ -272,7 +273,8 @@ async def get_cex_balances(
     user_data: dict,
     client,
     account_name: str,
-    ttl: int = DEFAULT_CACHE_TTL
+    ttl: int = DEFAULT_CACHE_TTL,
+    refresh: bool = False
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Get CEX balances with caching.
 
@@ -281,6 +283,7 @@ async def get_cex_balances(
         client: API client
         account_name: Account name
         ttl: Cache TTL in seconds
+        refresh: If True, force fresh fetch from exchange (slow). Default False uses cached data.
 
     Returns:
         Dict of connector_name -> list of balances
@@ -292,7 +295,8 @@ async def get_cex_balances(
         fetch_cex_balances,
         ttl,
         client,
-        account_name
+        account_name,
+        refresh
     )
 
 

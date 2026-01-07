@@ -21,8 +21,9 @@ from handlers.config.user_preferences import (
     set_dex_last_swap,
     get_all_enabled_networks,
     DEFAULT_DEX_NETWORK,
+    set_last_trade_connector,
 )
-from servers import get_client
+from config_manager import get_client
 from ._shared import (
     get_cached,
     set_cached,
@@ -273,7 +274,7 @@ async def _fetch_quotes_background(
         if not all([connector, network, trading_pair, amount]):
             return
 
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():
@@ -405,6 +406,7 @@ def _build_swap_keyboard(params: dict) -> list:
         [
             InlineKeyboardButton("📋 Quote", callback_data="dex:swap_get_quote"),
             InlineKeyboardButton("🔍 History", callback_data="dex:swap_history"),
+            InlineKeyboardButton("🔄 Switch", callback_data="trade:select_connector"),
             InlineKeyboardButton("✕ Close", callback_data="dex:close")
         ]
     ]
@@ -531,7 +533,7 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
     swaps = get_cached(context.user_data, "recent_swaps", ttl=60)
     if swaps is None:
         try:
-            client = await get_client(chat_id)
+            client = await get_client(chat_id, context=context)
             swaps = await _fetch_recent_swaps(client, limit=5)
             set_cached(context.user_data, "recent_swaps", swaps)
         except Exception as e:
@@ -613,7 +615,7 @@ async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAUL
     network = params.get("network", "solana-mainnet-beta")
 
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         cache_key = "router_connectors"
         connectors = get_cached(context.user_data, cache_key, ttl=300)
@@ -661,6 +663,9 @@ async def handle_swap_connector_select(update: Update, context: ContextTypes.DEF
     params = context.user_data.get("swap_params", {})
     params["connector"] = connector_name
 
+    # Save unified preference for /trade command
+    set_last_trade_connector(context.user_data, "dex", connector_name)
+
     # Auto-update network based on connector
     cache_key = "router_connectors"
     connectors = get_cached(context.user_data, cache_key, ttl=300)
@@ -683,46 +688,36 @@ async def handle_swap_connector_select(update: Update, context: ContextTypes.DEF
 
 
 async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show available networks for selection"""
+    """Show available networks from portfolio for selection"""
     chat_id = update.effective_chat.id
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
-        networks_cache_key = "gateway_networks"
-        networks = get_cached(context.user_data, networks_cache_key, ttl=300)
-        if networks is None:
-            networks = await _fetch_networks(client)
-            set_cached(context.user_data, networks_cache_key, networks)
+        # Get networks from portfolio (ones with wallets configured)
+        from handlers import is_gateway_network
+        portfolio_networks = set()
 
-        connectors_cache_key = "router_connectors"
-        connectors = get_cached(context.user_data, connectors_cache_key, ttl=300)
-        if connectors is None:
-            connectors = await _fetch_router_connectors(client)
-            set_cached(context.user_data, connectors_cache_key, connectors)
+        try:
+            state = await client.portfolio.get_state()
+            for account_data in state.values():
+                if isinstance(account_data, dict):
+                    for connector_name in account_data.keys():
+                        if is_gateway_network(connector_name):
+                            portfolio_networks.add(connector_name)
+        except Exception as e:
+            logger.warning(f"Error fetching portfolio for networks: {e}")
 
-        # Filter to networks with routers
-        router_networks = set()
-        for c in connectors:
-            chain = c.get('chain', '')
-            for net in c.get('networks', []):
-                router_networks.add((chain, net))
-
-        available = [
-            n for n in networks
-            if (n.get('chain', ''), n.get('network', '')) in router_networks
-        ]
-
-        if not available:
-            help_text = r"🌐 *Select Network*" + "\n\n" + r"_No networks available\._"
+        if not portfolio_networks:
+            help_text = r"🌐 *Select Network*" + "\n\n" + r"_No networks found in portfolio\._"
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
         else:
             help_text = r"🌐 *Select Network*"
 
             network_buttons = []
             row = []
-            for n in available:
-                network_id = n.get('network_id', '')
-                row.append(InlineKeyboardButton(network_id, callback_data=f"dex:swap_network_{network_id}"))
+            for network_id in sorted(portfolio_networks):
+                display = _format_network_display(network_id)
+                row.append(InlineKeyboardButton(display, callback_data=f"dex:swap_network_{network_id}"))
                 if len(row) == 3:
                     network_buttons.append(row)
                     row = []
@@ -855,7 +850,7 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
         if not all([connector, network, trading_pair, amount]):
             raise ValueError("Missing required parameters")
 
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():
@@ -991,7 +986,7 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
         )
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1109,7 +1104,7 @@ async def process_swap_status(
     """Process swap status check"""
     try:
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1210,7 +1205,7 @@ async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE
             filters = get_history_filters(context.user_data, "swap")
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_swap'):
             error_message = format_error_message("Gateway swap not available")

@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, status: str = "OPEN") -> None:
     """Handle search orders operation"""
     try:
-        from servers import get_client
+        from config_manager import get_client
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Search for orders with specified status
         if status == "OPEN":
@@ -162,10 +162,10 @@ async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFA
         if not client_order_id:
             raise ValueError("Order ID not found")
 
-        from servers import get_client
+        from config_manager import get_client
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Cancel the order
         result = await client.trading.cancel_order(

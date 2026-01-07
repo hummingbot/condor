@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from geckoterminal_py import GeckoTerminalAsyncClient
 
-from servers import get_client
+from config_manager import get_client
 from ._shared import get_cached, set_cached
 
 logger = logging.getLogger(__name__)
@@ -238,7 +238,7 @@ async def fetch_liquidity_bins(
             if cached is not None:
                 return cached.get('bins'), cached, None
 
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
         if not client:
             return None, None, "Gateway client not available"
 

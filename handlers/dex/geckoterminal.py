@@ -2749,9 +2749,9 @@ async def handle_gecko_token_add(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer("Adding token to Gateway...")
 
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
-        client = await server_manager.get_default_client()
+        client = await get_config_manager().get_default_client()
         await client.gateway.add_token(
             network_id=gateway_network,
             address=address,
@@ -3133,7 +3133,7 @@ async def handle_gecko_add_tokens(update: Update, context: ContextTypes.DEFAULT_
     """Add pool tokens to Gateway configuration"""
     import httpx
     from geckoterminal_py import GeckoTerminalAsyncClient
-    from servers import server_manager
+    from config_manager import get_config_manager
 
     query = update.callback_query
 
@@ -3229,7 +3229,7 @@ async def handle_gecko_add_tokens(update: Update, context: ContextTypes.DEFAULT_
             name = token_data.get('name')
 
             # Add to gateway
-            client = await server_manager.get_default_client()
+            client = await get_config_manager().get_default_client()
             await client.gateway.add_token(
                 network_id=gateway_network,
                 address=token_address,
@@ -3294,7 +3294,7 @@ async def handle_gecko_add_tokens(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_gecko_restart_gateway(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Restart Gateway after adding tokens"""
-    from servers import server_manager
+    from config_manager import get_config_manager
 
     query = update.callback_query
     await query.answer("Restarting Gateway...")
@@ -3312,7 +3312,7 @@ async def handle_gecko_restart_gateway(update: Update, context: ContextTypes.DEF
     )
 
     try:
-        client = await server_manager.get_default_client()
+        client = await get_config_manager().get_default_client()
         await client.gateway.restart()
 
         # Wait a moment for restart

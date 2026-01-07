@@ -13,7 +13,7 @@ from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, resolve_token_symbol, KNOWN_TOKENS
 from handlers.config.user_preferences import get_dex_last_swap, get_all_enabled_networks
-from servers import get_client
+from config_manager import get_client
 from ._shared import cached_call, invalidate_cache
 
 logger = logging.getLogger(__name__)
@@ -455,7 +455,7 @@ async def _load_menu_data_background(
     gateway_data = {"balances_by_network": {}, "lp_positions": [], "total_value": 0, "token_cache": {}}
 
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Step 2: Fetch balances first (usually fast) and update UI immediately
         # When refresh=True, bypass local cache and tell API to refresh from exchanges
@@ -546,13 +546,13 @@ async def show_dex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, refr
     Args:
         refresh: If True, force refresh balances from exchanges (bypasses API cache)
     """
-    from servers import server_manager
+    from config_manager import get_config_manager
 
     # Cancel any existing loading task first
     cancel_dex_loading_task(context)
 
     # Get server name for display
-    server_name = server_manager.default_server or "unknown"
+    server_name = get_config_manager().default_server or "unknown"
 
     reply_markup = _build_menu_keyboard()
 

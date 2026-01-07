@@ -20,8 +20,9 @@ from handlers.config.user_preferences import (
     get_clob_order_defaults,
     get_clob_last_order,
     set_clob_last_order,
+    set_last_trade_connector,
 )
-from servers import get_client
+from config_manager import get_client
 from ._shared import (
     get_cached,
     set_cached,
@@ -279,6 +280,7 @@ def _build_trade_keyboard(params: dict, is_perpetual: bool = False,
     keyboard.append([
         InlineKeyboardButton("📋 Orders", callback_data="cex:search_orders"),
         InlineKeyboardButton("📊 Positions", callback_data="cex:positions"),
+        InlineKeyboardButton("🔄 Switch", callback_data="trade:select_connector"),
         InlineKeyboardButton("❌ Close", callback_data="cex:close")
     ])
 
@@ -558,7 +560,7 @@ async def _fetch_trade_data_background(
     is_perpetual = _is_perpetual_connector(connector)
 
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
     except Exception as e:
         logger.warning(f"Could not get client for trade data: {e}")
         return
@@ -753,7 +755,7 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
         volume = float(str(amount).replace("$", ""))
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # If amount is in USD, we need to convert to base token volume
         if "$" in str(amount):
@@ -889,7 +891,7 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
 
     try:
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
         cex_connectors = await get_available_cex_connectors(context.user_data, client)
 
         # Build buttons (2 per row)
@@ -926,6 +928,9 @@ async def handle_trade_connector_select(update: Update, context: ContextTypes.DE
     """Handle connector selection"""
     params = context.user_data.get("trade_params", {})
     params["connector"] = connector_name
+
+    # Save unified preference for /trade command
+    set_last_trade_connector(context.user_data, "cex", connector_name)
 
     _invalidate_trade_cache(context.user_data)
     invalidate_cache(context.user_data, "balances", "positions", "trading_rules")
@@ -1044,7 +1049,7 @@ async def handle_trade_toggle_pos_mode(update: Update, context: ContextTypes.DEF
 
     try:
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Get current mode
         current_mode = context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE")
@@ -1094,7 +1099,7 @@ async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYP
             raise ValueError("Price required for LIMIT orders")
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Handle USD amount
         is_quote_amount = "$" in str(amount)
@@ -1227,7 +1232,10 @@ async def process_trade(
     context: ContextTypes.DEFAULT_TYPE,
     user_input: str
 ) -> None:
-    """Process trade from text input: pair side amount [type] [price] [position]"""
+    """Process trade from text input: pair side amount [type] [price] [position]
+
+    This is a QUICK TRADE - it executes immediately, not just updates params.
+    """
     try:
         parts = user_input.split()
 
@@ -1237,6 +1245,7 @@ async def process_trade(
         # Get current connector from params
         params = context.user_data.get("trade_params", {})
         connector = params.get("connector", "binance_perpetual")
+        account = get_clob_account(context.user_data)
 
         trading_pair = parts[0].upper()
         side = parts[1].upper()
@@ -1245,7 +1254,52 @@ async def process_trade(
         price = parts[4] if len(parts) > 4 else None
         position_action = parts[5].upper() if len(parts) > 5 else "OPEN"
 
-        # Update params
+        # Validate
+        if side not in ("BUY", "SELL"):
+            raise ValueError(f"Invalid side: {side}. Use BUY or SELL")
+        if order_type not in ("MARKET", "LIMIT", "LIMIT_MAKER"):
+            raise ValueError(f"Invalid type: {order_type}. Use MARKET, LIMIT, or LIMIT_MAKER")
+        if order_type in ("LIMIT", "LIMIT_MAKER") and not price:
+            raise ValueError("Price required for LIMIT orders")
+
+        # Delete user's input message
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id, context=context)
+
+        # Handle USD amount
+        is_quote_amount = "$" in str(amount)
+        if is_quote_amount:
+            usd_value = float(str(amount).replace("$", ""))
+            prices = await client.market_data.get_prices(
+                connector_name=connector,
+                trading_pairs=trading_pair
+            )
+            current_price = prices["prices"][trading_pair]
+            amount_float = usd_value / current_price
+        else:
+            amount_float = float(amount)
+
+        # Execute the trade
+        result = await client.trading.place_order(
+            account_name=account,
+            connector_name=connector,
+            trading_pair=trading_pair,
+            trade_type=side,
+            amount=amount_float,
+            order_type=order_type,
+            price=float(price) if price and order_type in ["LIMIT", "LIMIT_MAKER"] else None,
+            position_action=position_action,
+        )
+
+        # Invalidate cache
+        invalidate_cache(context.user_data, "balances", "orders", "positions")
+
+        # Update params for next trade
         context.user_data["trade_params"] = {
             "connector": connector,
             "trading_pair": trading_pair,
@@ -1256,14 +1310,67 @@ async def process_trade(
             "position_mode": position_action,
         }
 
-        _invalidate_trade_cache(context.user_data)
+        # Save for quick repeat
+        set_clob_last_order(context.user_data, {
+            "connector": connector,
+            "trading_pair": trading_pair,
+            "side": side,
+            "order_type": order_type,
+            "position_mode": position_action,
+            "amount": amount,
+            "price": price if price else "—",
+        })
+
+        # Build success message
+        order_info = escape_markdown_v2(
+            f"✅ Order placed!\n\n"
+            f"Pair: {trading_pair}\n"
+            f"Side: {side}\n"
+            f"Amount: {amount_float:.6f}\n"
+            f"Type: {order_type}"
+        )
+
+        if price and order_type in ["LIMIT", "LIMIT_MAKER"]:
+            order_info += escape_markdown_v2(f"\nPrice: {price}")
+
+        if "order_id" in result:
+            order_info += escape_markdown_v2(f"\nOrder ID: {result['order_id']}")
+
+        keyboard = [[InlineKeyboardButton("« Back to Trade", callback_data="cex:trade")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Update the trade menu message with success
+        msg_id = context.user_data.get("trade_menu_message_id")
+        menu_chat_id = context.user_data.get("trade_menu_chat_id")
+
+        if msg_id and menu_chat_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=menu_chat_id,
+                    message_id=msg_id,
+                    text=order_info,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception as e:
+                logger.debug(f"Could not update trade menu: {e}")
+                await update.effective_chat.send_message(
+                    order_info,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+        else:
+            await update.effective_chat.send_message(
+                order_info,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+
         context.user_data["cex_state"] = "trade"
 
-        await _update_trade_menu_after_input(update, context)
-
     except Exception as e:
-        logger.error(f"Error processing trade input: {e}", exc_info=True)
-        error_message = format_error_message(f"Invalid: {str(e)}")
+        logger.error(f"Error processing quick trade: {e}", exc_info=True)
+        error_message = format_error_message(f"Trade failed: {str(e)}")
         await update.message.reply_text(error_message, parse_mode="MarkdownV2")
 
 
@@ -1344,7 +1451,7 @@ async def process_trade_set_leverage(
         account = get_clob_account(context.user_data)
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Set leverage on exchange
         await client.trading.set_leverage(

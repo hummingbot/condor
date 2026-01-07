@@ -255,7 +255,7 @@ class BackgroundRefreshManager:
         try:
             # Use per-chat server if available
             chat_id = self._user_chat_ids.get(user_id)
-            client = await get_client(chat_id)
+            client = await get_client(chat_id, context=context)
         except Exception as e:
             logger.warning(f"Background refresh: couldn't get client: {e}")
             return
@@ -322,7 +322,7 @@ def with_background_refresh(func: Callable) -> Callable:
 # SERVER CLIENT HELPERS
 # ============================================
 
-from servers import get_client
+from config_manager import get_client
 
 
 # ============================================

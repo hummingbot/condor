@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 async def handle_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle get positions operation"""
     try:
-        from servers import get_client
+        from config_manager import get_client
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Get all positions
         result = await client.trading.get_positions(limit=100)
@@ -236,10 +236,10 @@ async def handle_confirm_close_position(update: Update, context: ContextTypes.DE
         # Determine the opposite side to close the position
         close_side = "SELL" if side in ["LONG", "BUY"] else "BUY"
 
-        from servers import get_client
+        from config_manager import get_client
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Place market order to close position
         result = await client.trading.place_order(
