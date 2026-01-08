@@ -20,7 +20,7 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if not servers:
             message_text = format_server_selection_needed()
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+            keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
         else:
             # Build unified header with server and gateway info
             chat_id = query.message.chat_id
@@ -63,8 +63,8 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     InlineKeyboardButton("🚀 Deploy Gateway", callback_data="gateway_deploy"),
                 ])
 
-            # Add back button
-            keyboard.append([InlineKeyboardButton("« Back", callback_data="config_back")])
+            # Add close button
+            keyboard.append([InlineKeyboardButton("« Close", callback_data="config_close")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -91,7 +91,7 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error showing gateway menu: {e}", exc_info=True)
         error_text = f"❌ Error loading gateway: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+        keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 

@@ -2,22 +2,56 @@
 API Keys configuration management handlers
 """
 
+import asyncio
 import logging
 import base64
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2
+from utils.auth import restricted
 from .server_context import build_config_message_header, format_server_selection_needed
 from .user_preferences import get_active_server
 
 logger = logging.getLogger(__name__)
 
+# Default account name used for all API key operations
+DEFAULT_ACCOUNT = "master_account"
+
+
+@restricted
+async def keys_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /keys command - show API keys configuration directly."""
+    from handlers import clear_all_input_states
+    from utils.telegram_helpers import create_mock_query_from_message
+
+    clear_all_input_states(context)
+    mock_query = await create_mock_query_from_message(update, "Loading API keys...")
+    await show_api_keys(mock_query, context)
+
+
+async def get_default_account(client) -> str:
+    """
+    Get the default account to use for API key operations.
+    Returns the first available account from the backend, or DEFAULT_ACCOUNT if none exist.
+    """
+    try:
+        accounts = await client.accounts.list_accounts()
+        if accounts:
+            return str(accounts[0])
+    except Exception:
+        pass
+    return DEFAULT_ACCOUNT
+
 
 async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Show API keys configuration with account selection
+    Show API keys configuration with Perpetual/Spot connector selection
     """
+    # Clear bots state to prevent bots handler from intercepting API key input
+    # This is needed when navigating here from Grid Strike or PMM wizards
+    context.user_data.pop('bots_state', None)
+
     try:
         from config_manager import get_config_manager
 
@@ -25,7 +59,7 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if not servers:
             message_text = format_server_selection_needed()
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+            keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
         else:
             # Build header with server context
             chat_id = query.message.chat_id
@@ -41,65 +75,68 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     header +
                     "⚠️ _Server is offline\\. Cannot manage API keys\\._"
                 )
-                keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+                keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
             else:
                 # Get client from per-chat server
                 client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
-                accounts = await client.accounts.list_accounts()
 
-                if not accounts:
-                    message_text = (
-                        header +
-                        "No accounts configured\\.\n\n"
-                        "_Create accounts in Hummingbot first\\._"
-                    )
-                    keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+                # Get the default account to use
+                account_name = await get_default_account(client)
+
+                # Get credentials for the account
+                try:
+                    credentials = await client.accounts.list_account_credentials(account_name=account_name)
+                    cred_list = credentials if credentials else []
+                except Exception as e:
+                    logger.warning(f"Failed to get credentials for {account_name}: {e}")
+                    cred_list = []
+
+                # Separate credentials into perpetual and spot
+                perp_creds = [c for c in cred_list if c.endswith('_perpetual')]
+                spot_creds = [c for c in cred_list if not c.endswith('_perpetual')]
+
+                # Store credentials in context for callback handling
+                context.user_data['api_key_current_account'] = account_name
+                context.user_data['api_key_credentials'] = cred_list
+
+                # Build keyboard with credential buttons for deletion
+                keyboard = []
+
+                # Add perpetual credential buttons
+                if perp_creds:
+                    for i, cred in enumerate(perp_creds):
+                        # Store index for lookup
+                        keyboard.append([
+                            InlineKeyboardButton(f"📈 {cred}", callback_data=f"api_key_manage:{i}")
+                        ])
+
+                # Add spot credential buttons
+                if spot_creds:
+                    for i, cred in enumerate(spot_creds):
+                        # Offset index by perp count
+                        idx = len(perp_creds) + i
+                        keyboard.append([
+                            InlineKeyboardButton(f"💱 {cred}", callback_data=f"api_key_manage:{idx}")
+                        ])
+
+                # Build message text
+                if cred_list:
+                    creds_display = "_Tap a key to manage it\\._\n\n"
                 else:
-                    # Build account list with credentials info
-                    account_lines = []
-                    for account in accounts:
-                        account_name = str(account)
-                        # Get credentials for this account
-                        try:
-                            credentials = await client.accounts.list_account_credentials(account_name=account_name)
-                            cred_count = len(credentials) if credentials else 0
+                    creds_display = "_No exchanges connected yet\\._\n\n"
 
-                            account_escaped = escape_markdown_v2(account_name)
-                            if cred_count > 0:
-                                creds_text = escape_markdown_v2(", ".join(credentials))
-                                account_lines.append(f"• *{account_escaped}* \\({cred_count} connected\\)\n  _{creds_text}_")
-                            else:
-                                account_lines.append(f"• *{account_escaped}* \\(no credentials\\)")
-                        except Exception as e:
-                            logger.warning(f"Failed to get credentials for {account_name}: {e}")
-                            account_escaped = escape_markdown_v2(account_name)
-                            account_lines.append(f"• *{account_escaped}*")
+                message_text = (
+                    header +
+                    creds_display +
+                    "_Select exchange type to add a new key:_"
+                )
 
-                    message_text = (
-                        header +
-                        "\n".join(account_lines) + "\n\n"
-                        "_Select an account to manage exchange credentials:_"
-                    )
-
-                    # Create account buttons in grid of 4 per row
-                    # Use base64 encoding to avoid issues with special characters in account names
-                    account_buttons = []
-                    for account in accounts:
-                        account_name = str(account)
-                        # Encode account name to avoid issues with underscores and special chars
-                        encoded_name = base64.b64encode(account_name.encode()).decode()
-                        account_buttons.append(
-                            InlineKeyboardButton(account_name, callback_data=f"api_key_account:{encoded_name}")
-                        )
-
-                    # Organize into rows of max 4 columns
-                    account_button_rows = []
-                    for i in range(0, len(account_buttons), 4):
-                        account_button_rows.append(account_buttons[i:i+4])
-
-                    keyboard = account_button_rows + [
-                        [InlineKeyboardButton("« Back", callback_data="config_back")]
-                    ]
+                # Add type selection buttons
+                keyboard.append([
+                    InlineKeyboardButton("➕ Perpetual", callback_data="api_key_type:perpetual"),
+                    InlineKeyboardButton("➕ Spot", callback_data="api_key_type:spot")
+                ])
+                keyboard.append([InlineKeyboardButton("« Close", callback_data="config_close")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -120,7 +157,121 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error showing API keys: {e}", exc_info=True)
         error_text = f"❌ Error loading API keys: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+        keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+
+
+async def show_connectors_by_type(query, context: ContextTypes.DEFAULT_TYPE, connector_type: str) -> None:
+    """
+    Show connectors filtered by type (perpetual or spot)
+    """
+    try:
+        from config_manager import get_config_manager
+
+        chat_id = query.message.chat_id
+        is_perpetual = connector_type == "perpetual"
+        type_label = "Perpetual" if is_perpetual else "Spot"
+        type_emoji = "📈" if is_perpetual else "💱"
+
+        # Build header with server context
+        header, server_online, _ = await build_config_message_header(
+            f"🔑 {type_emoji} {type_label} Exchanges",
+            include_gateway=False,
+            chat_id=chat_id,
+            user_data=context.user_data
+        )
+
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
+
+        # Get the default account to use
+        account_name = await get_default_account(client)
+        context.user_data['api_key_current_account'] = account_name
+
+        # Get credentials for the account
+        try:
+            credentials = await client.accounts.list_account_credentials(account_name=account_name)
+            cred_list = credentials if credentials else []
+        except Exception as e:
+            logger.warning(f"Failed to get credentials for {account_name}: {e}")
+            cred_list = []
+
+        # Filter credentials by type
+        if is_perpetual:
+            type_creds = [c for c in cred_list if c.endswith('_perpetual')]
+        else:
+            type_creds = [c for c in cred_list if not c.endswith('_perpetual')]
+
+        # Store credentials in context for delete functionality
+        context.user_data['api_key_credentials'] = type_creds
+        context.user_data['api_key_connector_type'] = connector_type
+
+        keyboard = []
+
+        if type_creds:
+            # Build list of connected credentials with delete buttons
+            cred_lines = ["*Connected:*"]
+            for i, cred in enumerate(type_creds):
+                cred_escaped = escape_markdown_v2(str(cred))
+                cred_lines.append(f"  ✅ {cred_escaped}")
+                # Add delete button for each credential
+                keyboard.append([
+                    InlineKeyboardButton(f"🗑 Delete {cred}", callback_data=f"api_key_delete_cred:{i}")
+                ])
+            creds_display = "\n".join(cred_lines) + "\n\n"
+        else:
+            creds_display = "_No exchanges connected yet\\._\n\n"
+
+        message_text = (
+            header +
+            creds_display +
+            "_Select an exchange to configure:_\n"
+        )
+
+        # Get list of available connectors
+        all_connectors = await client.connectors.list_connectors()
+
+        # Filter out testnet connectors and gateway connectors (those with '/' like "uniswap/ethereum")
+        connectors = [c for c in all_connectors if 'testnet' not in c.lower() and '/' not in c]
+
+        # Filter by type
+        if is_perpetual:
+            connectors = [c for c in connectors if c.endswith('_perpetual')]
+        else:
+            connectors = [c for c in connectors if not c.endswith('_perpetual')]
+
+        # Store connector list in context
+        context.user_data['api_key_connectors'] = connectors
+
+        # Create connector buttons
+        connector_buttons = []
+        for i, connector in enumerate(connectors):
+            # Use index instead of full names to keep callback_data short
+            connector_buttons.append(
+                InlineKeyboardButton(connector, callback_data=f"api_key_connector:{i}")
+            )
+
+        # Organize into rows of 2 columns for better readability
+        connector_button_rows = []
+        for i in range(0, len(connector_buttons), 2):
+            connector_button_rows.append(connector_buttons[i:i+2])
+
+        keyboard = keyboard + connector_button_rows + [
+            [InlineKeyboardButton("« Back", callback_data="api_key_back_to_accounts")]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error showing connectors by type: {e}", exc_info=True)
+        error_text = f"❌ Error loading connectors: {escape_markdown_v2(str(e))}"
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="api_key_back_to_accounts")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 
@@ -131,24 +282,22 @@ async def handle_api_key_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
     """
     action_data = query.data.replace("api_key_", "")
 
-    if action_data.startswith("account:"):
-        # Decode base64 encoded account name
-        encoded_name = action_data.replace("account:", "")
-        try:
-            account_name = base64.b64decode(encoded_name.encode()).decode()
-            await show_account_credentials(query, context, account_name)
-        except Exception as e:
-            logger.error(f"Failed to decode account name: {e}")
-            await query.answer("❌ Invalid account name")
+    if action_data.startswith("type:"):
+        # Handle perpetual/spot selection
+        connector_type = action_data.replace("type:", "")
+        await show_connectors_by_type(query, context, connector_type)
+    elif action_data.startswith("account:"):
+        # Legacy handler - redirect to main API keys view
+        await show_api_keys(query, context)
     elif action_data.startswith("connector:"):
         # Format: connector:{index}
-        # Retrieve account and connector from context
+        # Retrieve connector from context (use account from context)
         try:
             connector_index = int(action_data.replace("connector:", ""))
-            account_name = context.user_data.get('api_key_current_account')
             connectors = context.user_data.get('api_key_connectors', [])
+            account_name = context.user_data.get('api_key_current_account', DEFAULT_ACCOUNT)
 
-            if account_name and 0 <= connector_index < len(connectors):
+            if 0 <= connector_index < len(connectors):
                 connector_name = connectors[connector_index]
                 await show_connector_config(query, context, account_name, connector_name)
             else:
@@ -182,28 +331,36 @@ async def handle_api_key_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
         else:
             await query.answer("Cannot go back")
     elif action_data.startswith("back_account:"):
-        # Back to specific account view - also clear API key config state
+        # Legacy handler - clear state and redirect to main API keys view
         context.user_data.pop('configuring_api_key', None)
         context.user_data.pop('awaiting_api_key_input', None)
         context.user_data.pop('api_key_config_data', None)
-
-        encoded_name = action_data.replace("back_account:", "")
-        try:
-            account_name = base64.b64decode(encoded_name.encode()).decode()
-            await show_account_credentials(query, context, account_name)
-        except Exception as e:
-            logger.error(f"Failed to decode account name: {e}")
-            await query.answer("❌ Invalid account name")
+        await show_api_keys(query, context)
     elif action_data == "back_to_accounts":
         await show_api_keys(query, context)
+    elif action_data.startswith("manage:"):
+        # Show manage options for a credential (delete)
+        try:
+            cred_index = int(action_data.replace("manage:", ""))
+            credentials = context.user_data.get('api_key_credentials', [])
+            account_name = context.user_data.get('api_key_current_account', DEFAULT_ACCOUNT)
+
+            if 0 <= cred_index < len(credentials):
+                connector_name = credentials[cred_index]
+                await show_credential_manage_menu(query, context, cred_index, connector_name)
+            else:
+                await query.answer("❌ Session expired, please try again")
+        except (ValueError, IndexError) as e:
+            logger.error(f"Failed to parse credential index: {e}")
+            await query.answer("❌ Invalid credential data")
     elif action_data.startswith("delete_cred:"):
-        # Handle credential deletion
+        # Handle credential deletion (use account from context)
         try:
             cred_index = int(action_data.replace("delete_cred:", ""))
-            account_name = context.user_data.get('api_key_current_account')
             credentials = context.user_data.get('api_key_credentials', [])
+            account_name = context.user_data.get('api_key_current_account', DEFAULT_ACCOUNT)
 
-            if account_name and 0 <= cred_index < len(credentials):
+            if 0 <= cred_index < len(credentials):
                 connector_name = credentials[cred_index]
                 # Show confirmation dialog
                 await show_delete_credential_confirmation(query, context, account_name, connector_name)
@@ -214,13 +371,13 @@ async def handle_api_key_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.error(f"Failed to parse credential index: {e}")
             await query.answer("❌ Invalid credential data")
     elif action_data.startswith("delete_cred_confirm:"):
-        # Confirm credential deletion
+        # Confirm credential deletion (use account from context)
         try:
             cred_index = int(action_data.replace("delete_cred_confirm:", ""))
-            account_name = context.user_data.get('api_key_current_account')
             credentials = context.user_data.get('api_key_credentials', [])
+            account_name = context.user_data.get('api_key_current_account', DEFAULT_ACCOUNT)
 
-            if account_name and 0 <= cred_index < len(credentials):
+            if 0 <= cred_index < len(credentials):
                 connector_name = credentials[cred_index]
                 await delete_credential(query, context, account_name, connector_name)
             else:
@@ -229,113 +386,17 @@ async def handle_api_key_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
             logger.error(f"Failed to delete credential: {e}")
             await query.answer("❌ Failed to delete credential")
     elif action_data == "delete_cred_cancel":
-        # Cancel credential deletion - go back to account view
-        account_name = context.user_data.get('api_key_current_account')
-        if account_name:
-            await show_account_credentials(query, context, account_name)
-        else:
-            await show_api_keys(query, context)
+        # Cancel credential deletion - go back to keys menu
+        await show_api_keys(query, context)
+    elif action_data.startswith("select:"):
+        # Handle Literal type option selection
+        selected_value = action_data.replace("select:", "")
+        await _handle_field_value_selection(query, context, selected_value)
+    elif action_data == "skip":
+        # Skip optional field
+        await _handle_skip_optional_field(query, context)
     else:
         await query.answer("Unknown action")
-
-
-async def show_account_credentials(query, context: ContextTypes.DEFAULT_TYPE, account_name: str) -> None:
-    """
-    Show connected credentials for a specific account
-    """
-    try:
-        from config_manager import get_config_manager
-
-        chat_id = query.message.chat_id
-
-        # Build header with server context
-        header, server_online, _ = await build_config_message_header(
-            f"🔑 API Keys",
-            include_gateway=False,
-            chat_id=chat_id,
-            user_data=context.user_data
-        )
-
-        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
-
-        # Get list of connected credentials for this account
-        credentials = await client.accounts.list_account_credentials(account_name=account_name)
-
-        account_escaped = escape_markdown_v2(account_name)
-
-        # Store credentials in context for delete functionality
-        context.user_data['api_key_credentials'] = credentials if credentials else []
-
-        if not credentials:
-            message_text = (
-                header +
-                f"*Account:* `{account_escaped}`\n\n"
-                "No exchange credentials connected\\.\n\n"
-                "Select an exchange below to add credentials:\n\n"
-            )
-            keyboard = []
-        else:
-            # Build list of connected credentials with delete buttons
-            cred_lines = []
-            credential_buttons = []
-            for i, cred in enumerate(credentials):
-                cred_escaped = escape_markdown_v2(str(cred))
-                cred_lines.append(f"  ✅ {cred_escaped}")
-                # Add delete button for each credential
-                credential_buttons.append([
-                    InlineKeyboardButton(f"🗑 Delete {cred}", callback_data=f"api_key_delete_cred:{i}")
-                ])
-
-            message_text = (
-                header +
-                f"*Account:* `{account_escaped}`\n\n"
-                "*Connected Exchanges:*\n"
-                + "\n".join(cred_lines) + "\n\n"
-                "Select an exchange below to configure or delete:\n\n"
-            )
-            keyboard = credential_buttons
-
-        # Get list of available connectors
-        all_connectors = await client.connectors.list_connectors()
-
-        # Filter out testnet connectors and gateway connectors (those with '/' like "uniswap/ethereum")
-        connectors = [c for c in all_connectors if 'testnet' not in c.lower() and '/' not in c]
-
-        # Create connector buttons in grid of 3 per row (for better readability of long names)
-        # Store account name and connector list in context to avoid exceeding 64-byte callback_data limit
-        context.user_data['api_key_current_account'] = account_name
-        context.user_data['api_key_connectors'] = connectors
-
-        connector_buttons = []
-        for i, connector in enumerate(connectors):
-            # Use index instead of full names to keep callback_data short
-            connector_buttons.append(
-                InlineKeyboardButton(connector, callback_data=f"api_key_connector:{i}")
-            )
-
-        # Organize into rows of 2 columns for better readability
-        connector_button_rows = []
-        for i in range(0, len(connector_buttons), 2):
-            connector_button_rows.append(connector_buttons[i:i+2])
-
-        keyboard = keyboard + connector_button_rows + [
-            [InlineKeyboardButton("« Back to Accounts", callback_data="api_key_back_to_accounts")]
-        ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
-
-    except Exception as e:
-        logger.error(f"Error showing account credentials: {e}", exc_info=True)
-        error_text = f"❌ Error loading account credentials: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="api_key_back_to_accounts")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 
 
 async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, account_name: str, connector_name: str) -> None:
@@ -349,19 +410,47 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
         client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Get config map for this connector
-        config_fields = await client.connectors.get_config_map(connector_name)
+        try:
+            config_map = await client.connectors.get_config_map(connector_name)
+        except Exception as config_err:
+            # Fallback for older backends that don't support config-map endpoint
+            logger.warning(f"Failed to get config map for {connector_name}, using defaults: {config_err}")
+            config_map = None
+
+        # Support both old format (list) and new format (dict with metadata)
+        if config_map is None:
+            # Fallback: use default fields for most exchange connectors
+            config_fields = [f"{connector_name}_api_key", f"{connector_name}_api_secret"]
+            field_metadata = {
+                f"{connector_name}_api_key": {'type': 'SecretStr', 'required': True},
+                f"{connector_name}_api_secret": {'type': 'SecretStr', 'required': True}
+            }
+        elif isinstance(config_map, dict):
+            # New format: dict with field metadata
+            config_fields = list(config_map.keys())
+            field_metadata = config_map
+        else:
+            # Old format: list of field names
+            config_fields = config_map
+            field_metadata = {}
 
         # Filter out fields that should be handled automatically
         if connector_name == "xrpl":
             # custom_markets expects a dict, we'll default to empty
             config_fields = [f for f in config_fields if f != "custom_markets"]
+            field_metadata.pop("custom_markets", None)
+
+        # Determine connector type for back navigation
+        connector_type = "perpetual" if connector_name.endswith('_perpetual') else "spot"
 
         # Initialize context storage for API key configuration
         context.user_data['configuring_api_key'] = True
         context.user_data['api_key_config_data'] = {
             'account_name': account_name,
             'connector_name': connector_name,
+            'connector_type': connector_type,
             'fields': config_fields,
+            'field_metadata': field_metadata,
             'values': {}
         }
         context.user_data['awaiting_api_key_input'] = config_fields[0] if config_fields else None
@@ -370,15 +459,12 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
 
         if not config_fields:
             # No configuration needed
-            account_escaped = escape_markdown_v2(account_name)
             connector_escaped = escape_markdown_v2(connector_name)
             message_text = (
                 f"🔑 *Configure {connector_escaped}*\n\n"
-                f"Account: *{account_escaped}*\n\n"
                 "✅ No configuration required for this connector\\."
             )
-            encoded_account = base64.b64encode(account_name.encode()).decode()
-            keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_key_back_account:{encoded_account}")]]
+            keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_key_type:{connector_type}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.message.edit_text(message_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
             return
@@ -400,8 +486,8 @@ async def show_connector_config(query, context: ContextTypes.DEFAULT_TYPE, accou
     except Exception as e:
         logger.error(f"Error showing connector config: {e}", exc_info=True)
         error_text = f"❌ Error loading connector config: {escape_markdown_v2(str(e))}"
-        encoded_account = base64.b64encode(account_name.encode()).decode()
-        keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_key_back_account:{encoded_account}")]]
+        connector_type = "perpetual" if connector_name.endswith('_perpetual') else "spot"
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_key_type:{connector_type}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 
@@ -430,6 +516,70 @@ async def handle_api_key_config_input(update: Update, context: ContextTypes.DEFA
         config_data = context.user_data.get('api_key_config_data', {})
         values = config_data.get('values', {})
         all_fields = config_data.get('fields', [])
+        field_metadata = config_data.get('field_metadata', {})
+
+        # Get field metadata for validation
+        field_meta = field_metadata.get(awaiting_field, {})
+        field_type = field_meta.get('type', '')
+
+        # Validate and convert based on field type
+        if field_type == 'Literal':
+            allowed_values = field_meta.get('allowed_values', [])
+            if allowed_values and new_value not in allowed_values:
+                # Send error message and don't advance
+                error_msg = await update.effective_chat.send_message(
+                    f"❌ Invalid value. Please select one of: {', '.join(allowed_values)}"
+                )
+                # Auto-delete error message after 3 seconds
+                await asyncio.sleep(3)
+                try:
+                    await error_msg.delete()
+                except:
+                    pass
+                return
+        elif field_type == 'bool':
+            # Convert string to boolean
+            lower_val = new_value.lower()
+            if lower_val in ('true', 'yes', '1'):
+                new_value = True
+            elif lower_val in ('false', 'no', '0'):
+                new_value = False
+            else:
+                error_msg = await update.effective_chat.send_message(
+                    "❌ Invalid value. Please enter 'true' or 'false'"
+                )
+                await asyncio.sleep(3)
+                try:
+                    await error_msg.delete()
+                except:
+                    pass
+                return
+        elif field_type == 'int':
+            try:
+                new_value = int(new_value)
+            except ValueError:
+                error_msg = await update.effective_chat.send_message(
+                    "❌ Invalid value. Please enter an integer number"
+                )
+                await asyncio.sleep(3)
+                try:
+                    await error_msg.delete()
+                except:
+                    pass
+                return
+        elif field_type == 'float':
+            try:
+                new_value = float(new_value)
+            except ValueError:
+                error_msg = await update.effective_chat.send_message(
+                    "❌ Invalid value. Please enter a number"
+                )
+                await asyncio.sleep(3)
+                try:
+                    await error_msg.delete()
+                except:
+                    pass
+                return
 
         # Store the value
         values[awaiting_field] = new_value
@@ -465,6 +615,7 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
         config_data = context.user_data.get('api_key_config_data', {})
         account_name = config_data.get('account_name')
         connector_name = config_data.get('connector_name')
+        connector_type = config_data.get('connector_type', 'spot')
         values = config_data.get('values', {})
         message_id = context.user_data.get('api_key_message_id')
 
@@ -473,11 +624,9 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
             return
 
         # Show "waiting for connection" message
-        account_escaped = escape_markdown_v2(account_name)
         connector_escaped = escape_markdown_v2(connector_name)
         waiting_message_text = (
             f"⏳ *Connecting to {connector_escaped}*\n\n"
-            f"Account: *{account_escaped}*\n\n"
             "Please wait while we verify your credentials\\.\\.\\."
         )
 
@@ -504,6 +653,9 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
             credentials=values
         )
 
+        # Store connector type before clearing context
+        saved_connector_type = connector_type
+
         # Clear context data
         context.user_data.pop('configuring_api_key', None)
         context.user_data.pop('awaiting_api_key_input', None)
@@ -529,9 +681,7 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
                 parse_mode="MarkdownV2"
             )
 
-        # Create a mock query object to reuse the existing show_account_credentials function
-        # This automatically refreshes the account credentials view
-        import asyncio
+        # Create a mock query object to navigate back to connector type view
         from types import SimpleNamespace
 
         # Wait a moment to let the user see the success message
@@ -551,16 +701,16 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
         )
         mock_query = SimpleNamespace(message=mock_message)
 
-        # Navigate back to account credentials view
-        await show_account_credentials(mock_query, context, account_name)
+        # Navigate back to connector type view
+        await show_connectors_by_type(mock_query, context, saved_connector_type)
 
     except Exception as e:
         logger.error(f"Error submitting API key config: {e}", exc_info=True)
 
-        # Get account name for back button before clearing state
+        # Get connector info for back button before clearing state
         config_data = context.user_data.get('api_key_config_data', {})
-        account_name = config_data.get('account_name', '')
         connector_name = config_data.get('connector_name', '')
+        connector_type = config_data.get('connector_type', 'spot')
         message_id = context.user_data.get('api_key_message_id')
 
         # Clear context data so user can retry
@@ -583,12 +733,8 @@ async def submit_api_key_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
         else:
             error_text = f"❌ Error saving configuration: {escape_markdown_v2(error_str)}"
 
-        # Add back button to navigate back to account
-        if account_name:
-            encoded_account = base64.b64encode(account_name.encode()).decode()
-            keyboard = [[InlineKeyboardButton("« Back to Account", callback_data=f"api_key_back_account:{encoded_account}")]]
-        else:
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="api_key_back_to_accounts")]]
+        # Add back button to navigate back to connector type view
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_key_type:{connector_type}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Try to edit existing message, fall back to sending new message
@@ -629,6 +775,9 @@ async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_n
         chat_id = query.message.chat_id
         client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
+        # Determine connector type for back navigation
+        connector_type = context.user_data.get('api_key_connector_type', 'perpetual' if connector_name.endswith('_perpetual') else 'spot')
+
         # Delete the credential
         await client.accounts.delete_credential(
             account_name=account_name,
@@ -636,14 +785,13 @@ async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_n
         )
 
         # Show success message
-        account_escaped = escape_markdown_v2(account_name)
         connector_escaped = escape_markdown_v2(connector_name)
         message_text = (
             f"✅ *Credential Deleted*\n\n"
-            f"The *{connector_escaped}* credentials have been removed from account *{account_escaped}*\\."
+            f"The *{connector_escaped}* credentials have been removed\\."
         )
 
-        keyboard = [[InlineKeyboardButton("« Back to Account", callback_data=f"api_key_account:{base64.b64encode(account_name.encode()).decode()}")]]
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_key_type:{connector_type}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
@@ -657,25 +805,62 @@ async def delete_credential(query, context: ContextTypes.DEFAULT_TYPE, account_n
         logger.error(f"Error deleting credential: {e}", exc_info=True)
         error_text = f"❌ Error deleting credential: {escape_markdown_v2(str(e))}"
 
-        keyboard = [[InlineKeyboardButton("« Back to Account", callback_data=f"api_key_account:{base64.b64encode(account_name.encode()).decode()}")]]
+        connector_type = context.user_data.get('api_key_connector_type', 'perpetual' if connector_name.endswith('_perpetual') else 'spot')
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_key_type:{connector_type}")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
         await query.answer("❌ Failed to delete credential")
 
 
+async def show_credential_manage_menu(query, context: ContextTypes.DEFAULT_TYPE, cred_index: int, connector_name: str) -> None:
+    """
+    Show management options for a credential (currently just delete)
+    """
+    from .server_context import build_config_message_header
+
+    chat_id = query.message.chat_id
+    header, _, _ = await build_config_message_header(
+        "🔑 Manage API Key",
+        include_gateway=False,
+        chat_id=chat_id,
+        user_data=context.user_data
+    )
+
+    # Determine type emoji
+    is_perpetual = connector_name.endswith('_perpetual')
+    type_emoji = "📈" if is_perpetual else "💱"
+    connector_escaped = escape_markdown_v2(connector_name)
+
+    message_text = (
+        header +
+        f"*Exchange:* {type_emoji} {connector_escaped}\n\n"
+        "_What would you like to do?_"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🗑 Delete Key", callback_data=f"api_key_delete_cred:{cred_index}")],
+        [InlineKeyboardButton("« Back", callback_data="api_key_back_to_accounts")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.message.edit_text(
+        message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
+
+
 async def show_delete_credential_confirmation(query, context: ContextTypes.DEFAULT_TYPE, account_name: str, connector_name: str) -> None:
     """
     Show confirmation dialog before deleting a credential
     """
-    account_escaped = escape_markdown_v2(account_name)
     connector_escaped = escape_markdown_v2(connector_name)
 
     message_text = (
         f"🗑 *Delete Credential*\n\n"
-        f"Account: *{account_escaped}*\n"
         f"Exchange: *{connector_escaped}*\n\n"
-        f"⚠️ This will remove the API credentials for *{connector_escaped}* from account *{account_escaped}*\\.\n\n"
+        f"⚠️ This will remove the API credentials for *{connector_escaped}*\\.\n\n"
         "Are you sure you want to delete this credential?"
     )
 
@@ -696,44 +881,199 @@ async def show_delete_credential_confirmation(query, context: ContextTypes.DEFAU
     )
 
 
+async def _handle_field_value_selection(query, context, selected_value: str) -> None:
+    """
+    Handle selection of a value for a Literal or bool type field via inline button
+    """
+    try:
+        awaiting_field = context.user_data.get('awaiting_api_key_input')
+        if not awaiting_field:
+            await query.answer("❌ No field awaiting input")
+            return
+
+        config_data = context.user_data.get('api_key_config_data', {})
+        values = config_data.get('values', {})
+        all_fields = config_data.get('fields', [])
+        field_metadata = config_data.get('field_metadata', {})
+
+        # Convert value based on field type
+        field_meta = field_metadata.get(awaiting_field, {})
+        if field_meta.get('type') == 'bool':
+            selected_value = selected_value.lower() == 'true'
+
+        # Store the selected value
+        values[awaiting_field] = selected_value
+        config_data['values'] = values
+        context.user_data['api_key_config_data'] = config_data
+
+        # Move to next field or submit
+        current_index = all_fields.index(awaiting_field)
+
+        if current_index < len(all_fields) - 1:
+            # Move to next field
+            context.user_data['awaiting_api_key_input'] = all_fields[current_index + 1]
+            await query.answer(f"✅ {awaiting_field} = {selected_value}")
+            await _update_api_key_config_message(context, query.message.get_bot())
+        else:
+            # All fields filled - submit configuration
+            context.user_data['awaiting_api_key_input'] = None
+            await query.answer("✅ Submitting configuration...")
+            chat_id = context.user_data.get('api_key_chat_id', query.message.chat_id)
+            await submit_api_key_config(context, query.message.get_bot(), chat_id)
+
+    except Exception as e:
+        logger.error(f"Error handling field value selection: {e}", exc_info=True)
+        await query.answer("❌ Error processing selection")
+
+
+async def _handle_skip_optional_field(query, context) -> None:
+    """
+    Handle skipping an optional field
+    """
+    try:
+        awaiting_field = context.user_data.get('awaiting_api_key_input')
+        if not awaiting_field:
+            await query.answer("❌ No field awaiting input")
+            return
+
+        config_data = context.user_data.get('api_key_config_data', {})
+        all_fields = config_data.get('fields', [])
+        field_metadata = config_data.get('field_metadata', {})
+
+        # Verify field is optional
+        field_meta = field_metadata.get(awaiting_field, {})
+        if field_meta.get('required', True):
+            await query.answer("❌ This field is required")
+            return
+
+        # Don't store a value - just move to next field
+        current_index = all_fields.index(awaiting_field)
+
+        if current_index < len(all_fields) - 1:
+            # Move to next field
+            context.user_data['awaiting_api_key_input'] = all_fields[current_index + 1]
+            await query.answer(f"⏭ Skipped {awaiting_field}")
+            await _update_api_key_config_message(context, query.message.get_bot())
+        else:
+            # All fields filled - submit configuration
+            context.user_data['awaiting_api_key_input'] = None
+            await query.answer("✅ Submitting configuration...")
+            chat_id = context.user_data.get('api_key_chat_id', query.message.chat_id)
+            await submit_api_key_config(context, query.message.get_bot(), chat_id)
+
+    except Exception as e:
+        logger.error(f"Error handling skip field: {e}", exc_info=True)
+        await query.answer("❌ Error skipping field")
+
+
+def _format_field_type_hint(field_meta: dict) -> str:
+    """
+    Format a human-readable type hint from field metadata
+    """
+    if not field_meta:
+        return ""
+
+    field_type = field_meta.get('type', '')
+    required = field_meta.get('required', False)
+    allowed_values = field_meta.get('allowed_values', [])
+
+    hints = []
+
+    # Type hint
+    if field_type == 'Literal' and allowed_values:
+        values_str = " | ".join(allowed_values)
+        hints.append(f"Options: {values_str}")
+    elif field_type == 'bool':
+        hints.append("true/false")
+    elif field_type == 'SecretStr':
+        hints.append("secret")
+    elif field_type == 'int':
+        hints.append("integer")
+    elif field_type == 'float':
+        hints.append("number")
+    elif field_type:
+        hints.append(field_type.lower())
+
+    # Required hint
+    if not required:
+        hints.append("optional")
+
+    return ", ".join(hints)
+
+
 def _build_api_key_config_message(config_data: dict, current_field: str, all_fields: list) -> tuple:
     """
     Build the progressive API key configuration message showing filled fields and current prompt
     Returns (message_text, reply_markup)
     """
-    account_name = config_data.get('account_name', '')
     connector_name = config_data.get('connector_name', '')
+    connector_type = config_data.get('connector_type', 'spot')
     values = config_data.get('values', {})
+    field_metadata = config_data.get('field_metadata', {})
 
-    account_escaped = escape_markdown_v2(account_name)
     connector_escaped = escape_markdown_v2(connector_name)
 
     # Build the message showing progress
     lines = [f"🔑 *Configure {connector_escaped}*\n"]
-    lines.append(f"Account: *{account_escaped}*\n")
 
     for field in all_fields:
+        field_meta = field_metadata.get(field, {})
+        field_escaped = escape_markdown_v2(field)
+
         if field in values:
             # Field already filled - show value (mask if contains 'secret', 'key', or 'password')
             value = values[field]
-            if any(keyword in field.lower() for keyword in ['secret', 'key', 'password', 'passphrase']):
+            is_secret = any(keyword in field.lower() for keyword in ['secret', 'key', 'password', 'passphrase'])
+            if is_secret or field_meta.get('type') == 'SecretStr':
                 value = '****'
-            field_escaped = escape_markdown_v2(field)
             value_escaped = escape_markdown_v2(str(value))
             lines.append(f"*{field_escaped}:* `{value_escaped}` ✅")
         elif field == current_field:
-            # Current field being filled
-            field_escaped = escape_markdown_v2(field)
-            lines.append(f"*{field_escaped}:* _\\(awaiting input\\)_")
+            # Current field being filled - show with type hint
+            type_hint = _format_field_type_hint(field_meta)
+            if type_hint:
+                type_hint_escaped = escape_markdown_v2(type_hint)
+                lines.append(f"*{field_escaped}:* _\\(awaiting input\\)_")
+                lines.append(f"  ↳ _{type_hint_escaped}_")
+            else:
+                lines.append(f"*{field_escaped}:* _\\(awaiting input\\)_")
             break
         else:
-            # Future field - show placeholder
-            field_escaped = escape_markdown_v2(field)
-            lines.append(f"*{field_escaped}:* \\_\\_\\_")
+            # Future field - show placeholder with optional indicator
+            is_optional = field_meta and not field_meta.get('required', True)
+            optional_marker = " \\(optional\\)" if is_optional else ""
+            lines.append(f"*{field_escaped}:*{optional_marker} \\_\\_\\_")
 
     message_text = "\n".join(lines)
 
-    # Build keyboard with back and cancel buttons
+    # Build keyboard
+    keyboard = []
+
+    # Add option buttons for Literal and bool types
+    current_field_meta = field_metadata.get(current_field, {})
+    if current_field_meta.get('type') == 'Literal' and current_field_meta.get('allowed_values'):
+        allowed_values = current_field_meta['allowed_values']
+        # Create buttons for each allowed value (max 2 per row)
+        option_buttons = []
+        for value in allowed_values:
+            option_buttons.append(
+                InlineKeyboardButton(value, callback_data=f"api_key_select:{value}")
+            )
+        # Arrange in rows of 2
+        for i in range(0, len(option_buttons), 2):
+            keyboard.append(option_buttons[i:i+2])
+    elif current_field_meta.get('type') == 'bool':
+        # Add true/false buttons for boolean fields
+        keyboard.append([
+            InlineKeyboardButton("✓ true", callback_data="api_key_select:true"),
+            InlineKeyboardButton("✗ false", callback_data="api_key_select:false")
+        ])
+
+    # Add skip button for optional fields
+    if current_field_meta and not current_field_meta.get('required', True):
+        keyboard.append([InlineKeyboardButton("⏭ Skip (use default)", callback_data="api_key_skip")])
+
+    # Build navigation buttons
     buttons = []
 
     # Add back button if not on first field
@@ -741,11 +1081,10 @@ def _build_api_key_config_message(config_data: dict, current_field: str, all_fie
     if current_index > 0:
         buttons.append(InlineKeyboardButton("« Back", callback_data="api_key_config_back"))
 
-    # Always add cancel button
-    encoded_account = base64.b64encode(account_name.encode()).decode()
-    buttons.append(InlineKeyboardButton("❌ Cancel", callback_data=f"api_key_back_account:{encoded_account}"))
+    # Always add cancel button - navigate back to connector type view
+    buttons.append(InlineKeyboardButton("❌ Cancel", callback_data=f"api_key_type:{connector_type}"))
 
-    keyboard = [buttons]
+    keyboard.append(buttons)
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     return message_text, reply_markup

@@ -8,8 +8,21 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 from utils.telegram_formatters import escape_markdown_v2
+from utils.auth import restricted
 
 logger = logging.getLogger(__name__)
+
+
+@restricted
+async def servers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /servers command - show API servers configuration directly."""
+    from handlers import clear_all_input_states
+    from utils.telegram_helpers import create_mock_query_from_message
+
+    clear_all_input_states(context)
+    mock_query = await create_mock_query_from_message(update, "Loading servers...")
+    await show_api_servers(mock_query, context)
+
 
 # Conversation states
 (ADD_SERVER_NAME, ADD_SERVER_HOST, ADD_SERVER_PORT,
@@ -59,7 +72,7 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             keyboard = [
                 [InlineKeyboardButton("➕ Add Server", callback_data="api_server_add")],
-                [InlineKeyboardButton("« Back", callback_data="config_back")]
+                [InlineKeyboardButton("« Close", callback_data="config_close")]
             ]
         else:
             # Build server list with status
@@ -139,7 +152,7 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 [
                     InlineKeyboardButton("➕ Add Server", callback_data="api_server_add"),
                     InlineKeyboardButton("🔄 Refresh", callback_data="config_api_servers"),
-                    InlineKeyboardButton("« Back", callback_data="config_back")
+                    InlineKeyboardButton("« Close", callback_data="config_close")
                 ]
             ]
 
@@ -160,7 +173,7 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error showing API servers: {e}", exc_info=True)
         error_text = f"❌ Error loading API servers: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+        keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 

@@ -31,7 +31,7 @@ def _get_admin_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Stats", callback_data="admin:stats"),
         ],
         [
-            InlineKeyboardButton("« Back", callback_data="config_back"),
+            InlineKeyboardButton("« Close", callback_data="config_close"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -475,3 +475,10 @@ async def _show_stats(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+__all__ = [
+    'admin_command',
+    'admin_callback_handler',
+    '_show_admin_menu',
+]
