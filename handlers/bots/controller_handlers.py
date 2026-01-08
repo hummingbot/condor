@@ -1405,6 +1405,10 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
     pair = config.get("trading_pair", "")
     side = "📈 LONG" if config.get("side") == SIDE_LONG else "📉 SHORT"
 
+    # Enable text input for leverage
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "leverage"
+
     keyboard = [
         [
             InlineKeyboardButton("1x", callback_data="bots:gs_leverage:1"),
@@ -1426,7 +1430,8 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
     await query.message.edit_text(
         r"*📈 Grid Strike \- Step 4/6*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}` \\| {side}" + "\n\n"
-        r"⚡ *Select Leverage*",
+        r"⚡ *Select Leverage*" + "\n"
+        r"_Or type a value \(e\.g\. 2, 3x\)_",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2254,7 +2259,8 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
-        logger.error(f"Error updating review message: {e}")
+        logger.error(f"Error updating review message: {e}", exc_info=True)
+        logger.debug(f"Message text was: {message_text[:500]}")
 
 
 async def handle_gs_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2642,7 +2648,10 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
     chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
+    logger.debug(f"GS wizard input: step={step}, input={user_input[:50]}")
+
     if not step:
+        logger.warning("GS wizard input called but no step set")
         return
 
     try:
@@ -2848,6 +2857,21 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             context.user_data["gs_wizard_step"] = "prices"
             await _update_wizard_message_for_prices(update, context)
 
+        elif step == "leverage":
+            # Parse leverage - handle formats like "2", "2x", "2X", "10x"
+            lev_input = user_input.strip().lower().replace("x", "")
+            leverage = int(float(lev_input))
+
+            if leverage < 1:
+                raise ValueError("Leverage must be at least 1")
+
+            config["leverage"] = leverage
+            set_controller_config(context, config)
+
+            # Move to amount step
+            context.user_data["gs_wizard_step"] = "total_amount_quote"
+            await _update_wizard_message_for_amount(update, context)
+
         elif step == "edit_id":
             new_id = user_input.strip()
             config["id"] = new_id
@@ -2999,14 +3023,26 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             else:
                 raise ValueError("No valid fields found")
 
-    except ValueError:
+    except ValueError as e:
         # Send error and let user try again
+        logger.warning(f"GS wizard input ValueError: {e}")
         error_msg = await update.message.reply_text(
             f"Invalid input. Please enter a valid value."
         )
         # Auto-delete error after 3 seconds
         await asyncio.sleep(3)
         try:
+            await error_msg.delete()
+        except:
+            pass
+    except Exception as e:
+        # Catch any other exceptions and log them
+        logger.error(f"GS wizard input error: {e}", exc_info=True)
+        try:
+            error_msg = await update.message.reply_text(
+                f"Error processing input: {str(e)[:100]}"
+            )
+            await asyncio.sleep(3)
             await error_msg.delete()
         except:
             pass
@@ -3169,6 +3205,47 @@ async def _update_wizard_message_for_prices(update: Update, context: ContextType
         'effective_chat': FakeChat(chat_id)
     })()
     await _show_wizard_prices_step(fake_update, context)
+
+
+async def _update_wizard_message_for_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trigger amount step after leverage input"""
+    message_id = context.user_data.get("gs_wizard_message_id")
+    chat_id = context.user_data.get("gs_wizard_chat_id")
+
+    if not message_id or not chat_id:
+        return
+
+    # Create a fake query object to reuse _show_wizard_amount_step
+    class FakeChat:
+        def __init__(self, chat_id):
+            self.id = chat_id
+
+    class FakeQuery:
+        def __init__(self, bot, chat_id, message_id):
+            self.message = FakeMessage(bot, chat_id, message_id)
+
+    class FakeMessage:
+        def __init__(self, bot, chat_id, message_id):
+            self.chat_id = chat_id
+            self.message_id = message_id
+            self._bot = bot
+
+        async def edit_text(self, text, **kwargs):
+            await self._bot.edit_message_text(
+                chat_id=self.chat_id,
+                message_id=self.message_id,
+                text=text,
+                **kwargs
+            )
+
+        async def delete(self):
+            await self._bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
+
+    fake_update = type('FakeUpdate', (), {
+        'callback_query': FakeQuery(context.bot, chat_id, message_id),
+        'effective_chat': FakeChat(chat_id)
+    })()
+    await _show_wizard_amount_step(fake_update, context)
 
 
 async def _update_wizard_message_for_prices_after_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

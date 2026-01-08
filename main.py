@@ -297,6 +297,10 @@ def register_handlers(application: Application) -> None:
     from handlers.cex import cex_callback_handler
     from handlers.dex import lp_command, dex_callback_handler
     from handlers.config import get_config_callback_handler, get_modify_value_handler
+    from handlers.config.servers import servers_command
+    from handlers.config.api_keys import keys_command
+    from handlers.config.gateway import gateway_command
+    from handlers.admin import admin_command
     from handlers.routines import routines_command, routines_callback_handler
 
     # Clear existing handlers
@@ -310,6 +314,12 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("swap", unified_trade_command))   # Alias for /trade
     application.add_handler(CommandHandler("lp", lp_command))
     application.add_handler(CommandHandler("routines", routines_command))
+
+    # Add configuration commands (direct access)
+    application.add_handler(CommandHandler("servers", servers_command))
+    application.add_handler(CommandHandler("keys", keys_command))
+    application.add_handler(CommandHandler("gateway", gateway_command))
+    application.add_handler(CommandHandler("admin", admin_command))
 
     # Add callback query handler for start menu navigation
     application.add_handler(CallbackQueryHandler(start_callback_handler, pattern="^start:"))
@@ -361,18 +371,38 @@ async def sync_server_permissions() -> None:
 
 async def post_init(application: Application) -> None:
     """Register bot commands after initialization."""
+    from telegram import BotCommandScopeChat
+    from utils.config import ADMIN_USER_ID
+
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
+    # Public commands (all users)
     commands = [
-        BotCommand("start", "Welcome message and quick commands overview"),
-        BotCommand("portfolio", "View detailed portfolio breakdown by account and connector"),
-        BotCommand("bots", "Check status of all active trading bots"),
+        BotCommand("start", "Welcome message and server status"),
+        BotCommand("portfolio", "View detailed portfolio breakdown"),
+        BotCommand("bots", "Check status of all trading bots"),
         BotCommand("trade", "Unified trading - CEX orders and DEX swaps"),
-        BotCommand("lp", "Liquidity pool management and explorer"),
+        BotCommand("lp", "Liquidity pool management"),
         BotCommand("routines", "Run configurable Python scripts"),
+        BotCommand("servers", "Manage Hummingbot API servers"),
+        BotCommand("keys", "Configure exchange API credentials"),
+        BotCommand("gateway", "Deploy Gateway for DEX trading"),
     ]
     await application.bot.set_my_commands(commands)
+
+    # Admin-only commands (visible only to admin user in their command menu)
+    if ADMIN_USER_ID:
+        admin_commands = commands + [
+            BotCommand("admin", "Admin panel - manage users and access"),
+        ]
+        try:
+            await application.bot.set_my_commands(
+                admin_commands,
+                scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID))
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set admin-specific commands: {e}")
 
     # Restore scheduled routine jobs from persistence
     from handlers.routines import restore_scheduled_jobs
