@@ -547,7 +547,8 @@ async def get_available_cex_connectors(
     user_data: dict,
     client,
     account_name: str = "master_account",
-    ttl: int = 300  # 5 min cache
+    ttl: int = 300,  # 5 min cache
+    server_name: str = "default"
 ) -> List[str]:
     """Get available CEX connectors with caching.
 
@@ -556,11 +557,12 @@ async def get_available_cex_connectors(
         client: API client
         account_name: Account name to check credentials for
         ttl: Cache TTL in seconds
+        server_name: Server name to include in cache key (prevents cross-server cache pollution)
 
     Returns:
         List of available CEX connector names
     """
-    cache_key = f"available_cex_connectors_{account_name}"
+    cache_key = f"available_cex_connectors_{server_name}_{account_name}"
     return await cached_call(
         user_data,
         cache_key,
@@ -586,3 +588,173 @@ def clear_cex_state(context) -> None:
     context.user_data.pop("place_order_params", None)
     context.user_data.pop("current_positions", None)
     context.user_data.pop("current_orders", None)
+
+
+# ============================================
+# TRADING PAIR VALIDATION
+# ============================================
+
+def _calculate_similarity(s1: str, s2: str) -> float:
+    """Calculate similarity ratio between two strings using Levenshtein-like approach.
+
+    Returns:
+        Similarity score between 0 and 1 (1 = exact match)
+    """
+    s1, s2 = s1.upper(), s2.upper()
+
+    if s1 == s2:
+        return 1.0
+
+    # Check for partial matches (base token match)
+    s1_parts = s1.replace("_", "-").split("-")
+    s2_parts = s2.replace("_", "-").split("-")
+
+    # Exact base token match gets high score
+    if s1_parts and s2_parts and s1_parts[0] == s2_parts[0]:
+        # Same base token, check quote similarity
+        if len(s1_parts) > 1 and len(s2_parts) > 1:
+            # Both have quote tokens
+            quote_sim = _levenshtein_ratio(s1_parts[1], s2_parts[1])
+            return 0.7 + (0.3 * quote_sim)
+        return 0.7
+
+    # Fall back to full string Levenshtein ratio
+    return _levenshtein_ratio(s1, s2)
+
+
+def _levenshtein_ratio(s1: str, s2: str) -> float:
+    """Calculate Levenshtein similarity ratio between two strings."""
+    if not s1 and not s2:
+        return 1.0
+    if not s1 or not s2:
+        return 0.0
+
+    len1, len2 = len(s1), len(s2)
+
+    # Create distance matrix
+    dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
+
+    for i in range(len1 + 1):
+        dp[i][0] = i
+    for j in range(len2 + 1):
+        dp[0][j] = j
+
+    for i in range(1, len1 + 1):
+        for j in range(1, len2 + 1):
+            cost = 0 if s1[i - 1] == s2[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,       # deletion
+                dp[i][j - 1] + 1,       # insertion
+                dp[i - 1][j - 1] + cost  # substitution
+            )
+
+    distance = dp[len1][len2]
+    max_len = max(len1, len2)
+    return 1 - (distance / max_len)
+
+
+def find_similar_trading_pairs(
+    input_pair: str,
+    available_pairs: List[str],
+    limit: int = 4,
+    min_similarity: float = 0.3
+) -> List[str]:
+    """Find trading pairs similar to the input.
+
+    Args:
+        input_pair: User's input trading pair
+        available_pairs: List of available trading pairs from trading rules
+        limit: Maximum number of suggestions to return
+        min_similarity: Minimum similarity score to include (0-1)
+
+    Returns:
+        List of similar trading pairs, sorted by similarity (most similar first)
+    """
+    input_normalized = input_pair.upper().replace("_", "-").replace("/", "-")
+
+    # Calculate similarity for each available pair
+    scored_pairs = []
+    for pair in available_pairs:
+        pair_normalized = pair.upper().replace("_", "-")
+        score = _calculate_similarity(input_normalized, pair_normalized)
+        if score >= min_similarity:
+            scored_pairs.append((pair, score))
+
+    # Sort by score (descending) and return top matches
+    scored_pairs.sort(key=lambda x: x[1], reverse=True)
+    return [pair for pair, _ in scored_pairs[:limit]]
+
+
+async def validate_trading_pair(
+    user_data: dict,
+    client,
+    connector_name: str,
+    trading_pair: str,
+    ttl: int = 300
+) -> tuple[bool, Optional[str], List[str]]:
+    """Validate that a trading pair exists on a connector.
+
+    Args:
+        user_data: context.user_data dict
+        client: API client
+        connector_name: Name of the connector
+        trading_pair: Trading pair to validate
+        ttl: Cache TTL for trading rules
+
+    Returns:
+        Tuple of (is_valid, error_message, suggestions)
+        - is_valid: True if the pair exists
+        - error_message: Error message if invalid, None if valid
+        - suggestions: List of similar trading pairs if invalid, empty if valid
+    """
+    # Normalize input
+    pair_normalized = trading_pair.upper().replace("_", "-").replace("/", "-")
+
+    # Get trading rules for the connector
+    trading_rules = await get_trading_rules(user_data, client, connector_name, ttl)
+
+    if not trading_rules:
+        # No rules available, can't validate - allow through
+        logger.warning(f"No trading rules available for {connector_name}, skipping validation")
+        return True, None, []
+
+    # Get all available pairs
+    available_pairs = list(trading_rules.keys())
+
+    # Check for exact match (case-insensitive, normalized)
+    available_normalized = {p.upper().replace("_", "-"): p for p in available_pairs}
+    if pair_normalized in available_normalized:
+        # Return the correctly formatted pair from the exchange
+        return True, None, []
+
+    # Pair not found - find suggestions
+    suggestions = find_similar_trading_pairs(pair_normalized, available_pairs, limit=4)
+
+    error_msg = f"Trading pair '{trading_pair}' not found on {connector_name}"
+
+    return False, error_msg, suggestions
+
+
+def get_correct_pair_format(
+    trading_rules: Dict[str, Dict[str, Any]],
+    input_pair: str
+) -> Optional[str]:
+    """Get the correctly formatted trading pair from trading rules.
+
+    Args:
+        trading_rules: Dict of trading_pair -> rules
+        input_pair: User's input trading pair
+
+    Returns:
+        Correctly formatted pair if found, None otherwise
+    """
+    if not trading_rules:
+        return None
+
+    pair_normalized = input_pair.upper().replace("_", "-").replace("/", "-")
+
+    for pair in trading_rules.keys():
+        if pair.upper().replace("_", "-") == pair_normalized:
+            return pair
+
+    return None

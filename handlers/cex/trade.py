@@ -30,6 +30,8 @@ from ._shared import (
     get_positions,
     get_trading_rules,
     get_available_cex_connectors,
+    validate_trading_pair,
+    get_correct_pair_format,
 )
 from handlers.dex._shared import format_relative_time
 
@@ -288,7 +290,8 @@ def _build_trade_keyboard(params: dict, is_perpetual: bool = False,
 def _build_trade_menu_text(user_data: dict, params: dict,
                            balances: dict = None, positions: list = None,
                            orders: list = None, trading_rules: dict = None,
-                           current_price: float = None, quote_data: dict = None) -> str:
+                           current_price: float = None, quote_data: dict = None,
+                           server_name: str = None, server_status: str = "online") -> str:
     """Build the trade menu text content (swap.py style)"""
     connector = params.get('connector', 'binance_perpetual')
     trading_pair = params.get('trading_pair', 'BTC-USDT')
@@ -299,8 +302,12 @@ def _build_trade_menu_text(user_data: dict, params: dict,
     else:
         base_token, quote_token = trading_pair, 'USDT'
 
-    # Build header
-    help_text = r"📝 *Trade*" + "\n\n"
+    # Build header with server indicator
+    if server_name:
+        status_emoji = {"online": "🟢", "offline": "🔴", "auth_error": "🟠", "error": "⚠️"}.get(server_status, "🟢")
+        help_text = f"📝 *Trade* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
+    else:
+        help_text = r"📝 *Trade*" + "\n\n"
 
     # Show balances section (with loading placeholder)
     help_text += r"━━━ Balance ━━━" + "\n"
@@ -434,11 +441,39 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
                           send_new: bool = False, auto_fetch: bool = True,
                           quote_data: dict = None) -> None:
     """Display the unified trade menu with balances and data"""
+    from config_manager import get_config_manager
+    from handlers.config.user_preferences import get_active_server
+
     params = context.user_data.get("trade_params", {})
     connector = params.get("connector", "binance_perpetual")
     trading_pair = params.get("trading_pair", "BTC-USDT")
     account = get_clob_account(context.user_data)
     is_perpetual = _is_perpetual_connector(connector)
+
+    # Get current server name and status - with proper access control
+    cm = get_config_manager()
+    user_id = context.user_data.get('_user_id')
+
+    # Only use servers the user has access to
+    if user_id:
+        accessible_servers = cm.get_accessible_servers(user_id)
+        all_servers = cm.list_servers()
+        enabled_accessible = [s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)]
+    else:
+        logger.warning("show_trade_menu called without user_id - cannot verify server access")
+        all_servers = cm.list_servers()
+        enabled_accessible = [name for name, cfg in all_servers.items() if cfg.get("enabled", True)]
+
+    preferred = get_active_server(context.user_data)
+    # Only use preferred if user has access to it
+    server_name = preferred if preferred and preferred in enabled_accessible else (enabled_accessible[0] if enabled_accessible else None)
+    server_status = "online"
+    if server_name:
+        try:
+            server_status_info = await cm.check_server_status(server_name)
+            server_status = server_status_info.get("status", "online")
+        except Exception:
+            pass
 
     # Try to get cached data
     balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
@@ -460,7 +495,8 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Build text and keyboard
     help_text = _build_trade_menu_text(
-        context.user_data, params, balances, positions, orders, trading_rules, current_price, quote_data
+        context.user_data, params, balances, positions, orders, trading_rules, current_price, quote_data,
+        server_name=server_name, server_status=server_status
     )
     keyboard = _build_trade_keyboard(params, is_perpetual, leverage, position_mode)
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -885,8 +921,27 @@ async def handle_trade_toggle_position(update: Update, context: ContextTypes.DEF
 
 async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available CEX connectors and DEX networks for selection"""
+    from config_manager import get_config_manager
+    from handlers.config.user_preferences import get_active_server
+
     chat_id = update.effective_chat.id
     keyboard = []
+
+    # Get server name for cache keying - with proper access control
+    cm = get_config_manager()
+    user_id = context.user_data.get('_user_id')
+
+    # Only use servers the user has access to
+    if user_id:
+        accessible_servers = cm.get_accessible_servers(user_id)
+        all_servers = cm.list_servers()
+        enabled_accessible = [s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)]
+    else:
+        all_servers = cm.list_servers()
+        enabled_accessible = [name for name, cfg in all_servers.items() if cfg.get("enabled", True)]
+
+    preferred = get_active_server(context.user_data)
+    server_name = preferred if preferred and preferred in enabled_accessible else (enabled_accessible[0] if enabled_accessible else "default")
 
     try:
         client = await get_client(chat_id, context=context)
@@ -896,7 +951,7 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
 
         async def get_cex_connectors_list():
             try:
-                return await get_available_cex_connectors(context.user_data, client)
+                return await get_available_cex_connectors(context.user_data, client, server_name=server_name)
             except Exception as e:
                 logger.warning(f"Could not fetch CEX connectors: {e}")
                 return []
@@ -1443,19 +1498,114 @@ async def process_trade_set_pair(
     context: ContextTypes.DEFAULT_TYPE,
     user_input: str
 ) -> None:
-    """Process trading pair input"""
+    """Process trading pair input with validation against available markets"""
     try:
         params = context.user_data.get("trade_params", {})
-        params["trading_pair"] = user_input.strip().upper()
+        connector = params.get("connector", "binance_perpetual")
+        pair_input = user_input.strip().upper().replace("_", "-").replace("/", "-")
 
-        _invalidate_trade_cache(context.user_data)
-        context.user_data["cex_state"] = "trade"
+        chat_id = update.effective_chat.id
+        client = await get_client(chat_id, context=context)
 
-        await _update_trade_menu_after_input(update, context)
+        # Validate trading pair exists on the connector
+        is_valid, error_msg, suggestions = await validate_trading_pair(
+            context.user_data, client, connector, pair_input
+        )
+
+        if is_valid:
+            # Get correctly formatted pair from trading rules
+            trading_rules = await get_trading_rules(context.user_data, client, connector)
+            correct_pair = get_correct_pair_format(trading_rules, pair_input)
+            params["trading_pair"] = correct_pair if correct_pair else pair_input
+
+            _invalidate_trade_cache(context.user_data)
+            context.user_data["cex_state"] = "trade"
+
+            await _update_trade_menu_after_input(update, context)
+        else:
+            # Show error with suggestions
+            await _show_pair_suggestions(update, context, pair_input, error_msg, suggestions)
 
     except Exception as e:
+        logger.error(f"Error processing trading pair: {e}", exc_info=True)
         error_message = format_error_message(f"Failed: {str(e)}")
         await update.message.reply_text(error_message, parse_mode="MarkdownV2")
+
+
+async def _show_pair_suggestions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    input_pair: str,
+    error_msg: str,
+    suggestions: list
+) -> None:
+    """Show trading pair suggestions when validation fails"""
+    # Delete user's input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Build suggestion message
+    help_text = f"❌ *{escape_markdown_v2(error_msg)}*\n\n"
+
+    if suggestions:
+        help_text += "💡 *Did you mean:*\n"
+    else:
+        help_text += "_No similar pairs found\\._\n"
+
+    # Build keyboard with suggestions
+    keyboard = []
+    for pair in suggestions:
+        keyboard.append([InlineKeyboardButton(
+            f"📈 {pair}",
+            callback_data=f"cex:trade_pair_select_{pair}"
+        )])
+
+    keyboard.append([InlineKeyboardButton("« Back", callback_data="cex:trade")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Update the stored trade menu message
+    msg_id = context.user_data.get("trade_menu_message_id")
+    menu_chat_id = context.user_data.get("trade_menu_chat_id")
+
+    if msg_id and menu_chat_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=menu_chat_id,
+                message_id=msg_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.debug(f"Could not update trade menu: {e}")
+            await update.effective_chat.send_message(
+                help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+    else:
+        await update.effective_chat.send_message(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+
+async def handle_trade_pair_select(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    trading_pair: str
+) -> None:
+    """Handle selection of a suggested trading pair"""
+    params = context.user_data.get("trade_params", {})
+    params["trading_pair"] = trading_pair
+
+    _invalidate_trade_cache(context.user_data)
+    context.user_data["cex_state"] = "trade"
+
+    await show_trade_menu(update, context)
 
 
 async def process_trade_set_amount(

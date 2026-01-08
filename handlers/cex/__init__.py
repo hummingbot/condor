@@ -107,6 +107,7 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         handle_trade_toggle_pos_mode,
         handle_trade_get_quote,
         handle_trade_execute,
+        handle_trade_pair_select,
         handle_close,
     )
     from .orders import handle_search_orders, handle_cancel_order, handle_confirm_cancel_order
@@ -150,6 +151,9 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_trade_connector_select(update, context, connector_name)
         elif action == "trade_set_pair":
             await handle_trade_set_pair(update, context)
+        elif action.startswith("trade_pair_select_"):
+            trading_pair = action.replace("trade_pair_select_", "")
+            await handle_trade_pair_select(update, context, trading_pair)
         elif action == "trade_set_amount":
             await handle_trade_set_amount(update, context)
         elif action == "trade_set_price":
