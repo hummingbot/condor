@@ -12,7 +12,7 @@ Controller-specific code (defaults, fields, charts) is in handlers/bots/controll
 
 import logging
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -59,33 +59,59 @@ GRID_STRIKE_FIELDS = {
 # SERVER CLIENT HELPER
 # ============================================
 
-async def get_bots_client(chat_id: Optional[int] = None, user_data: Optional[Dict] = None):
+async def get_bots_client(chat_id: Optional[int] = None, user_data: Optional[Dict] = None) -> Tuple[Any, str]:
     """Get the API client for bot operations
 
     Args:
         chat_id: Optional chat ID (legacy, not used for server selection)
-        user_data: Optional user_data dict to get user's preferred server
+        user_data: Optional user_data dict to get user's preferred server and user_id
 
     Returns:
-        Client instance with bot_orchestration and controller endpoints
+        Tuple of (client, server_name) - client has bot_orchestration and controller endpoints
+
+    Raises:
+        ValueError: If no accessible servers are available for the user
     """
     from config_manager import get_config_manager
 
-    servers = get_config_manager().list_servers()
-    enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+    cm = get_config_manager()
 
-    if not enabled_servers:
-        raise ValueError("No enabled API servers available")
+    # Get user_id from user_data for access control
+    user_id = user_data.get('_user_id') if user_data else None
 
-    # Use user's preferred server if user_data provided
+    # Get servers the user has access to (not all servers)
+    if user_id:
+        accessible_servers = cm.get_accessible_servers(user_id)
+        # Filter to only enabled servers
+        all_servers = cm.list_servers()
+        enabled_accessible = [s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)]
+    else:
+        # Fallback for legacy calls without user_data - use all enabled servers
+        # This should not happen in normal operation
+        logger.warning("get_bots_client called without user_data - cannot verify server access")
+        all_servers = cm.list_servers()
+        enabled_accessible = [name for name, cfg in all_servers.items() if cfg.get("enabled", True)]
+
+    if not enabled_accessible:
+        raise ValueError("No accessible API servers available. Please configure server access.")
+
+    # Use user's preferred server if valid
     preferred = None
     if user_data:
         from handlers.config.user_preferences import get_active_server
         preferred = get_active_server(user_data)
 
-    server_name = preferred if preferred and preferred in enabled_servers else enabled_servers[0]
-    logger.info(f"Bots using server: {server_name}")
-    return await get_config_manager().get_client(server_name)
+    # Only use preferred server if user has access to it
+    if preferred and preferred in enabled_accessible:
+        server_name = preferred
+    elif enabled_accessible:
+        server_name = enabled_accessible[0]
+    else:
+        raise ValueError("No accessible API servers available")
+
+    logger.info(f"Bots using server: {server_name} (user_id: {user_id})")
+    client = await cm.get_client(server_name)
+    return client, server_name
 
 
 # ============================================
@@ -301,10 +327,22 @@ async def get_available_cex_connectors(
     user_data: dict,
     client,
     account_name: str = "master_account",
-    ttl: int = 300
+    ttl: int = 300,
+    server_name: str = "default"
 ) -> List[str]:
-    """Get available CEX connectors with caching."""
-    cache_key = f"available_cex_connectors_{account_name}"
+    """Get available CEX connectors with caching.
+
+    Args:
+        user_data: context.user_data dict
+        client: API client instance
+        account_name: Account name to check credentials for
+        ttl: Cache time-to-live in seconds
+        server_name: Server name to include in cache key (prevents cross-server cache pollution)
+
+    Returns:
+        List of available CEX connector names
+    """
+    cache_key = f"available_cex_connectors_{server_name}_{account_name}"
     return await cached_call(
         user_data,
         cache_key,

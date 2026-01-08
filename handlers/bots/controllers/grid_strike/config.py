@@ -243,9 +243,11 @@ WIZARD_STEPS: List[str] = [
 ]
 
 
-# Editable fields for config editing (excludes id, connector, trading_pair, side which are fixed)
+# Editable fields for config editing
 # This is the standard list shown in both wizard final step and edit views
 EDITABLE_FIELDS: List[str] = [
+    "connector_name",
+    "trading_pair",
     "total_amount_quote",
     "start_price",
     "end_price",

@@ -132,9 +132,11 @@ from .controller_handlers import (
     handle_gs_review_back,
     handle_gs_edit_price,
     process_gs_wizard_input,
+    handle_gs_pair_select,
     # PMM Mister wizard
     handle_pmm_wizard_connector,
     handle_pmm_wizard_pair,
+    handle_pmm_pair_select,
     handle_pmm_wizard_leverage,
     handle_pmm_wizard_allocation,
     handle_pmm_wizard_amount,
@@ -201,7 +203,7 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         from ._shared import get_bots_client
 
         try:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             bot_status = await client.bot_orchestration.get_bot_status(bot_name)
             response_message = format_bot_status(bot_status)
             await msg.reply_text(response_message, parse_mode="MarkdownV2")
@@ -447,6 +449,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 pair = action_parts[1]
                 await handle_gs_wizard_pair(update, context, pair)
 
+        elif main_action == "gs_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_gs_pair_select(update, context, pair)
+
         elif main_action == "gs_side":
             if len(action_parts) > 1:
                 side_str = action_parts[1]
@@ -538,6 +545,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if len(action_parts) > 1:
                 pair = action_parts[1]
                 await handle_pmm_wizard_pair(update, context, pair)
+
+        elif main_action == "pmm_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_pmm_pair_select(update, context, pair)
 
         elif main_action == "pmm_leverage":
             if len(action_parts) > 1:

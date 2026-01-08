@@ -89,7 +89,19 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        client = await get_bots_client(chat_id)
+        from config_manager import get_config_manager
+
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+
+        # Check server status for indicator
+        try:
+            server_status_info = await get_config_manager().check_server_status(server_name)
+            server_status = server_status_info.get("status", "online")
+        except Exception:
+            server_status = "online"  # Default to online if check fails
+
+        status_emoji = {"online": "🟢", "offline": "🔴", "auth_error": "🟠", "error": "⚠️"}.get(server_status, "🟢")
+
         bots_data = await client.bot_orchestration.get_active_bots_status()
 
         # Fetch bot runs to get deployment times
@@ -115,6 +127,7 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Store bots data for later use
         context.user_data["active_bots_data"] = bots_data
         context.user_data["bot_runs_map"] = bot_runs_map
+        context.user_data["current_server_name"] = server_name
 
         # Format the bot status message
         status_message = format_active_bots(bots_data, bot_runs=bot_runs_map)
@@ -122,8 +135,8 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Build the menu with bot buttons
         reply_markup = _build_main_menu_keyboard(bots_dict)
 
-        # Add header
-        header = r"*Bots Dashboard*" + "\n\n"
+        # Add header with server indicator
+        header = f"*Bots Dashboard* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
         full_message = header + status_message
 
         if query:
@@ -210,7 +223,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
         # If not in cache, fetch fresh data
         if not bot_info:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             fresh_data = await client.bot_orchestration.get_active_bots_status()
             if isinstance(fresh_data, dict) and "data" in fresh_data:
                 bot_info = fresh_data.get("data", {}).get(bot_name)
@@ -633,7 +646,7 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
     is_pmm_mister = False
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         configs = await client.controllers.get_bot_controller_configs(bot_name)
 
         # Find the matching config
@@ -820,7 +833,7 @@ async def handle_confirm_stop_controller(update: Update, context: ContextTypes.D
     )
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Stop controller by setting manual_kill_switch=True
         result = await client.controllers.update_bot_controller_config(
@@ -919,7 +932,7 @@ async def handle_confirm_start_controller(update: Update, context: ContextTypes.
     )
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Start controller by setting manual_kill_switch=False
         result = await client.controllers.update_bot_controller_config(
@@ -965,7 +978,7 @@ async def handle_clone_controller(update: Update, context: ContextTypes.DEFAULT_
 
     try:
         # Fetch existing configs to generate new ID (use get_all to find max number)
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         configs = await client.controllers.get_all_controller_configs()
         context.user_data["controller_configs_list"] = configs
 
@@ -1014,7 +1027,7 @@ async def handle_quick_stop_controller(update: Update, context: ContextTypes.DEF
     await query.answer(f"Stopping {short_name}...")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Stop controller by setting manual_kill_switch=True
         await client.controllers.update_bot_controller_config(
@@ -1051,7 +1064,7 @@ async def handle_quick_start_controller(update: Update, context: ContextTypes.DE
     await query.answer(f"Starting {short_name}...")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Start controller by setting manual_kill_switch=False
         await client.controllers.update_bot_controller_config(
@@ -1099,7 +1112,7 @@ async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TY
         pass
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         connector = ctrl_config.get("connector_name", "")
         pair = ctrl_config.get("trading_pair", "")
 
@@ -1411,7 +1424,7 @@ async def handle_controller_confirm_set(update: Update, context: ContextTypes.DE
     await query.answer("Updating...")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Build config update
         if field_name == "take_profit":
@@ -1579,7 +1592,7 @@ async def process_controller_field_input(update: Update, context: ContextTypes.D
             update_config[key] = value
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Apply the update
         result = await client.controllers.update_bot_controller_config(
@@ -1717,7 +1730,7 @@ async def handle_confirm_stop_bot(update: Update, context: ContextTypes.DEFAULT_
     )
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         result = await client.bot_orchestration.stop_and_archive_bot(
             bot_name=bot_name,
@@ -1789,7 +1802,7 @@ async def handle_refresh_controller(update: Update, context: ContextTypes.DEFAUL
 
     if bot_name:
         try:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             fresh_data = await client.bot_orchestration.get_active_bots_status()
             if isinstance(fresh_data, dict) and "data" in fresh_data:
                 bot_info = fresh_data.get("data", {}).get(bot_name)

@@ -288,7 +288,7 @@ async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Fetch databases (with caching) - only healthy databases
         cache_key = "archived_databases"
@@ -449,7 +449,7 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["archived_current_db"] = db_path
         context.user_data["archived_current_idx"] = db_index
 
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Fetch summary
         summary = await fetch_database_summary(client, db_path)
@@ -575,7 +575,7 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
         summaries = context.user_data.get("archived_summaries", {})
 
         if not databases:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             all_databases = await fetch_archived_databases(client)
             # Filter to only healthy databases
             databases = await get_healthy_databases(client, all_databases)
@@ -586,7 +586,7 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
                 return
 
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         bots_data = []
 
         # Import chart functions
@@ -671,7 +671,7 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
             parse_mode="MarkdownV2"
         )
 
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Fetch summary and ALL trades
         summary = await fetch_database_summary(client, db_path)
@@ -754,7 +754,7 @@ async def handle_generate_report(update: Update, context: ContextTypes.DEFAULT_T
         # Import report generation
         from .archived_report import save_full_report
 
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         json_path, png_path = await save_full_report(client, db_path)
 
         # Update message with success
