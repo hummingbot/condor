@@ -18,23 +18,3 @@ services:
     network_mode: host
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      # Only update containers with the watchtower label
-      WATCHTOWER_LABEL_ENABLE: "true"
-      # Check for updates every 5 minutes (300 seconds)
-      WATCHTOWER_POLL_INTERVAL: 300
-      # Remove old images after updating
-      WATCHTOWER_CLEANUP: "true"
-      # Telegram notifications
-      WATCHTOWER_NOTIFICATIONS: shoutrrr
-      WATCHTOWER_NOTIFICATION_URL: telegram://${TELEGRAM_TOKEN}@telegram?chats=${ADMIN_USER_ID}
-    env_file:
-      - .env
-    command: --interval 300
