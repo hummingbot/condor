@@ -44,11 +44,10 @@ def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start the conversation and display the main menu."""
+    """Start the conversation and display available commands (BotFather style)."""
     from config_manager import get_config_manager, UserRole
     from utils.auth import _notify_admin_new_user
 
-    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     username = update.effective_user.username or "No username"
 
@@ -57,23 +56,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Handle blocked users
     if role == UserRole.BLOCKED:
-        await update.message.reply_text("🚫 Access denied.")
+        await update.message.reply_text("Access denied.")
         return
 
     # Handle pending users
     if role == UserRole.PENDING:
-        reply_text = rf"""
-⏳ *Access Pending*
+        reply_text = f"""Access Pending
 
-Your access request is awaiting admin approval\.
+Your access request is awaiting admin approval.
 
-🆔 *Your Info*:
-👤 User ID: `{user_id}`
-🏷️ Username: `@{username}`
+Your Info:
+User ID: {user_id}
+Username: @{username}
 
-You will be notified when approved\.
-"""
-        await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
+You will be notified when approved."""
+        await update.message.reply_text(reply_text)
         return
 
     # Handle new users - register as pending
@@ -82,127 +79,33 @@ You will be notified when approved\.
         if is_new:
             await _notify_admin_new_user(context, user_id, username)
 
-        reply_text = rf"""
-🔒 *Access Request Submitted*
+        reply_text = f"""Access Request Submitted
 
-Your request has been sent to the admin for approval\.
+Your request has been sent to the admin for approval.
 
-🆔 *Your Info*:
-👤 User ID: `{user_id}`
-🏷️ Username: `@{username}`
+Your Info:
+User ID: {user_id}
+Username: @{username}
 
-You will be notified when approved\.
-"""
-        await update.message.reply_text(reply_text, parse_mode="MarkdownV2")
+You will be notified when approved."""
+        await update.message.reply_text(reply_text)
         return
 
     # User is approved (USER or ADMIN role)
-    # Clear all pending input states to prevent interference
     clear_all_input_states(context)
 
-    is_admin = role == UserRole.ADMIN
+    reply_text = """I can help you create and manage trading bots on any CEX or DEX using Hummingbot API servers\\.
 
-    # Build status information
-    from config_manager import get_effective_server
-    from utils.telegram_formatters import escape_markdown_v2
+See [this manual](https://hummingbot.org/condor/) if you're new to Condor\\.
 
-    # Get servers the user has access to (not all servers)
-    servers = cm.get_accessible_servers(user_id)
-    active_server = get_effective_server(chat_id, context.user_data)
+You can control me by sending these commands:
 
-    # If no active server, default to first accessible server (not global default)
-    if not active_server and servers:
-        active_server = servers[0]
+/keys \\- add exchange API keys
+/portfolio \\- view balances across exchanges
+/bots \\- deploy and manage trading bots
+/trade \\- place CEX and DEX orders"""
 
-    server_statuses = {}
-    active_server_online = False
-
-    if servers:
-        # Query all server statuses in parallel
-        status_tasks = [cm.check_server_status(name) for name in servers]
-        status_results = await asyncio.gather(*status_tasks, return_exceptions=True)
-
-        for server_name, status_result in zip(servers, status_results):
-            if isinstance(status_result, Exception):
-                status = "error"
-            else:
-                status = status_result.get("status", "unknown")
-            server_statuses[server_name] = status
-            if server_name == active_server and status == "online":
-                active_server_online = True
-
-    # Build servers list display
-    servers_display = ""
-    online_count = 0
-    if servers:
-        for server_name in servers:
-            status = server_statuses.get(server_name, "unknown")
-            if status == "online":
-                icon = "🟢"
-                online_count += 1
-            else:
-                icon = "🔴"
-
-            is_active = " ⭐" if server_name == active_server else ""
-            server_escaped = escape_markdown_v2(server_name)
-            servers_display += f"  {icon} `{server_escaped}`{is_active}\n"
-    else:
-        servers_display = "  _No servers configured_\n"
-
-    # Get gateway and accounts info only if active server is online
-    extra_info = ""
-    if active_server_online:
-        try:
-            from handlers.config.server_context import get_gateway_status_info
-            gateway_header, _ = await get_gateway_status_info(chat_id, context.user_data)
-            extra_info += gateway_header
-
-            client = await cm.get_client_for_chat(chat_id, preferred_server=active_server)
-            accounts = await client.accounts.list_accounts()
-            if accounts:
-                total_creds = 0
-                for account in accounts:
-                    try:
-                        creds = await client.accounts.list_account_credentials(account_name=str(account))
-                        total_creds += len(creds) if creds else 0
-                    except Exception:
-                        pass
-                accounts_escaped = escape_markdown_v2(str(len(accounts)))
-                creds_escaped = escape_markdown_v2(str(total_creds))
-                extra_info += f"*Accounts:* {accounts_escaped} \\({creds_escaped} keys\\)\n"
-        except Exception as e:
-            logger.warning(f"Failed to get extra info: {e}")
-
-    # Build the message
-    admin_badge = " 👑" if is_admin else ""
-
-    # Description of capabilities
-    capabilities = """_Trade CEX/DEX, manage bots, monitor portfolio_"""
-
-    # Offline help message
-    offline_help = ""
-    if not active_server_online and servers:
-        offline_help = """
-⚠️ *Active server is offline*
-• Ensure `hummingbot\\-backend\\-api` is running
-• Or select an online server below
-"""
-
-    # Menu descriptions
-    menu_help = r"""
-🔌 *Servers* \- Add/manage Hummingbot API servers
-🔑 *Keys* \- Connect exchange API credentials
-🌐 *Gateway* \- Deploy Gateway for DEX trading
-"""
-
-    reply_text = rf"""
-🦅 *Condor*{admin_badge}
-{capabilities}
-
-*Servers:*
-{servers_display}{offline_help}{extra_info}{menu_help}"""
-    keyboard = _get_start_menu_keyboard(is_admin=is_admin)
-    await update.message.reply_text(reply_text, parse_mode="MarkdownV2", reply_markup=keyboard)
+    await update.message.reply_text(reply_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
 
 
 @restricted

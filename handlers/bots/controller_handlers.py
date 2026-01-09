@@ -1234,9 +1234,12 @@ async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFA
         await query.message.edit_text(
             r"*📈 Grid Strike \- Step 1*" + "\n\n"
             r"🏦 *Select Connector*" + "\n\n"
+            r"Grid Strike automatically places a grid of buy or sell orders within a set price range\." + "\n"
+            r"[📖 Strategy Guide](https://hummingbot.org/blog/strategy-guide-grid-strike/)" + "\n\n"
             r"Choose the exchange for this grid \(spot or perpetual\):",
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
         )
 
     except Exception as e:
@@ -1616,6 +1619,29 @@ async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_
     await _show_wizard_prices_step(update, context)
 
 
+def _calculate_min_order_amount(current_price: float, trading_rules: dict, default: float = 6.0) -> float:
+    """
+    Calculate minimum order amount based on trading rules.
+
+    The minimum is the greater of:
+    - min_notional_size from trading rules
+    - current_price * min_order_size (min base amount)
+    - the provided default
+
+    Returns the calculated minimum order amount in quote currency.
+    """
+    min_notional = trading_rules.get("min_notional_size", 0) or 0
+    min_order_size = trading_rules.get("min_order_size", 0) or 0
+
+    # Calculate min from base amount requirement
+    min_from_base = current_price * min_order_size if min_order_size > 0 else 0
+
+    # Take the maximum of all constraints
+    calculated_min = max(default, min_notional, min_from_base)
+
+    return calculated_min
+
+
 async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str = None) -> None:
     """Wizard Step 6: Grid Configuration with prices, TP, spread, and grid analysis"""
     query = update.callback_query
@@ -1627,9 +1653,9 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
     side = config.get("side", SIDE_LONG)
     total_amount = config.get("total_amount_quote", 1000)
 
-    # Get current interval (default 1m for better NATR calculation)
+    # Get current interval (default 5m for better NATR calculation)
     if interval is None:
-        interval = context.user_data.get("gs_chart_interval", "1m")
+        interval = context.user_data.get("gs_chart_interval", "5m")
     context.user_data["gs_chart_interval"] = interval
 
     # Check if we have pre-cached data from background fetch
@@ -1638,7 +1664,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
     try:
         # If no cached data or interval changed, fetch now
-        cached_interval = context.user_data.get("gs_candles_interval", "1m")
+        cached_interval = context.user_data.get("gs_candles_interval", "5m")
         need_refetch = interval != cached_interval
 
         if not current_price or need_refetch:
@@ -1750,12 +1776,15 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         limit = config.get("limit_price")
         min_spread = config.get("min_spread_between_orders", 0.0001)
         take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
-        min_order_amount = config.get("min_order_amount_quote", max(6, min_notional))
+
+        # Calculate minimum order amount from trading rules
+        required_min_order = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+        min_order_amount = config.get("min_order_amount_quote", required_min_order)
 
         # Ensure min_order_amount respects exchange rules
-        if min_notional > min_order_amount:
-            config["min_order_amount_quote"] = min_notional
-            min_order_amount = min_notional
+        if min_order_amount < required_min_order:
+            config["min_order_amount_quote"] = required_min_order
+            min_order_amount = required_min_order
 
         # Generate config ID with sequence number (if not already set)
         if not config.get("id"):
@@ -1805,7 +1834,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         max_open_orders = config.get("max_open_orders", 3)
         order_frequency = config.get("order_frequency", 3)
         leverage = config.get("leverage", 1)
-        position_mode = config.get("position_mode", "HEDGE")
+        position_mode = config.get("position_mode", "ONEWAY")
         coerce_tp_to_step = config.get("coerce_tp_to_step", False)
         activation_bounds = config.get("activation_bounds", 0.01)
         side_value = config.get("side", SIDE_LONG)
@@ -2068,7 +2097,7 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
     pair = config.get("trading_pair", "")
     side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
     leverage = config.get("leverage", 1)
-    position_mode = config.get("position_mode", "HEDGE")
+    position_mode = config.get("position_mode", "ONEWAY")
     amount = config.get("total_amount_quote", 0)
     start_price = config.get("start_price", 0)
     end_price = config.get("end_price", 0)
@@ -2189,7 +2218,7 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
     pair = config.get("trading_pair", "")
     side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
     leverage = config.get("leverage", 1)
-    position_mode = config.get("position_mode", "HEDGE")
+    position_mode = config.get("position_mode", "ONEWAY")
     amount = config.get("total_amount_quote", 0)
     start_price = config.get("start_price", 0)
     end_price = config.get("end_price", 0)
@@ -2445,6 +2474,11 @@ async def handle_gs_edit_min_amt(update: Update, context: ContextTypes.DEFAULT_T
 
     current = config.get("min_order_amount_quote", 6)
 
+    # Calculate minimum required from trading rules
+    current_price = context.user_data.get("gs_current_price", 0)
+    trading_rules = context.user_data.get("gs_trading_rules", {})
+    required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+
     keyboard = [
         [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
     ]
@@ -2457,8 +2491,9 @@ async def handle_gs_edit_min_amt(update: Update, context: ContextTypes.DEFAULT_T
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=r"*Edit Min Order Amount*" + "\n\n"
-        f"Current: `{current}`" + "\n\n"
-        r"Enter new value \(e\.g\. 6\):",
+        f"Current: `{current}`\n"
+        f"Minimum: `{required_min:.2f}` \\(from trading rules\\)" + "\n\n"
+        r"Enter new value:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2627,10 +2662,10 @@ async def _background_fetch_market_data(context, config: dict, chat_id: int = No
         if current_price:
             context.user_data["gs_current_price"] = current_price
 
-            # Fetch candles (1m, 420 records) - consistent with default interval
-            candles = await fetch_candles(client, connector, pair, interval="1m", max_records=420)
+            # Fetch candles (5m, 420 records) - consistent with default interval
+            candles = await fetch_candles(client, connector, pair, interval="5m", max_records=420)
             context.user_data["gs_candles"] = candles
-            context.user_data["gs_candles_interval"] = "1m"
+            context.user_data["gs_candles_interval"] = "5m"
             context.user_data["gs_market_data_ready"] = True
 
             logger.info(f"Background fetch complete for {pair}: price={current_price}")
@@ -2719,6 +2754,12 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             if "=" in input_stripped:
                 # Parse field=value format
                 changes_made = False
+                chart_affecting_change = False  # Track if chart needs regeneration
+                warning_msg = None
+                # Fields that affect the chart visualization
+                chart_fields = {"start_price", "start", "end_price", "end", "limit_price", "limit",
+                               "connector_name", "trading_pair"}
+
                 for line in input_stripped.split("\n"):
                     line = line.strip()
                     if not line or "=" not in line:
@@ -2727,6 +2768,10 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                     field, value = line.split("=", 1)
                     field = field.strip().lower()
                     value = value.strip()
+
+                    # Check if this field affects the chart
+                    if field in chart_fields:
+                        chart_affecting_change = True
 
                     # Map field names and set values
                     if field in ("start_price", "start"):
@@ -2753,7 +2798,16 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                         config["min_spread_between_orders"] = val
                         changes_made = True
                     elif field in ("min_order_amount_quote", "min_order_amount", "min_order", "min"):
-                        config["min_order_amount_quote"] = float(value.replace("$", ""))
+                        new_min_amt = float(value.replace("$", ""))
+                        # Validate against trading rules
+                        current_price = context.user_data.get("gs_current_price", 0)
+                        trading_rules = context.user_data.get("gs_trading_rules", {})
+                        required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+                        if new_min_amt < required_min:
+                            config["min_order_amount_quote"] = required_min
+                            warning_msg = f"Min order must be >= ${required_min:.2f}"
+                        else:
+                            config["min_order_amount_quote"] = new_min_amt
                         changes_made = True
                     elif field in ("total_amount_quote", "total_amount", "amount"):
                         config["total_amount_quote"] = float(value)
@@ -2784,10 +2838,17 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                         val_lower = value.lower()
                         config["coerce_tp_to_step"] = val_lower in ("true", "1", "yes", "on")
                         changes_made = True
+                    elif field == "position_mode":
+                        config["position_mode"] = value.upper()
+                        changes_made = True
 
                 if changes_made:
                     set_controller_config(context, config)
-                    await _update_wizard_message_for_prices_after_edit(update, context)
+                    # Only regenerate chart if price/pair fields changed
+                    if chart_affecting_change:
+                        await _update_wizard_message_for_prices_after_edit(update, context)
+                    else:
+                        await _update_wizard_caption_only(update, context, warning_msg=warning_msg)
                 else:
                     raise ValueError(f"Unknown field: {field}")
 
@@ -2799,7 +2860,7 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                     config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
                 config["triple_barrier_config"]["take_profit"] = tp_decimal
                 set_controller_config(context, config)
-                await _update_wizard_message_for_prices_after_edit(update, context)
+                await _update_wizard_caption_only(update, context)
 
             elif input_lower.startswith("spread:"):
                 # Min spread in percentage (e.g., spread:0.05 = 0.05% = 0.0005)
@@ -2807,14 +2868,23 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                 spread_decimal = spread_pct / 100
                 config["min_spread_between_orders"] = spread_decimal
                 set_controller_config(context, config)
-                await _update_wizard_message_for_prices_after_edit(update, context)
+                await _update_wizard_caption_only(update, context)
 
             elif input_lower.startswith("min:"):
                 # Min order amount in quote (e.g., min:10 = $10)
                 min_amt = float(input_lower.replace("min:", "").replace("$", "").strip())
-                config["min_order_amount_quote"] = min_amt
+                # Validate against trading rules
+                current_price = context.user_data.get("gs_current_price", 0)
+                trading_rules = context.user_data.get("gs_trading_rules", {})
+                required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+                warning_msg = None
+                if min_amt < required_min:
+                    config["min_order_amount_quote"] = required_min
+                    warning_msg = f"Min order must be >= ${required_min:.2f}"
+                else:
+                    config["min_order_amount_quote"] = min_amt
                 set_controller_config(context, config)
-                await _update_wizard_message_for_prices_after_edit(update, context)
+                await _update_wizard_caption_only(update, context, warning_msg=warning_msg)
 
             else:
                 # Parse comma-separated prices: start,end,limit
@@ -2924,7 +2994,24 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             await _update_wizard_message_for_review(update, context)
 
         elif step == "edit_min_amt":
-            config["min_order_amount_quote"] = float(user_input)
+            new_min_amt = float(user_input)
+            # Validate against trading rules
+            current_price = context.user_data.get("gs_current_price", 0)
+            trading_rules = context.user_data.get("gs_trading_rules", {})
+            required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+            if new_min_amt < required_min:
+                config["min_order_amount_quote"] = required_min
+                # Send warning message
+                warn_msg = await update.message.reply_text(
+                    f"Min order must be >= ${required_min:.2f}. Set to ${required_min:.2f}."
+                )
+                await asyncio.sleep(3)
+                try:
+                    await warn_msg.delete()
+                except:
+                    pass
+            else:
+                config["min_order_amount_quote"] = new_min_amt
             set_controller_config(context, config)
             context.user_data["gs_wizard_step"] = "review"
             await _update_wizard_message_for_review(update, context)
@@ -3266,7 +3353,7 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     limit = config.get("limit_price", 0)
     current_price = context.user_data.get("gs_current_price", 0)
     candles = context.user_data.get("gs_candles")
-    interval = context.user_data.get("gs_chart_interval", "1m")
+    interval = context.user_data.get("gs_chart_interval", "5m")
     total_amount = config.get("total_amount_quote", 1000)
     min_spread = config.get("min_spread_between_orders", 0.0001)
     take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
@@ -3306,7 +3393,7 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     max_open_orders = config.get("max_open_orders", 3)
     order_frequency = config.get("order_frequency", 3)
     leverage = config.get("leverage", 1)
-    position_mode = config.get("position_mode", "HEDGE")
+    position_mode = config.get("position_mode", "ONEWAY")
     coerce_tp_to_step = config.get("coerce_tp_to_step", False)
     activation_bounds = config.get("activation_bounds", 0.01)
     side_value = config.get("side", SIDE_LONG)
@@ -3391,6 +3478,126 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
 
     except Exception as e:
         logger.error(f"Error updating prices message: {e}", exc_info=True)
+
+
+async def _update_wizard_caption_only(update: Update, context: ContextTypes.DEFAULT_TYPE, warning_msg: str = None) -> None:
+    """
+    Update only the caption of the chart message without regenerating the chart.
+
+    Use this when changing fields that don't affect the visual representation
+    (e.g., min_order_amount, take_profit, activation_bounds, etc.)
+    """
+    config = get_controller_config(context)
+    message_id = context.user_data.get("gs_wizard_message_id")
+    chat_id = context.user_data.get("gs_wizard_chat_id")
+
+    if not message_id or not chat_id:
+        return
+
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    side = config.get("side", SIDE_LONG)
+    side_value = config.get("side", SIDE_LONG)
+    side_str = "LONG" if side_value == SIDE_LONG else "SHORT"
+    start = config.get("start_price", 0)
+    end = config.get("end_price", 0)
+    limit = config.get("limit_price", 0)
+    current_price = context.user_data.get("gs_current_price", 0)
+    interval = context.user_data.get("gs_chart_interval", "5m")
+    total_amount = config.get("total_amount_quote", 1000)
+    min_spread = config.get("min_spread_between_orders", 0.0001)
+    take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    min_order_amount = config.get("min_order_amount_quote", 6)
+    natr = context.user_data.get("gs_natr")
+    trading_rules = context.user_data.get("gs_trading_rules", {})
+
+    # Get config values
+    max_open_orders = config.get("max_open_orders", 3)
+    leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "ONEWAY")
+    coerce_tp_to_step = config.get("coerce_tp_to_step", False)
+    activation_bounds = config.get("activation_bounds", 0.01)
+
+    # Regenerate theoretical grid with updated parameters
+    grid = generate_theoretical_grid(
+        start_price=start,
+        end_price=end,
+        min_spread=min_spread,
+        total_amount=total_amount,
+        min_order_amount=min_order_amount,
+        current_price=current_price,
+        side=side,
+        trading_rules=trading_rules,
+    )
+    context.user_data["gs_theoretical_grid"] = grid
+
+    # Build interval buttons with current one highlighted
+    interval_options = ["1m", "5m", "15m", "1h", "4h"]
+    interval_row = []
+    for opt in interval_options:
+        label = f"✓ {opt}" if opt == interval else opt
+        interval_row.append(InlineKeyboardButton(label, callback_data=f"bots:gs_interval:{opt}"))
+
+    keyboard = [
+        interval_row,
+        [
+            InlineKeyboardButton("💾 Save Config", callback_data="bots:gs_save"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+    ]
+
+    # Grid analysis info
+    grid_valid = "✓" if grid.get("valid") else "⚠️"
+    natr_pct = f"{natr*100:.2f}%" if natr else "N/A"
+    range_pct = f"{grid.get('grid_range_pct', 0):.2f}%"
+
+    # Build config text with individually copyable key=value params
+    config_text = (
+        f"*{escape_markdown_v2(pair)}* {side_str}\n"
+        f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
+        f"`connector_name={connector}`\n"
+        f"`trading_pair={pair}`\n"
+        f"`total_amount_quote={total_amount:.0f}`\n"
+        f"`start_price={start:.6g}`\n"
+        f"`end_price={end:.6g}`\n"
+        f"`limit_price={limit:.6g}`\n"
+        f"`leverage={leverage}`\n"
+        f"`position_mode={position_mode}`\n"
+        f"`take_profit={take_profit}`\n"
+        f"`coerce_tp_to_step={str(coerce_tp_to_step).lower()}`\n"
+        f"`min_spread_between_orders={min_spread}`\n"
+        f"`min_order_amount_quote={min_order_amount:.0f}`\n"
+        f"`max_open_orders={max_open_orders}`\n"
+        f"`activation_bounds={activation_bounds}`\n\n"
+        f"{grid_valid} Grid: `{grid['num_levels']}` levels "
+        f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
+        f"@ `${grid['amount_per_level']:.2f}`/lvl \\| step: `{grid.get('spread_pct', 0):.3f}%`"
+    )
+
+    # Add warnings if any
+    if grid.get("warnings"):
+        warnings_text = "\n".join(f"⚠️ {escape_markdown_v2(w)}" for w in grid["warnings"])
+        config_text += f"\n{warnings_text}"
+
+    # Add user warning message if provided
+    if warning_msg:
+        config_text += f"\n\n⚠️ {escape_markdown_v2(warning_msg)}"
+
+    config_text += "\n\n_Edit: `field=value`_"
+
+    try:
+        # Try to edit the caption of the existing photo message
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=config_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        # If editing caption fails (e.g., message is text not photo), fall back to full update
+        logger.warning(f"Caption edit failed, falling back to full update: {e}")
+        await _update_wizard_message_for_prices_after_edit(update, context)
 
 
 async def handle_gs_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE, price_type: str) -> None:
@@ -3812,7 +4019,7 @@ async def handle_toggle_position_mode(update: Update, context: ContextTypes.DEFA
     query = update.callback_query
     config = get_controller_config(context)
 
-    current_mode = config.get("position_mode", "HEDGE")
+    current_mode = config.get("position_mode", "ONEWAY")
     new_mode = "ONEWAY" if current_mode == "HEDGE" else "HEDGE"
     config["position_mode"] = new_mode
 
