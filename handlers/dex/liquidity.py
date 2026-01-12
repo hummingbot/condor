@@ -12,15 +12,12 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
+from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, KNOWN_TOKENS
 from utils.auth import gateway_required
-from servers import get_client
+from config_manager import get_client
 from ._shared import (
-    get_cached,
-    set_cached,
     cached_call,
     invalidate_cache,
-    get_explorer_url,
     format_relative_time,
     get_history_filters,
     set_history_filters,
@@ -479,7 +476,7 @@ async def show_liquidity_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
     help_text = r"💧 *Liquidity Pools*" + "\n\n"
 
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Fetch balances (cached)
         gateway_data = await cached_call(
@@ -938,7 +935,7 @@ async def handle_lp_history(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         else:
             filters = get_history_filters(context.user_data, "position")
 
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             error_message = format_error_message("Gateway CLMM not available")

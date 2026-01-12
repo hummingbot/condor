@@ -17,19 +17,18 @@ from utils.telegram_formatters import escape_markdown_v2, format_error_message
 from handlers.config.user_preferences import (
     get_dex_swap_defaults,
     get_dex_connector,
-    get_dex_last_swap,
     set_dex_last_swap,
     get_all_enabled_networks,
     DEFAULT_DEX_NETWORK,
+    set_last_trade_connector,
 )
-from servers import get_client
+from config_manager import get_client
 from ._shared import (
     get_cached,
     set_cached,
     invalidate_cache,
     get_explorer_url,
     format_relative_time,
-    _format_amount,
     get_history_filters,
     set_history_filters,
     HistoryFilters,
@@ -91,7 +90,14 @@ def _format_number(value, decimals: int = 2) -> str:
             return f"{num:.{decimals}f}"
         if abs(num) >= 0.01:
             return f"{num:.4f}"
-        return f"{num:.6f}"
+        if abs(num) >= 0.0001:
+            return f"{num:.6f}"
+        if abs(num) >= 0.000001:
+            return f"{num:.8f}"
+        if abs(num) >= 0.00000001:
+            return f"{num:.10f}"
+        # For extremely small numbers, use scientific notation
+        return f"{num:.2e}"
     except (ValueError, TypeError):
         return "—"
 
@@ -266,12 +272,14 @@ async def _fetch_quotes_background(
         if not all([connector, network, trading_pair, amount]):
             return
 
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():
             try:
-                balances = await _fetch_balances(client)
+                # Check if force refresh is needed (e.g., after swap execution)
+                force_refresh = context.user_data.pop("_force_balance_refresh", False)
+                balances = await _fetch_balances(client, refresh=force_refresh)
                 if balances:
                     set_cached(context.user_data, "gateway_balances", balances)
                 return balances
@@ -524,7 +532,7 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
     swaps = get_cached(context.user_data, "recent_swaps", ttl=60)
     if swaps is None:
         try:
-            client = await get_client(chat_id)
+            client = await get_client(chat_id, context=context)
             swaps = await _fetch_recent_swaps(client, limit=5)
             set_cached(context.user_data, "recent_swaps", swaps)
         except Exception as e:
@@ -541,25 +549,50 @@ async def show_swap_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, sen
 
     # Send or edit message
     message = None
-    if send_new or not update.callback_query:
+    if send_new:
+        # Send new message - determine chat from callback query or message
+        if update.callback_query:
+            chat = update.callback_query.message.chat
+        else:
+            chat = update.message.chat
+        message = await chat.send_message(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+    elif update.callback_query:
+        try:
+            await update.callback_query.message.edit_text(
+                help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            # Ignore "Message is not modified" error
+            if "not modified" not in str(e).lower():
+                raise
+        message = update.callback_query.message
+    else:
         message = await update.message.reply_text(
             help_text,
             parse_mode="MarkdownV2",
             reply_markup=reply_markup,
             disable_web_page_preview=True
         )
-    else:
-        await update.callback_query.message.edit_text(
-            help_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup,
-            disable_web_page_preview=True
-        )
-        message = update.callback_query.message
 
-    # Launch background quote fetch if no quote yet and auto_quote is enabled
-    if auto_quote and quote_result is None and message:
-        asyncio.create_task(_fetch_quotes_background(context, message, params, chat_id))
+    # Store message for later editing (for text input processing)
+    if message:
+        context.user_data["swap_menu_message_id"] = message.message_id
+        context.user_data["swap_menu_chat_id"] = message.chat_id
+
+    # Launch background fetch if needed (balances missing or quotes needed)
+    if message:
+        needs_balance_fetch = get_cached(context.user_data, "gateway_balances", ttl=120) is None
+        needs_quote_fetch = auto_quote and quote_result is None
+        if needs_balance_fetch or needs_quote_fetch:
+            asyncio.create_task(_fetch_quotes_background(context, message, params, chat_id))
 
 
 # ============================================
@@ -571,6 +604,43 @@ def _invalidate_swap_quote(user_data: dict) -> None:
     cache = user_data.get("_cache", {})
     if "swap_quote" in cache:
         del cache["swap_quote"]
+
+
+async def _update_swap_menu_after_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Update the swap menu message after text input (like trade.py pattern)"""
+    # Delete user's input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Edit the stored swap menu message
+    msg_id = context.user_data.get("swap_menu_message_id")
+    chat_id = context.user_data.get("swap_menu_chat_id")
+
+    if msg_id and chat_id:
+        params = context.user_data.get("swap_params", {})
+        quote_result = get_cached(context.user_data, "swap_quote", ttl=30)
+
+        help_text = _build_swap_menu_text(context.user_data, params, quote_result)
+        keyboard = _build_swap_keyboard(params)
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.debug(f"Could not update swap menu: {e}")
+            # Fallback: send new message
+            await show_swap_menu(update, context, send_new=True)
+    else:
+        await show_swap_menu(update, context, send_new=True)
 
 
 async def handle_swap_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -589,7 +659,7 @@ async def handle_swap_set_connector(update: Update, context: ContextTypes.DEFAUL
     network = params.get("network", "solana-mainnet-beta")
 
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         cache_key = "router_connectors"
         connectors = get_cached(context.user_data, cache_key, ttl=300)
@@ -653,60 +723,84 @@ async def handle_swap_connector_select(update: Update, context: ContextTypes.DEF
                     params["network"] = f"ethereum-{networks[0]}"
                 break
 
+    # Save unified preference for /trade command (DEX stores network ID, not connector)
+    network = params.get("network", DEFAULT_DEX_NETWORK)
+    set_last_trade_connector(context.user_data, "dex", network)
+
     _invalidate_swap_quote(context.user_data)
     context.user_data["dex_state"] = "swap"
     await show_swap_menu(update, context)
 
 
 async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show available networks for selection"""
+    """Show available networks (DEX) and connectors (CEX) for selection"""
     chat_id = update.effective_chat.id
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
-        networks_cache_key = "gateway_networks"
-        networks = get_cached(context.user_data, networks_cache_key, ttl=300)
-        if networks is None:
-            networks = await _fetch_networks(client)
-            set_cached(context.user_data, networks_cache_key, networks)
+        # Fetch DEX networks and CEX connectors in parallel
+        from handlers import is_gateway_network
 
-        connectors_cache_key = "router_connectors"
-        connectors = get_cached(context.user_data, connectors_cache_key, ttl=300)
-        if connectors is None:
-            connectors = await _fetch_router_connectors(client)
-            set_cached(context.user_data, connectors_cache_key, connectors)
+        async def get_dex_networks():
+            try:
+                return await _fetch_networks(client)
+            except Exception as e:
+                logger.warning(f"Could not fetch DEX networks: {e}")
+                return []
 
-        # Filter to networks with routers
-        router_networks = set()
-        for c in connectors:
-            chain = c.get('chain', '')
-            for net in c.get('networks', []):
-                router_networks.add((chain, net))
+        async def get_cex_connectors():
+            try:
+                state = await client.portfolio.get_state()
+                cex = set()
+                for account_data in state.values():
+                    if isinstance(account_data, dict):
+                        for connector_name in account_data.keys():
+                            if not is_gateway_network(connector_name):
+                                cex.add(connector_name)
+                return sorted(cex)
+            except Exception as e:
+                logger.warning(f"Could not fetch CEX connectors: {e}")
+                return []
 
-        available = [
-            n for n in networks
-            if (n.get('chain', ''), n.get('network', '')) in router_networks
-        ]
+        import asyncio
+        networks, cex_connectors = await asyncio.gather(get_dex_networks(), get_cex_connectors())
 
-        if not available:
-            help_text = r"🌐 *Select Network*" + "\n\n" + r"_No networks available\._"
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
-        else:
-            help_text = r"🌐 *Select Network*"
+        keyboard = []
 
-            network_buttons = []
+        # CEX section
+        if cex_connectors:
+            keyboard.append([InlineKeyboardButton("━━ CEX ━━", callback_data="dex:noop")])
             row = []
-            for n in available:
-                network_id = n.get('network_id', '')
-                row.append(InlineKeyboardButton(network_id, callback_data=f"dex:swap_network_{network_id}"))
-                if len(row) == 3:
-                    network_buttons.append(row)
+            for connector in cex_connectors:
+                row.append(InlineKeyboardButton(connector, callback_data=f"dex:switch_cex_{connector}"))
+                if len(row) == 2:
+                    keyboard.append(row)
                     row = []
             if row:
-                network_buttons.append(row)
+                keyboard.append(row)
 
-            keyboard = network_buttons + [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
+        # DEX section
+        if networks:
+            keyboard.append([InlineKeyboardButton("━━ DEX ━━", callback_data="dex:noop")])
+            row = []
+            for network_item in networks:
+                if isinstance(network_item, dict):
+                    network_id = network_item.get('network_id') or network_item.get('id') or str(network_item)
+                else:
+                    network_id = str(network_item)
+                row.append(InlineKeyboardButton(network_id, callback_data=f"dex:swap_network_{network_id}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
 
+        if not networks and not cex_connectors:
+            help_text = r"🔄 *Select Connector*" + "\n\n" + r"_No connectors available\._"
+        else:
+            help_text = r"🔄 *Select Connector*"
+
+        keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:swap")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
@@ -716,27 +810,42 @@ async def handle_swap_set_network(update: Update, context: ContextTypes.DEFAULT_
         )
 
     except Exception as e:
-        logger.error(f"Error showing networks: {e}", exc_info=True)
-        error_text = format_error_message(f"Error loading networks: {str(e)}")
+        logger.error(f"Error showing connectors: {e}", exc_info=True)
+        error_text = format_error_message(f"Error loading connectors: {str(e)}")
         await update.callback_query.message.edit_text(error_text, parse_mode="MarkdownV2")
 
 
 async def handle_swap_network_select(update: Update, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
     """Handle network selection from button"""
+    chat_id = update.effective_chat.id
     params = context.user_data.get("swap_params", {})
     params["network"] = network_id
 
-    # Auto-update connector
+    # Auto-update connector based on network
     chain = network_id.split("-")[0] if network_id else ""
-    network = network_id.split("-", 1)[1] if "-" in network_id else ""
+    network_part = network_id.split("-", 1)[1] if "-" in network_id else ""
 
+    # Fetch connectors if not cached
     cache_key = "router_connectors"
     connectors = get_cached(context.user_data, cache_key, ttl=300)
+    if connectors is None:
+        try:
+            client = await get_client(chat_id, context=context)
+            connectors = await _fetch_router_connectors(client)
+            set_cached(context.user_data, cache_key, connectors)
+        except Exception as e:
+            logger.warning(f"Could not fetch connectors: {e}")
+            connectors = []
+
+    # Find matching connector for the network
     if connectors:
         for c in connectors:
-            if c.get('chain') == chain and network in c.get('networks', []):
+            if c.get('chain') == chain and network_part in c.get('networks', []):
                 params["connector"] = c.get('name')
                 break
+
+    # Save unified preference for /trade command (DEX stores network ID)
+    set_last_trade_connector(context.user_data, "dex", network_id)
 
     _invalidate_swap_quote(context.user_data)
     context.user_data["dex_state"] = "swap"
@@ -759,7 +868,7 @@ async def handle_swap_set_pair(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["dex_state"] = "swap_set_pair"
     context.user_data["dex_previous_state"] = "swap"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -782,7 +891,7 @@ async def handle_swap_set_amount(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["dex_state"] = "swap_set_amount"
     context.user_data["dex_previous_state"] = "swap"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -805,7 +914,7 @@ async def handle_swap_set_slippage(update: Update, context: ContextTypes.DEFAULT
     context.user_data["dex_state"] = "swap_set_slippage"
     context.user_data["dex_previous_state"] = "swap"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -831,12 +940,14 @@ async def handle_swap_get_quote(update: Update, context: ContextTypes.DEFAULT_TY
         if not all([connector, network, trading_pair, amount]):
             raise ValueError("Missing required parameters")
 
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Fetch balances in parallel with quotes
         async def fetch_balances_safe():
             try:
-                balances = await _fetch_balances(client)
+                # Check if force refresh is needed (e.g., after swap execution)
+                force_refresh = context.user_data.pop("_force_balance_refresh", False)
+                balances = await _fetch_balances(client, refresh=force_refresh)
                 if balances:
                     set_cached(context.user_data, "gateway_balances", balances)
                 return balances
@@ -967,7 +1078,7 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
         )
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1003,8 +1114,11 @@ async def handle_swap_execute_confirm(update: Update, context: ContextTypes.DEFA
         if result is None:
             raise ValueError("Swap execution failed")
 
-        # Invalidate caches
+        # Invalidate caches - including swap_quote so background fetch runs when going back
         invalidate_cache(context.user_data, "balances", "swaps")
+        _invalidate_swap_quote(context.user_data)
+        # Flag to force refresh on next balance fetch (swap changed balances)
+        context.user_data["_force_balance_refresh"] = True
 
         # Save params
         set_dex_last_swap(context.user_data, {
@@ -1070,7 +1184,7 @@ async def handle_swap_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data["dex_state"] = "swap_status"
 
-    await update.callback_query.message.reply_text(
+    await update.callback_query.message.edit_text(
         help_text,
         parse_mode="MarkdownV2",
         reply_markup=reply_markup
@@ -1085,7 +1199,7 @@ async def process_swap_status(
     """Process swap status check"""
     try:
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_swap'):
             raise ValueError("Gateway swap not available")
@@ -1186,7 +1300,7 @@ async def handle_swap_history(update: Update, context: ContextTypes.DEFAULT_TYPE
             filters = get_history_filters(context.user_data, "swap")
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_swap'):
             error_message = format_error_message("Gateway swap not available")
@@ -1457,14 +1571,12 @@ async def process_swap_set_pair(
     """Process trading pair input"""
     try:
         params = context.user_data.get("swap_params", {})
-        params["trading_pair"] = user_input.strip()
+        params["trading_pair"] = user_input.strip().upper()
 
         _invalidate_swap_quote(context.user_data)
         context.user_data["dex_state"] = "swap"
 
-        success_msg = escape_markdown_v2(f"✅ Pair: {user_input}")
-        await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-        await show_swap_menu(update, context, send_new=True)
+        await _update_swap_menu_after_input(update, context)
 
     except Exception as e:
         logger.error(f"Error setting pair: {e}", exc_info=True)
@@ -1497,12 +1609,7 @@ async def process_swap_set_amount(
         _invalidate_swap_quote(context.user_data)
         context.user_data["dex_state"] = "swap"
 
-        if is_quote_amount:
-            success_msg = escape_markdown_v2(f"✅ Amount: {amount_str} (quote)")
-        else:
-            success_msg = escape_markdown_v2(f"✅ Amount: {amount_str}")
-        await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-        await show_swap_menu(update, context, send_new=True)
+        await _update_swap_menu_after_input(update, context)
 
     except Exception as e:
         logger.error(f"Error setting amount: {e}", exc_info=True)
@@ -1529,9 +1636,7 @@ async def process_swap_set_slippage(
 
         context.user_data["dex_state"] = "swap"
 
-        success_msg = escape_markdown_v2(f"✅ Slippage: {slippage_str}%")
-        await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-        await show_swap_menu(update, context, send_new=True)
+        await _update_swap_menu_after_input(update, context)
 
     except Exception as e:
         logger.error(f"Error setting slippage: {e}", exc_info=True)

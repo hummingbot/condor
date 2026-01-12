@@ -50,6 +50,10 @@ DEFAULT_DEX_SLIPPAGE = "1.0"
 DEFAULT_DEX_SIDE = "BUY"
 DEFAULT_DEX_AMOUNT = "1.0"
 
+# Unified trade defaults
+DEFAULT_TRADE_CONNECTOR_TYPE = "dex"  # "cex" or "dex"
+DEFAULT_TRADE_CONNECTOR_NAME = "solana-mainnet-beta"  # For DEX: network ID, for CEX: connector name
+
 
 # ============================================
 # TYPE DEFINITIONS
@@ -118,12 +122,23 @@ class GatewayPrefs(TypedDict, total=False):
     wallet_networks: Dict[str, list]  # wallet_address -> list of enabled network IDs
 
 
+class UnifiedTradePrefs(TypedDict, total=False):
+    """Unified trade preferences for /trade command.
+
+    Tracks which connector type (CEX/DEX) and which specific connector
+    was last used, so the unified /trade command can show the right UI.
+    """
+    last_connector_type: str  # "cex" or "dex"
+    last_connector_name: str  # e.g., "jupiter", "binance_perpetual"
+
+
 class UserPreferences(TypedDict, total=False):
     portfolio: PortfolioPrefs
     clob: CLOBPrefs
     dex: DEXPrefs
     general: GeneralPrefs
     gateway: GatewayPrefs
+    unified_trade: UnifiedTradePrefs
 
 
 # ============================================
@@ -155,6 +170,10 @@ def _get_default_preferences() -> UserPreferences:
         },
         "gateway": {
             "wallet_networks": {},  # wallet_address -> list of enabled network IDs
+        },
+        "unified_trade": {
+            "last_connector_type": DEFAULT_TRADE_CONNECTOR_TYPE,
+            "last_connector_name": DEFAULT_TRADE_CONNECTOR_NAME,
         },
     }
 
@@ -619,6 +638,56 @@ def get_all_enabled_networks(user_data: Dict) -> set:
             all_networks.update(networks)
 
     return all_networks if all_networks else None
+
+
+# ============================================
+# PUBLIC API - UNIFIED TRADE
+# ============================================
+
+def get_unified_trade_prefs(user_data: Dict) -> UnifiedTradePrefs:
+    """Get unified trade preferences
+
+    Returns:
+        Unified trade preferences with last_connector_type and last_connector_name
+    """
+    _migrate_legacy_data(user_data)
+    prefs = _ensure_preferences(user_data)
+    return deepcopy(prefs.get("unified_trade", {
+        "last_connector_type": DEFAULT_TRADE_CONNECTOR_TYPE,
+        "last_connector_name": DEFAULT_TRADE_CONNECTOR_NAME,
+    }))
+
+
+def get_last_trade_connector(user_data: Dict) -> tuple:
+    """Get last used trade connector type and name
+
+    Returns:
+        Tuple of (connector_type, connector_name)
+        - For DEX: ("dex", "solana-mainnet-beta") - connector_name is the NETWORK ID
+        - For CEX: ("cex", "binance_perpetual") - connector_name is the connector
+    """
+    prefs = get_unified_trade_prefs(user_data)
+    return (
+        prefs.get("last_connector_type", DEFAULT_TRADE_CONNECTOR_TYPE),
+        prefs.get("last_connector_name", DEFAULT_TRADE_CONNECTOR_NAME),
+    )
+
+
+def set_last_trade_connector(user_data: Dict, connector_type: str, connector_name: str) -> None:
+    """Set last used trade connector
+
+    Args:
+        user_data: User data dict
+        connector_type: "cex" or "dex"
+        connector_name: For DEX: network ID (e.g., "solana-mainnet-beta")
+                        For CEX: connector name (e.g., "binance_perpetual")
+    """
+    prefs = _ensure_preferences(user_data)
+    if "unified_trade" not in prefs:
+        prefs["unified_trade"] = {}
+    prefs["unified_trade"]["last_connector_type"] = connector_type
+    prefs["unified_trade"]["last_connector_name"] = connector_name
+    logger.info(f"Set last trade connector: {connector_type}:{connector_name}")
 
 
 # ============================================

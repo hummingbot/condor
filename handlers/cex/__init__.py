@@ -13,7 +13,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
-from utils.auth import restricted
+from utils.auth import restricted, hummingbot_api_required
 from utils.telegram_formatters import format_error_message
 from handlers import clear_all_input_states
 
@@ -34,7 +34,35 @@ def clear_cex_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("trade_menu_chat_id", None)
 
 
+async def _handle_switch_to_dex(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    network_id: str
+) -> None:
+    """Switch from CEX to DEX trading"""
+    from handlers.config.user_preferences import (
+        set_last_trade_connector,
+        get_dex_swap_defaults,
+    )
+    from handlers.dex.swap import handle_swap as dex_handle_swap
+
+    # Clear CEX state
+    clear_cex_state(context)
+
+    # Save preference (DEX stores network ID)
+    set_last_trade_connector(context.user_data, "dex", network_id)
+
+    # Set up DEX swap params with the selected network
+    defaults = get_dex_swap_defaults(context.user_data)
+    defaults["network"] = network_id
+    context.user_data["swap_params"] = defaults
+
+    # Route to DEX swap menu
+    await dex_handle_swap(update, context)
+
+
 @restricted
+@hummingbot_api_required
 async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /trade command - CEX trading interface with order books
@@ -63,7 +91,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 @restricted
 async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline button callbacks for CEX trading operations"""
-    from .menu import show_cex_menu, cancel_cex_loading_task
+    from .menu import cancel_cex_loading_task
     from .trade import (
         handle_trade,
         handle_trade_refresh,
@@ -79,6 +107,7 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         handle_trade_toggle_pos_mode,
         handle_trade_get_quote,
         handle_trade_execute,
+        handle_trade_pair_select,
         handle_close,
     )
     from .orders import handle_search_orders, handle_cancel_order, handle_confirm_cancel_order
@@ -122,6 +151,9 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             await handle_trade_connector_select(update, context, connector_name)
         elif action == "trade_set_pair":
             await handle_trade_set_pair(update, context)
+        elif action.startswith("trade_pair_select_"):
+            trading_pair = action.replace("trade_pair_select_", "")
+            await handle_trade_pair_select(update, context, trading_pair)
         elif action == "trade_set_amount":
             await handle_trade_set_amount(update, context)
         elif action == "trade_set_price":
@@ -139,8 +171,6 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Orders
         elif action == "search_orders":
-            await handle_search_orders(update, context, status="OPEN")
-        elif action == "search_all":
             await handle_search_orders(update, context, status="ALL")
         elif action == "search_filled":
             await handle_search_orders(update, context, status="FILLED")
@@ -169,6 +199,15 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Close
         elif action == "close":
             await handle_close(update, context)
+
+        # Switch to DEX
+        elif action.startswith("switch_dex_"):
+            network_id = action.replace("switch_dex_", "")
+            await _handle_switch_to_dex(update, context, network_id)
+
+        # No-op for separator buttons
+        elif action == "noop":
+            pass
 
         else:
             await query.message.reply_text(f"Unknown action: {action}")

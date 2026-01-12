@@ -16,9 +16,9 @@ ORDER_TYPE_LIMIT = 2
 ORDER_TYPE_LIMIT_MAKER = 3
 
 ORDER_TYPE_LABELS = {
-    ORDER_TYPE_MARKET: "Market",
-    ORDER_TYPE_LIMIT: "Limit",
-    ORDER_TYPE_LIMIT_MAKER: "Limit Maker",
+    ORDER_TYPE_MARKET: "MARKET",
+    ORDER_TYPE_LIMIT: "LIMIT",
+    ORDER_TYPE_LIMIT_MAKER: "LIMIT_MAKER",
 }
 
 
@@ -31,23 +31,25 @@ DEFAULTS: Dict[str, Any] = {
     "trading_pair": "",
     "leverage": 20,
     "position_mode": "HEDGE",
+    "total_amount_quote": 100,
     "portfolio_allocation": 0.05,
-    "target_base_pct": 0.2,
-    "min_base_pct": 0.1,
-    "max_base_pct": 0.4,
+    "target_base_pct": 0.5,
+    "min_base_pct": 0.4,
+    "max_base_pct": 0.6,
     "buy_spreads": "0.0002,0.001",
     "sell_spreads": "0.0002,0.001",
-    "buy_amounts_pct": "1,2",
-    "sell_amounts_pct": "1,2",
+    "buy_amounts_pct": None,  # Auto-calculated: 1 per spread level
+    "sell_amounts_pct": None,  # Auto-calculated: 1 per spread level
     "executor_refresh_time": 30,
     "buy_cooldown_time": 15,
     "sell_cooldown_time": 15,
-    "buy_position_effectivization_time": 60,
-    "sell_position_effectivization_time": 60,
+    "buy_position_effectivization_time": 3600,
+    "sell_position_effectivization_time": 3600,
     "min_buy_price_distance_pct": 0.003,
     "min_sell_price_distance_pct": 0.003,
     "take_profit": 0.0001,
-    "take_profit_order_type": ORDER_TYPE_LIMIT_MAKER,
+    "take_profit_order_type": "LIMIT_MAKER",  # String format for API
+    "open_order_type": "LIMIT",  # String format for API
     "max_active_executors_by_level": 4,
     "tick_mode": False,
     "candles_config": [],
@@ -237,15 +239,40 @@ FIELDS: Dict[str, ControllerField] = {
         hint="Enable tick-based updates",
         default=False
     ),
+    "total_amount_quote": ControllerField(
+        name="total_amount_quote",
+        label="Total Amount (Quote)",
+        type="float",
+        required=False,
+        hint="Total amount in quote currency (e.g. 500 USDT)",
+        default=100
+    ),
+    "open_order_type": ControllerField(
+        name="open_order_type",
+        label="Open Order Type",
+        type="str",
+        required=False,
+        hint="Order type for opening (LIMIT, LIMIT_MAKER, MARKET)",
+        default="LIMIT"
+    ),
+    "position_mode": ControllerField(
+        name="position_mode",
+        label="Position Mode",
+        type="str",
+        required=False,
+        hint="Position mode (HEDGE, ONEWAY)",
+        default="HEDGE"
+    ),
 }
 
 
 # Field display order
 FIELD_ORDER: List[str] = [
     "id", "connector_name", "trading_pair", "leverage",
-    "portfolio_allocation", "target_base_pct", "min_base_pct", "max_base_pct",
+    "total_amount_quote", "portfolio_allocation", "position_mode",
+    "target_base_pct", "min_base_pct", "max_base_pct",
     "buy_spreads", "sell_spreads", "buy_amounts_pct", "sell_amounts_pct",
-    "take_profit", "take_profit_order_type",
+    "take_profit", "take_profit_order_type", "open_order_type",
     "executor_refresh_time", "buy_cooldown_time", "sell_cooldown_time",
     "buy_position_effectivization_time", "sell_position_effectivization_time",
     "min_buy_price_distance_pct", "min_sell_price_distance_pct",

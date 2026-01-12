@@ -4,7 +4,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
-from servers import get_client
+from config_manager import get_client
 
 
 class Config(BaseModel):
@@ -20,7 +20,7 @@ class Config(BaseModel):
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Check arbitrage between CEX and DEX."""
     chat_id = context._chat_id if hasattr(context, '_chat_id') else None
-    client = await get_client(chat_id)
+    client = await get_client(chat_id, context=context)
 
     if not client:
         return "No server available. Configure servers in /config."

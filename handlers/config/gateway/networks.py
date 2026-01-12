@@ -6,17 +6,18 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from ._shared import logger, escape_markdown_v2, extract_network_id
+from ..user_preferences import get_active_server
 
 
 async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show networks configuration menu"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         await query.answer("Loading networks...")
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.list_networks()
 
         networks = response.get('networks', [])
@@ -112,10 +113,10 @@ async def handle_network_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
 async def show_network_details(query, context: ContextTypes.DEFAULT_TYPE, network_id: str) -> None:
     """Show network config in edit mode - user can copy/paste to change values"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.get_network_config(network_id)
 
         # Try to extract config - it might be directly in response or nested under 'config'
@@ -258,7 +259,7 @@ async def handle_network_config_input(update: Update, context: ContextTypes.DEFA
 async def submit_network_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id: int) -> None:
     """Submit the network configuration to Gateway"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         config_data = context.user_data.get('network_config_data', {})
         network_id = config_data.get('network_id')
@@ -292,7 +293,7 @@ async def submit_network_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id
         context.user_data.pop('awaiting_network_input', None)
 
         # Submit configuration to Gateway
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         await client.gateway.update_network_config(network_id, final_config)
 
         success_text = f"✅ Configuration saved for {escape_markdown_v2(network_id)}\\!"

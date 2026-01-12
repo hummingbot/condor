@@ -2,14 +2,27 @@
 API Servers configuration handlers
 """
 
+import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 from utils.telegram_formatters import escape_markdown_v2
-from .server_context import build_config_message_header
+from utils.auth import restricted
 
 logger = logging.getLogger(__name__)
+
+
+@restricted
+async def servers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /servers command - show API servers configuration directly."""
+    from handlers import clear_all_input_states
+    from utils.telegram_helpers import create_mock_query_from_message
+
+    clear_all_input_states(context)
+    mock_query = await create_mock_query_from_message(update, "Loading servers...")
+    await show_api_servers(mock_query, context)
+
 
 # Conversation states
 (ADD_SERVER_NAME, ADD_SERVER_HOST, ADD_SERVER_PORT,
@@ -33,18 +46,23 @@ async def handle_servers_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Show API servers configuration with status and actions
+    Show API servers configuration with status and actions.
+    Only shows servers the user has access to.
     """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager, ServerPermission
 
-        # Reload configuration from servers.yml to pick up any manual changes
-        await server_manager.reload_config()
+        # Reload configuration to pick up any manual changes
+        get_config_manager().reload()
 
-        servers = server_manager.list_servers()
-        chat_id = query.message.chat_id
-        # Use per-chat default if set, otherwise global default
-        default_server = server_manager.get_default_server_for_chat(chat_id)
+        user_id = query.from_user.id
+        cm = get_config_manager()
+
+        # Get only accessible servers
+        servers = cm.list_accessible_servers(user_id)
+        # User's preferred server (checks both user_data and config.yml)
+        from config_manager import get_effective_server
+        default_server = get_effective_server(query.message.chat_id, context.user_data)
 
         if not servers:
             message_text = (
@@ -54,16 +72,23 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             keyboard = [
                 [InlineKeyboardButton("➕ Add Server", callback_data="api_server_add")],
-                [InlineKeyboardButton("« Back", callback_data="config_back")]
+                [InlineKeyboardButton("« Close", callback_data="config_close")]
             ]
         else:
             # Build server list with status
             server_lines = []
             server_buttons = []
 
+            # Check all server statuses in parallel
+            server_names = list(servers.keys())
+            status_tasks = [
+                get_config_manager().check_server_status(name) for name in server_names
+            ]
+            status_results = await asyncio.gather(*status_tasks)
+            server_statuses = dict(zip(server_names, status_results))
+
             for server_name, server_config in servers.items():
-                # Check server status
-                status_result = await server_manager.check_server_status(server_name)
+                status_result = server_statuses[server_name]
 
                 # Choose status icon and detail message
                 if status_result["status"] == "online":
@@ -78,24 +103,33 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     error_msg = escape_markdown_v2(status_result.get("message", "Offline"))
                     status_detail = f" \\[{error_msg}\\]"
                 else:
-                    status_icon = "🟡"
+                    status_icon = "🔴"
                     error_msg = escape_markdown_v2(status_result.get("message", "Error"))
                     status_detail = f" \\[{error_msg}\\]"
 
                 # Default server indicator
                 default_indicator = " ⭐️" if server_name == default_server else ""
 
+                # Permission badge
+                perm = cm.get_server_permission(user_id, server_name)
+                perm_badges = {
+                    ServerPermission.OWNER: "👑",
+                    ServerPermission.TRADER: "💱",
+                    ServerPermission.VIEWER: "👁",
+                }
+                perm_badge = perm_badges.get(perm, "") + " " if perm else ""
+
                 url = f"{server_config['host']}:{server_config['port']}"
                 url_escaped = escape_markdown_v2(url)
                 name_escaped = escape_markdown_v2(server_name)
 
                 server_lines.append(
-                    f"{status_icon} *{name_escaped}*{default_indicator}{status_detail}\n"
+                    f"{status_icon} {perm_badge}*{name_escaped}*{default_indicator}{status_detail}\n"
                     f"   `{url_escaped}`"
                 )
 
                 # Add button for each server
-                button_text = f"{server_name}"
+                button_text = f"{perm_badge}{server_name}"
                 if server_name == default_server:
                     button_text += " ⭐️"
                 server_buttons.append(
@@ -118,7 +152,7 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 [
                     InlineKeyboardButton("➕ Add Server", callback_data="api_server_add"),
                     InlineKeyboardButton("🔄 Refresh", callback_data="config_api_servers"),
-                    InlineKeyboardButton("« Back", callback_data="config_back")
+                    InlineKeyboardButton("« Close", callback_data="config_close")
                 ]
             ]
 
@@ -139,7 +173,7 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error(f"Error showing API servers: {e}", exc_info=True)
         error_text = f"❌ Error loading API servers: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="config_back")]]
+        keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
 
@@ -167,33 +201,87 @@ async def handle_api_server_action(query, context: ContextTypes.DEFAULT_TYPE) ->
         await confirm_delete_server(query, context, server_name)
     elif action_data == "cancel_delete":
         await show_api_servers(query, context)
+    # Server sharing actions
+    elif action_data.startswith("share_user_"):
+        # Format: share_user_{uid}_{server_name}
+        parts = action_data.replace("share_user_", "").split("_", 1)
+        if len(parts) == 2:
+            target_user_id = int(parts[0])
+            server_name = parts[1]
+            await select_share_user(query, context, server_name, target_user_id)
+        else:
+            await query.answer("Invalid share action")
+    elif action_data.startswith("share_manual_"):
+        server_name = action_data.replace("share_manual_", "")
+        await start_manual_share_flow(query, context, server_name)
+    elif action_data.startswith("share_start_"):
+        server_name = action_data.replace("share_start_", "")
+        await start_share_flow(query, context, server_name)
+    elif action_data.startswith("share_cancel_"):
+        server_name = action_data.replace("share_cancel_", "")
+        # Clear sharing state
+        context.user_data.pop('sharing_server', None)
+        context.user_data.pop('awaiting_share_user_id', None)
+        context.user_data.pop('share_target_user_id', None)
+        context.user_data.pop('share_message_id', None)
+        context.user_data.pop('share_chat_id', None)
+        await show_server_sharing(query, context, server_name)
+    elif action_data.startswith("share_"):
+        server_name = action_data.replace("share_", "")
+        await show_server_sharing(query, context, server_name)
+    elif action_data.startswith("perm_trader_"):
+        server_name = action_data.replace("perm_trader_", "")
+        await set_share_permission(query, context, server_name, "trader")
+    elif action_data.startswith("perm_viewer_"):
+        server_name = action_data.replace("perm_viewer_", "")
+        await set_share_permission(query, context, server_name, "viewer")
+    elif action_data.startswith("revoke_"):
+        # Format: revoke_{user_id}_{server_name}
+        parts = action_data.replace("revoke_", "").split("_", 1)
+        if len(parts) == 2:
+            target_user_id = int(parts[0])
+            server_name = parts[1]
+            await revoke_access(query, context, server_name, target_user_id)
+        else:
+            await query.answer("Invalid revoke action")
     else:
         await query.answer("Unknown action")
 
 
 async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
-    """Show details and actions for a specific server"""
+    """Show details and actions for a specific server.
+    Actions are restricted based on user's permission level.
+    """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager, ServerPermission
 
         # Clear any modify state when showing server details
         context.user_data.pop('modifying_server', None)
         context.user_data.pop('modifying_field', None)
         context.user_data.pop('awaiting_modify_input', None)
 
-        server = server_manager.get_server(server_name)
+        server = get_config_manager().get_server(server_name)
         if not server:
             await query.answer("❌ Server not found")
             return
 
-        chat_id = query.message.chat_id
-        chat_info = server_manager.get_chat_server_info(chat_id)
-        default_server = server_manager.get_default_server()
-        is_global_default = server_name == default_server
-        is_chat_default = chat_info.get("is_per_chat") and chat_info.get("server") == server_name
+        user_id = query.from_user.id
+        cm = get_config_manager()
+
+        # Check user's permission level
+        perm = cm.get_server_permission(user_id, server_name)
+        if not perm:
+            await query.answer("❌ No access to this server")
+            return
+
+        is_owner = perm == ServerPermission.OWNER
+        can_trade = perm in (ServerPermission.OWNER, ServerPermission.TRADER)
+
+        from config_manager import get_effective_server
+        is_user_default = server_name == get_effective_server(query.message.chat_id, context.user_data)
 
         # Check status
-        status_result = await server_manager.check_server_status(server_name)
+        status_result = await get_config_manager().check_server_status(server_name)
         status = status_result["status"]
         message = status_result.get("message", "")
 
@@ -209,40 +297,60 @@ async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_
         name_escaped = escape_markdown_v2(server_name)
         host_escaped = escape_markdown_v2(server['host'])
         port_escaped = escape_markdown_v2(str(server['port']))
-        username_escaped = escape_markdown_v2(server['username'])
+
+        # Permission badge
+        perm_labels = {
+            ServerPermission.OWNER: "👑 Owner",
+            ServerPermission.TRADER: "💱 Trader",
+            ServerPermission.VIEWER: "👁 Viewer",
+        }
+        perm_label = perm_labels.get(perm, "Unknown")
 
         message_text = (
             f"🔌 *Server: {name_escaped}*\n\n"
             f"*Status:* {status_text}\n"
             f"*Host:* `{host_escaped}`\n"
             f"*Port:* `{port_escaped}`\n"
-            f"*Username:* `{username_escaped}`\n"
+            f"*Access:* {escape_markdown_v2(perm_label)}\n"
         )
 
-        # Show if this is the default for this chat
-        if is_chat_default:
-            message_text += "\n⭐️ _Default for this chat_"
+        # Only show username to owners
+        if is_owner:
+            username_escaped = escape_markdown_v2(server['username'])
+            message_text += f"*Username:* `{username_escaped}`\n"
 
-        message_text += "\n\n_You can modify or delete this server using the buttons below\\._"
+        # Show if this is the user's default
+        if is_user_default:
+            message_text += "\n⭐️ _Your default server_"
+
+        # Different help text based on permission
+        if is_owner:
+            message_text += "\n\n_You can modify, share, or delete this server\\._"
+        elif can_trade:
+            message_text += "\n\n_You can use this server for trading\\._"
+        else:
+            message_text += "\n\n_You have view\\-only access to this server\\._"
 
         keyboard = []
 
-        # Show Set as Default button only if not already default
-        if not is_chat_default:
+        # Show Set as Default button for traders and owners
+        if can_trade and not is_user_default:
             keyboard.append([InlineKeyboardButton("⭐️ Set as Default", callback_data=f"api_server_set_default_{server_name}")])
 
-        # Add modification buttons in a row with 4 columns
-        keyboard.append([
-            InlineKeyboardButton("🌐 Host", callback_data=f"modify_field_host_{server_name}"),
-            InlineKeyboardButton("🔌 Port", callback_data=f"modify_field_port_{server_name}"),
-            InlineKeyboardButton("👤 User", callback_data=f"modify_field_username_{server_name}"),
-            InlineKeyboardButton("🔑 Pass", callback_data=f"modify_field_password_{server_name}"),
-        ])
+        # Only owners can modify server settings
+        if is_owner:
+            keyboard.append([
+                InlineKeyboardButton("🌐 Host", callback_data=f"modify_field_host_{server_name}"),
+                InlineKeyboardButton("🔌 Port", callback_data=f"modify_field_port_{server_name}"),
+                InlineKeyboardButton("👤 User", callback_data=f"modify_field_username_{server_name}"),
+                InlineKeyboardButton("🔑 Pass", callback_data=f"modify_field_password_{server_name}"),
+            ])
+            keyboard.append([
+                InlineKeyboardButton("📤 Share", callback_data=f"api_server_share_{server_name}"),
+                InlineKeyboardButton("🗑 Delete", callback_data=f"api_server_delete_{server_name}"),
+            ])
 
-        keyboard.extend([
-            [InlineKeyboardButton("🗑 Delete", callback_data=f"api_server_delete_{server_name}")],
-            [InlineKeyboardButton("« Back to Servers", callback_data="config_api_servers")],
-        ])
+        keyboard.append([InlineKeyboardButton("« Back to Servers", callback_data="config_api_servers")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -258,28 +366,25 @@ async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_
 
 
 async def set_default_server(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
-    """Set server as default for this chat"""
+    """Set server as default for this user/chat"""
     try:
-        from servers import server_manager
         from handlers.dex._shared import invalidate_cache
+        from handlers.config.user_preferences import set_active_server
+        from config_manager import get_config_manager
 
+        # Save to user_data (in-memory, pickle persistence)
+        set_active_server(context.user_data, server_name)
+
+        # Also save to config.yml for immediate persistence (survives hard kills)
         chat_id = query.message.chat_id
-        success = server_manager.set_default_server_for_chat(chat_id, server_name)
+        get_config_manager().set_chat_default_server(chat_id, server_name)
 
-        if success:
-            # Invalidate ALL cached data since we're switching to a different server
-            # This ensures /lp, /swap, etc. will fetch fresh data from the new server
-            invalidate_cache(context.user_data, "all")
+        # Invalidate ALL cached data since we're switching to a different server
+        invalidate_cache(context.user_data, "all")
+        context.user_data["_current_server"] = server_name
 
-            # Store current server in user_data as fallback for background tasks
-            context.user_data["_current_server"] = server_name
-
-            logger.info(f"Cache invalidated after switching to server '{server_name}'")
-
-            await query.answer(f"✅ Set {server_name} as default for this chat")
-            await show_server_details(query, context, server_name)
-        else:
-            await query.answer("❌ Failed to set default server")
+        await query.answer(f"✅ Set {server_name} as your default server")
+        await show_server_details(query, context, server_name)
 
     except Exception as e:
         logger.error(f"Error setting default server: {e}", exc_info=True)
@@ -310,17 +415,29 @@ async def confirm_delete_server(query, context: ContextTypes.DEFAULT_TYPE, serve
 
 
 async def delete_server(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
-    """Delete a server from configuration"""
+    """Delete a server from configuration.
+    Only owners can delete servers.
+    """
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
         from handlers.dex._shared import invalidate_cache
+        from config_manager import get_config_manager, ServerPermission
 
-        # Check if this is the current chat's default server
-        chat_id = query.message.chat_id
-        current_default = server_manager.get_default_server_for_chat(chat_id)
-        was_current = (current_default == server_name)
+        user_id = query.from_user.id
+        cm = get_config_manager()
 
-        success = server_manager.delete_server(server_name)
+        # Check if user has owner permission
+        perm = cm.get_server_permission(user_id, server_name)
+        if perm != ServerPermission.OWNER:
+            await query.answer("❌ Only the owner can delete this server", show_alert=True)
+            return
+
+        # Check if this is the user's current default server
+        from handlers.config.user_preferences import get_active_server
+        was_current = (get_active_server(context.user_data) == server_name)
+
+        # Delete server and clean up permissions
+        success = get_config_manager().delete_server(server_name, actor_id=user_id)
 
         if success:
             # Invalidate cache if we deleted the server that was in use
@@ -500,8 +617,8 @@ async def handle_add_server_input(update: Update, context: ContextTypes.DEFAULT_
                           awaiting_field not in server_data
 
         if awaiting_field == 'name':
-            from servers import server_manager
-            if new_value in server_manager.list_servers() and new_value != server_data.get('name'):
+            from config_manager import get_config_manager
+            if new_value in get_config_manager().list_servers() and new_value != server_data.get('name'):
                 message_id = context.user_data.get('add_server_message_id')
                 chat_id = context.user_data.get('add_server_chat_id')
                 if message_id and chat_id:
@@ -702,9 +819,10 @@ async def handle_add_server_callbacks(query, context: ContextTypes.DEFAULT_TYPE)
 async def confirm_add_server(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Actually add the server to configuration"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         server_data = context.user_data.get('adding_server', {})
+        user_id = query.from_user.id
 
         required_fields = ['name', 'host', 'port', 'username', 'password']
         for field in required_fields:
@@ -712,12 +830,14 @@ async def confirm_add_server(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await query.answer(f"❌ Missing field: {field}")
                 return
 
-        success = server_manager.add_server(
+        # Add server with ownership registration
+        success = get_config_manager().add_server(
             name=server_data['name'],
             host=server_data['host'],
             port=server_data['port'],
             username=server_data['username'],
-            password=server_data['password']
+            password=server_data['password'],
+            owner_id=user_id
         )
 
         if success:
@@ -737,9 +857,9 @@ async def confirm_add_server(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def start_modify_server(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> int:
     """Start the modify server conversation"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
-        server = server_manager.get_server(server_name)
+        server = get_config_manager().get_server(server_name)
         if not server:
             await query.answer("❌ Server not found")
             return ConversationHandler.END
@@ -792,8 +912,8 @@ async def handle_modify_field_selection(query, context: ContextTypes.DEFAULT_TYP
         context.user_data['modify_message_id'] = query.message.message_id
         context.user_data['modify_chat_id'] = query.message.chat_id
 
-        from servers import server_manager
-        server = server_manager.get_server(server_name)
+        from config_manager import get_config_manager
+        server = get_config_manager().get_server(server_name)
         if not server:
             await query.answer("❌ Server not found")
             return
@@ -856,7 +976,7 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
         pass
 
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         if not server_name or not field:
             await context.bot.send_message(
@@ -885,7 +1005,7 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
                 return
 
         kwargs = {field: new_value}
-        success = server_manager.modify_server(server_name, **kwargs)
+        success = get_config_manager().modify_server(server_name, **kwargs)
 
         # Clear modification state
         context.user_data.pop('modifying_server', None)
@@ -895,9 +1015,9 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
         if success:
             logger.info(f"Successfully modified {field} for server {server_name}")
 
-            # Invalidate cache if this is the current chat's default server
-            current_default = server_manager.get_default_server_for_chat(chat_id)
-            if current_default == server_name:
+            # Invalidate cache if this is the user's current default server
+            from handlers.config.user_preferences import get_active_server
+            if get_active_server(context.user_data) == server_name:
                 from handlers.dex._shared import invalidate_cache
                 invalidate_cache(context.user_data, "all")
                 logger.info(f"Cache invalidated after modifying current server '{server_name}'")
@@ -987,3 +1107,417 @@ async def handle_server_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await handle_add_server_input(update, context)
     elif context.user_data.get('awaiting_modify_input'):
         await handle_modify_value_input(update, context)
+    elif context.user_data.get('awaiting_share_user_id'):
+        await handle_share_user_id_input(update, context)
+
+
+# ==================== Server Sharing ====================
+
+async def show_server_sharing(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
+    """Show sharing details and management for a server."""
+    from config_manager import get_config_manager, ServerPermission
+
+    user_id = query.from_user.id
+    cm = get_config_manager()
+
+    # Check ownership
+    perm = cm.get_server_permission(user_id, server_name)
+    if perm != ServerPermission.OWNER:
+        await query.answer("Only the owner can manage sharing", show_alert=True)
+        return
+
+    shared_users = cm.get_server_shared_users(server_name)
+    name_escaped = escape_markdown_v2(server_name)
+
+    message = f"📤 *Share Server: {name_escaped}*\n\n"
+
+    keyboard = []
+
+    if shared_users:
+        message += "*Shared with:*\n"
+
+        perm_badges = {
+            ServerPermission.TRADER: "💱",
+            ServerPermission.VIEWER: "👁",
+        }
+
+        for target_user_id, perm in shared_users:
+            target_user = cm.get_user(target_user_id)
+            username = target_user.get('username') if target_user else None
+
+            badge = perm_badges.get(perm, "?")
+            if username:
+                message += f"  {badge} `{target_user_id}` \\(@{escape_markdown_v2(username)}\\)\n"
+            else:
+                message += f"  {badge} `{target_user_id}`\n"
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🗑 Revoke {target_user_id}",
+                    callback_data=f"api_server_revoke_{target_user_id}_{server_name}"
+                )
+            ])
+
+        message += "\n"
+    else:
+        message += "_Not shared with anyone yet\\._\n\n"
+
+    message += "_Enter a User ID below to share this server\\._"
+
+    keyboard.append([
+        InlineKeyboardButton("➕ Share with User ID", callback_data=f"api_server_share_start_{server_name}")
+    ])
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=f"api_server_view_{server_name}")])
+
+    await query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def start_share_flow(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
+    """Start the share flow.
+    - Admin sees a list of approved users to pick from
+    - Regular users enter the user ID manually
+    """
+    from config_manager import get_config_manager, ServerPermission, UserRole
+
+    user_id = query.from_user.id
+    cm = get_config_manager()
+
+    perm = cm.get_server_permission(user_id, server_name)
+    if perm != ServerPermission.OWNER:
+        await query.answer("Only the owner can share", show_alert=True)
+        return
+
+    context.user_data['sharing_server'] = server_name
+    context.user_data['share_message_id'] = query.message.message_id
+    context.user_data['share_chat_id'] = query.message.chat_id
+
+    name_escaped = escape_markdown_v2(server_name)
+    owner_id = cm.get_server_owner(server_name)
+
+    # Get already shared users to exclude them
+    shared_users = cm.get_server_shared_users(server_name)
+    shared_user_ids = {uid for uid, _ in shared_users}
+
+    # For admin: show list of approved users
+    if cm.is_admin(user_id):
+        approved_users = [
+            u for u in cm.get_all_users()
+            if u.get('role') in (UserRole.USER.value, UserRole.ADMIN.value)
+            and u['user_id'] != owner_id
+            and u['user_id'] not in shared_user_ids
+        ]
+
+        if not approved_users:
+            message = (
+                f"📤 *Share Server: {name_escaped}*\n\n"
+                "_No approved users available to share with\\._\n\n"
+                "All approved users either already have access or are the owner\\."
+            )
+            keyboard = [[InlineKeyboardButton("« Back", callback_data=f"api_server_share_{server_name}")]]
+        else:
+            message = (
+                f"📤 *Share Server: {name_escaped}*\n\n"
+                "Select a user to share with:"
+            )
+            keyboard = []
+            for u in approved_users[:10]:  # Limit to 10 users
+                uid = u['user_id']
+                username = u.get('username') or 'N/A'
+                btn_text = f"@{username}" if username != 'N/A' else str(uid)
+                keyboard.append([
+                    InlineKeyboardButton(btn_text, callback_data=f"api_server_share_user_{uid}_{server_name}")
+                ])
+
+            if len(approved_users) > 10:
+                message += f"\n\n_Showing first 10 of {len(approved_users)} users_"
+
+            keyboard.append([InlineKeyboardButton("✏️ Enter ID manually", callback_data=f"api_server_share_manual_{server_name}")])
+            keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")])
+
+        context.user_data['awaiting_share_user_id'] = False
+    else:
+        # Regular users: manual entry
+        message = (
+            f"📤 *Share Server: {name_escaped}*\n\n"
+            "Enter the *User ID* of the user you want to share with:\n\n"
+            "_The user must be approved to receive access\\._"
+        )
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")]]
+        context.user_data['awaiting_share_user_id'] = True
+
+    await query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def select_share_user(query, context: ContextTypes.DEFAULT_TYPE, server_name: str, target_user_id: int) -> None:
+    """Handle user selection from the list (admin flow)."""
+    from config_manager import get_config_manager, ServerPermission
+
+    cm = get_config_manager()
+    user_id = query.from_user.id
+
+    # Verify ownership
+    perm = cm.get_server_permission(user_id, server_name)
+    if perm != ServerPermission.OWNER:
+        await query.answer("Only the owner can share", show_alert=True)
+        return
+
+    # Store target and ask for permission level
+    context.user_data['sharing_server'] = server_name
+    context.user_data['share_target_user_id'] = target_user_id
+
+    target_user = cm.get_user(target_user_id)
+    username = target_user.get('username') if target_user else None
+    name_escaped = escape_markdown_v2(server_name)
+
+    if username:
+        user_display = f"`{target_user_id}` \\(@{escape_markdown_v2(username)}\\)"
+    else:
+        user_display = f"`{target_user_id}`"
+
+    message = (
+        f"📤 *Share Server: {name_escaped}*\n\n"
+        f"Sharing with: {user_display}\n\n"
+        "Select the permission level:"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("💱 Trader (can trade)", callback_data=f"api_server_perm_trader_{server_name}")],
+        [InlineKeyboardButton("👁 Viewer (read-only)", callback_data=f"api_server_perm_viewer_{server_name}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")],
+    ]
+
+    await query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def start_manual_share_flow(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
+    """Start manual entry flow for sharing (used when admin clicks 'Enter ID manually')."""
+    from config_manager import get_config_manager, ServerPermission
+
+    user_id = query.from_user.id
+    cm = get_config_manager()
+
+    perm = cm.get_server_permission(user_id, server_name)
+    if perm != ServerPermission.OWNER:
+        await query.answer("Only the owner can share", show_alert=True)
+        return
+
+    context.user_data['sharing_server'] = server_name
+    context.user_data['awaiting_share_user_id'] = True
+    context.user_data['share_message_id'] = query.message.message_id
+    context.user_data['share_chat_id'] = query.message.chat_id
+
+    name_escaped = escape_markdown_v2(server_name)
+    message = (
+        f"📤 *Share Server: {name_escaped}*\n\n"
+        "Enter the *User ID* of the user you want to share with:\n\n"
+        "_The user must be approved to receive access\\._"
+    )
+
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")]]
+
+    await query.message.edit_text(
+        message,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_share_user_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle user ID input for sharing."""
+    from config_manager import get_config_manager
+
+    if not context.user_data.get('awaiting_share_user_id'):
+        return
+
+    server_name = context.user_data.get('sharing_server')
+    if not server_name:
+        return
+
+    try:
+        await update.message.delete()
+    except:
+        pass
+
+    cm = get_config_manager()
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    message_id = context.user_data.get('share_message_id')
+
+    # Parse target user ID
+    try:
+        target_user_id = int(update.message.text.strip())
+    except ValueError:
+        if message_id:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="❌ Invalid User ID\\. Please enter a valid number\\.\n\nEnter the User ID:",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")
+                ]])
+            )
+        return
+
+    # Check if target user is approved
+    if not cm.is_approved(target_user_id):
+        if message_id:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"❌ User `{target_user_id}` is not an approved user\\.\n\n"
+                     "Only approved users can receive server access\\.\n\n"
+                     "Enter a different User ID:",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")
+                ]])
+            )
+        return
+
+    # Check if trying to share with self
+    owner_id = cm.get_server_owner(server_name)
+    if target_user_id == owner_id:
+        if message_id:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="❌ You can't share with the owner\\.\n\nEnter a different User ID:",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")
+                ]])
+            )
+        return
+
+    # Store target and ask for permission level
+    context.user_data['share_target_user_id'] = target_user_id
+    context.user_data['awaiting_share_user_id'] = False
+
+    target_user = cm.get_user(target_user_id)
+    username = target_user.get('username') if target_user else None
+    name_escaped = escape_markdown_v2(server_name)
+
+    if username:
+        user_display = f"`{target_user_id}` \\(@{escape_markdown_v2(username)}\\)"
+    else:
+        user_display = f"`{target_user_id}`"
+
+    message = (
+        f"📤 *Share Server: {name_escaped}*\n\n"
+        f"Sharing with: {user_display}\n\n"
+        "Select the permission level:"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("💱 Trader (can trade)", callback_data=f"api_server_perm_trader_{server_name}")],
+        [InlineKeyboardButton("👁 Viewer (read-only)", callback_data=f"api_server_perm_viewer_{server_name}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}")],
+    ]
+
+    if message_id:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=message,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def set_share_permission(query, context: ContextTypes.DEFAULT_TYPE, server_name: str, permission: str) -> None:
+    """Set the permission level and complete sharing."""
+    from config_manager import get_config_manager, ServerPermission
+
+    user_id = query.from_user.id
+    target_user_id = context.user_data.get('share_target_user_id')
+
+    if not target_user_id:
+        await query.answer("Session expired. Please try again.", show_alert=True)
+        await show_api_servers(query, context)
+        return
+
+    cm = get_config_manager()
+
+    perm_map = {
+        'trader': ServerPermission.TRADER,
+        'viewer': ServerPermission.VIEWER,
+    }
+    perm = perm_map.get(permission)
+
+    if not perm:
+        await query.answer("Invalid permission", show_alert=True)
+        return
+
+    success = cm.share_server(server_name, user_id, target_user_id, perm)
+
+    # Clean up state
+    context.user_data.pop('sharing_server', None)
+    context.user_data.pop('share_target_user_id', None)
+    context.user_data.pop('share_message_id', None)
+    context.user_data.pop('share_chat_id', None)
+
+    if success:
+        # Notify target user
+        try:
+            perm_label = "Trader" if perm == ServerPermission.TRADER else "Viewer"
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    f"📥 *Server Shared With You*\n\n"
+                    f"You now have *{escape_markdown_v2(perm_label)}* access to server:\n"
+                    f"`{escape_markdown_v2(server_name)}`\n\n"
+                    f"Use /config \\> API Servers to access it\\."
+                ),
+                parse_mode="MarkdownV2"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to notify user {target_user_id} of share: {e}")
+
+        await query.answer(f"Shared with {target_user_id}", show_alert=True)
+        await show_server_sharing(query, context, server_name)
+    else:
+        await query.answer("Failed to share server", show_alert=True)
+        await show_server_sharing(query, context, server_name)
+
+
+async def revoke_access(query, context: ContextTypes.DEFAULT_TYPE, server_name: str, target_user_id: int) -> None:
+    """Revoke a user's access to a server."""
+    from config_manager import get_config_manager
+
+    user_id = query.from_user.id
+    cm = get_config_manager()
+
+    success = cm.revoke_server_access(server_name, user_id, target_user_id)
+
+    if success:
+        # Notify target user
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    f"🚫 *Access Revoked*\n\n"
+                    f"Your access to server `{escape_markdown_v2(server_name)}` has been revoked\\."
+                ),
+                parse_mode="MarkdownV2"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to notify user {target_user_id} of revocation: {e}")
+
+        await query.answer(f"Revoked access for {target_user_id}", show_alert=True)
+    else:
+        await query.answer("Failed to revoke access", show_alert=True)
+
+    await show_server_sharing(query, context, server_name)

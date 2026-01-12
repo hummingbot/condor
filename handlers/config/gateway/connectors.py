@@ -6,17 +6,18 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from ._shared import logger, escape_markdown_v2
+from ..user_preferences import get_active_server
 
 
 async def show_connectors_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show DEX connectors configuration menu"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         await query.answer("Loading connectors...")
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.list_connectors()
 
         connectors = response.get('connectors', [])
@@ -113,10 +114,10 @@ async def handle_connector_action(query, context: ContextTypes.DEFAULT_TYPE) -> 
 async def show_connector_details(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
     """Show details and configuration for a specific connector"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.get_connector_config(connector_name)
 
         # Try to extract config - it might be directly in response or nested under 'config'
@@ -179,10 +180,10 @@ async def show_connector_details(query, context: ContextTypes.DEFAULT_TYPE, conn
 async def start_connector_config_edit(query, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
     """Start progressive configuration editing flow for a connector"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         chat_id = query.message.chat_id
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
         response = await client.gateway.get_connector_config(connector_name)
 
         # Extract config
@@ -365,7 +366,7 @@ async def handle_connector_config_input(update: Update, context: ContextTypes.DE
 async def submit_connector_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_id: int) -> None:
     """Submit the connector configuration to Gateway"""
     try:
-        from servers import server_manager
+        from config_manager import get_config_manager
 
         config_data = context.user_data.get('connector_config_data', {})
         connector_name = config_data.get('connector_name')
@@ -396,7 +397,7 @@ async def submit_connector_config(context: ContextTypes.DEFAULT_TYPE, bot, chat_
                 parse_mode="MarkdownV2"
             )
 
-        client = await server_manager.get_client_for_chat(chat_id)
+        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
 
         # Update configuration using the gateway API
         await client.gateway.update_connector_config(connector_name, final_config)

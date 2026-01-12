@@ -13,8 +13,9 @@ Provides:
 """
 
 import asyncio
+import copy
 import logging
-from typing import Dict, Any, List, Optional
+from typing import List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
@@ -27,7 +28,6 @@ from ._shared import (
     get_controller_config,
     set_controller_config,
     init_new_controller_config,
-    format_controller_config_summary,
     format_config_field_value,
     get_available_cex_connectors,
     fetch_current_price,
@@ -35,11 +35,10 @@ from ._shared import (
     calculate_auto_prices,
     generate_config_id,
     generate_candles_chart,
-    SUPPORTED_CONTROLLERS,
     GRID_STRIKE_DEFAULTS,
     GRID_STRIKE_FIELDS,
     GRID_STRIKE_FIELD_ORDER,
-    GS_WIZARD_STEPS,
+    GS_EDITABLE_FIELDS,
     SIDE_LONG,
     SIDE_SHORT,
     ORDER_TYPE_MARKET,
@@ -47,18 +46,20 @@ from ._shared import (
     ORDER_TYPE_LIMIT_MAKER,
     ORDER_TYPE_LABELS,
 )
+from .controllers.pmm_mister import (
+    FIELDS as PMM_FIELDS,
+    FIELD_ORDER as PMM_FIELD_ORDER,
+)
 from .controllers.grid_strike.grid_analysis import (
     calculate_natr,
-    calculate_price_stats,
     suggest_grid_params,
     generate_theoretical_grid,
-    format_grid_summary,
 )
 from handlers.cex._shared import (
-    fetch_cex_balances,
     get_cex_balances,
-    fetch_trading_rules,
     get_trading_rules,
+    validate_trading_pair,
+    get_correct_pair_format,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
     chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         configs = await client.controllers.list_controller_configs()
 
         # Store all configs
@@ -269,6 +270,7 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
             ])
 
         keyboard.append([
+            InlineKeyboardButton("📤 Upload", callback_data="bots:upload_config"),
             InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu"),
         ])
 
@@ -446,7 +448,7 @@ async def handle_cfg_delete_execute(update: Update, context: ContextTypes.DEFAUL
     )
 
     # Delete each config
-    client = await get_bots_client(chat_id)
+    client, _ = await get_bots_client(chat_id, context.user_data)
     deleted = []
     failed = []
 
@@ -548,23 +550,35 @@ async def handle_cfg_edit_loop(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def _get_editable_config_fields(config: dict) -> dict:
-    """Extract editable fields from a controller config"""
+    """Extract editable fields from a controller config using centralized field definitions"""
     controller_type = config.get("controller_name", "grid_strike")
     tp_cfg = config.get("triple_barrier_config", {})
     take_profit = tp_cfg.get("take_profit", 0.0001) if isinstance(tp_cfg, dict) else 0.0001
 
     if "grid_strike" in controller_type:
-        return {
-            "start_price": config.get("start_price", 0),
-            "end_price": config.get("end_price", 0),
-            "limit_price": config.get("limit_price", 0),
-            "total_amount_quote": config.get("total_amount_quote", 0),
-            "max_open_orders": config.get("max_open_orders", 3),
-            "max_orders_per_batch": config.get("max_orders_per_batch", 1),
-            "min_spread_between_orders": config.get("min_spread_between_orders", 0.0001),
-            "activation_bounds": config.get("activation_bounds", 0.01),
-            "take_profit": take_profit,
-        }
+        # Use centralized GS_EDITABLE_FIELDS for consistency between wizard and edit views
+        result = {}
+        for field_name in GS_EDITABLE_FIELDS:
+            if field_name == "take_profit":
+                result[field_name] = take_profit
+            else:
+                default_val = GRID_STRIKE_DEFAULTS.get(field_name, "")
+                result[field_name] = config.get(field_name, default_val)
+        return result
+    elif "pmm" in controller_type:
+        # Use centralized PMM_FIELDS and PMM_FIELD_ORDER for consistency
+        # between config creation and editing
+        from .controllers.pmm_mister import DEFAULTS as PMM_DEFAULTS
+        result = {}
+        for field_name in PMM_FIELD_ORDER:
+            # Skip 'id' - it's shown in the header already
+            if field_name == "id":
+                continue
+            if field_name in PMM_FIELDS:
+                # Get value from config, fallback to PMM_DEFAULTS
+                default_val = PMM_DEFAULTS.get(field_name, "")
+                result[field_name] = config.get(field_name, default_val)
+        return result
     # Default fields for other controller types
     return {
         "total_amount_quote": config.get("total_amount_quote", 0),
@@ -572,7 +586,7 @@ def _get_editable_config_fields(config: dict) -> dict:
     }
 
 
-async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE, status_msg: str = None) -> None:
     """Show edit form for current config in bulk edit format (key=value)"""
     query = update.callback_query
 
@@ -605,9 +619,22 @@ async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["cfg_edit_chat_id"] = query.message.chat_id
 
     # Build message with key=value format
-    lines = [f"*Edit Config* \\({current_idx + 1}/{total}\\)", ""]
+    header = f"*Edit Config* \\({current_idx + 1}/{total}\\)"
+    if status_msg:
+        header += f" — {escape_markdown_v2(status_msg)}"
+    lines = [header, ""]
     lines.append(f"`{escape_markdown_v2(config_id)}`")
     lines.append("")
+
+    # Add context info for Grid Strike (connector, trading pair, side)
+    controller_type = config.get("controller_name", "")
+    if "grid_strike" in controller_type:
+        connector = config.get("connector_name", "")
+        pair = config.get("trading_pair", "")
+        side = config.get("side", SIDE_LONG)
+        side_str = "LONG" if side == SIDE_LONG else "SHORT"
+        lines.append(f"*{escape_markdown_v2(pair)}* {side_str} on {escape_markdown_v2(connector)}")
+        lines.append("")
 
     # Build config text for display (each line copyable)
     for key, value in editable_fields.items():
@@ -626,6 +653,11 @@ async def show_cfg_edit_form(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if current_idx < total - 1:
         nav_row.append(InlineKeyboardButton("Next ▶️", callback_data="bots:cfg_edit_next"))
     keyboard.append(nav_row)
+
+    # Branch button row
+    keyboard.append([
+        InlineKeyboardButton("🔀 Branch", callback_data="bots:cfg_branch"),
+    ])
 
     # Final row
     keyboard.append([
@@ -772,6 +804,7 @@ async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     # Apply updates to config
+    old_config_id = config.get("id", "")
     for key, value in updates.items():
         if key == "take_profit":
             if "triple_barrier_config" not in config:
@@ -780,10 +813,36 @@ async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_T
         else:
             config[key] = value
 
-    # Store modified config
-    config_id = config.get("id")
+    # Auto-update ID if connector_name or trading_pair changed
+    if "connector_name" in updates or "trading_pair" in updates:
+        # Extract sequence number from old ID
+        parts = old_config_id.split("_", 1)
+        seq_num = parts[0] if parts and parts[0].isdigit() else "001"
+
+        # Determine controller type abbreviation
+        controller_name = config.get("controller_name", "")
+        if controller_name == "grid_strike":
+            type_abbrev = "gs"
+        elif controller_name == "pmm_mister":
+            type_abbrev = "pmm"
+        else:
+            type_abbrev = parts[1].split("_")[0] if len(parts) > 1 and "_" in parts[1] else "cfg"
+
+        # Build new ID with current values
+        connector = config.get("connector_name", "unknown")
+        conn_clean = connector.replace("_perpetual", "").replace("_spot", "")
+        pair = config.get("trading_pair", "UNKNOWN").upper()
+        new_config_id = f"{seq_num}_{type_abbrev}_{conn_clean}_{pair}"
+
+        config["id"] = new_config_id
+    else:
+        new_config_id = old_config_id
+
+    # Store modified config (remove old key if ID changed)
     modified = context.user_data.get("cfg_edit_modified", {})
-    modified[config_id] = config
+    if old_config_id != new_config_id and old_config_id in modified:
+        del modified[old_config_id]
+    modified[new_config_id] = config
     context.user_data["cfg_edit_modified"] = modified
 
     # Update in edit loop
@@ -793,19 +852,73 @@ async def process_cfg_edit_input(update: Update, context: ContextTypes.DEFAULT_T
         configs_to_edit[current_idx] = config
 
     # Update editable fields for display
-    context.user_data["cfg_editable_fields"] = _get_editable_config_fields(config)
+    editable_fields = _get_editable_config_fields(config)
+    context.user_data["cfg_editable_fields"] = editable_fields
 
-    # Format updated fields
-    updated_lines = [f"`{escape_markdown_v2(k)}` \\= `{escape_markdown_v2(str(v))}`" for k, v in updates.items()]
+    # Try to delete the user's input message
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
 
-    keyboard = [[InlineKeyboardButton("✅ Continue", callback_data="bots:cfg_edit_form")]]
+    # Rebuild the edit form with updated values
+    total = len(configs_to_edit)
+    config_id = config.get("id", "unknown")
 
-    await update.get_bot().send_message(
-        chat_id=chat_id,
-        text=f"✅ *Updated*\n\n" + "\n".join(updated_lines) + "\n\n_Tap to continue editing_",
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    lines = [f"*Edit Config* \\({current_idx + 1}/{total}\\)", ""]
+    lines.append(f"`{escape_markdown_v2(config_id)}`")
+    lines.append("")
+
+    # Add context info for Grid Strike (connector, trading pair, side)
+    controller_type = config.get("controller_name", "")
+    if "grid_strike" in controller_type:
+        connector = config.get("connector_name", "")
+        pair = config.get("trading_pair", "")
+        side = config.get("side", SIDE_LONG)
+        side_str = "LONG" if side == SIDE_LONG else "SHORT"
+        lines.append(f"*{escape_markdown_v2(pair)}* {side_str} on {escape_markdown_v2(connector)}")
+        lines.append("")
+
+    for key, value in editable_fields.items():
+        lines.append(f"`{key}={value}`")
+    lines.append("")
+    lines.append("✏️ _Send `key=value` to update_")
+
+    # Build keyboard
+    keyboard = []
+    nav_row = []
+    if current_idx > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="bots:cfg_edit_prev"))
+    nav_row.append(InlineKeyboardButton(f"💾 Save", callback_data="bots:cfg_edit_save"))
+    if current_idx < total - 1:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data="bots:cfg_edit_next"))
+    keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("🔀 Branch", callback_data="bots:cfg_branch")])
+    keyboard.append([
+        InlineKeyboardButton("💾 Save All & Exit", callback_data="bots:cfg_edit_save_all"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:cfg_edit_cancel"),
+    ])
+
+    # Edit the original message
+    message_id = context.user_data.get("cfg_edit_message_id")
+    if message_id:
+        try:
+            await update.get_bot().edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception:
+            # If edit fails, send a new message
+            msg = await update.get_bot().send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["cfg_edit_message_id"] = msg.message_id
 
 
 async def handle_cfg_edit_prev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -838,14 +951,17 @@ async def handle_cfg_edit_save(update: Update, context: ContextTypes.DEFAULT_TYP
     config_id = config.get("id")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         await client.controllers.create_or_update_controller_config(config_id, config)
-        await query.answer(f"✅ Saved {config_id[:20]}")
+        await query.answer()
 
         # Remove from modified since it's now saved
         modified = context.user_data.get("cfg_edit_modified", {})
         modified.pop(config_id, None)
         context.user_data["cfg_edit_modified"] = modified
+
+        # Refresh form with saved status
+        await show_cfg_edit_form(update, context, status_msg="✅ Saved!")
 
     except Exception as e:
         logger.error(f"Failed to save config {config_id}: {e}")
@@ -874,7 +990,7 @@ async def handle_cfg_edit_save_all(update: Update, context: ContextTypes.DEFAULT
         parse_mode="MarkdownV2"
     )
 
-    client = await get_bots_client(chat_id)
+    client, _ = await get_bots_client(chat_id, context.user_data)
     saved = []
     failed = []
 
@@ -926,6 +1042,101 @@ async def handle_cfg_edit_cancel(update: Update, context: ContextTypes.DEFAULT_T
     await show_controller_configs_menu(update, context)
 
 
+async def handle_cfg_branch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Branch (duplicate) the current config with a new ID"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    configs_to_edit = context.user_data.get("cfg_edit_loop", [])
+    current_idx = context.user_data.get("cfg_edit_index", 0)
+    modified = context.user_data.get("cfg_edit_modified", {})
+
+    if not configs_to_edit or current_idx >= len(configs_to_edit):
+        await query.answer("No config to branch")
+        return
+
+    # Get current config (use modified version if exists)
+    config = configs_to_edit[current_idx]
+    config_id = config.get("id", "unknown")
+    if config_id in modified:
+        config = modified[config_id]
+
+    # Generate new ID by incrementing the sequence number
+    # Format: NNN_type_connector_pair -> increment NNN
+    old_id = config.get("id", "")
+    parts = old_id.split("_", 1)
+
+    # Find highest sequence number across all configs from multiple sources
+    client, _ = await get_bots_client(chat_id, context.user_data)
+
+    # Source 1: Fresh list from API
+    try:
+        api_configs = await client.controllers.list_controller_configs()
+    except Exception:
+        api_configs = []
+
+    # Source 2: Cached list in user_data (may have configs not yet saved)
+    cached_configs = context.user_data.get("controller_configs_list", [])
+
+    max_num = 0
+
+    # Check all sources for highest sequence number
+    all_config_sources = [api_configs, cached_configs, configs_to_edit]
+    for config_list in all_config_sources:
+        for cfg in config_list:
+            cfg_id = cfg.get("id", "") if isinstance(cfg, dict) else ""
+            cfg_parts = cfg_id.split("_", 1)
+            if cfg_parts and cfg_parts[0].isdigit():
+                max_num = max(max_num, int(cfg_parts[0]))
+
+    # Also check modified config IDs (keys)
+    for cfg_id in modified.keys():
+        cfg_parts = cfg_id.split("_", 1)
+        if cfg_parts and cfg_parts[0].isdigit():
+            max_num = max(max_num, int(cfg_parts[0]))
+
+    # Create new ID based on current config values
+    new_num = str(max_num + 1).zfill(3)
+
+    # Determine controller type abbreviation
+    controller_name = config.get("controller_name", "")
+    if controller_name == "grid_strike":
+        type_abbrev = "gs"
+    elif controller_name == "pmm_mister":
+        type_abbrev = "pmm"
+    else:
+        # Fallback: try to extract from old ID
+        if len(parts) > 1:
+            type_abbrev = parts[1].split("_")[0] if "_" in parts[1] else parts[1]
+        else:
+            type_abbrev = "cfg"
+
+    # Get connector and trading pair from current config values
+    connector = config.get("connector_name", "unknown")
+    conn_clean = connector.replace("_perpetual", "").replace("_spot", "")
+    pair = config.get("trading_pair", "UNKNOWN").upper()
+
+    new_id = f"{new_num}_{type_abbrev}_{conn_clean}_{pair}"
+
+    # Deep copy the config with new ID
+    new_config = copy.deepcopy(config)
+    new_config["id"] = new_id
+
+    # Add to edit loop right after current config
+    configs_to_edit.insert(current_idx + 1, new_config)
+    context.user_data["cfg_edit_loop"] = configs_to_edit
+
+    # Mark as modified so it gets saved
+    modified[new_id] = new_config
+    context.user_data["cfg_edit_modified"] = modified
+
+    # Navigate to the new config
+    context.user_data["cfg_edit_index"] = current_idx + 1
+
+    await query.answer(f"Branched to {new_id}")
+    await show_cfg_edit_form(update, context)
+
+
 async def handle_configs_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int) -> None:
     """Handle pagination for controller configs menu (legacy, redirects to cfg_page)"""
     controller_type = context.user_data.get("configs_controller_type")
@@ -953,9 +1164,19 @@ async def show_new_grid_strike_form(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     chat_id = update.effective_chat.id
 
+    # Clear any cached market data from previous wizard runs
+    # This prevents showing stale data when starting a new grid for a different pair
+    gs_keys_to_clear = [
+        "gs_current_price", "gs_candles", "gs_candles_interval",
+        "gs_chart_interval", "gs_natr", "gs_trading_rules",
+        "gs_theoretical_grid", "gs_market_data_ready", "gs_market_data_error"
+    ]
+    for key in gs_keys_to_clear:
+        context.user_data.pop(key, None)
+
     # Fetch existing configs for sequence numbering
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         configs = await client.controllers.list_controller_configs()
         context.user_data["controller_configs_list"] = configs
     except Exception as e:
@@ -979,15 +1200,19 @@ async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFA
     config = get_controller_config(context)
 
     try:
-        client = await get_bots_client(chat_id)
-        cex_connectors = await get_available_cex_connectors(context.user_data, client)
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(context.user_data, client, server_name=server_name)
 
         if not cex_connectors:
-            keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+            keyboard = [
+                [InlineKeyboardButton("🔑 Configure API Keys", callback_data="config_api_keys")],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")]
+            ]
             await query.message.edit_text(
                 r"*Grid Strike \- New Config*" + "\n\n"
-                r"No CEX connectors configured\." + "\n"
-                r"Please configure exchange credentials first\.",
+                r"⚠️ No CEX connectors available\." + "\n\n"
+                r"You need to connect API keys for an exchange to deploy strategies\." + "\n"
+                r"Click below to configure your API keys\.",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -1009,9 +1234,12 @@ async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFA
         await query.message.edit_text(
             r"*📈 Grid Strike \- Step 1*" + "\n\n"
             r"🏦 *Select Connector*" + "\n\n"
+            r"Grid Strike automatically places a grid of buy or sell orders within a set price range\." + "\n"
+            r"[📖 Strategy Guide](https://hummingbot.org/blog/strategy-guide-grid-strike/)" + "\n\n"
             r"Choose the exchange for this grid \(spot or perpetual\):",
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
         )
 
     except Exception as e:
@@ -1042,6 +1270,14 @@ async def handle_gs_wizard_pair(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     chat_id = update.effective_chat.id
     config = get_controller_config(context)
+
+    # Clear old market data if pair changed (prevents stale data)
+    old_pair = config.get("trading_pair", "")
+    if old_pair and old_pair.upper() != pair.upper():
+        for key in ["gs_current_price", "gs_candles", "gs_candles_interval",
+                    "gs_natr", "gs_trading_rules", "gs_theoretical_grid",
+                    "gs_market_data_ready", "gs_market_data_error"]:
+            context.user_data.pop(key, None)
 
     config["trading_pair"] = pair.upper()
     set_controller_config(context, config)
@@ -1172,6 +1408,10 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
     pair = config.get("trading_pair", "")
     side = "📈 LONG" if config.get("side") == SIDE_LONG else "📉 SHORT"
 
+    # Enable text input for leverage
+    context.user_data["bots_state"] = "gs_wizard_input"
+    context.user_data["gs_wizard_step"] = "leverage"
+
     keyboard = [
         [
             InlineKeyboardButton("1x", callback_data="bots:gs_leverage:1"),
@@ -1193,7 +1433,8 @@ async def _show_wizard_leverage_step(update: Update, context: ContextTypes.DEFAU
     await query.message.edit_text(
         r"*📈 Grid Strike \- Step 4/6*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}` \\| {side}" + "\n\n"
-        r"⚡ *Select Leverage*",
+        r"⚡ *Select Leverage*" + "\n"
+        r"_Or type a value \(e\.g\. 2, 3x\)_",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1234,7 +1475,7 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
     # Fetch balances for the connector
     balance_text = ""
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         balances = await get_cex_balances(
             context.user_data, client, "master_account", ttl=30
         )
@@ -1378,6 +1619,29 @@ async def handle_gs_wizard_amount(update: Update, context: ContextTypes.DEFAULT_
     await _show_wizard_prices_step(update, context)
 
 
+def _calculate_min_order_amount(current_price: float, trading_rules: dict, default: float = 6.0) -> float:
+    """
+    Calculate minimum order amount based on trading rules.
+
+    The minimum is the greater of:
+    - min_notional_size from trading rules
+    - current_price * min_order_size (min base amount)
+    - the provided default
+
+    Returns the calculated minimum order amount in quote currency.
+    """
+    min_notional = trading_rules.get("min_notional_size", 0) or 0
+    min_order_size = trading_rules.get("min_order_size", 0) or 0
+
+    # Calculate min from base amount requirement
+    min_from_base = current_price * min_order_size if min_order_size > 0 else 0
+
+    # Take the maximum of all constraints
+    calculated_min = max(default, min_notional, min_from_base)
+
+    return calculated_min
+
+
 async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str = None) -> None:
     """Wizard Step 6: Grid Configuration with prices, TP, spread, and grid analysis"""
     query = update.callback_query
@@ -1389,9 +1653,9 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
     side = config.get("side", SIDE_LONG)
     total_amount = config.get("total_amount_quote", 1000)
 
-    # Get current interval (default 1m for better NATR calculation)
+    # Get current interval (default 5m for better NATR calculation)
     if interval is None:
-        interval = context.user_data.get("gs_chart_interval", "1m")
+        interval = context.user_data.get("gs_chart_interval", "5m")
     context.user_data["gs_chart_interval"] = interval
 
     # Check if we have pre-cached data from background fetch
@@ -1400,7 +1664,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
 
     try:
         # If no cached data or interval changed, fetch now
-        cached_interval = context.user_data.get("gs_candles_interval", "1m")
+        cached_interval = context.user_data.get("gs_candles_interval", "5m")
         need_refetch = interval != cached_interval
 
         if not current_price or need_refetch:
@@ -1427,7 +1691,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 )
                 context.user_data["gs_wizard_message_id"] = loading_msg.message_id
 
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             current_price = await fetch_current_price(client, connector, pair)
 
             if current_price:
@@ -1451,7 +1715,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                 await query.message.edit_text(
                     r"*❌ Error*" + "\n\n"
                     f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
-                    r"Please check the trading pair and try again\\.",
+                    r"Please check the trading pair and try again\.",
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -1461,7 +1725,7 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
                     text=(
                         r"*❌ Error*" + "\n\n"
                         f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.\n"
-                        r"Please check the trading pair and try again\\."
+                        r"Please check the trading pair and try again\."
                     ),
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1475,6 +1739,13 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         if candles_list:
             natr = calculate_natr(candles_list, period=14)
             context.user_data["gs_natr"] = natr
+            # Use the last candle's close price for better chart alignment
+            last_candle = candles_list[-1] if candles_list else None
+            if last_candle:
+                last_close = last_candle.get("close") or last_candle.get("c")
+                if last_close:
+                    current_price = float(last_close)
+                    context.user_data["gs_current_price"] = current_price
 
         # Get trading rules
         trading_rules = context.user_data.get("gs_trading_rules", {})
@@ -1505,12 +1776,15 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         limit = config.get("limit_price")
         min_spread = config.get("min_spread_between_orders", 0.0001)
         take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
-        min_order_amount = config.get("min_order_amount_quote", max(6, min_notional))
+
+        # Calculate minimum order amount from trading rules
+        required_min_order = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+        min_order_amount = config.get("min_order_amount_quote", required_min_order)
 
         # Ensure min_order_amount respects exchange rules
-        if min_notional > min_order_amount:
-            config["min_order_amount_quote"] = min_notional
-            min_order_amount = min_notional
+        if min_order_amount < required_min_order:
+            config["min_order_amount_quote"] = required_min_order
+            min_order_amount = required_min_order
 
         # Generate config ID with sequence number (if not already set)
         if not config.get("id"):
@@ -1560,6 +1834,9 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
         max_open_orders = config.get("max_open_orders", 3)
         order_frequency = config.get("order_frequency", 3)
         leverage = config.get("leverage", 1)
+        position_mode = config.get("position_mode", "ONEWAY")
+        coerce_tp_to_step = config.get("coerce_tp_to_step", False)
+        activation_bounds = config.get("activation_bounds", 0.01)
         side_value = config.get("side", SIDE_LONG)
         side_str_label = "LONG" if side_value == SIDE_LONG else "SHORT"
 
@@ -1577,18 +1854,23 @@ async def _show_wizard_prices_step(update: Update, context: ContextTypes.DEFAULT
             rf"*📈 Grid Strike \- Step {final_step}/{final_step} \(Final\)*" + "\n\n"
             f"*{escape_markdown_v2(pair)}* {side_str_label}\n"
             f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
+            f"`connector_name={connector}`\n"
+            f"`trading_pair={pair}`\n"
             f"`total_amount_quote={total_amount:.0f}`\n"
             f"`start_price={start:.6g}`\n"
             f"`end_price={end:.6g}`\n"
             f"`limit_price={limit:.6g}`\n"
             f"`leverage={leverage}`\n"
+            f"`position_mode={position_mode}`\n"
             f"`take_profit={take_profit}`\n"
+            f"`coerce_tp_to_step={str(coerce_tp_to_step).lower()}`\n"
             f"`min_spread_between_orders={min_spread}`\n"
             f"`min_order_amount_quote={min_order_amount:.0f}`\n"
-            f"`max_open_orders={max_open_orders}`\n\n"
+            f"`max_open_orders={max_open_orders}`\n"
+            f"`activation_bounds={activation_bounds}`\n\n"
             f"{grid_valid} Grid: `{grid['num_levels']}` levels "
             f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
-            f"@ `${grid['amount_per_level']:.2f}`/lvl"
+            f"@ `${grid['amount_per_level']:.2f}`/lvl \\| step: `{grid.get('spread_pct', 0):.3f}%`"
         )
 
         # Add warnings if any
@@ -1815,18 +2097,23 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
     pair = config.get("trading_pair", "")
     side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
     leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "ONEWAY")
     amount = config.get("total_amount_quote", 0)
     start_price = config.get("start_price", 0)
     end_price = config.get("end_price", 0)
     limit_price = config.get("limit_price", 0)
     tp = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    open_order_type = config.get("triple_barrier_config", {}).get("open_order_type", ORDER_TYPE_LIMIT_MAKER)
+    tp_order_type = config.get("triple_barrier_config", {}).get("take_profit_order_type", ORDER_TYPE_LIMIT_MAKER)
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
+    order_frequency = config.get("order_frequency", 3)
     min_order_amount = config.get("min_order_amount_quote", 6)
     min_spread = config.get("min_spread_between_orders", 0.0001)
+    coerce_tp_to_step = config.get("coerce_tp_to_step", False)
 
     # Delete previous chart if exists
     chart_msg_id = context.user_data.pop("gs_chart_message_id", None)
@@ -1850,15 +2137,20 @@ async def _show_wizard_review_step(update: Update, context: ContextTypes.DEFAULT
         f"trading_pair: {pair}\n"
         f"side: {side_value}\n"
         f"leverage: {leverage}\n"
+        f"position_mode: {position_mode}\n"
         f"total_amount_quote: {amount:.0f}\n"
         f"start_price: {start_price:.6g}\n"
         f"end_price: {end_price:.6g}\n"
         f"limit_price: {limit_price:.6g}\n"
         f"take_profit: {tp}\n"
+        f"open_order_type: {open_order_type}\n"
+        f"take_profit_order_type: {tp_order_type}\n"
+        f"coerce_tp_to_step: {str(coerce_tp_to_step).lower()}\n"
         f"keep_position: {str(keep_position).lower()}\n"
         f"activation_bounds: {activation_bounds}\n"
         f"max_open_orders: {max_open_orders}\n"
         f"max_orders_per_batch: {max_orders_per_batch}\n"
+        f"order_frequency: {order_frequency}\n"
         f"min_order_amount_quote: {min_order_amount}\n"
         f"min_spread_between_orders: {min_spread}"
     )
@@ -1926,18 +2218,23 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
     pair = config.get("trading_pair", "")
     side = "LONG" if config.get("side") == SIDE_LONG else "SHORT"
     leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "ONEWAY")
     amount = config.get("total_amount_quote", 0)
     start_price = config.get("start_price", 0)
     end_price = config.get("end_price", 0)
     limit_price = config.get("limit_price", 0)
     tp = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    open_order_type = config.get("triple_barrier_config", {}).get("open_order_type", ORDER_TYPE_LIMIT_MAKER)
+    tp_order_type = config.get("triple_barrier_config", {}).get("take_profit_order_type", ORDER_TYPE_LIMIT_MAKER)
     keep_position = config.get("keep_position", True)
     activation_bounds = config.get("activation_bounds", 0.01)
     config_id = config.get("id", "")
     max_open_orders = config.get("max_open_orders", 3)
     max_orders_per_batch = config.get("max_orders_per_batch", 1)
+    order_frequency = config.get("order_frequency", 3)
     min_order_amount = config.get("min_order_amount_quote", 6)
     min_spread = config.get("min_spread_between_orders", 0.0001)
+    coerce_tp_to_step = config.get("coerce_tp_to_step", False)
 
     # Build copyable config block with real YAML field names
     side_value = config.get("side", SIDE_LONG)
@@ -1947,15 +2244,20 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
         f"trading_pair: {pair}\n"
         f"side: {side_value}\n"
         f"leverage: {leverage}\n"
+        f"position_mode: {position_mode}\n"
         f"total_amount_quote: {amount:.0f}\n"
         f"start_price: {start_price:.6g}\n"
         f"end_price: {end_price:.6g}\n"
         f"limit_price: {limit_price:.6g}\n"
         f"take_profit: {tp}\n"
+        f"open_order_type: {open_order_type}\n"
+        f"take_profit_order_type: {tp_order_type}\n"
+        f"coerce_tp_to_step: {str(coerce_tp_to_step).lower()}\n"
         f"keep_position: {str(keep_position).lower()}\n"
         f"activation_bounds: {activation_bounds}\n"
         f"max_open_orders: {max_open_orders}\n"
         f"max_orders_per_batch: {max_orders_per_batch}\n"
+        f"order_frequency: {order_frequency}\n"
         f"min_order_amount_quote: {min_order_amount}\n"
         f"min_spread_between_orders: {min_spread}"
     )
@@ -1986,7 +2288,8 @@ async def _update_wizard_message_for_review(update: Update, context: ContextType
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
-        logger.error(f"Error updating review message: {e}")
+        logger.error(f"Error updating review message: {e}", exc_info=True)
+        logger.debug(f"Message text was: {message_text[:500]}")
 
 
 async def handle_gs_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2171,6 +2474,11 @@ async def handle_gs_edit_min_amt(update: Update, context: ContextTypes.DEFAULT_T
 
     current = config.get("min_order_amount_quote", 6)
 
+    # Calculate minimum required from trading rules
+    current_price = context.user_data.get("gs_current_price", 0)
+    trading_rules = context.user_data.get("gs_trading_rules", {})
+    required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+
     keyboard = [
         [InlineKeyboardButton("Cancel", callback_data="bots:gs_review_back")],
     ]
@@ -2183,8 +2491,9 @@ async def handle_gs_edit_min_amt(update: Update, context: ContextTypes.DEFAULT_T
     msg = await context.bot.send_message(
         chat_id=chat_id,
         text=r"*Edit Min Order Amount*" + "\n\n"
-        f"Current: `{current}`" + "\n\n"
-        r"Enter new value \(e\.g\. 6\):",
+        f"Current: `{current}`\n"
+        f"Minimum: `{required_min:.2f}` \\(from trading rules\\)" + "\n\n"
+        r"Enter new value:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2286,7 +2595,7 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         result = await client.controllers.create_or_update_controller_config(config_id, config)
 
         # Clean up wizard state
@@ -2345,7 +2654,7 @@ async def _background_fetch_market_data(context, config: dict, chat_id: int = No
         return
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Fetch current price
         current_price = await fetch_current_price(client, connector, pair)
@@ -2353,10 +2662,10 @@ async def _background_fetch_market_data(context, config: dict, chat_id: int = No
         if current_price:
             context.user_data["gs_current_price"] = current_price
 
-            # Fetch candles (1m, 420 records) - consistent with default interval
-            candles = await fetch_candles(client, connector, pair, interval="1m", max_records=420)
+            # Fetch candles (5m, 420 records) - consistent with default interval
+            candles = await fetch_candles(client, connector, pair, interval="5m", max_records=420)
             context.user_data["gs_candles"] = candles
-            context.user_data["gs_candles_interval"] = "1m"
+            context.user_data["gs_candles_interval"] = "5m"
             context.user_data["gs_market_data_ready"] = True
 
             logger.info(f"Background fetch complete for {pair}: price={current_price}")
@@ -2374,7 +2683,10 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
     chat_id = update.effective_chat.id
     config = get_controller_config(context)
 
+    logger.debug(f"GS wizard input: step={step}, input={user_input[:50]}")
+
     if not step:
+        logger.warning("GS wizard input called but no step set")
         return
 
     try:
@@ -2389,6 +2701,32 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             pair = user_input.upper().strip()
             if "-" not in pair:
                 pair = pair.replace("/", "-").replace("_", "-")
+
+            connector = config.get("connector_name", "")
+
+            # Validate trading pair exists on the connector
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            is_valid, error_msg, suggestions = await validate_trading_pair(
+                context.user_data, client, connector, pair
+            )
+
+            if not is_valid:
+                # Show error with suggestions
+                await _show_gs_pair_suggestions(update, context, pair, error_msg, suggestions, connector)
+                return
+
+            # Get correctly formatted pair from trading rules
+            trading_rules = await get_trading_rules(context.user_data, client, connector)
+            correct_pair = get_correct_pair_format(trading_rules, pair)
+            pair = correct_pair if correct_pair else pair
+
+            # Clear old market data if pair changed (prevents stale data)
+            old_pair = config.get("trading_pair", "")
+            if old_pair and old_pair.upper() != pair.upper():
+                for key in ["gs_current_price", "gs_candles", "gs_candles_interval",
+                            "gs_natr", "gs_trading_rules", "gs_theoretical_grid",
+                            "gs_market_data_ready", "gs_market_data_error"]:
+                    context.user_data.pop(key, None)
 
             config["trading_pair"] = pair
             set_controller_config(context, config)
@@ -2416,6 +2754,12 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             if "=" in input_stripped:
                 # Parse field=value format
                 changes_made = False
+                chart_affecting_change = False  # Track if chart needs regeneration
+                warning_msg = None
+                # Fields that affect the chart visualization
+                chart_fields = {"start_price", "start", "end_price", "end", "limit_price", "limit",
+                               "connector_name", "trading_pair"}
+
                 for line in input_stripped.split("\n"):
                     line = line.strip()
                     if not line or "=" not in line:
@@ -2424,6 +2768,10 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                     field, value = line.split("=", 1)
                     field = field.strip().lower()
                     value = value.strip()
+
+                    # Check if this field affects the chart
+                    if field in chart_fields:
+                        chart_affecting_change = True
 
                     # Map field names and set values
                     if field in ("start_price", "start"):
@@ -2450,7 +2798,16 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                         config["min_spread_between_orders"] = val
                         changes_made = True
                     elif field in ("min_order_amount_quote", "min_order_amount", "min_order", "min"):
-                        config["min_order_amount_quote"] = float(value.replace("$", ""))
+                        new_min_amt = float(value.replace("$", ""))
+                        # Validate against trading rules
+                        current_price = context.user_data.get("gs_current_price", 0)
+                        trading_rules = context.user_data.get("gs_trading_rules", {})
+                        required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+                        if new_min_amt < required_min:
+                            config["min_order_amount_quote"] = required_min
+                            warning_msg = f"Min order must be >= ${required_min:.2f}"
+                        else:
+                            config["min_order_amount_quote"] = new_min_amt
                         changes_made = True
                     elif field in ("total_amount_quote", "total_amount", "amount"):
                         config["total_amount_quote"] = float(value)
@@ -2476,10 +2833,22 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                             val = val / 100
                         config["activation_bounds"] = val
                         changes_made = True
+                    elif field in ("coerce_tp_to_step", "coerce_tp", "coerce"):
+                        # Boolean field - accept true/false/1/0/yes/no
+                        val_lower = value.lower()
+                        config["coerce_tp_to_step"] = val_lower in ("true", "1", "yes", "on")
+                        changes_made = True
+                    elif field == "position_mode":
+                        config["position_mode"] = value.upper()
+                        changes_made = True
 
                 if changes_made:
                     set_controller_config(context, config)
-                    await _update_wizard_message_for_prices_after_edit(update, context)
+                    # Only regenerate chart if price/pair fields changed
+                    if chart_affecting_change:
+                        await _update_wizard_message_for_prices_after_edit(update, context)
+                    else:
+                        await _update_wizard_caption_only(update, context, warning_msg=warning_msg)
                 else:
                     raise ValueError(f"Unknown field: {field}")
 
@@ -2491,7 +2860,7 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                     config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
                 config["triple_barrier_config"]["take_profit"] = tp_decimal
                 set_controller_config(context, config)
-                await _update_wizard_message_for_prices_after_edit(update, context)
+                await _update_wizard_caption_only(update, context)
 
             elif input_lower.startswith("spread:"):
                 # Min spread in percentage (e.g., spread:0.05 = 0.05% = 0.0005)
@@ -2499,14 +2868,23 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                 spread_decimal = spread_pct / 100
                 config["min_spread_between_orders"] = spread_decimal
                 set_controller_config(context, config)
-                await _update_wizard_message_for_prices_after_edit(update, context)
+                await _update_wizard_caption_only(update, context)
 
             elif input_lower.startswith("min:"):
                 # Min order amount in quote (e.g., min:10 = $10)
                 min_amt = float(input_lower.replace("min:", "").replace("$", "").strip())
-                config["min_order_amount_quote"] = min_amt
+                # Validate against trading rules
+                current_price = context.user_data.get("gs_current_price", 0)
+                trading_rules = context.user_data.get("gs_trading_rules", {})
+                required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+                warning_msg = None
+                if min_amt < required_min:
+                    config["min_order_amount_quote"] = required_min
+                    warning_msg = f"Min order must be >= ${required_min:.2f}"
+                else:
+                    config["min_order_amount_quote"] = min_amt
                 set_controller_config(context, config)
-                await _update_wizard_message_for_prices_after_edit(update, context)
+                await _update_wizard_caption_only(update, context, warning_msg=warning_msg)
 
             else:
                 # Parse comma-separated prices: start,end,limit
@@ -2548,6 +2926,21 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             # Move to prices step
             context.user_data["gs_wizard_step"] = "prices"
             await _update_wizard_message_for_prices(update, context)
+
+        elif step == "leverage":
+            # Parse leverage - handle formats like "2", "2x", "2X", "10x"
+            lev_input = user_input.strip().lower().replace("x", "")
+            leverage = int(float(lev_input))
+
+            if leverage < 1:
+                raise ValueError("Leverage must be at least 1")
+
+            config["leverage"] = leverage
+            set_controller_config(context, config)
+
+            # Move to amount step
+            context.user_data["gs_wizard_step"] = "total_amount_quote"
+            await _update_wizard_message_for_amount(update, context)
 
         elif step == "edit_id":
             new_id = user_input.strip()
@@ -2601,7 +2994,24 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             await _update_wizard_message_for_review(update, context)
 
         elif step == "edit_min_amt":
-            config["min_order_amount_quote"] = float(user_input)
+            new_min_amt = float(user_input)
+            # Validate against trading rules
+            current_price = context.user_data.get("gs_current_price", 0)
+            trading_rules = context.user_data.get("gs_trading_rules", {})
+            required_min = _calculate_min_order_amount(current_price, trading_rules, default=6.0)
+            if new_min_amt < required_min:
+                config["min_order_amount_quote"] = required_min
+                # Send warning message
+                warn_msg = await update.message.reply_text(
+                    f"Min order must be >= ${required_min:.2f}. Set to ${required_min:.2f}."
+                )
+                await asyncio.sleep(3)
+                try:
+                    await warn_msg.delete()
+                except:
+                    pass
+            else:
+                config["min_order_amount_quote"] = new_min_amt
             set_controller_config(context, config)
             context.user_data["gs_wizard_step"] = "review"
             await _update_wizard_message_for_review(update, context)
@@ -2621,15 +3031,20 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                 "trading_pair": "trading_pair",
                 "side": "side",
                 "leverage": "leverage",
+                "position_mode": "position_mode",
                 "total_amount_quote": "total_amount_quote",
                 "start_price": "start_price",
                 "end_price": "end_price",
                 "limit_price": "limit_price",
                 "take_profit": "triple_barrier_config.take_profit",
+                "open_order_type": "triple_barrier_config.open_order_type",
+                "take_profit_order_type": "triple_barrier_config.take_profit_order_type",
+                "coerce_tp_to_step": "coerce_tp_to_step",
                 "keep_position": "keep_position",
                 "activation_bounds": "activation_bounds",
                 "max_open_orders": "max_open_orders",
                 "max_orders_per_batch": "max_orders_per_batch",
+                "order_frequency": "order_frequency",
                 "min_order_amount_quote": "min_order_amount_quote",
                 "min_spread_between_orders": "min_spread_between_orders",
             }
@@ -2660,13 +3075,26 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
                         config["side"] = SIDE_LONG
                     else:
                         config["side"] = SIDE_SHORT
+                elif key == "position_mode":
+                    # Accept HEDGE or ONEWAY (case insensitive)
+                    config["position_mode"] = "ONEWAY" if value.upper() == "ONEWAY" else "HEDGE"
                 elif key == "keep_position":
                     config["keep_position"] = value.lower() in ("true", "yes", "y", "1")
+                elif key == "coerce_tp_to_step":
+                    config["coerce_tp_to_step"] = value.lower() in ("true", "yes", "y", "1")
                 elif key == "take_profit":
                     if "triple_barrier_config" not in config:
                         config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
                     config["triple_barrier_config"]["take_profit"] = float(value)
-                elif field in ["leverage", "max_open_orders", "max_orders_per_batch"]:
+                elif key == "open_order_type":
+                    if "triple_barrier_config" not in config:
+                        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+                    config["triple_barrier_config"]["open_order_type"] = int(value)
+                elif key == "take_profit_order_type":
+                    if "triple_barrier_config" not in config:
+                        config["triple_barrier_config"] = GRID_STRIKE_DEFAULTS["triple_barrier_config"].copy()
+                    config["triple_barrier_config"]["take_profit_order_type"] = int(value)
+                elif field in ["leverage", "max_open_orders", "max_orders_per_batch", "order_frequency"]:
                     config[field] = int(value)
                 elif field in ["total_amount_quote", "start_price", "end_price", "limit_price",
                               "activation_bounds", "min_order_amount_quote", "min_spread_between_orders"]:
@@ -2682,8 +3110,9 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             else:
                 raise ValueError("No valid fields found")
 
-    except ValueError:
+    except ValueError as e:
         # Send error and let user try again
+        logger.warning(f"GS wizard input ValueError: {e}")
         error_msg = await update.message.reply_text(
             f"Invalid input. Please enter a valid value."
         )
@@ -2693,6 +3122,95 @@ async def process_gs_wizard_input(update: Update, context: ContextTypes.DEFAULT_
             await error_msg.delete()
         except:
             pass
+    except Exception as e:
+        # Catch any other exceptions and log them
+        logger.error(f"GS wizard input error: {e}", exc_info=True)
+        try:
+            error_msg = await update.message.reply_text(
+                f"Error processing input: {str(e)[:100]}"
+            )
+            await asyncio.sleep(3)
+            await error_msg.delete()
+        except:
+            pass
+
+
+async def _show_gs_pair_suggestions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    input_pair: str,
+    error_msg: str,
+    suggestions: list,
+    connector: str
+) -> None:
+    """Show trading pair suggestions when validation fails in grid strike wizard"""
+    config = get_controller_config(context)
+    message_id = context.user_data.get("gs_wizard_message_id")
+    chat_id = context.user_data.get("gs_wizard_chat_id")
+
+    # Build suggestion message
+    help_text = f"❌ *{escape_markdown_v2(error_msg)}*\n\n"
+
+    if suggestions:
+        help_text += "💡 *Did you mean:*\n"
+    else:
+        help_text += "_No similar pairs found\\._\n"
+
+    # Build keyboard with suggestions
+    keyboard = []
+    for pair in suggestions:
+        keyboard.append([InlineKeyboardButton(
+            f"📈 {pair}",
+            callback_data=f"bots:gs_pair_select:{pair}"
+        )])
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back:connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+    ])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if message_id and chat_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.debug(f"Could not update wizard message: {e}")
+    else:
+        await update.effective_chat.send_message(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+
+async def handle_gs_pair_select(update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str) -> None:
+    """Handle selection of a suggested trading pair in grid strike wizard"""
+    config = get_controller_config(context)
+    chat_id = update.effective_chat.id
+
+    # Clear old market data
+    for key in ["gs_current_price", "gs_candles", "gs_candles_interval",
+                "gs_natr", "gs_trading_rules", "gs_theoretical_grid",
+                "gs_market_data_ready", "gs_market_data_error"]:
+        context.user_data.pop(key, None)
+
+    config["trading_pair"] = trading_pair
+    set_controller_config(context, config)
+
+    # Start background fetch of market data
+    asyncio.create_task(_background_fetch_market_data(context, config, chat_id))
+
+    # Move to side step
+    context.user_data["gs_wizard_step"] = "side"
+
+    # Update the wizard message
+    await _update_wizard_message_for_side(update, context)
 
 
 async def _update_wizard_message_for_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2776,6 +3294,47 @@ async def _update_wizard_message_for_prices(update: Update, context: ContextType
     await _show_wizard_prices_step(fake_update, context)
 
 
+async def _update_wizard_message_for_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Trigger amount step after leverage input"""
+    message_id = context.user_data.get("gs_wizard_message_id")
+    chat_id = context.user_data.get("gs_wizard_chat_id")
+
+    if not message_id or not chat_id:
+        return
+
+    # Create a fake query object to reuse _show_wizard_amount_step
+    class FakeChat:
+        def __init__(self, chat_id):
+            self.id = chat_id
+
+    class FakeQuery:
+        def __init__(self, bot, chat_id, message_id):
+            self.message = FakeMessage(bot, chat_id, message_id)
+
+    class FakeMessage:
+        def __init__(self, bot, chat_id, message_id):
+            self.chat_id = chat_id
+            self.message_id = message_id
+            self._bot = bot
+
+        async def edit_text(self, text, **kwargs):
+            await self._bot.edit_message_text(
+                chat_id=self.chat_id,
+                message_id=self.message_id,
+                text=text,
+                **kwargs
+            )
+
+        async def delete(self):
+            await self._bot.delete_message(chat_id=self.chat_id, message_id=self.message_id)
+
+    fake_update = type('FakeUpdate', (), {
+        'callback_query': FakeQuery(context.bot, chat_id, message_id),
+        'effective_chat': FakeChat(chat_id)
+    })()
+    await _show_wizard_amount_step(fake_update, context)
+
+
 async def _update_wizard_message_for_prices_after_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Update prices display after editing prices - regenerate chart with new prices and grid analysis"""
     config = get_controller_config(context)
@@ -2794,7 +3353,7 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     limit = config.get("limit_price", 0)
     current_price = context.user_data.get("gs_current_price", 0)
     candles = context.user_data.get("gs_candles")
-    interval = context.user_data.get("gs_chart_interval", "1m")
+    interval = context.user_data.get("gs_chart_interval", "5m")
     total_amount = config.get("total_amount_quote", 1000)
     min_spread = config.get("min_spread_between_orders", 0.0001)
     take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
@@ -2834,6 +3393,9 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     max_open_orders = config.get("max_open_orders", 3)
     order_frequency = config.get("order_frequency", 3)
     leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "ONEWAY")
+    coerce_tp_to_step = config.get("coerce_tp_to_step", False)
+    activation_bounds = config.get("activation_bounds", 0.01)
     side_value = config.get("side", SIDE_LONG)
     side_str = "LONG" if side_value == SIDE_LONG else "SHORT"
 
@@ -2846,18 +3408,23 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
     config_text = (
         f"*{escape_markdown_v2(pair)}* {side_str}\n"
         f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
+        f"`connector_name={connector}`\n"
+        f"`trading_pair={pair}`\n"
         f"`total_amount_quote={total_amount:.0f}`\n"
         f"`start_price={start:.6g}`\n"
         f"`end_price={end:.6g}`\n"
         f"`limit_price={limit:.6g}`\n"
         f"`leverage={leverage}`\n"
+        f"`position_mode={position_mode}`\n"
         f"`take_profit={take_profit}`\n"
+        f"`coerce_tp_to_step={str(coerce_tp_to_step).lower()}`\n"
         f"`min_spread_between_orders={min_spread}`\n"
         f"`min_order_amount_quote={min_order_amount:.0f}`\n"
-        f"`max_open_orders={max_open_orders}`\n\n"
+        f"`max_open_orders={max_open_orders}`\n"
+        f"`activation_bounds={activation_bounds}`\n\n"
         f"{grid_valid} Grid: `{grid['num_levels']}` levels "
         f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
-        f"@ `${grid['amount_per_level']:.2f}`/lvl"
+        f"@ `${grid['amount_per_level']:.2f}`/lvl \\| step: `{grid.get('spread_pct', 0):.3f}%`"
     )
 
     # Add warnings if any
@@ -2911,6 +3478,126 @@ async def _update_wizard_message_for_prices_after_edit(update: Update, context: 
 
     except Exception as e:
         logger.error(f"Error updating prices message: {e}", exc_info=True)
+
+
+async def _update_wizard_caption_only(update: Update, context: ContextTypes.DEFAULT_TYPE, warning_msg: str = None) -> None:
+    """
+    Update only the caption of the chart message without regenerating the chart.
+
+    Use this when changing fields that don't affect the visual representation
+    (e.g., min_order_amount, take_profit, activation_bounds, etc.)
+    """
+    config = get_controller_config(context)
+    message_id = context.user_data.get("gs_wizard_message_id")
+    chat_id = context.user_data.get("gs_wizard_chat_id")
+
+    if not message_id or not chat_id:
+        return
+
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    side = config.get("side", SIDE_LONG)
+    side_value = config.get("side", SIDE_LONG)
+    side_str = "LONG" if side_value == SIDE_LONG else "SHORT"
+    start = config.get("start_price", 0)
+    end = config.get("end_price", 0)
+    limit = config.get("limit_price", 0)
+    current_price = context.user_data.get("gs_current_price", 0)
+    interval = context.user_data.get("gs_chart_interval", "5m")
+    total_amount = config.get("total_amount_quote", 1000)
+    min_spread = config.get("min_spread_between_orders", 0.0001)
+    take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.0001)
+    min_order_amount = config.get("min_order_amount_quote", 6)
+    natr = context.user_data.get("gs_natr")
+    trading_rules = context.user_data.get("gs_trading_rules", {})
+
+    # Get config values
+    max_open_orders = config.get("max_open_orders", 3)
+    leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "ONEWAY")
+    coerce_tp_to_step = config.get("coerce_tp_to_step", False)
+    activation_bounds = config.get("activation_bounds", 0.01)
+
+    # Regenerate theoretical grid with updated parameters
+    grid = generate_theoretical_grid(
+        start_price=start,
+        end_price=end,
+        min_spread=min_spread,
+        total_amount=total_amount,
+        min_order_amount=min_order_amount,
+        current_price=current_price,
+        side=side,
+        trading_rules=trading_rules,
+    )
+    context.user_data["gs_theoretical_grid"] = grid
+
+    # Build interval buttons with current one highlighted
+    interval_options = ["1m", "5m", "15m", "1h", "4h"]
+    interval_row = []
+    for opt in interval_options:
+        label = f"✓ {opt}" if opt == interval else opt
+        interval_row.append(InlineKeyboardButton(label, callback_data=f"bots:gs_interval:{opt}"))
+
+    keyboard = [
+        interval_row,
+        [
+            InlineKeyboardButton("💾 Save Config", callback_data="bots:gs_save"),
+        ],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+    ]
+
+    # Grid analysis info
+    grid_valid = "✓" if grid.get("valid") else "⚠️"
+    natr_pct = f"{natr*100:.2f}%" if natr else "N/A"
+    range_pct = f"{grid.get('grid_range_pct', 0):.2f}%"
+
+    # Build config text with individually copyable key=value params
+    config_text = (
+        f"*{escape_markdown_v2(pair)}* {side_str}\n"
+        f"Price: `{current_price:,.6g}` \\| Range: `{range_pct}` \\| NATR: `{natr_pct}`\n\n"
+        f"`connector_name={connector}`\n"
+        f"`trading_pair={pair}`\n"
+        f"`total_amount_quote={total_amount:.0f}`\n"
+        f"`start_price={start:.6g}`\n"
+        f"`end_price={end:.6g}`\n"
+        f"`limit_price={limit:.6g}`\n"
+        f"`leverage={leverage}`\n"
+        f"`position_mode={position_mode}`\n"
+        f"`take_profit={take_profit}`\n"
+        f"`coerce_tp_to_step={str(coerce_tp_to_step).lower()}`\n"
+        f"`min_spread_between_orders={min_spread}`\n"
+        f"`min_order_amount_quote={min_order_amount:.0f}`\n"
+        f"`max_open_orders={max_open_orders}`\n"
+        f"`activation_bounds={activation_bounds}`\n\n"
+        f"{grid_valid} Grid: `{grid['num_levels']}` levels "
+        f"\\(↓{grid.get('levels_below_current', 0)} ↑{grid.get('levels_above_current', 0)}\\) "
+        f"@ `${grid['amount_per_level']:.2f}`/lvl \\| step: `{grid.get('spread_pct', 0):.3f}%`"
+    )
+
+    # Add warnings if any
+    if grid.get("warnings"):
+        warnings_text = "\n".join(f"⚠️ {escape_markdown_v2(w)}" for w in grid["warnings"])
+        config_text += f"\n{warnings_text}"
+
+    # Add user warning message if provided
+    if warning_msg:
+        config_text += f"\n\n⚠️ {escape_markdown_v2(warning_msg)}"
+
+    config_text += "\n\n_Edit: `field=value`_"
+
+    try:
+        # Try to edit the caption of the existing photo message
+        await context.bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=config_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        # If editing caption fails (e.g., message is text not photo), fall back to full update
+        logger.warning(f"Caption edit failed, falling back to full update: {e}")
+        await _update_wizard_message_for_prices_after_edit(update, context)
 
 
 async def handle_gs_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE, price_type: str) -> None:
@@ -3019,31 +3706,32 @@ async def show_config_form(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         InlineKeyboardButton("Pair", callback_data="bots:set_field:trading_pair"),
     ])
 
-    # Row 2: Side and Leverage
+    # Row 2: Side, Leverage, Position Mode
     keyboard.append([
         InlineKeyboardButton("Side", callback_data="bots:toggle_side"),
         InlineKeyboardButton("Leverage", callback_data="bots:set_field:leverage"),
+        InlineKeyboardButton("Pos Mode", callback_data="bots:toggle_position_mode"),
+    ])
+
+    # Row 3: Amount and Prices
+    keyboard.append([
         InlineKeyboardButton("Amount", callback_data="bots:set_field:total_amount_quote"),
+        InlineKeyboardButton("Start", callback_data="bots:set_field:start_price"),
+        InlineKeyboardButton("End", callback_data="bots:set_field:end_price"),
     ])
 
-    # Row 3: Prices
+    # Row 4: Limit Price and Order Settings
     keyboard.append([
-        InlineKeyboardButton("Start Price", callback_data="bots:set_field:start_price"),
-        InlineKeyboardButton("End Price", callback_data="bots:set_field:end_price"),
-        InlineKeyboardButton("Limit Price", callback_data="bots:set_field:limit_price"),
-    ])
-
-    # Row 4: Advanced
-    keyboard.append([
+        InlineKeyboardButton("Limit", callback_data="bots:set_field:limit_price"),
         InlineKeyboardButton("Max Orders", callback_data="bots:set_field:max_open_orders"),
         InlineKeyboardButton("Min Spread", callback_data="bots:set_field:min_spread_between_orders"),
-        InlineKeyboardButton("Take Profit", callback_data="bots:set_field:take_profit"),
     ])
 
-    # Row 5: Order Types
+    # Row 5: Take Profit and Order Types
     keyboard.append([
-        InlineKeyboardButton("Open Order Type", callback_data="bots:cycle_order_type:open"),
-        InlineKeyboardButton("TP Order Type", callback_data="bots:cycle_order_type:tp"),
+        InlineKeyboardButton("Take Profit", callback_data="bots:set_field:take_profit"),
+        InlineKeyboardButton("Open Type", callback_data="bots:cycle_order_type:open"),
+        InlineKeyboardButton("TP Type", callback_data="bots:cycle_order_type:tp"),
     ])
 
     # Row 6: Actions
@@ -3128,10 +3816,10 @@ async def show_connector_selector(update: Update, context: ContextTypes.DEFAULT_
     chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client(chat_id)
+        client, server_name = await get_bots_client(chat_id, context.user_data)
 
         # Get available CEX connectors (with cache)
-        cex_connectors = await get_available_cex_connectors(context.user_data, client)
+        cex_connectors = await get_available_cex_connectors(context.user_data, client, server_name=server_name)
 
         if not cex_connectors:
             await query.answer("No CEX connectors configured", show_alert=True)
@@ -3208,7 +3896,7 @@ async def fetch_and_apply_market_data(update: Update, context: ContextTypes.DEFA
         return
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Show loading message
         await query.message.edit_text(
@@ -3326,6 +4014,21 @@ async def handle_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await show_config_form(update, context)
 
 
+async def handle_toggle_position_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle the position mode between HEDGE and ONEWAY"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    current_mode = config.get("position_mode", "ONEWAY")
+    new_mode = "ONEWAY" if current_mode == "HEDGE" else "HEDGE"
+    config["position_mode"] = new_mode
+
+    set_controller_config(context, config)
+
+    # Refresh the form
+    await show_config_form(update, context)
+
+
 async def handle_cycle_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE, order_type_key: str) -> None:
     """Cycle the order type between Market, Limit, and Limit Maker
 
@@ -3424,7 +4127,7 @@ async def process_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
 
             try:
-                client = await get_bots_client(chat_id)
+                client, _ = await get_bots_client(chat_id, context.user_data)
                 connector = config.get("connector_name")
                 pair = config.get("trading_pair")
                 side = config.get("side", SIDE_LONG)
@@ -3523,7 +4226,7 @@ async def handle_save_config(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Save to backend using config id as the config_name
         config_name = config.get("id", "")
@@ -3646,7 +4349,7 @@ async def show_deploy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         configs = await client.controllers.list_controller_configs()
 
         if not configs:
@@ -4205,7 +4908,7 @@ async def handle_execute_deploy(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Deploy using deploy_v2_controllers (this can take time)
         result = await client.bot_orchestration.deploy_v2_controllers(
@@ -4339,9 +5042,11 @@ async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_
         controllers_block,
         "```",
         "",
-        f"*Name:*     `{escape_markdown_v2(instance_name)}`",
-        f"*Account:*  `{escape_markdown_v2(creds)}`",
-        f"*Image:*    `{escape_markdown_v2(image_short)}`",
+        r"*Configuration*",
+        "",
+        f"  📝  *Name:*      `{escape_markdown_v2(instance_name)}`",
+        f"  👤  *Account:*   `{escape_markdown_v2(creds)}`",
+        f"  🐳  *Image:*     `{escape_markdown_v2(image_short)}`",
         "",
         r"_Tap buttons below to change settings_",
     ]
@@ -4377,7 +5082,7 @@ async def handle_select_credentials(update: Update, context: ContextTypes.DEFAUL
     if creds == "_show":
         # Show available credentials profiles
         try:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             available_creds = await _get_available_credentials(client)
         except Exception:
             available_creds = ["master_account"]
@@ -4687,7 +5392,7 @@ async def process_deploy_custom_name_input(update: Update, context: ContextTypes
         logger.error(f"Error updating deploy message: {e}")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         result = await client.bot_orchestration.deploy_v2_controllers(
             instance_name=custom_name,
@@ -4766,12 +5471,8 @@ async def process_deploy_custom_name_input(update: Update, context: ContextTypes
 # ============================================
 
 from .controllers.pmm_mister import (
-    DEFAULTS as PMM_DEFAULTS,
-    WIZARD_STEPS as PMM_WIZARD_STEPS,
     validate_config as pmm_validate_config,
     generate_id as pmm_generate_id,
-    parse_spreads,
-    format_spreads,
 )
 
 
@@ -4781,7 +5482,7 @@ async def show_new_pmm_mister_form(update: Update, context: ContextTypes.DEFAULT
     chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         configs = await client.controllers.list_controller_configs()
         context.user_data["controller_configs_list"] = configs
     except Exception as e:
@@ -4802,14 +5503,19 @@ async def _show_pmm_wizard_connector_step(update: Update, context: ContextTypes.
     chat_id = update.effective_chat.id
 
     try:
-        client = await get_bots_client(chat_id)
-        cex_connectors = await get_available_cex_connectors(context.user_data, client)
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(context.user_data, client, server_name=server_name)
 
         if not cex_connectors:
-            keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+            keyboard = [
+                [InlineKeyboardButton("🔑 Configure API Keys", callback_data="config_api_keys")],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")]
+            ]
             await query.message.edit_text(
                 r"*PMM Mister \- New Config*" + "\n\n"
-                r"No CEX connectors configured\.",
+                r"⚠️ No CEX connectors available\." + "\n\n"
+                r"You need to connect API keys for an exchange to deploy strategies\." + "\n"
+                r"Click below to configure your API keys\.",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -4828,7 +5534,7 @@ async def _show_pmm_wizard_connector_step(update: Update, context: ContextTypes.
 
         await query.message.edit_text(
             r"*📈 PMM Mister \- New Config*" + "\n\n"
-            r"*Step 1/7:* 🏦 Select Connector",
+            r"*Step 1/8:* 🏦 Select Connector",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -4881,12 +5587,15 @@ async def _show_pmm_wizard_pair_step(update: Update, context: ContextTypes.DEFAU
                 row = []
         if row:
             keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+    ])
 
     await query.message.edit_text(
         r"*📈 PMM Mister \- New Config*" + "\n\n"
         f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n\n"
-        r"*Step 2/7:* 🔗 Trading Pair" + "\n\n"
+        r"*Step 2/8:* 🔗 Trading Pair" + "\n\n"
         r"Select or type a pair:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -4931,13 +5640,16 @@ async def _show_pmm_wizard_leverage_step(update: Update, context: ContextTypes.D
             InlineKeyboardButton("50x", callback_data="bots:pmm_leverage:50"),
             InlineKeyboardButton("75x", callback_data="bots:pmm_leverage:75"),
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+        ],
     ]
 
     await query.message.edit_text(
         r"*📈 PMM Mister \- New Config*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
-        r"*Step 3/7:* ⚡ Leverage",
+        r"*Step 3/8:* ⚡ Leverage",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -4960,25 +5672,35 @@ async def _show_pmm_wizard_allocation_step(update: Update, context: ContextTypes
     pair = config.get("trading_pair", "")
     leverage = config.get("leverage", 20)
 
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = "portfolio_allocation"
+
+    # Back goes to leverage for perpetual, or pair for spot
+    back_target = "leverage" if connector.endswith("_perpetual") else "pair"
+
     keyboard = [
         [
             InlineKeyboardButton("1%", callback_data="bots:pmm_alloc:0.01"),
             InlineKeyboardButton("2%", callback_data="bots:pmm_alloc:0.02"),
-            InlineKeyboardButton("5%", callback_data="bots:pmm_alloc:0.05"),
+            InlineKeyboardButton("3%", callback_data="bots:pmm_alloc:0.03"),
         ],
         [
+            InlineKeyboardButton("5%", callback_data="bots:pmm_alloc:0.05"),
             InlineKeyboardButton("10%", callback_data="bots:pmm_alloc:0.1"),
             InlineKeyboardButton("20%", callback_data="bots:pmm_alloc:0.2"),
-            InlineKeyboardButton("50%", callback_data="bots:pmm_alloc:0.5"),
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data=f"bots:pmm_back:{back_target}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+        ],
     ]
 
     await query.message.edit_text(
         r"*📈 PMM Mister \- New Config*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
         f"⚡ `{leverage}x`" + "\n\n"
-        r"*Step 4/7:* 💰 Portfolio Allocation",
+        r"*Step 4/8:* 💰 Portfolio Allocation" + "\n\n"
+        r"_Or type a custom value \(e\.g\. 3% or 0\.03\)_",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -4989,12 +5711,134 @@ async def handle_pmm_wizard_allocation(update: Update, context: ContextTypes.DEF
     config = get_controller_config(context)
     config["portfolio_allocation"] = allocation
     set_controller_config(context, config)
+    context.user_data["pmm_wizard_step"] = "total_amount_quote"
+    await _show_pmm_wizard_amount_step(update, context)
+
+
+async def _show_pmm_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """PMM Wizard Step 5: Total Amount Quote"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 20)
+    allocation = config.get("portfolio_allocation", 0.05)
+
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = "total_amount_quote"
+
+    # Extract base and quote tokens from pair
+    base_token, quote_token = "", ""
+    if "-" in pair:
+        base_token, quote_token = pair.split("-", 1)
+
+    # Fetch balances for the connector
+    balance_text = ""
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        balances = await get_cex_balances(
+            context.user_data, client, "master_account", ttl=30
+        )
+
+        # Try to find connector balances with flexible matching
+        connector_balances = []
+        connector_lower = connector.lower()
+        connector_base = connector_lower.replace("_perpetual", "").replace("_spot", "")
+
+        for bal_connector, bal_list in balances.items():
+            bal_lower = bal_connector.lower()
+            bal_base = bal_lower.replace("_perpetual", "").replace("_spot", "")
+            if bal_lower == connector_lower or bal_base == connector_base:
+                connector_balances = bal_list
+                break
+
+        if connector_balances:
+            relevant_balances = []
+            for bal in connector_balances:
+                token = bal.get("token", bal.get("asset", ""))
+                available = bal.get("units", bal.get("available_balance", bal.get("free", 0)))
+                value_usd = bal.get("value", 0)
+                if token and available:
+                    try:
+                        available_float = float(available)
+                        if available_float > 0:
+                            if token.upper() in [quote_token.upper(), base_token.upper()]:
+                                relevant_balances.append((token, available_float, float(value_usd) if value_usd else None))
+                    except (ValueError, TypeError):
+                        continue
+
+            if relevant_balances:
+                bal_lines = []
+                for token, available, value_usd in relevant_balances:
+                    if available >= 1000:
+                        amt_str = f"{available:,.0f}"
+                    elif available >= 1:
+                        amt_str = f"{available:,.2f}"
+                    else:
+                        amt_str = f"{available:,.6f}"
+
+                    if value_usd and value_usd >= 1:
+                        bal_lines.append(f"{token}: {amt_str} (${value_usd:,.0f})")
+                    else:
+                        bal_lines.append(f"{token}: {amt_str}")
+                balance_text = "💼 *Available:* " + " \\| ".join(
+                    escape_markdown_v2(b) for b in bal_lines
+                ) + "\n\n"
+            else:
+                balance_text = f"_No {escape_markdown_v2(quote_token)} balance on {escape_markdown_v2(connector)}_\n\n"
+        elif balances:
+            balance_text = f"_No {escape_markdown_v2(quote_token)} balance found_\n\n"
+    except Exception as e:
+        logger.warning(f"Could not fetch balances for PMM amount step: {e}")
+
+    keyboard = [
+        [
+            InlineKeyboardButton("💵 100", callback_data="bots:pmm_amount:100"),
+            InlineKeyboardButton("💵 500", callback_data="bots:pmm_amount:500"),
+            InlineKeyboardButton("💵 1000", callback_data="bots:pmm_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("💰 2000", callback_data="bots:pmm_amount:2000"),
+            InlineKeyboardButton("💰 5000", callback_data="bots:pmm_amount:5000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:allocation"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    message_text = (
+        r"*📈 PMM Mister \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+        f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.1f}%`" + "\n\n"
+        + balance_text +
+        r"*Step 5/8:* 💵 Total Amount \(Quote\)" + "\n\n"
+        r"Select or type amount:"
+    )
+
+    try:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception:
+        pass
+
+
+async def handle_pmm_wizard_amount(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float) -> None:
+    """Handle amount selection in PMM wizard"""
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
     context.user_data["pmm_wizard_step"] = "spreads"
     await _show_pmm_wizard_spreads_step(update, context)
 
 
 async def _show_pmm_wizard_spreads_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """PMM Wizard Step 5: Spreads"""
+    """PMM Wizard Step 6: Spreads"""
     query = update.callback_query
     config = get_controller_config(context)
     connector = config.get("connector_name", "")
@@ -5005,19 +5849,95 @@ async def _show_pmm_wizard_spreads_step(update: Update, context: ContextTypes.DE
     context.user_data["bots_state"] = "pmm_wizard_input"
     context.user_data["pmm_wizard_step"] = "spreads"
 
+    amount = config.get("total_amount_quote", 100)
+
     keyboard = [
         [InlineKeyboardButton("Tight: 0.02%, 0.1%", callback_data="bots:pmm_spreads:0.0002,0.001")],
         [InlineKeyboardButton("Normal: 0.5%, 1%", callback_data="bots:pmm_spreads:0.005,0.01")],
         [InlineKeyboardButton("Wide: 1%, 2%", callback_data="bots:pmm_spreads:0.01,0.02")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:amount"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+        ],
     ]
 
     await query.message.edit_text(
         r"*📈 PMM Mister \- New Config*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
-        f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.0f}%`" + "\n\n"
-        r"*Step 5/7:* 📊 Spreads" + "\n\n"
+        f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.0f}%` \\| 💵 `{amount:,.0f}`" + "\n\n"
+        r"*Step 6/8:* 📊 Spreads" + "\n\n"
         r"_Or type custom: `0\.01,0\.02`_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _show_pmm_wizard_spreads_step_msg(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, config: dict) -> None:
+    """Show spreads step via direct message edit (for text input flow)"""
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 20)
+    allocation = config.get("portfolio_allocation", 0.05)
+    amount = config.get("total_amount_quote", 100)
+
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = "spreads"
+
+    keyboard = [
+        [InlineKeyboardButton("Tight: 0.02%, 0.1%", callback_data="bots:pmm_spreads:0.0002,0.001")],
+        [InlineKeyboardButton("Normal: 0.5%, 1%", callback_data="bots:pmm_spreads:0.005,0.01")],
+        [InlineKeyboardButton("Wide: 1%, 2%", callback_data="bots:pmm_spreads:0.01,0.02")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:amount"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+        ],
+    ]
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id, message_id=message_id,
+        text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+             f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+             f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.0f}%` \\| 💵 `{amount:,.0f}`" + "\n\n"
+             r"*Step 6/8:* 📊 Spreads" + "\n\n"
+             r"_Or type custom: `0\.01,0\.02`_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _show_pmm_wizard_amount_step_msg(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, config: dict) -> None:
+    """Show amount step via direct message edit (for text input flow)"""
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 20)
+    allocation = config.get("portfolio_allocation", 0.05)
+
+    context.user_data["bots_state"] = "pmm_wizard_input"
+    context.user_data["pmm_wizard_step"] = "total_amount_quote"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("💵 100", callback_data="bots:pmm_amount:100"),
+            InlineKeyboardButton("💵 500", callback_data="bots:pmm_amount:500"),
+            InlineKeyboardButton("💵 1000", callback_data="bots:pmm_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("💰 2000", callback_data="bots:pmm_amount:2000"),
+            InlineKeyboardButton("💰 5000", callback_data="bots:pmm_amount:5000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:allocation"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id, message_id=message_id,
+        text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+             f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+             f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.1f}%`" + "\n\n"
+             r"*Step 5/8:* 💵 Total Amount \(Quote\)" + "\n\n"
+             r"Select or type amount:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -5034,7 +5954,7 @@ async def handle_pmm_wizard_spreads(update: Update, context: ContextTypes.DEFAUL
 
 
 async def _show_pmm_wizard_tp_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """PMM Wizard Step 6: Take Profit"""
+    """PMM Wizard Step 7: Take Profit"""
     query = update.callback_query
     config = get_controller_config(context)
     connector = config.get("connector_name", "")
@@ -5054,7 +5974,10 @@ async def _show_pmm_wizard_tp_step(update: Update, context: ContextTypes.DEFAULT
             InlineKeyboardButton("0.2%", callback_data="bots:pmm_tp:0.002"),
             InlineKeyboardButton("0.5%", callback_data="bots:pmm_tp:0.005"),
         ],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:spreads"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+        ],
     ]
 
     await query.message.edit_text(
@@ -5062,7 +5985,7 @@ async def _show_pmm_wizard_tp_step(update: Update, context: ContextTypes.DEFAULT
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
         f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.0f}%`" + "\n"
         f"📊 Spreads: `{escape_markdown_v2(spreads)}`" + "\n\n"
-        r"*Step 6/7:* 🎯 Take Profit",
+        r"*Step 7/8:* 🎯 Take Profit",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -5091,22 +6014,58 @@ async def _show_pmm_wizard_review_step(update: Update, context: ContextTypes.DEF
     context.user_data["bots_state"] = "pmm_wizard_input"
     context.user_data["pmm_wizard_step"] = "review"
 
+    # Format order types as string
+    tp_order_type = config.get('take_profit_order_type', "LIMIT_MAKER")
+    if isinstance(tp_order_type, int):
+        tp_order_type_str = ORDER_TYPE_LABELS.get(tp_order_type, "LIMIT_MAKER")
+    else:
+        tp_order_type_str = str(tp_order_type)
+
+    open_order_type = config.get('open_order_type', "LIMIT")
+    if isinstance(open_order_type, int):
+        open_order_type_str = ORDER_TYPE_LABELS.get(open_order_type, "LIMIT")
+    else:
+        open_order_type_str = str(open_order_type)
+
+    # Calculate amounts_pct based on spreads if not set
+    buy_spreads = config.get('buy_spreads', '0.0002,0.001')
+    sell_spreads = config.get('sell_spreads', '0.0002,0.001')
+    buy_amounts = config.get('buy_amounts_pct')
+    sell_amounts = config.get('sell_amounts_pct')
+
+    if not buy_amounts:
+        num_buy_spreads = len(buy_spreads.split(',')) if buy_spreads else 1
+        buy_amounts = ','.join(['1'] * num_buy_spreads)
+    if not sell_amounts:
+        num_sell_spreads = len(sell_spreads.split(',')) if sell_spreads else 1
+        sell_amounts = ','.join(['1'] * num_sell_spreads)
+
     # Build copyable config block
     config_block = (
         f"id: {config.get('id', '')}\n"
         f"connector_name: {config.get('connector_name', '')}\n"
         f"trading_pair: {config.get('trading_pair', '')}\n"
         f"leverage: {config.get('leverage', 1)}\n"
+        f"position_mode: {config.get('position_mode', 'HEDGE')}\n"
+        f"total_amount_quote: {config.get('total_amount_quote', 100)}\n"
         f"portfolio_allocation: {config.get('portfolio_allocation', 0.05)}\n"
-        f"buy_spreads: {config.get('buy_spreads', '0.0002,0.001')}\n"
-        f"sell_spreads: {config.get('sell_spreads', '0.0002,0.001')}\n"
+        f"target_base_pct: {config.get('target_base_pct', 0.5)}\n"
+        f"min_base_pct: {config.get('min_base_pct', 0.4)}\n"
+        f"max_base_pct: {config.get('max_base_pct', 0.6)}\n"
+        f"buy_spreads: {buy_spreads}\n"
+        f"sell_spreads: {sell_spreads}\n"
+        f"buy_amounts_pct: {buy_amounts}\n"
+        f"sell_amounts_pct: {sell_amounts}\n"
         f"take_profit: {config.get('take_profit', 0.0001)}\n"
-        f"target_base_pct: {config.get('target_base_pct', 0.2)}\n"
-        f"min_base_pct: {config.get('min_base_pct', 0.1)}\n"
-        f"max_base_pct: {config.get('max_base_pct', 0.4)}\n"
+        f"take_profit_order_type: {tp_order_type_str}\n"
+        f"open_order_type: {open_order_type_str}\n"
         f"executor_refresh_time: {config.get('executor_refresh_time', 30)}\n"
         f"buy_cooldown_time: {config.get('buy_cooldown_time', 15)}\n"
         f"sell_cooldown_time: {config.get('sell_cooldown_time', 15)}\n"
+        f"buy_position_effectivization_time: {config.get('buy_position_effectivization_time', 3600)}\n"
+        f"sell_position_effectivization_time: {config.get('sell_position_effectivization_time', 3600)}\n"
+        f"min_buy_price_distance_pct: {config.get('min_buy_price_distance_pct', 0.003)}\n"
+        f"min_sell_price_distance_pct: {config.get('min_sell_price_distance_pct', 0.003)}\n"
         f"max_active_executors_by_level: {config.get('max_active_executors_by_level', 4)}"
     )
 
@@ -5114,14 +6073,15 @@ async def _show_pmm_wizard_review_step(update: Update, context: ContextTypes.DEF
     message_text = (
         f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
         f"```\n{config_block}\n```\n\n"
-        f"_To edit, send `field: value` lines:_\n"
-        f"`leverage: 20`\n"
-        f"`take_profit: 0.001`"
+        f"_To edit, send `field: value` lines_"
     )
 
     keyboard = [
         [InlineKeyboardButton("✅ Save Config", callback_data="bots:pmm_save")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:tp"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+        ],
     ]
 
     await query.message.edit_text(
@@ -5129,6 +6089,26 @@ async def _show_pmm_wizard_review_step(update: Update, context: ContextTypes.DEF
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def handle_pmm_back(update: Update, context: ContextTypes.DEFAULT_TYPE, target: str) -> None:
+    """Handle back navigation in PMM wizard"""
+    query = update.callback_query
+
+    if target == "connector":
+        await _show_pmm_wizard_connector_step(update, context)
+    elif target == "pair":
+        await _show_pmm_wizard_pair_step(update, context)
+    elif target == "leverage":
+        await _show_pmm_wizard_leverage_step(update, context)
+    elif target == "allocation":
+        await _show_pmm_wizard_allocation_step(update, context)
+    elif target == "amount":
+        await _show_pmm_wizard_amount_step(update, context)
+    elif target == "spreads":
+        await _show_pmm_wizard_spreads_step(update, context)
+    elif target == "tp":
+        await _show_pmm_wizard_tp_step(update, context)
 
 
 async def handle_pmm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5148,7 +6128,7 @@ async def handle_pmm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         config_id = config.get("id", "")
         result = await client.controllers.create_or_update_controller_config(config_id, config)
 
@@ -5242,19 +6222,19 @@ async def handle_pmm_edit_field(update: Update, context: ContextTypes.DEFAULT_TY
             [
                 InlineKeyboardButton("1%", callback_data="bots:pmm_set:allocation:0.01"),
                 InlineKeyboardButton("2%", callback_data="bots:pmm_set:allocation:0.02"),
-                InlineKeyboardButton("5%", callback_data="bots:pmm_set:allocation:0.05"),
+                InlineKeyboardButton("3%", callback_data="bots:pmm_set:allocation:0.03"),
             ],
             [
+                InlineKeyboardButton("5%", callback_data="bots:pmm_set:allocation:0.05"),
                 InlineKeyboardButton("10%", callback_data="bots:pmm_set:allocation:0.1"),
                 InlineKeyboardButton("20%", callback_data="bots:pmm_set:allocation:0.2"),
-                InlineKeyboardButton("50%", callback_data="bots:pmm_set:allocation:0.5"),
             ],
             [InlineKeyboardButton("❌ Cancel", callback_data="bots:pmm_review_back")],
         ]
         await query.message.edit_text(
             r"*Edit Portfolio Allocation*" + "\n\n"
             f"Current: `{config.get('portfolio_allocation', 0.05)*100:.0f}%`" + "\n\n"
-            r"_Or type a custom value \(e\.g\. 0\.15 for 15%\)_",
+            r"_Or type a custom value \(e\.g\. 3% or 0\.03\)_",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -5385,6 +6365,129 @@ async def handle_pmm_adv_setting(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+async def _show_pmm_pair_suggestions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    input_pair: str,
+    error_msg: str,
+    suggestions: list,
+    connector: str
+) -> None:
+    """Show trading pair suggestions when validation fails in PMM wizard"""
+    message_id = context.user_data.get("pmm_wizard_message_id")
+    chat_id = context.user_data.get("pmm_wizard_chat_id")
+
+    # Build suggestion message
+    help_text = f"❌ *{escape_markdown_v2(error_msg)}*\n\n"
+
+    if suggestions:
+        help_text += "💡 *Did you mean:*\n"
+    else:
+        help_text += "_No similar pairs found\\._\n"
+
+    # Build keyboard with suggestions
+    keyboard = []
+    for pair in suggestions:
+        keyboard.append([InlineKeyboardButton(
+            f"📈 {pair}",
+            callback_data=f"bots:pmm_pair_select:{pair}"
+        )])
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+    ])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if message_id and chat_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.debug(f"Could not update PMM wizard message: {e}")
+    else:
+        await update.effective_chat.send_message(
+            help_text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup
+        )
+
+
+async def handle_pmm_pair_select(update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str) -> None:
+    """Handle selection of a suggested trading pair in PMM wizard"""
+    config = get_controller_config(context)
+    message_id = context.user_data.get("pmm_wizard_message_id")
+    chat_id = context.user_data.get("pmm_wizard_chat_id")
+
+    config["trading_pair"] = trading_pair
+    set_controller_config(context, config)
+    connector = config.get("connector_name", "")
+
+    # Only ask for leverage on perpetual exchanges
+    if connector.endswith("_perpetual"):
+        context.user_data["pmm_wizard_step"] = "leverage"
+        keyboard = [
+            [
+                InlineKeyboardButton("1x", callback_data="bots:pmm_leverage:1"),
+                InlineKeyboardButton("5x", callback_data="bots:pmm_leverage:5"),
+                InlineKeyboardButton("10x", callback_data="bots:pmm_leverage:10"),
+            ],
+            [
+                InlineKeyboardButton("20x", callback_data="bots:pmm_leverage:20"),
+                InlineKeyboardButton("50x", callback_data="bots:pmm_leverage:50"),
+                InlineKeyboardButton("75x", callback_data="bots:pmm_leverage:75"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:pair"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+            ],
+        ]
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+                 f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(trading_pair)}`" + "\n\n"
+                 r"*Step 3/8:* ⚡ Leverage",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        # Spot exchange - set leverage to 1 and skip to allocation
+        config["leverage"] = 1
+        set_controller_config(context, config)
+        context.user_data["bots_state"] = "pmm_wizard_input"
+        context.user_data["pmm_wizard_step"] = "portfolio_allocation"
+        keyboard = [
+            [
+                InlineKeyboardButton("1%", callback_data="bots:pmm_alloc:0.01"),
+                InlineKeyboardButton("2%", callback_data="bots:pmm_alloc:0.02"),
+                InlineKeyboardButton("3%", callback_data="bots:pmm_alloc:0.03"),
+            ],
+            [
+                InlineKeyboardButton("5%", callback_data="bots:pmm_alloc:0.05"),
+                InlineKeyboardButton("10%", callback_data="bots:pmm_alloc:0.1"),
+                InlineKeyboardButton("20%", callback_data="bots:pmm_alloc:0.2"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:pair"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+            ],
+        ]
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+                 f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(trading_pair)}`" + "\n\n"
+                 r"*Step 4/8:* 💰 Portfolio Allocation" + "\n\n"
+                 r"_Or type a custom value \(e\.g\. 3% or 0\.03\)_",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
 async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str) -> None:
     """Process text input during PMM wizard"""
     step = context.user_data.get("pmm_wizard_step", "")
@@ -5398,9 +6501,30 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
         pass
 
     if step == "trading_pair":
-        config["trading_pair"] = user_input.upper()
-        set_controller_config(context, config)
+        pair = user_input.upper().strip()
+        if "-" not in pair:
+            pair = pair.replace("/", "-").replace("_", "-")
+
         connector = config.get("connector_name", "")
+
+        # Validate trading pair exists on the connector
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        is_valid, error_msg, suggestions = await validate_trading_pair(
+            context.user_data, client, connector, pair
+        )
+
+        if not is_valid:
+            # Show error with suggestions
+            await _show_pmm_pair_suggestions(update, context, pair, error_msg, suggestions, connector)
+            return
+
+        # Get correctly formatted pair from trading rules
+        trading_rules = await get_trading_rules(context.user_data, client, connector)
+        correct_pair = get_correct_pair_format(trading_rules, pair)
+        pair = correct_pair if correct_pair else pair
+
+        config["trading_pair"] = pair
+        set_controller_config(context, config)
 
         # Only ask for leverage on perpetual exchanges
         if connector.endswith("_perpetual"):
@@ -5416,13 +6540,16 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
                     InlineKeyboardButton("50x", callback_data="bots:pmm_leverage:50"),
                     InlineKeyboardButton("75x", callback_data="bots:pmm_leverage:75"),
                 ],
-                [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:pair"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+                ],
             ]
             await context.bot.edit_message_text(
                 chat_id=chat_id, message_id=message_id,
                 text=r"*📈 PMM Mister \- New Config*" + "\n\n"
                      f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(config['trading_pair'])}`" + "\n\n"
-                     r"*Step 3/7:* ⚡ Leverage",
+                     r"*Step 3/8:* ⚡ Leverage",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -5430,25 +6557,114 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
             # Spot exchange - set leverage to 1 and skip to allocation
             config["leverage"] = 1
             set_controller_config(context, config)
+            context.user_data["bots_state"] = "pmm_wizard_input"
             context.user_data["pmm_wizard_step"] = "portfolio_allocation"
             keyboard = [
                 [
                     InlineKeyboardButton("1%", callback_data="bots:pmm_alloc:0.01"),
                     InlineKeyboardButton("2%", callback_data="bots:pmm_alloc:0.02"),
-                    InlineKeyboardButton("5%", callback_data="bots:pmm_alloc:0.05"),
+                    InlineKeyboardButton("3%", callback_data="bots:pmm_alloc:0.03"),
                 ],
                 [
+                    InlineKeyboardButton("5%", callback_data="bots:pmm_alloc:0.05"),
                     InlineKeyboardButton("10%", callback_data="bots:pmm_alloc:0.1"),
                     InlineKeyboardButton("20%", callback_data="bots:pmm_alloc:0.2"),
-                    InlineKeyboardButton("50%", callback_data="bots:pmm_alloc:0.5"),
                 ],
-                [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:pair"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+                ],
             ]
             await context.bot.edit_message_text(
                 chat_id=chat_id, message_id=message_id,
                 text=r"*📈 PMM Mister \- New Config*" + "\n\n"
                      f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(config['trading_pair'])}`" + "\n\n"
-                     r"*Step 4/7:* 💰 Portfolio Allocation",
+                     r"*Step 4/8:* 💰 Portfolio Allocation" + "\n\n"
+                     r"_Or type a custom value \(e\.g\. 3% or 0\.03\)_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+    elif step == "portfolio_allocation":
+        # Parse allocation value (handle "3%" or "0.03" formats)
+        try:
+            val_str = user_input.strip().replace("%", "")
+            val = float(val_str)
+            if val > 1:  # User entered percentage like "3" or "3%"
+                val = val / 100
+            config["portfolio_allocation"] = val
+            set_controller_config(context, config)
+            context.user_data["pmm_wizard_step"] = "total_amount_quote"
+            await _show_pmm_wizard_amount_step_msg(context, chat_id, message_id, config)
+        except ValueError:
+            # Invalid input - show error and keep at same step
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+            leverage = config.get("leverage", 20)
+            back_target = "leverage" if connector.endswith("_perpetual") else "pair"
+            keyboard = [
+                [
+                    InlineKeyboardButton("1%", callback_data="bots:pmm_alloc:0.01"),
+                    InlineKeyboardButton("2%", callback_data="bots:pmm_alloc:0.02"),
+                    InlineKeyboardButton("3%", callback_data="bots:pmm_alloc:0.03"),
+                ],
+                [
+                    InlineKeyboardButton("5%", callback_data="bots:pmm_alloc:0.05"),
+                    InlineKeyboardButton("10%", callback_data="bots:pmm_alloc:0.1"),
+                    InlineKeyboardButton("20%", callback_data="bots:pmm_alloc:0.2"),
+                ],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data=f"bots:pmm_back:{back_target}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+                ],
+            ]
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+                     f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+                     f"⚡ `{leverage}x`" + "\n\n"
+                     r"*Step 4/8:* 💰 Portfolio Allocation" + "\n\n"
+                     r"⚠️ _Invalid value\. Enter a percentage \(e\.g\. 3% or 0\.03\)_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+    elif step == "total_amount_quote":
+        # Parse amount value
+        try:
+            amount = float(user_input.strip().replace(",", ""))
+            config["total_amount_quote"] = amount
+            set_controller_config(context, config)
+            context.user_data["pmm_wizard_step"] = "spreads"
+            await _show_pmm_wizard_spreads_step_msg(context, chat_id, message_id, config)
+        except ValueError:
+            # Invalid input - show error and keep at same step
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+            leverage = config.get("leverage", 20)
+            allocation = config.get("portfolio_allocation", 0.05)
+            keyboard = [
+                [
+                    InlineKeyboardButton("💵 100", callback_data="bots:pmm_amount:100"),
+                    InlineKeyboardButton("💵 500", callback_data="bots:pmm_amount:500"),
+                    InlineKeyboardButton("💵 1000", callback_data="bots:pmm_amount:1000"),
+                ],
+                [
+                    InlineKeyboardButton("💰 2000", callback_data="bots:pmm_amount:2000"),
+                    InlineKeyboardButton("💰 5000", callback_data="bots:pmm_amount:5000"),
+                ],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:allocation"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                ],
+            ]
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=r"*📈 PMM Mister \- New Config*" + "\n\n"
+                     f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
+                     f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.1f}%`" + "\n\n"
+                     r"*Step 5/8:* 💵 Total Amount \(Quote\)" + "\n\n"
+                     r"⚠️ _Invalid value\. Enter a number \(e\.g\. 500\)_",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
@@ -5473,7 +6689,10 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
                 InlineKeyboardButton("0.2%", callback_data="bots:pmm_tp:0.002"),
                 InlineKeyboardButton("0.5%", callback_data="bots:pmm_tp:0.005"),
             ],
-            [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:spreads"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+            ],
         ]
         await context.bot.edit_message_text(
             chat_id=chat_id, message_id=message_id,
@@ -5481,7 +6700,7 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
                  f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
                  f"⚡ `{leverage}x` \\| 💰 `{allocation*100:.0f}%`" + "\n"
                  f"📊 Spreads: `{escape_markdown_v2(user_input.strip())}`" + "\n\n"
-                 r"*Step 6/7:* 🎯 Take Profit",
+                 r"*Step 7/8:* 🎯 Take Profit",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -5570,16 +6789,26 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
             "connector_name": ("connector_name", str),
             "trading_pair": ("trading_pair", str),
             "leverage": ("leverage", int),
+            "position_mode": ("position_mode", str),
+            "total_amount_quote": ("total_amount_quote", float),
             "portfolio_allocation": ("portfolio_allocation", float),
-            "buy_spreads": ("buy_spreads", str),
-            "sell_spreads": ("sell_spreads", str),
-            "take_profit": ("take_profit", float),
             "target_base_pct": ("target_base_pct", float),
             "min_base_pct": ("min_base_pct", float),
             "max_base_pct": ("max_base_pct", float),
+            "buy_spreads": ("buy_spreads", str),
+            "sell_spreads": ("sell_spreads", str),
+            "buy_amounts_pct": ("buy_amounts_pct", str),
+            "sell_amounts_pct": ("sell_amounts_pct", str),
+            "take_profit": ("take_profit", float),
+            "take_profit_order_type": ("take_profit_order_type", str),
+            "open_order_type": ("open_order_type", str),
             "executor_refresh_time": ("executor_refresh_time", int),
             "buy_cooldown_time": ("buy_cooldown_time", int),
             "sell_cooldown_time": ("sell_cooldown_time", int),
+            "buy_position_effectivization_time": ("buy_position_effectivization_time", int),
+            "sell_position_effectivization_time": ("sell_position_effectivization_time", int),
+            "min_buy_price_distance_pct": ("min_buy_price_distance_pct", float),
+            "min_sell_price_distance_pct": ("min_sell_price_distance_pct", float),
             "max_active_executors_by_level": ("max_active_executors_by_level", int),
         }
 
@@ -5608,11 +6837,19 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
             if field_name in field_map:
                 config_key, type_fn = field_map[field_name]
                 try:
-                    if type_fn == str:
+                    # Special handling for order type fields
+                    if config_key in ("take_profit_order_type", "open_order_type"):
+                        # Normalize input to uppercase with underscores
+                        normalized = value_str.upper().replace(" ", "_")
+                        if normalized in ("LIMIT_MAKER", "LIMIT", "MARKET"):
+                            config[config_key] = normalized
+                            updated_fields.append(field_name)
+                    elif type_fn == str:
                         config[config_key] = value_str
+                        updated_fields.append(field_name)
                     else:
                         config[config_key] = type_fn(value_str)
-                    updated_fields.append(field_name)
+                        updated_fields.append(field_name)
                 except (ValueError, TypeError):
                     pass
 
@@ -5623,22 +6860,58 @@ async def process_pmm_wizard_input(update: Update, context: ContextTypes.DEFAULT
 
 async def _pmm_show_review(context, chat_id, message_id, config):
     """Helper to show review step with copyable config format"""
+    # Format order types as string
+    tp_order_type = config.get('take_profit_order_type', "LIMIT_MAKER")
+    if isinstance(tp_order_type, int):
+        tp_order_type_str = ORDER_TYPE_LABELS.get(tp_order_type, "LIMIT_MAKER")
+    else:
+        tp_order_type_str = str(tp_order_type)
+
+    open_order_type = config.get('open_order_type', "LIMIT")
+    if isinstance(open_order_type, int):
+        open_order_type_str = ORDER_TYPE_LABELS.get(open_order_type, "LIMIT")
+    else:
+        open_order_type_str = str(open_order_type)
+
+    # Calculate amounts_pct based on spreads if not set
+    buy_spreads = config.get('buy_spreads', '0.0002,0.001')
+    sell_spreads = config.get('sell_spreads', '0.0002,0.001')
+    buy_amounts = config.get('buy_amounts_pct')
+    sell_amounts = config.get('sell_amounts_pct')
+
+    if not buy_amounts:
+        num_buy_spreads = len(buy_spreads.split(',')) if buy_spreads else 1
+        buy_amounts = ','.join(['1'] * num_buy_spreads)
+    if not sell_amounts:
+        num_sell_spreads = len(sell_spreads.split(',')) if sell_spreads else 1
+        sell_amounts = ','.join(['1'] * num_sell_spreads)
+
     # Build copyable config block
     config_block = (
         f"id: {config.get('id', '')}\n"
         f"connector_name: {config.get('connector_name', '')}\n"
         f"trading_pair: {config.get('trading_pair', '')}\n"
         f"leverage: {config.get('leverage', 1)}\n"
+        f"position_mode: {config.get('position_mode', 'HEDGE')}\n"
+        f"total_amount_quote: {config.get('total_amount_quote', 100)}\n"
         f"portfolio_allocation: {config.get('portfolio_allocation', 0.05)}\n"
-        f"buy_spreads: {config.get('buy_spreads', '0.0002,0.001')}\n"
-        f"sell_spreads: {config.get('sell_spreads', '0.0002,0.001')}\n"
+        f"target_base_pct: {config.get('target_base_pct', 0.5)}\n"
+        f"min_base_pct: {config.get('min_base_pct', 0.4)}\n"
+        f"max_base_pct: {config.get('max_base_pct', 0.6)}\n"
+        f"buy_spreads: {buy_spreads}\n"
+        f"sell_spreads: {sell_spreads}\n"
+        f"buy_amounts_pct: {buy_amounts}\n"
+        f"sell_amounts_pct: {sell_amounts}\n"
         f"take_profit: {config.get('take_profit', 0.0001)}\n"
-        f"target_base_pct: {config.get('target_base_pct', 0.2)}\n"
-        f"min_base_pct: {config.get('min_base_pct', 0.1)}\n"
-        f"max_base_pct: {config.get('max_base_pct', 0.4)}\n"
+        f"take_profit_order_type: {tp_order_type_str}\n"
+        f"open_order_type: {open_order_type_str}\n"
         f"executor_refresh_time: {config.get('executor_refresh_time', 30)}\n"
         f"buy_cooldown_time: {config.get('buy_cooldown_time', 15)}\n"
         f"sell_cooldown_time: {config.get('sell_cooldown_time', 15)}\n"
+        f"buy_position_effectivization_time: {config.get('buy_position_effectivization_time', 3600)}\n"
+        f"sell_position_effectivization_time: {config.get('sell_position_effectivization_time', 3600)}\n"
+        f"min_buy_price_distance_pct: {config.get('min_buy_price_distance_pct', 0.003)}\n"
+        f"min_sell_price_distance_pct: {config.get('min_sell_price_distance_pct', 0.003)}\n"
         f"max_active_executors_by_level: {config.get('max_active_executors_by_level', 4)}"
     )
 
@@ -5646,22 +6919,28 @@ async def _pmm_show_review(context, chat_id, message_id, config):
     message_text = (
         f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
         f"```\n{config_block}\n```\n\n"
-        f"_To edit, send `field: value` lines:_\n"
-        f"`leverage: 20`\n"
-        f"`take_profit: 0.001`"
+        f"_To edit, send `field: value` lines_"
     )
 
     keyboard = [
         [InlineKeyboardButton("✅ Save Config", callback_data="bots:pmm_save")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pmm_back:tp"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")
+        ],
     ]
 
-    await context.bot.edit_message_text(
-        chat_id=chat_id, message_id=message_id,
-        text=message_text,
-        parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        # Ignore "Message is not modified" error
+        if "Message is not modified" not in str(e):
+            raise
 
 
 async def _pmm_show_advanced(context, chat_id, message_id, config):
@@ -5690,3 +6969,129 @@ async def _pmm_show_advanced(context, chat_id, message_id, config):
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+# ============================================
+# CUSTOM CONFIG UPLOAD
+# ============================================
+
+async def show_upload_config_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show message prompting user to upload a YAML config file"""
+    query = update.callback_query
+
+    # Set state to expect file upload
+    context.user_data["bots_state"] = "awaiting_config_upload"
+
+    message_text = (
+        r"*Upload Custom Config*" + "\n\n"
+        r"Upload a YAML file \(`.yml` or `.yaml`\) with your controller configuration\." + "\n\n"
+        r"The file should contain a valid controller config with at least an `id` field\."
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:upload_cancel")],
+    ]
+
+    await query.message.edit_text(
+        message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def handle_upload_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel the upload and return to configs menu"""
+    clear_bots_state(context)
+    await show_controller_configs_menu(update, context)
+
+
+async def handle_config_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle uploaded YAML config file"""
+    import yaml
+
+    # Only process if we're expecting a config upload
+    if context.user_data.get("bots_state") != "awaiting_config_upload":
+        return
+
+    chat_id = update.effective_chat.id
+    document = update.message.document
+
+    # Check file extension
+    file_name = document.file_name or ""
+    if not file_name.lower().endswith(('.yml', '.yaml')):
+        await update.message.reply_text(
+            format_error_message("Please upload a YAML file (.yml or .yaml)"),
+            parse_mode="MarkdownV2"
+        )
+        return
+
+    try:
+        # Download the file
+        file = await context.bot.get_file(document.file_id)
+        file_bytes = await file.download_as_bytearray()
+        content = file_bytes.decode('utf-8')
+
+        # Parse YAML
+        try:
+            config = yaml.safe_load(content)
+        except yaml.YAMLError as e:
+            await update.message.reply_text(
+                format_error_message(f"Invalid YAML file: {str(e)}"),
+                parse_mode="MarkdownV2"
+            )
+            return
+
+        if not isinstance(config, dict):
+            await update.message.reply_text(
+                format_error_message("YAML file must contain a dictionary/object"),
+                parse_mode="MarkdownV2"
+            )
+            return
+
+        # Validate minimum required field
+        config_id = config.get("id")
+        if not config_id:
+            await update.message.reply_text(
+                format_error_message("Config must have an 'id' field"),
+                parse_mode="MarkdownV2"
+            )
+            return
+
+        # Save to backend
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        result = await client.controllers.create_or_update_controller_config(config_id, config)
+
+        # Clear state
+        clear_bots_state(context)
+
+        # Check result
+        if result.get("status") == "success" or "success" in str(result).lower():
+            controller_name = config.get("controller_name", "unknown")
+            success_msg = (
+                f"✅ *Config uploaded successfully\\!*\n\n"
+                f"ID: `{escape_markdown_v2(config_id)}`\n"
+                f"Type: `{escape_markdown_v2(controller_name)}`"
+            )
+            keyboard = [
+                [InlineKeyboardButton("📁 View Configs", callback_data="bots:controller_configs")],
+                [InlineKeyboardButton("⬅️ Back to Menu", callback_data="bots:main_menu")],
+            ]
+            await update.message.reply_text(
+                success_msg,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        else:
+            error_detail = result.get("message", result.get("error", str(result)))
+            await update.message.reply_text(
+                format_error_message(f"Failed to save config: {error_detail}"),
+                parse_mode="MarkdownV2"
+            )
+
+    except Exception as e:
+        logger.error(f"Error uploading config file: {e}", exc_info=True)
+        clear_bots_state(context)
+        await update.message.reply_text(
+            format_error_message(f"Failed to upload config: {str(e)}"),
+            parse_mode="MarkdownV2"
+        )

@@ -14,6 +14,24 @@ This module provides a modular structure for gateway configuration:
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from utils.auth import restricted
+
+
+@restricted
+async def gateway_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /gateway command - show Gateway configuration directly."""
+    from handlers import clear_all_input_states
+    from utils.telegram_helpers import create_mock_query_from_message
+    from .menu import show_gateway_menu
+
+    clear_all_input_states(context)
+    # Clear trading states that might interfere
+    context.user_data.pop("dex_state", None)
+    context.user_data.pop("cex_state", None)
+    mock_query = await create_mock_query_from_message(update, "Loading Gateway...")
+    await show_gateway_menu(mock_query, context)
+
+
 # Import all submodule handlers
 from .deployment import (
     start_deploy_gateway,
@@ -22,6 +40,7 @@ from .deployment import (
     stop_gateway,
     restart_gateway,
     show_gateway_logs,
+    handle_deployment_input,
 )
 from .wallets import show_wallets_menu, handle_wallet_action, handle_wallet_input
 from .connectors import show_connectors_menu, handle_connector_action, handle_connector_config_input
@@ -82,7 +101,9 @@ async def handle_gateway_callback(update: Update, context: ContextTypes.DEFAULT_
 async def handle_gateway_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Route text input to the appropriate gateway module"""
     # Check which type of input we're awaiting
-    if context.user_data.get('awaiting_wallet_input'):
+    if context.user_data.get('awaiting_gateway_input'):
+        await handle_deployment_input(update, context)
+    elif context.user_data.get('awaiting_wallet_input'):
         await handle_wallet_input(update, context)
     elif context.user_data.get('awaiting_token_input'):
         await handle_token_input(update, context)
@@ -95,6 +116,7 @@ async def handle_gateway_input(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 __all__ = [
+    'gateway_command',
     'handle_gateway_callback',
     'handle_gateway_input',
 ]

@@ -16,7 +16,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
-from utils.auth import restricted
+from utils.auth import restricted, hummingbot_api_required
 from handlers import clear_all_input_states
 
 # Import submodule handlers
@@ -28,6 +28,9 @@ from .menu import (
     show_controller_detail,
     handle_stop_controller,
     handle_confirm_stop_controller,
+    handle_start_controller,
+    handle_confirm_start_controller,
+    handle_clone_controller,
     handle_quick_stop_controller,
     handle_quick_start_controller,
     handle_stop_bot,
@@ -66,11 +69,13 @@ from .controller_handlers import (
     handle_cfg_edit_save,
     handle_cfg_edit_save_all,
     handle_cfg_edit_cancel,
+    handle_cfg_branch,
     show_new_grid_strike_form,
     show_new_pmm_mister_form,
     show_config_form,
     handle_set_field,
     handle_toggle_side,
+    handle_toggle_position_mode,
     handle_cycle_order_type,
     handle_select_connector,
     process_field_input,
@@ -86,7 +91,6 @@ from .controller_handlers import (
     process_deploy_field_input,
     handle_execute_deploy,
     # Progressive deploy flow
-    show_deploy_progressive_form,
     handle_deploy_progressive_input,
     handle_deploy_use_default,
     handle_deploy_skip_field,
@@ -128,13 +132,17 @@ from .controller_handlers import (
     handle_gs_review_back,
     handle_gs_edit_price,
     process_gs_wizard_input,
+    handle_gs_pair_select,
     # PMM Mister wizard
     handle_pmm_wizard_connector,
     handle_pmm_wizard_pair,
+    handle_pmm_pair_select,
     handle_pmm_wizard_leverage,
     handle_pmm_wizard_allocation,
+    handle_pmm_wizard_amount,
     handle_pmm_wizard_spreads,
     handle_pmm_wizard_tp,
+    handle_pmm_back,
     handle_pmm_save,
     handle_pmm_review_back,
     handle_pmm_edit_id,
@@ -143,9 +151,11 @@ from .controller_handlers import (
     handle_pmm_edit_advanced,
     handle_pmm_adv_setting,
     process_pmm_wizard_input,
+    # Custom config upload
+    show_upload_config_prompt,
+    handle_upload_cancel,
+    handle_config_file_upload,
 )
-from ._shared import clear_bots_state, SIDE_LONG, SIDE_SHORT
-
 # Archived bots handlers
 from .archived import (
     show_archived_menu,
@@ -154,7 +164,6 @@ from .archived import (
     show_bot_chart,
     handle_generate_report,
     handle_archived_refresh,
-    clear_archived_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,6 +174,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 @restricted
+@hummingbot_api_required
 async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle /bots command - Display bots dashboard
@@ -193,7 +203,7 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         from ._shared import get_bots_client
 
         try:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             bot_status = await client.bot_orchestration.get_bot_status(bot_name)
             response_message = format_bot_status(bot_status)
             await msg.reply_text(response_message, parse_mode="MarkdownV2")
@@ -305,6 +315,16 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
         elif main_action == "cfg_edit_cancel":
             await handle_cfg_edit_cancel(update, context)
 
+        elif main_action == "cfg_branch":
+            await handle_cfg_branch(update, context)
+
+        # Custom config upload
+        elif main_action == "upload_config":
+            await show_upload_config_prompt(update, context)
+
+        elif main_action == "upload_cancel":
+            await handle_upload_cancel(update, context)
+
         elif main_action == "noop":
             pass  # Do nothing - used for pagination display button
 
@@ -329,6 +349,9 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "toggle_side":
             await handle_toggle_side(update, context)
+
+        elif main_action == "toggle_position_mode":
+            await handle_toggle_position_mode(update, context)
 
         elif main_action == "cycle_order_type":
             if len(action_parts) > 1:
@@ -400,7 +423,8 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "select_image":
             if len(action_parts) > 1:
-                image = action_parts[1]
+                # Rejoin parts to preserve colons in image tag (e.g., "hummingbot:development")
+                image = ":".join(action_parts[1:])
                 await handle_select_image(update, context, image)
 
         elif main_action == "select_name":
@@ -424,6 +448,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if len(action_parts) > 1:
                 pair = action_parts[1]
                 await handle_gs_wizard_pair(update, context, pair)
+
+        elif main_action == "gs_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_gs_pair_select(update, context, pair)
 
         elif main_action == "gs_side":
             if len(action_parts) > 1:
@@ -517,6 +546,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 pair = action_parts[1]
                 await handle_pmm_wizard_pair(update, context, pair)
 
+        elif main_action == "pmm_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_pmm_pair_select(update, context, pair)
+
         elif main_action == "pmm_leverage":
             if len(action_parts) > 1:
                 leverage = int(action_parts[1])
@@ -527,6 +561,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 allocation = float(action_parts[1])
                 await handle_pmm_wizard_allocation(update, context, allocation)
 
+        elif main_action == "pmm_amount":
+            if len(action_parts) > 1:
+                amount = float(action_parts[1])
+                await handle_pmm_wizard_amount(update, context, amount)
+
         elif main_action == "pmm_spreads":
             if len(action_parts) > 1:
                 spreads = action_parts[1]
@@ -536,6 +575,11 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if len(action_parts) > 1:
                 tp = float(action_parts[1])
                 await handle_pmm_wizard_tp(update, context, tp)
+
+        elif main_action == "pmm_back":
+            if len(action_parts) > 1:
+                target = action_parts[1]
+                await handle_pmm_back(update, context, target)
 
         elif main_action == "pmm_save":
             await handle_pmm_save(update, context)
@@ -601,6 +645,17 @@ async def bots_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         elif main_action == "confirm_stop_ctrl":
             await handle_confirm_stop_controller(update, context)
+
+        # Start controller (uses context)
+        elif main_action == "start_ctrl":
+            await handle_start_controller(update, context)
+
+        elif main_action == "confirm_start_ctrl":
+            await handle_confirm_start_controller(update, context)
+
+        # Clone controller (PMM Mister only)
+        elif main_action == "clone_ctrl":
+            await handle_clone_controller(update, context)
 
         # Quick stop/start controller (from bot detail view)
         elif main_action == "stop_ctrl_quick":
@@ -764,10 +819,28 @@ def get_bots_message_handler():
     )
 
 
+@restricted
+async def bots_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle document uploads for bots module (e.g., config file uploads)"""
+    # Only process if we're expecting a config upload
+    if context.user_data.get("bots_state") == "awaiting_config_upload":
+        await handle_config_file_upload(update, context)
+
+
+def get_bots_document_handler():
+    """Get the document handler for bots module"""
+    return MessageHandler(
+        filters.Document.ALL,
+        bots_document_handler
+    )
+
+
 __all__ = [
     'bots_command',
     'bots_callback_handler',
     'bots_message_handler',
+    'bots_document_handler',
     'get_bots_callback_handler',
     'get_bots_message_handler',
+    'get_bots_document_handler',
 ]

@@ -4,37 +4,17 @@ services:
     container_name: condor-bot
     restart: unless-stopped
     environment:
-      TELEGRAM_TOKEN: your_bot_token
-      AUTHORIZED_USERS: 123,1234
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
+      ADMIN_USER_ID: ${ADMIN_USER_ID}
     env_file:
       - .env
     volumes:
       # Persist bot data (user preferences, trading context, etc.)
       - ./condor_bot_data.pickle:/app/condor_bot_data.pickle
-      # Mount servers config
-      - ./servers.yml:/app/servers.yml
+      # Mount config (servers, users, permissions)
+      - ./config.yml:/app/config.yml
       # Mount routines for auto-discovery
       - ./routines:/app/routines
     network_mode: host
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
-
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      # Only update containers with the watchtower label
-      WATCHTOWER_LABEL_ENABLE: "true"
-      # Check for updates every 5 minutes (300 seconds)
-      WATCHTOWER_POLL_INTERVAL: 300
-      # Remove old images after updating
-      WATCHTOWER_CLEANUP: "true"
-      # Telegram notifications
-      WATCHTOWER_NOTIFICATIONS: shoutrrr
-      WATCHTOWER_NOTIFICATION_URL: telegram://${TELEGRAM_TOKEN}@telegram?chats=${TELEGRAM_ALLOWED_IDS}
-    env_file:
-      - .env
-    command: --interval 300

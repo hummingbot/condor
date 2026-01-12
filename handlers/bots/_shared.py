@@ -28,21 +28,22 @@ DEFAULT_CACHE_TTL = 60
 
 from .controllers import SUPPORTED_CONTROLLERS, get_controller
 from .controllers.grid_strike import (
-    DEFAULTS as GRID_STRIKE_DEFAULTS,
     SIDE_LONG,
     SIDE_SHORT,
     ORDER_TYPE_MARKET,
     ORDER_TYPE_LIMIT,
     ORDER_TYPE_LIMIT_MAKER,
     ORDER_TYPE_LABELS,
-    WIZARD_STEPS as GS_WIZARD_STEPS,
-    calculate_auto_prices,
     generate_chart as _gs_generate_chart,
     generate_id as _gs_generate_id,
+    calculate_auto_prices,
+    DEFAULTS as GRID_STRIKE_DEFAULTS,
+    FIELD_ORDER as GRID_STRIKE_FIELD_ORDER,
+    EDITABLE_FIELDS as GS_EDITABLE_FIELDS,
 )
 
 # Convert ControllerField objects to dicts for backwards compatibility
-from .controllers.grid_strike import FIELDS as _GS_FIELDS, FIELD_ORDER as GRID_STRIKE_FIELD_ORDER
+from .controllers.grid_strike import FIELDS as _GS_FIELDS
 GRID_STRIKE_FIELDS = {
     name: {
         "label": field.label,
@@ -58,41 +59,59 @@ GRID_STRIKE_FIELDS = {
 # SERVER CLIENT HELPER
 # ============================================
 
-async def get_bots_client(chat_id: Optional[int] = None):
+async def get_bots_client(chat_id: Optional[int] = None, user_data: Optional[Dict] = None) -> Tuple[Any, str]:
     """Get the API client for bot operations
 
     Args:
-        chat_id: Optional chat ID to get per-chat server. If None, uses global default.
+        chat_id: Optional chat ID (legacy, not used for server selection)
+        user_data: Optional user_data dict to get user's preferred server and user_id
 
     Returns:
-        Client instance with bot_orchestration and controller endpoints
+        Tuple of (client, server_name) - client has bot_orchestration and controller endpoints
 
     Raises:
-        ValueError: If no enabled servers available
+        ValueError: If no accessible servers are available for the user
     """
-    from servers import server_manager
+    from config_manager import get_config_manager
 
-    servers = server_manager.list_servers()
-    enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+    cm = get_config_manager()
 
-    if not enabled_servers:
-        raise ValueError("No enabled API servers available")
+    # Get user_id from user_data for access control
+    user_id = user_data.get('_user_id') if user_data else None
 
-    # Use per-chat server if chat_id provided, otherwise global default
-    if chat_id is not None:
-        default_server = server_manager.get_default_server_for_chat(chat_id)
+    # Get servers the user has access to (not all servers)
+    if user_id:
+        accessible_servers = cm.get_accessible_servers(user_id)
+        # Filter to only enabled servers
+        all_servers = cm.list_servers()
+        enabled_accessible = [s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)]
     else:
-        default_server = server_manager.get_default_server()
+        # Fallback for legacy calls without user_data - use all enabled servers
+        # This should not happen in normal operation
+        logger.warning("get_bots_client called without user_data - cannot verify server access")
+        all_servers = cm.list_servers()
+        enabled_accessible = [name for name, cfg in all_servers.items() if cfg.get("enabled", True)]
 
-    if default_server and default_server in enabled_servers:
-        server_name = default_server
+    if not enabled_accessible:
+        raise ValueError("No accessible API servers available. Please configure server access.")
+
+    # Use user's preferred server if valid
+    preferred = None
+    if user_data:
+        from handlers.config.user_preferences import get_active_server
+        preferred = get_active_server(user_data)
+
+    # Only use preferred server if user has access to it
+    if preferred and preferred in enabled_accessible:
+        server_name = preferred
+    elif enabled_accessible:
+        server_name = enabled_accessible[0]
     else:
-        server_name = enabled_servers[0]
+        raise ValueError("No accessible API servers available")
 
-    logger.info(f"Bots using server: {server_name}" + (f" (chat_id={chat_id})" if chat_id else ""))
-    client = await server_manager.get_client(server_name)
-
-    return client
+    logger.info(f"Bots using server: {server_name} (user_id: {user_id})")
+    client = await cm.get_client(server_name)
+    return client, server_name
 
 
 # ============================================
@@ -308,10 +327,22 @@ async def get_available_cex_connectors(
     user_data: dict,
     client,
     account_name: str = "master_account",
-    ttl: int = 300
+    ttl: int = 300,
+    server_name: str = "default"
 ) -> List[str]:
-    """Get available CEX connectors with caching."""
-    cache_key = f"available_cex_connectors_{account_name}"
+    """Get available CEX connectors with caching.
+
+    Args:
+        user_data: context.user_data dict
+        client: API client instance
+        account_name: Account name to check credentials for
+        ttl: Cache time-to-live in seconds
+        server_name: Server name to include in cache key (prevents cross-server cache pollution)
+
+    Returns:
+        List of available CEX connector names
+    """
+    cache_key = f"available_cex_connectors_{server_name}_{account_name}"
     return await cached_call(
         user_data,
         cache_key,

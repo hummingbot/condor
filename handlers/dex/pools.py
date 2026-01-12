@@ -15,8 +15,8 @@ from telegram.error import BadRequest
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
 from handlers.config.user_preferences import set_dex_last_pool, get_dex_last_pool
-from servers import get_client
-from ._shared import get_cached, set_cached, cached_call, DEFAULT_CACHE_TTL, invalidate_cache
+from config_manager import get_client
+from ._shared import get_cached, set_cached, DEFAULT_CACHE_TTL, invalidate_cache
 from .visualizations import generate_liquidity_chart, generate_ohlcv_chart, generate_combined_chart, generate_aggregated_liquidity_chart
 from .pool_data import fetch_ohlcv, fetch_liquidity_bins, get_gecko_network
 
@@ -41,7 +41,7 @@ async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta", cha
     token_cache = dict(KNOWN_TOKENS)  # Start with known tokens
 
     try:
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Try to get tokens from Gateway
         if hasattr(client, 'gateway'):
@@ -213,7 +213,7 @@ async def process_pool_info(
             raise ValueError(f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}")
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -628,7 +628,7 @@ async def process_pool_list(
         if not chat_id:
             chat_id = update.effective_chat.id
 
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -769,7 +769,7 @@ async def handle_plot_liquidity(
 
     try:
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         # Fetch all pool infos in parallel with individual timeouts
         POOL_FETCH_TIMEOUT = 10  # seconds per pool
@@ -988,7 +988,7 @@ async def _show_pool_detail(
     async def fetch_pool_info_task():
         if pool_info is not None:
             return pool_info
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
         return await _fetch_pool_info(client, pool_address, connector)
 
     async def fetch_token_cache_task():
@@ -1175,7 +1175,7 @@ async def _show_pool_detail(
         balance_cache_key = f"token_balances_{network}_{base_symbol}_{quote_symbol}"
         balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
         if balances is None:
-            client = await get_client(chat_id)
+            client = await get_client(chat_id, context=context)
             balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
             set_cached(context.user_data, balance_cache_key, balances)
         context.user_data["token_balances"] = balances
@@ -1538,6 +1538,10 @@ async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAU
         await query.answer("Refreshing...")
         timeframe = "1h"  # Default timeframe
     else:
+        # Store current timeframe in add_position_params to persist across param changes
+        if "add_position_params" not in context.user_data:
+            context.user_data["add_position_params"] = {}
+        context.user_data["add_position_params"]["timeframe"] = timeframe
         # Timeframe switch - show loading transition
         await query.answer(f"Loading {timeframe} candles...")
 
@@ -1575,7 +1579,7 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
     to the Gateway configuration for the network.
     """
     from geckoterminal_py import GeckoTerminalAsyncClient
-    from servers import server_manager
+    from config_manager import get_config_manager
 
     query = update.callback_query
 
@@ -1630,7 +1634,7 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
                 name = attrs.get('name')
 
                 # Add to gateway
-                client = await server_manager.get_default_client()
+                client = await get_config_manager().get_default_client()
                 await client.gateway.add_token(
                     network_id=network_id,
                     address=token_address,
@@ -1750,7 +1754,6 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         timeframe: OHLCV timeframe (1m, 5m, 15m, 1h, 4h, 1d)
         currency: Price currency - "usd" or "token" (quote token)
     """
-    from io import BytesIO
     from telegram import InputMediaPhoto
 
     query = update.callback_query
@@ -1899,7 +1902,6 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
         timeframe: OHLCV timeframe
         currency: Price currency - "usd" or "token" (quote token)
     """
-    from io import BytesIO
 
     query = update.callback_query
     await query.answer("Loading combined chart...")
@@ -2322,7 +2324,7 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
     """Display manage positions menu with all active LP positions"""
     try:
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2535,7 +2537,7 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
             cached = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
             if cached:
                 return cached
-            client = await get_client(chat_id)
+            client = await get_client(chat_id, context=context)
             info = await _fetch_pool_info(client, pool_address, connector)
             if info:
                 set_cached(context.user_data, cache_key, info)
@@ -2788,7 +2790,7 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
         )
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2932,7 +2934,7 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
         )
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -2950,9 +2952,13 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
         )
 
         if result:
-            # Clear the positions cache to force fresh fetch
-            context.user_data.pop("positions_cache", None)
+            # Remove this specific position from cache, but keep others (for LP monitor alerts)
+            positions_cache = context.user_data.get("positions_cache", {})
+            if pos_index in positions_cache:
+                del positions_cache[pos_index]
+            # Clear the full position list cache to force refresh on next view
             context.user_data.pop("all_positions", None)
+            context.user_data.pop("lp_positions_cache", None)  # Also clear LP list cache
 
             pair = pos.get('trading_pair', 'Unknown')
             success_msg = escape_markdown_v2(f"✅ Position closed: {pair}")
@@ -3019,7 +3025,7 @@ async def process_position_list(
         pool_address = parts[2]
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -3609,7 +3615,7 @@ async def show_add_position_menu(
             balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
             if balances is None:
                 chat_id = update.effective_chat.id
-                client = await get_client(chat_id)
+                client = await get_client(chat_id, context=context)
                 balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
                 set_cached(context.user_data, balance_cache_key, balances)
 
@@ -3993,7 +3999,7 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # Refetch pool info
         if pool_address:
             chat_id = update.effective_chat.id
-            client = await get_client(chat_id)
+            client = await get_client(chat_id, context=context)
             pool_info = await _fetch_pool_info(client, pool_address, connector)
             set_cached(context.user_data, pool_cache_key, pool_info)
             context.user_data["selected_pool_info"] = pool_info
@@ -4324,7 +4330,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
             pass
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -4599,7 +4605,7 @@ async def process_add_position(
         network = params.get("network", "solana-mainnet-beta")
 
         chat_id = update.effective_chat.id
-        client = await get_client(chat_id)
+        client = await get_client(chat_id, context=context)
 
         if not hasattr(client, 'gateway_clmm'):
             raise ValueError("Gateway CLMM not available")
@@ -4704,13 +4710,26 @@ async def process_pos_set_lower(
     params["lower_price"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Lower price set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail to show updated chart with range lines
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Lower set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Lower price set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )
 
 
 async def process_pos_set_upper(
@@ -4723,13 +4742,26 @@ async def process_pos_set_upper(
     params["upper_price"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Upper price set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail to show updated chart with range lines
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Upper set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Upper price set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )
 
 
 async def process_pos_set_base(
@@ -4742,13 +4774,26 @@ async def process_pos_set_base(
     params["amount_base"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Base amount set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail view
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Base set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Base amount set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )
 
 
 async def process_pos_set_quote(
@@ -4761,10 +4806,23 @@ async def process_pos_set_quote(
     params["amount_quote"] = user_input.strip()
     context.user_data["dex_state"] = "add_position"
 
-    success_msg = escape_markdown_v2(f"✅ Quote amount set to: {user_input}")
-    await update.message.reply_text(success_msg, parse_mode="MarkdownV2")
-
     # Refresh pool detail view
     selected_pool = context.user_data.get("selected_pool", {})
     if selected_pool:
-        await _show_pool_detail(update, context, selected_pool, from_callback=False)
+        # Show loading message
+        loading_msg = await update.message.reply_text(
+            escape_markdown_v2(f"✅ Quote set to: {user_input} - Updating chart..."),
+            parse_mode="MarkdownV2"
+        )
+        timeframe = params.get("timeframe", "1h")
+        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        # Delete loading message after chart is shown
+        try:
+            await loading_msg.delete()
+        except Exception:
+            pass
+    else:
+        await update.message.reply_text(
+            escape_markdown_v2(f"✅ Quote amount set to: {user_input}"),
+            parse_mode="MarkdownV2"
+        )

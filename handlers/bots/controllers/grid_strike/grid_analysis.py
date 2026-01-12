@@ -8,7 +8,7 @@ Provides:
 - Grid metrics calculation
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -164,15 +164,20 @@ def suggest_grid_params(
     suggested_spread = max(suggested_spread, 0.0002)  # At least 0.02%
     suggested_tp = max(suggested_tp, 0.0001)  # At least 0.01%
 
-    # Calculate prices based on side
+    # Calculate prices based on side using 3:1 ratio
+    # Total range = 4 units (1 unit on one side, 3 units on the other)
+    unit = grid_range / 4
+
     if side == 1:  # LONG
-        start_price = current_price * (1 - grid_range / 2)
-        end_price = current_price * (1 + grid_range / 2)
-        limit_price = start_price * (1 - grid_range / 3)  # Stop below start
+        # LONG: small range below (-1 unit), larger range above (+3 units)
+        start_price = current_price * (1 - unit)
+        end_price = current_price * (1 + unit * 3)
+        limit_price = start_price * (1 - unit)  # Stop below start
     else:  # SHORT
-        start_price = current_price * (1 - grid_range / 2)
-        end_price = current_price * (1 + grid_range / 2)
-        limit_price = end_price * (1 + grid_range / 3)  # Stop above end
+        # SHORT: larger range below (-3 units), small range above (+1 unit)
+        start_price = current_price * (1 - unit * 3)
+        end_price = current_price * (1 + unit)
+        limit_price = end_price * (1 + unit)  # Stop above end
 
     # Estimate number of levels
     price_range = abs(end_price - start_price)

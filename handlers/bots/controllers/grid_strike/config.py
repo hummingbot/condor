@@ -34,7 +34,7 @@ DEFAULTS: Dict[str, Any] = {
     "trading_pair": "",
     "side": SIDE_LONG,
     "leverage": 1,
-    "position_mode": "HEDGE",
+    "position_mode": "ONEWAY",
     "total_amount_quote": 1000,
     "min_order_amount_quote": 6,
     "start_price": 0.0,
@@ -92,6 +92,14 @@ FIELDS: Dict[str, ControllerField] = {
         required=True,
         hint="e.g. 1, 5, 10"
     ),
+    "position_mode": ControllerField(
+        name="position_mode",
+        label="Position Mode",
+        type="str",
+        required=False,
+        hint="HEDGE or ONEWAY",
+        default="ONEWAY"
+    ),
     "total_amount_quote": ControllerField(
         name="total_amount_quote",
         label="Total Amount (Quote)",
@@ -104,14 +112,14 @@ FIELDS: Dict[str, ControllerField] = {
         label="Start Price",
         type="float",
         required=True,
-        hint="Auto: -2% from current"
+        hint="Auto: -2% LONG, -6% SHORT"
     ),
     "end_price": ControllerField(
         name="end_price",
         label="End Price",
         type="float",
         required=True,
-        hint="Auto: +2% from current"
+        hint="Auto: +6% LONG, +2% SHORT"
     ),
     "limit_price": ControllerField(
         name="limit_price",
@@ -213,7 +221,7 @@ FIELDS: Dict[str, ControllerField] = {
 
 # Field display order
 FIELD_ORDER: List[str] = [
-    "id", "connector_name", "trading_pair", "side", "leverage",
+    "id", "connector_name", "trading_pair", "side", "leverage", "position_mode",
     "total_amount_quote", "start_price", "end_price", "limit_price",
     "max_open_orders", "max_orders_per_batch", "order_frequency",
     "min_order_amount_quote", "min_spread_between_orders", "take_profit",
@@ -232,6 +240,26 @@ WIZARD_STEPS: List[str] = [
     "prices",
     "take_profit",
     "review",
+]
+
+
+# Editable fields for config editing
+# This is the standard list shown in both wizard final step and edit views
+EDITABLE_FIELDS: List[str] = [
+    "connector_name",
+    "trading_pair",
+    "total_amount_quote",
+    "start_price",
+    "end_price",
+    "limit_price",
+    "leverage",
+    "position_mode",
+    "take_profit",
+    "coerce_tp_to_step",
+    "min_spread_between_orders",
+    "min_order_amount_quote",
+    "max_open_orders",
+    "activation_bounds",
 ]
 
 
@@ -279,33 +307,36 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 def calculate_auto_prices(
     current_price: float,
     side: int,
-    start_pct: float = 0.02,
-    end_pct: float = 0.02,
+    base_pct: float = 0.02,
     limit_pct: float = 0.03
 ) -> Tuple[float, float, float]:
     """
     Calculate start, end, and limit prices based on current price and side.
 
-    For LONG:
-        - start_price: current_price - 2%
-        - end_price: current_price + 2%
-        - limit_price: current_price - 3%
+    Uses a 3:1 ratio for the grid range:
 
-    For SHORT:
-        - start_price: current_price - 2%
-        - end_price: current_price + 2%
-        - limit_price: current_price + 3%
+    For LONG (buying grid below, selling above):
+        - start_price: current_price - 1x base_pct (buy zone starts here)
+        - end_price: current_price + 3x base_pct (grid extends up)
+        - limit_price: current_price - limit_pct (stop loss below start)
+
+    For SHORT (selling grid above, buying below):
+        - start_price: current_price - 3x base_pct (grid extends down)
+        - end_price: current_price + 1x base_pct (sell zone ends here)
+        - limit_price: current_price + limit_pct (stop loss above end)
 
     Returns:
         Tuple of (start_price, end_price, limit_price)
     """
     if side == SIDE_LONG:
-        start_price = current_price * (1 - start_pct)
-        end_price = current_price * (1 + end_pct)
+        # LONG: small range below (-1x), larger range above (+3x)
+        start_price = current_price * (1 - base_pct)
+        end_price = current_price * (1 + base_pct * 3)
         limit_price = current_price * (1 - limit_pct)
     else:  # SHORT
-        start_price = current_price * (1 - start_pct)
-        end_price = current_price * (1 + end_pct)
+        # SHORT: larger range below (-3x), small range above (+1x)
+        start_price = current_price * (1 - base_pct * 3)
+        end_price = current_price * (1 + base_pct)
         limit_price = current_price * (1 + limit_pct)
 
     return (

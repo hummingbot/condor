@@ -10,14 +10,14 @@ Provides:
 """
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_number
-from ._shared import get_bots_client, clear_bots_state
+from utils.telegram_formatters import format_active_bots, format_error_message, escape_markdown_v2, format_uptime
+from ._shared import get_bots_client, clear_bots_state, set_controller_config
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +89,32 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        client = await get_bots_client(chat_id)
+        from config_manager import get_config_manager
+
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+
+        # Check server status for indicator
+        try:
+            server_status_info = await get_config_manager().check_server_status(server_name)
+            server_status = server_status_info.get("status", "online")
+        except Exception:
+            server_status = "online"  # Default to online if check fails
+
+        status_emoji = {"online": "🟢", "offline": "🔴", "auth_error": "🟠", "error": "⚠️"}.get(server_status, "🟢")
+
         bots_data = await client.bot_orchestration.get_active_bots_status()
+
+        # Fetch bot runs to get deployment times
+        bot_runs_map = {}
+        try:
+            bot_runs_data = await client.bot_orchestration.get_bot_runs()
+            if isinstance(bot_runs_data, dict) and "data" in bot_runs_data:
+                for run in bot_runs_data.get("data", []):
+                    # Only include DEPLOYED bots (not ARCHIVED)
+                    if run.get("deployment_status") == "DEPLOYED" and run.get("deployed_at"):
+                        bot_runs_map[run.get("bot_name")] = run.get("deployed_at")
+        except Exception as e:
+            logger.debug(f"Could not fetch bot runs for uptime: {e}")
 
         # Extract bots dictionary for building keyboard
         if isinstance(bots_data, dict) and "data" in bots_data:
@@ -102,15 +126,17 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Store bots data for later use
         context.user_data["active_bots_data"] = bots_data
+        context.user_data["bot_runs_map"] = bot_runs_map
+        context.user_data["current_server_name"] = server_name
 
         # Format the bot status message
-        status_message = format_active_bots(bots_data)
+        status_message = format_active_bots(bots_data, bot_runs=bot_runs_map)
 
         # Build the menu with bot buttons
         reply_markup = _build_main_menu_keyboard(bots_dict)
 
-        # Add header
-        header = r"*Bots Dashboard*" + "\n\n"
+        # Add header with server indicator
+        header = f"*Bots Dashboard* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
         full_message = header + status_message
 
         if query:
@@ -197,7 +223,7 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
         # If not in cache, fetch fresh data
         if not bot_info:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             fresh_data = await client.bot_orchestration.get_active_bots_status()
             if isinstance(fresh_data, dict) and "data" in fresh_data:
                 bot_info = fresh_data.get("data", {}).get(bot_name)
@@ -219,13 +245,21 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
         # Truncate bot name for display
         display_name = bot_name[:45] + "..." if len(bot_name) > 45 else bot_name
 
+        # Get uptime if available
+        bot_runs_map = context.user_data.get("bot_runs_map", {})
+        uptime_str = ""
+        if bot_name in bot_runs_map:
+            uptime = format_uptime(bot_runs_map[bot_name])
+            if uptime:
+                uptime_str = f" ⏱️ {uptime}"
+
         lines = [
             f"*Bot Details*",
             "",
-            f"{status_emoji} `{escape_markdown_v2(display_name)}`",
+            f"{status_emoji} `{escape_markdown_v2(display_name)}`{uptime_str}",
         ]
 
-        # Controllers and performance - rich format
+        # Controllers and performance - table format
         performance = bot_info.get("performance", {})
         controller_names = list(performance.keys())
 
@@ -240,6 +274,11 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
             total_volume = 0
             total_realized = 0
             total_unrealized = 0
+
+            # Collect controller data for table
+            ctrl_rows = []
+            all_positions = []
+            all_closed = []
 
             for idx, (ctrl_name, ctrl_info) in enumerate(performance.items()):
                 if not isinstance(ctrl_info, dict):
@@ -258,26 +297,85 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                 total_realized += realized
                 total_unrealized += unrealized
 
-                # Controller section - compact format
-                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                ctrl_rows.append({
+                    "idx": idx,
+                    "name": ctrl_name,
+                    "status": ctrl_status,
+                    "pnl": pnl,
+                    "realized": realized,
+                    "unrealized": unrealized,
+                    "volume": volume,
+                })
 
-                # Controller name and status
-                ctrl_status_emoji = "▶️" if ctrl_status == "running" else "⏸️"
-                lines.append(f"{ctrl_status_emoji} *{escape_markdown_v2(ctrl_name)}*")
-
-                # P&L + Volume in one line (compact)
-                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
-                vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
-                lines.append(f"{pnl_emoji} pnl: `{escape_markdown_v2(f'{pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{realized:+.2f}')}` / U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`\\) 📦 vol: `{escape_markdown_v2(vol_str)}`")
-
-                # Open Positions section
+                # Collect positions with controller info
                 positions = ctrl_perf.get("positions_summary", [])
                 if positions:
-                    lines.append("")
-                    lines.append(f"*Open Positions* \\({len(positions)}\\)")
-                    # Extract trading pair from controller name for display
                     trading_pair = _extract_pair_from_name(ctrl_name)
                     for pos in positions:
+                        all_positions.append({"ctrl": ctrl_name, "pair": trading_pair, "pos": pos})
+
+                # Collect closed counts
+                close_counts = ctrl_perf.get("close_type_counts", {})
+                if close_counts:
+                    all_closed.append({"name": ctrl_name, "counts": close_counts})
+
+            # Build table header
+            lines.append("```")
+            lines.append("Controller                        PnL     Vol")
+            lines.append("──────────────────────────── ──────── ───────")
+
+            # Build table rows
+            for row in ctrl_rows:
+                status_char = "▶" if row["status"] == "running" else "⏸"
+                # Truncate controller name to fit table (max 27 chars)
+                name_display = row["name"][:27] if len(row["name"]) > 27 else row["name"]
+                name_padded = f"{status_char}{name_display}".ljust(28)
+
+                pnl_str = f"{row['pnl']:+.2f}".rjust(8)
+                vol_str = f"{row['volume']/1000:.1f}k" if row["volume"] >= 1000 else f"{row['volume']:.0f}"
+                vol_str = vol_str.rjust(7)
+
+                lines.append(f"{name_padded} {pnl_str} {vol_str}")
+
+            # Total row
+            if len(ctrl_rows) > 1:
+                lines.append("──────────────────────────── ──────── ───────")
+                total_name = "TOTAL".ljust(28)
+                pnl_str = f"{total_pnl:+.2f}".rjust(8)
+                vol_str = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
+                vol_str = vol_str.rjust(7)
+                lines.append(f"{total_name} {pnl_str} {vol_str}")
+
+            lines.append("```")
+
+            # Open Positions section (grouped by controller) - limit to avoid message too long
+            MAX_POSITIONS_DISPLAY = 8
+            if all_positions:
+                lines.append("")
+                lines.append(f"*Open Positions* \\({len(all_positions)}\\)")
+
+                # Group positions by controller
+                positions_by_ctrl = {}
+                for item in all_positions:
+                    ctrl = item["ctrl"]
+                    if ctrl not in positions_by_ctrl:
+                        positions_by_ctrl[ctrl] = []
+                    positions_by_ctrl[ctrl].append(item)
+
+                positions_shown = 0
+                for ctrl_name, ctrl_positions in positions_by_ctrl.items():
+                    if positions_shown >= MAX_POSITIONS_DISPLAY:
+                        remaining = len(all_positions) - positions_shown
+                        lines.append(f"_\\.\\.\\.and {remaining} more_")
+                        break
+                    # Shorten controller name for display
+                    short_ctrl = ctrl_name[:25] if len(ctrl_name) > 25 else ctrl_name
+                    lines.append(f"_{escape_markdown_v2(short_ctrl)}_")
+                    for item in ctrl_positions:
+                        if positions_shown >= MAX_POSITIONS_DISPLAY:
+                            break
+                        pos = item["pos"]
+                        trading_pair = item["pair"]
                         side_raw = pos.get("side", "")
                         is_long = "BUY" in str(side_raw).upper()
                         side_emoji = "🟢" if is_long else "🔴"
@@ -286,74 +384,69 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                         breakeven = pos.get("breakeven_price", 0) or 0
                         pos_value = amount * breakeven
                         pos_unrealized = pos.get("unrealized_pnl_quote", 0) or 0
+                        lines.append(f"  📍 {side_emoji}{side_str} `${escape_markdown_v2(f'{pos_value:.2f}')}` @ `{escape_markdown_v2(f'{breakeven:.4f}')}` \\| U: `{escape_markdown_v2(f'{pos_unrealized:+.2f}')}`")
+                        positions_shown += 1
 
-                        lines.append(f"📍 {escape_markdown_v2(trading_pair)} {side_emoji}{side_str} `${escape_markdown_v2(f'{pos_value:.2f}')}` @ `{escape_markdown_v2(f'{breakeven:.4f}')}` \\| U: `{escape_markdown_v2(f'{pos_unrealized:+.2f}')}`")
+            # Closed Positions section (combined)
+            if all_closed:
+                total_tp = total_sl = total_hold = total_early = total_insuf = 0
+                for item in all_closed:
+                    counts = item["counts"]
+                    total_tp += _get_close_count(counts, "TAKE_PROFIT")
+                    total_sl += _get_close_count(counts, "STOP_LOSS")
+                    total_hold += _get_close_count(counts, "POSITION_HOLD")
+                    total_early += _get_close_count(counts, "EARLY_STOP")
+                    total_insuf += _get_close_count(counts, "INSUFFICIENT_BALANCE")
 
-                # Closed Positions section
-                close_counts = ctrl_perf.get("close_type_counts", {})
-                if close_counts:
-                    total_closed = sum(close_counts.values())
+                total_closed_count = total_tp + total_sl + total_hold + total_early + total_insuf
+                if total_closed_count > 0:
                     lines.append("")
-                    lines.append(f"*Closed Positions* \\({total_closed}\\)")
+                    lines.append(f"*Closed Positions* \\({total_closed_count}\\)")
 
-                    # Extract counts for each type
-                    tp = _get_close_count(close_counts, "TAKE_PROFIT")
-                    sl = _get_close_count(close_counts, "STOP_LOSS")
-                    hold = _get_close_count(close_counts, "POSITION_HOLD")
-                    early = _get_close_count(close_counts, "EARLY_STOP")
-                    insuf = _get_close_count(close_counts, "INSUFFICIENT_BALANCE")
+                    row_parts = []
+                    if total_tp > 0:
+                        row_parts.append(f"🎯 TP: `{total_tp}`")
+                    if total_sl > 0:
+                        row_parts.append(f"🛑 SL: `{total_sl}`")
+                    if total_hold > 0:
+                        row_parts.append(f"✋ Hold: `{total_hold}`")
+                    if total_early > 0:
+                        row_parts.append(f"⚡ Early: `{total_early}`")
+                    if total_insuf > 0:
+                        row_parts.append(f"⚠️ Insuf: `{total_insuf}`")
 
-                    # Row 1: TP | SL (if any)
-                    row1_parts = []
-                    if tp > 0:
-                        row1_parts.append(f"🎯 TP: `{tp}`")
-                    if sl > 0:
-                        row1_parts.append(f"🛑 SL: `{sl}`")
-                    if row1_parts:
-                        lines.append(" \\| ".join(row1_parts))
+                    if row_parts:
+                        lines.append(" \\| ".join(row_parts))
 
-                    # Row 2: Hold | Early (if any)
-                    row2_parts = []
-                    if hold > 0:
-                        row2_parts.append(f"✋ Hold: `{hold}`")
-                    if early > 0:
-                        row2_parts.append(f"⚡ Early: `{early}`")
-                    if row2_parts:
-                        lines.append(" \\| ".join(row2_parts))
+            # Add controller buttons
+            for row in ctrl_rows:
+                idx = row["idx"]
+                ctrl_status = row["status"]
+                ctrl_name = row["name"]
 
-                    # Row 3: Insufficient balance (if any)
-                    if insuf > 0:
-                        lines.append(f"⚠️ Insuf\\. Balance: `{insuf}`")
-
-                # Add controller button row: [✏️ controller_name] [▶️/⏸️]
                 toggle_emoji = "⏸" if ctrl_status == "running" else "▶️"
                 toggle_action = "stop_ctrl_quick" if ctrl_status == "running" else "start_ctrl_quick"
 
                 if idx < 8:  # Max 8 controllers with buttons
-                    # Use shortened name for button but keep it readable
-                    btn_name = _shorten_controller_name(ctrl_name, 22)
+                    # Use controller name directly, truncate if needed
+                    btn_name = ctrl_name[:26] if len(ctrl_name) > 26 else ctrl_name
                     keyboard.append([
                         InlineKeyboardButton(f"✏️ {btn_name}", callback_data=f"bots:ctrl_idx:{idx}"),
                         InlineKeyboardButton(toggle_emoji, callback_data=f"bots:{toggle_action}:{idx}"),
                     ])
-
-            # Total summary (only if multiple controllers)
-            if len(performance) > 1:
-                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
-                vol_total = f"{total_volume/1000:.1f}k" if total_volume >= 1000 else f"{total_volume:.0f}"
-                lines.append(f"*TOTAL* {pnl_emoji} pnl: `{escape_markdown_v2(f'{total_pnl:+.2f}')}` \\(R: `{escape_markdown_v2(f'{total_realized:+.2f}')}` / U: `{escape_markdown_v2(f'{total_unrealized:+.2f}')}`\\) 📦 vol: `{escape_markdown_v2(vol_total)}`")
 
         # Error summary at the bottom
         error_logs = bot_info.get("error_logs", [])
         if error_logs:
             lines.append("")
             lines.append(f"⚠️ *{len(error_logs)} error\\(s\\):*")
-            # Show last 2 errors briefly
-            for err in error_logs[-2:]:
+            # Show last 3 errors with truncated message
+            for err in error_logs[-3:]:
                 err_msg = err.get("msg", str(err)) if isinstance(err, dict) else str(err)
-                err_short = err_msg[:60] + "..." if len(err_msg) > 60 else err_msg
-                lines.append(f"  `{escape_markdown_v2(err_short)}`")
+                # Truncate long error messages
+                if len(err_msg) > 80:
+                    err_msg = err_msg[:77] + "..."
+                lines.append(f"  `{escape_markdown_v2(err_msg)}`")
 
         # Bot-level actions
         keyboard.append([
@@ -368,6 +461,13 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
+        # Build message and ensure it doesn't exceed Telegram's limit
+        message_text = "\n".join(lines)
+        MAX_MESSAGE_LENGTH = 4000  # Leave some buffer below 4096
+        if len(message_text) > MAX_MESSAGE_LENGTH:
+            # Truncate and add indicator
+            message_text = message_text[:MAX_MESSAGE_LENGTH - 50] + "\n\n_\\.\\.\\. truncated_"
+
         try:
             # Check if current message is a photo (from controller detail view)
             if getattr(query.message, 'photo', None):
@@ -377,13 +477,13 @@ async def show_bot_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, bo
                 except Exception:
                     pass
                 await query.message.chat.send_message(
-                    "\n".join(lines),
+                    message_text,
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup
                 )
             else:
                 await query.message.edit_text(
-                    "\n".join(lines),
+                    message_text,
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup
                 )
@@ -543,9 +643,10 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
     # Try to fetch controller config
     ctrl_config = None
     is_grid_strike = False
+    is_pmm_mister = False
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         configs = await client.controllers.get_bot_controller_configs(bot_name)
 
         # Find the matching config
@@ -558,6 +659,7 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
             context.user_data["current_controller_config"] = ctrl_config
             controller_type = ctrl_config.get("controller_name", "")
             is_grid_strike = "grid_strike" in controller_type.lower()
+            is_pmm_mister = "pmm_mister" in controller_type.lower()
 
     except Exception as e:
         logger.warning(f"Could not fetch controller config: {e}")
@@ -570,13 +672,12 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
     lines = [
         f"{status_emoji} *{escape_markdown_v2(controller_name)}*",
         "",
-        f"{pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\| 💰 R: `{escape_markdown_v2(f'{realized:+.2f}')}` \\| 📊 U: `{escape_markdown_v2(f'{unrealized:+.2f}')}`",
-        f"📦 Vol: `{escape_markdown_v2(vol_str)}`",
+        f"{pnl_emoji} `{escape_markdown_v2(f'{pnl:+.2f}')}` \\| 💰 R: `{escape_markdown_v2(f'{realized:+.2f}')}` \\| 📊 U: `{escape_markdown_v2(f'{unrealized:+.2f}')}` \\| 📦 `{escape_markdown_v2(vol_str)}`",
     ]
 
     # Add editable config section if available
-    if ctrl_config and is_grid_strike:
-        editable_fields = _get_editable_controller_fields(ctrl_config)
+    if ctrl_config and (is_grid_strike or is_pmm_mister):
+        editable_fields = _get_editable_controller_fields(ctrl_config, is_pmm_mister)
 
         # Store for input processing
         context.user_data["ctrl_editable_fields"] = editable_fields
@@ -596,18 +697,43 @@ async def show_controller_detail(update: Update, context: ContextTypes.DEFAULT_T
         lines.append("")
         lines.append("✏️ _Send `key=value` to update_")
 
-    # Build keyboard
+    # Build keyboard - show Start or Stop based on controller status
     keyboard = []
+    is_running = ctrl_status == "running"
 
     if is_grid_strike and ctrl_config:
-        keyboard.append([
-            InlineKeyboardButton("📊 Chart", callback_data="bots:ctrl_chart"),
-            InlineKeyboardButton("🛑 Stop", callback_data="bots:stop_ctrl"),
-        ])
+        # Grid Strike: show Chart + Stop/Start
+        if is_running:
+            keyboard.append([
+                InlineKeyboardButton("📊 Chart", callback_data="bots:ctrl_chart"),
+                InlineKeyboardButton("🛑 Stop", callback_data="bots:stop_ctrl"),
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton("📊 Chart", callback_data="bots:ctrl_chart"),
+                InlineKeyboardButton("▶️ Start", callback_data="bots:start_ctrl"),
+            ])
+    elif is_pmm_mister and ctrl_config:
+        # PMM Mister: Stop/Start + Clone
+        if is_running:
+            keyboard.append([
+                InlineKeyboardButton("🛑 Stop", callback_data="bots:stop_ctrl"),
+                InlineKeyboardButton("📋 Clone", callback_data="bots:clone_ctrl"),
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton("▶️ Start", callback_data="bots:start_ctrl"),
+                InlineKeyboardButton("📋 Clone", callback_data="bots:clone_ctrl"),
+            ])
     else:
-        keyboard.append([
-            InlineKeyboardButton("🛑 Stop Controller", callback_data="bots:stop_ctrl"),
-        ])
+        if is_running:
+            keyboard.append([
+                InlineKeyboardButton("🛑 Stop Controller", callback_data="bots:stop_ctrl"),
+            ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton("▶️ Start Controller", callback_data="bots:start_ctrl"),
+            ])
 
     keyboard.append([
         InlineKeyboardButton("⬅️ Back", callback_data="bots:back_to_bot"),
@@ -707,7 +833,7 @@ async def handle_confirm_stop_controller(update: Update, context: ContextTypes.D
     )
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Stop controller by setting manual_kill_switch=True
         result = await client.controllers.update_bot_controller_config(
@@ -716,7 +842,10 @@ async def handle_confirm_stop_controller(update: Update, context: ContextTypes.D
             config={"manual_kill_switch": True}
         )
 
-        keyboard = [[InlineKeyboardButton("⬅️ Back to Bot", callback_data="bots:back_to_bot")]]
+        keyboard = [[
+            InlineKeyboardButton("▶️ Restart", callback_data="bots:start_ctrl"),
+            InlineKeyboardButton("⬅️ Back to Bot", callback_data="bots:back_to_bot"),
+        ]]
 
         await query.message.edit_text(
             f"*Controller Stopped*\n\n`{escape_markdown_v2(short_name)}`",
@@ -732,6 +861,152 @@ async def handle_confirm_stop_controller(update: Update, context: ContextTypes.D
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+
+async def handle_start_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start/restart current controller - show confirmation"""
+    query = update.callback_query
+
+    bot_name = context.user_data.get("current_bot_name")
+    controllers = context.user_data.get("current_controllers", [])
+    controller_idx = context.user_data.get("current_controller_idx")
+
+    if not bot_name or controller_idx is None or controller_idx >= len(controllers):
+        await query.answer("Context lost", show_alert=True)
+        return
+
+    controller_name = controllers[controller_idx]
+    short_name = _shorten_controller_name(controller_name, 30)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Start", callback_data="bots:confirm_start_ctrl"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"bots:ctrl_idx:{controller_idx}"),
+        ],
+    ]
+
+    message_text = (
+        f"*Start Controller?*\n\n"
+        f"`{escape_markdown_v2(short_name)}`\n\n"
+        f"This will resume the controller\\."
+    )
+
+    # Handle photo messages (from controller detail view with chart)
+    if getattr(query.message, 'photo', None):
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.message.chat.send_message(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def handle_confirm_start_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Actually start the controller by setting manual_kill_switch=False"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    bot_name = context.user_data.get("current_bot_name")
+    controllers = context.user_data.get("current_controllers", [])
+    controller_idx = context.user_data.get("current_controller_idx")
+
+    if not bot_name or controller_idx is None or controller_idx >= len(controllers):
+        await query.answer("Context lost", show_alert=True)
+        return
+
+    controller_name = controllers[controller_idx]
+    short_name = _shorten_controller_name(controller_name, 30)
+
+    await query.message.edit_text(
+        f"Starting `{escape_markdown_v2(short_name)}`\\.\\.\\.",
+        parse_mode="MarkdownV2"
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+
+        # Start controller by setting manual_kill_switch=False
+        result = await client.controllers.update_bot_controller_config(
+            bot_name=bot_name,
+            controller_name=controller_name,
+            config={"manual_kill_switch": False}
+        )
+
+        keyboard = [[InlineKeyboardButton("⬅️ Back to Bot", callback_data="bots:back_to_bot")]]
+
+        await query.message.edit_text(
+            f"*Controller Started*\n\n`{escape_markdown_v2(short_name)}`",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    except Exception as e:
+        logger.error(f"Error starting controller: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}")]]
+        await query.message.edit_text(
+            f"*Failed*\n\nError: {escape_markdown_v2(str(e)[:100])}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+async def handle_clone_controller(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clone current controller config - opens PMM wizard in review mode"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    ctrl_config = context.user_data.get("current_controller_config")
+    if not ctrl_config:
+        await query.answer("No config to clone", show_alert=True)
+        return
+
+    controller_type = ctrl_config.get("controller_name", "")
+    if "pmm_mister" not in controller_type.lower():
+        await query.answer("Clone only supported for PMM Mister", show_alert=True)
+        return
+
+    await query.answer("Cloning config...")
+
+    try:
+        # Fetch existing configs to generate new ID (use get_all to find max number)
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.get_all_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+
+        # Import generate_id from pmm_mister
+        from .controllers.pmm_mister import generate_id as pmm_generate_id
+
+        # Create a copy of the config
+        new_config = dict(ctrl_config)
+
+        # Generate new ID
+        new_config["id"] = pmm_generate_id(new_config, configs)
+
+        # Set the config for the wizard
+        set_controller_config(context, new_config)
+
+        # Set up wizard state for review mode
+        context.user_data["bots_state"] = "pmm_wizard"
+        context.user_data["pmm_wizard_step"] = "review"
+        context.user_data["pmm_wizard_message_id"] = query.message.message_id
+        context.user_data["pmm_wizard_chat_id"] = query.message.chat_id
+
+        # Import and show the review step
+        from .controller_handlers import _pmm_show_review
+        await _pmm_show_review(context, chat_id, query.message.message_id, new_config)
+
+    except Exception as e:
+        logger.error(f"Error cloning controller: {e}", exc_info=True)
+        await query.answer(f"Error: {str(e)[:50]}", show_alert=True)
 
 
 async def handle_quick_stop_controller(update: Update, context: ContextTypes.DEFAULT_TYPE, controller_idx: int) -> None:
@@ -752,7 +1027,7 @@ async def handle_quick_stop_controller(update: Update, context: ContextTypes.DEF
     await query.answer(f"Stopping {short_name}...")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Stop controller by setting manual_kill_switch=True
         await client.controllers.update_bot_controller_config(
@@ -761,8 +1036,9 @@ async def handle_quick_stop_controller(update: Update, context: ContextTypes.DEF
             config={"manual_kill_switch": True}
         )
 
-        # Refresh bot detail view
+        # Clear caches to force fresh data fetch
         context.user_data.pop("current_bot_info", None)
+        context.user_data.pop("active_bots_data", None)
         await show_bot_detail(update, context, bot_name)
 
     except Exception as e:
@@ -788,7 +1064,7 @@ async def handle_quick_start_controller(update: Update, context: ContextTypes.DE
     await query.answer(f"Starting {short_name}...")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Start controller by setting manual_kill_switch=False
         await client.controllers.update_bot_controller_config(
@@ -797,8 +1073,9 @@ async def handle_quick_start_controller(update: Update, context: ContextTypes.DE
             config={"manual_kill_switch": False}
         )
 
-        # Refresh bot detail view
+        # Clear caches to force fresh data fetch
         context.user_data.pop("current_bot_info", None)
+        context.user_data.pop("active_bots_data", None)
         await show_bot_detail(update, context, bot_name)
 
     except Exception as e:
@@ -811,7 +1088,7 @@ async def handle_quick_start_controller(update: Update, context: ContextTypes.DE
 # ============================================
 
 async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate and show OHLC chart for grid strike controller"""
+    """Generate and show OHLC chart for controller"""
     query = update.callback_query
     chat_id = update.effective_chat.id
     controller_idx = context.user_data.get("current_controller_idx", 0)
@@ -820,6 +1097,10 @@ async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TY
     if not ctrl_config:
         await query.answer("Config not found", show_alert=True)
         return
+
+    # Detect controller type
+    controller_type = ctrl_config.get("controller_name", "")
+    is_pmm_mister = "pmm_mister" in controller_type.lower()
 
     # Show loading message
     short_name = _shorten_controller_name(ctrl_config.get("id", ""), 30)
@@ -831,7 +1112,7 @@ async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TY
         pass
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
         connector = ctrl_config.get("connector_name", "")
         pair = ctrl_config.get("trading_pair", "")
 
@@ -848,24 +1129,37 @@ async def show_controller_chart(update: Update, context: ContextTypes.DEFAULT_TY
         )
         current_price = prices.get("prices", {}).get(pair)
 
-        # Generate chart
-        from .controllers.grid_strike import generate_chart
+        # Generate chart based on controller type
+        if is_pmm_mister:
+            from .controllers.pmm_mister import generate_chart
+        else:
+            from .controllers.grid_strike import generate_chart
         chart_bytes = generate_chart(ctrl_config, candles, current_price)
 
         if chart_bytes:
-            # Build caption
-            side_val = ctrl_config.get("side", 1)
-            side_str = "LONG" if side_val == 1 else "SHORT"
+            # Build caption based on controller type
             leverage = ctrl_config.get("leverage", 1)
-            start_p = ctrl_config.get("start_price", 0)
-            end_p = ctrl_config.get("end_price", 0)
-            limit_p = ctrl_config.get("limit_price", 0)
 
-            caption = (
-                f"📊 *{escape_markdown_v2(pair)}* \\| {escape_markdown_v2(side_str)} {leverage}x\n"
-                f"Grid: `{escape_markdown_v2(f'{start_p:.6g}')}` → `{escape_markdown_v2(f'{end_p:.6g}')}`\n"
-                f"Limit: `{escape_markdown_v2(f'{limit_p:.6g}')}`"
-            )
+            if is_pmm_mister:
+                buy_spreads = ctrl_config.get("buy_spreads", "0.0002,0.001")
+                sell_spreads = ctrl_config.get("sell_spreads", "0.0002,0.001")
+                take_profit = ctrl_config.get("take_profit", 0.0001)
+                caption = (
+                    f"📊 *{escape_markdown_v2(pair)}* \\| PMM {leverage}x\n"
+                    f"Buy: `{escape_markdown_v2(buy_spreads)}` \\| Sell: `{escape_markdown_v2(sell_spreads)}`\n"
+                    f"TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`"
+                )
+            else:
+                side_val = ctrl_config.get("side", 1)
+                side_str = "LONG" if side_val == 1 else "SHORT"
+                start_p = ctrl_config.get("start_price", 0)
+                end_p = ctrl_config.get("end_price", 0)
+                limit_p = ctrl_config.get("limit_price", 0)
+                caption = (
+                    f"📊 *{escape_markdown_v2(pair)}* \\| {escape_markdown_v2(side_str)} {leverage}x\n"
+                    f"Grid: `{escape_markdown_v2(f'{start_p:.6g}')}` → `{escape_markdown_v2(f'{end_p:.6g}')}`\n"
+                    f"Limit: `{escape_markdown_v2(f'{limit_p:.6g}')}`"
+                )
 
             keyboard = [[
                 InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}"),
@@ -916,9 +1210,11 @@ async def show_controller_edit(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     controller_name = ctrl_config.get("id", "")
+    controller_type = ctrl_config.get("controller_name", "")
+    is_pmm_mister = "pmm_mister" in controller_type.lower()
 
     # Define editable fields with their current values
-    editable_fields = _get_editable_controller_fields(ctrl_config)
+    editable_fields = _get_editable_controller_fields(ctrl_config, is_pmm_mister)
 
     # Store editable fields in context for input processing
     context.user_data["ctrl_editable_fields"] = editable_fields
@@ -973,21 +1269,61 @@ async def show_controller_edit(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["ctrl_edit_message_id"] = query.message.message_id
 
 
-def _get_editable_controller_fields(ctrl_config: Dict[str, Any]) -> Dict[str, Any]:
+def _get_editable_controller_fields(ctrl_config: Dict[str, Any], is_pmm_mister: bool = False) -> Dict[str, Any]:
     """Extract editable fields from controller config"""
-    tp_cfg = ctrl_config.get("triple_barrier_config", {})
-    take_profit = tp_cfg.get("take_profit", 0.0001) if isinstance(tp_cfg, dict) else 0.0001
+    if is_pmm_mister:
+        # PMM Mister editable fields - match review step order
+        return {
+            # Identification fields
+            "id": ctrl_config.get("id", ""),
+            "connector_name": ctrl_config.get("connector_name", ""),
+            "trading_pair": ctrl_config.get("trading_pair", ""),
+            "leverage": ctrl_config.get("leverage", 20),
+            "position_mode": ctrl_config.get("position_mode", "HEDGE"),
+            # Amount settings
+            "total_amount_quote": ctrl_config.get("total_amount_quote", 100),
+            "portfolio_allocation": ctrl_config.get("portfolio_allocation", 0.05),
+            # Base percentages
+            "target_base_pct": ctrl_config.get("target_base_pct", 0.5),
+            "min_base_pct": ctrl_config.get("min_base_pct", 0.4),
+            "max_base_pct": ctrl_config.get("max_base_pct", 0.6),
+            # Spreads and amounts
+            "buy_spreads": ctrl_config.get("buy_spreads", "0.0002,0.001"),
+            "sell_spreads": ctrl_config.get("sell_spreads", "0.0002,0.001"),
+            "buy_amounts_pct": ctrl_config.get("buy_amounts_pct", "1,2"),
+            "sell_amounts_pct": ctrl_config.get("sell_amounts_pct", "1,2"),
+            # Take profit settings
+            "take_profit": ctrl_config.get("take_profit", 0.0001),
+            "take_profit_order_type": ctrl_config.get("take_profit_order_type", "LIMIT_MAKER"),
+            "open_order_type": ctrl_config.get("open_order_type", "LIMIT"),
+            # Timing settings
+            "executor_refresh_time": ctrl_config.get("executor_refresh_time", 30),
+            "buy_cooldown_time": ctrl_config.get("buy_cooldown_time", 15),
+            "sell_cooldown_time": ctrl_config.get("sell_cooldown_time", 15),
+            "buy_position_effectivization_time": ctrl_config.get("buy_position_effectivization_time", 3600),
+            "sell_position_effectivization_time": ctrl_config.get("sell_position_effectivization_time", 3600),
+            # Distance settings
+            "min_buy_price_distance_pct": ctrl_config.get("min_buy_price_distance_pct", 0.003),
+            "min_sell_price_distance_pct": ctrl_config.get("min_sell_price_distance_pct", 0.003),
+            # Executor settings
+            "max_active_executors_by_level": ctrl_config.get("max_active_executors_by_level", 4),
+            "tick_mode": ctrl_config.get("tick_mode", False),
+        }
+    else:
+        # Grid Strike editable fields
+        tp_cfg = ctrl_config.get("triple_barrier_config", {})
+        take_profit = tp_cfg.get("take_profit", 0.0001) if isinstance(tp_cfg, dict) else 0.0001
 
-    return {
-        "start_price": ctrl_config.get("start_price", 0),
-        "end_price": ctrl_config.get("end_price", 0),
-        "limit_price": ctrl_config.get("limit_price", 0),
-        "total_amount_quote": ctrl_config.get("total_amount_quote", 0),
-        "max_open_orders": ctrl_config.get("max_open_orders", 3),
-        "max_orders_per_batch": ctrl_config.get("max_orders_per_batch", 1),
-        "min_spread_between_orders": ctrl_config.get("min_spread_between_orders", 0.0001),
-        "take_profit": take_profit,
-    }
+        return {
+            "start_price": ctrl_config.get("start_price", 0),
+            "end_price": ctrl_config.get("end_price", 0),
+            "limit_price": ctrl_config.get("limit_price", 0),
+            "total_amount_quote": ctrl_config.get("total_amount_quote", 0),
+            "max_open_orders": ctrl_config.get("max_open_orders", 3),
+            "max_orders_per_batch": ctrl_config.get("max_orders_per_batch", 1),
+            "min_spread_between_orders": ctrl_config.get("min_spread_between_orders", 0.0001),
+            "take_profit": take_profit,
+        }
 
 
 async def handle_controller_set_field(update: Update, context: ContextTypes.DEFAULT_TYPE, field_name: str) -> None:
@@ -1088,7 +1424,7 @@ async def handle_controller_confirm_set(update: Update, context: ContextTypes.DE
     await query.answer("Updating...")
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Build config update
         if field_name == "take_profit":
@@ -1256,7 +1592,7 @@ async def process_controller_field_input(update: Update, context: ContextTypes.D
             update_config[key] = value
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         # Apply the update
         result = await client.controllers.update_bot_controller_config(
@@ -1265,7 +1601,16 @@ async def process_controller_field_input(update: Update, context: ContextTypes.D
             config=update_config
         )
 
-        if result.get("status") == "success":
+        # Check for success - API may return status="success" or message containing "successfully"
+        result_status = result.get("status", "")
+        result_message = result.get("message", "")
+        is_success = (
+            result_status == "success" or
+            "successfully" in str(result_message).lower() or
+            "updated" in str(result_message).lower()
+        )
+
+        if is_success:
             # Update local config cache
             for key, value in updates.items():
                 if key == "take_profit":
@@ -1302,7 +1647,7 @@ async def process_controller_field_input(update: Update, context: ContextTypes.D
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
         else:
-            error_msg = result.get("message", "Update failed")
+            error_msg = result_message or "Update failed"
             keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"bots:ctrl_idx:{controller_idx}")]]
 
             if message_id:
@@ -1385,7 +1730,7 @@ async def handle_confirm_stop_bot(update: Update, context: ContextTypes.DEFAULT_
     )
 
     try:
-        client = await get_bots_client(chat_id)
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         result = await client.bot_orchestration.stop_and_archive_bot(
             bot_name=bot_name,
@@ -1457,7 +1802,7 @@ async def handle_refresh_controller(update: Update, context: ContextTypes.DEFAUL
 
     if bot_name:
         try:
-            client = await get_bots_client(chat_id)
+            client, _ = await get_bots_client(chat_id, context.user_data)
             fresh_data = await client.bot_orchestration.get_active_bots_status()
             if isinstance(fresh_data, dict) and "data" in fresh_data:
                 bot_info = fresh_data.get("data", {}).get(bot_name)
@@ -1477,14 +1822,17 @@ async def handle_refresh_controller(update: Update, context: ContextTypes.DEFAUL
 # VIEW LOGS
 # ============================================
 
-def _format_log_entry(log, max_msg_len: int = 55) -> str:
-    """Format a log entry with timestamp"""
+def _format_log_entry(log) -> str:
+    """Format a log entry with timestamp - full message, no truncation"""
     if isinstance(log, dict):
         timestamp = log.get("timestamp", log.get("time", log.get("ts", "")))
         msg = log.get("msg", log.get("message", str(log)))
     else:
         timestamp = ""
         msg = str(log)
+
+    # Escape backticks in log messages to prevent breaking code blocks
+    msg = str(msg).replace("`", "'")
 
     # Extract time portion (HH:MM:SS) from timestamp
     time_str = ""
@@ -1502,16 +1850,13 @@ def _format_log_entry(log, max_msg_len: int = 55) -> str:
         elif len(ts) >= 8 and ":" in ts:
             time_str = ts[:8]
 
-    # Truncate message
-    msg = msg[:max_msg_len] if len(msg) > max_msg_len else msg
-
     if time_str:
         return f"[{time_str}] {msg}"
     return msg
 
 
 async def show_bot_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show recent logs for current bot with timestamps"""
+    """Show recent logs for current bot with timestamps - full messages"""
     query = update.callback_query
 
     bot_name = context.user_data.get("current_bot_name")
@@ -1524,10 +1869,8 @@ async def show_bot_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     general_logs = bot_info.get("general_logs", [])
     error_logs = bot_info.get("error_logs", [])
 
-    display_name = bot_name[:25] + "..." if len(bot_name) > 25 else bot_name
-
     lines = [
-        f"*Logs: `{escape_markdown_v2(display_name)}`*",
+        f"*Logs: `{escape_markdown_v2(bot_name)}`*",
         "",
     ]
 
@@ -1535,8 +1878,8 @@ async def show_bot_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if error_logs:
         lines.append("*🔴 Errors:*")
         lines.append("```")
-        for log in error_logs[:5]:
-            entry = _format_log_entry(log, 50)
+        for log in error_logs[:10]:
+            entry = _format_log_entry(log)
             lines.append(entry)
         lines.append("```")
         lines.append("")
@@ -1545,8 +1888,8 @@ async def show_bot_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if general_logs:
         lines.append("*📋 Recent Activity:*")
         lines.append("```")
-        for log in general_logs[-10:]:
-            entry = _format_log_entry(log, 50)
+        for log in general_logs[-20:]:
+            entry = _format_log_entry(log)
             lines.append(entry)
         lines.append("```")
     else:
@@ -1556,7 +1899,11 @@ async def show_bot_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     message = "\n".join(lines)
     if len(message) > 4000:
-        message = message[:4000] + "\n\\.\\.\\."
+        message = message[:4000]
+        # Check if we have an unclosed code block (odd number of ```)
+        if message.count("```") % 2 == 1:
+            message += "\n```"
+        message += "\n\\.\\.\\."
 
     await query.message.edit_text(
         message,

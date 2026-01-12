@@ -13,25 +13,19 @@ A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
 
 ## Quick Start
 
-**Prerequisites:** Python 3.11+, Conda, Hummingbot Backend API running, Telegram Bot Token
+**Prerequisites:** Python 3.12+, Conda, Hummingbot Backend API running, Telegram Bot Token
 
 ```bash
-# clone repo
 git clone https://github.com/hummingbot/condor.git
 cd condor
-# environment setup
-conda env create -f environment.yml
-conda activate condor
 
-# Configure
-cp .env.example .env
-# Edit .env with your credentials:
-# - TELEGRAM_TOKEN
-# - TELEGRAM_ALLOWED_IDS
-# - OPENAI_API_KEY (optional, for AI features)
+# Option 1: Local Python
+make install     # Interactive setup + conda environment
+make run         # Start the bot
 
-# Run
-python main.py
+# Option 2: Docker
+make setup       # Interactive configuration
+make deploy      # Start with Docker Compose
 ```
 
 ## Commands
@@ -40,73 +34,55 @@ python main.py
 |---------|-------------|
 | `/portfolio` | Portfolio dashboard with PNL indicators, holdings, and graphs |
 | `/bots` | All active bots with status and metrics |
-| `/bots <name>` | Specific bot details |
-| `/clob_trading` | CLOB trading menu (place orders, manage positions) |
-| `/dex_trading` | DEX trading menu (swaps, pools, liquidity positions) |
-| `/config` | Configuration menu (servers, API keys) |
-| `/trade <question>` | AI assistant (disabled, coming soon) |
+| `/trade` | CEX trading menu (spot & perpetual orders, positions) |
+| `/swap` | DEX swap trading (quotes, execution, history) |
+| `/lp` | DEX liquidity pool management (positions, pools) |
+| `/routines` | Auto-discoverable Python scripts with scheduling |
+| `/config` | Configuration menu (servers, API keys, Gateway, admin) |
 
 ## Architecture
 
 ```
 Telegram → Condor Bot → Hummingbot Backend API → Trading Bots
                      ↘ Gateway → DEX Protocols
-                     ↘ GPT-4o → MCP (Docker) → Hummingbot API (future)
 ```
 
-### Direct API Commands
-- `/portfolio`, `/bots`, `/clob_trading`, `/dex_trading` use direct API calls via `hummingbot_api_client`
-- Fast, reliable, interactive button menus
-
-### AI Assistant (Future)
-- `/trade` uses GPT-4o + MCP server with access to all Hummingbot tools
-- Natural language interface for market data, portfolio queries, and more
+All commands use direct API calls via `hummingbot_api_client` with interactive button menus.
 
 ## Project Structure
 
 ```
 condor/
 ├── handlers/                    # Telegram command handlers
-│   ├── bots.py                 # /bots command
 │   ├── portfolio.py            # /portfolio command with dashboard
-│   ├── trade_ai.py             # /trade AI assistant (disabled)
-│   ├── clob/                   # CLOB trading module
+│   ├── bots/                   # Bot monitoring module
+│   │   ├── __init__.py         # /bots command
+│   │   ├── menu.py             # Bot status display
+│   │   └── controllers/        # Bot controller configs
+│   ├── cex/                    # CEX trading module (/trade)
 │   │   ├── __init__.py         # Main command, callback router
-│   │   ├── menu.py             # Trading menu with overview
-│   │   ├── place_order.py      # Order placement flow
-│   │   ├── leverage.py         # Leverage/position mode config
-│   │   ├── orders.py           # Order search/cancel
-│   │   ├── positions.py        # Position management
-│   │   └── account.py          # Account switching
-│   ├── dex/                    # DEX trading module
-│   │   ├── __init__.py         # Main command, callback router
-│   │   ├── menu.py             # Trading menu with balances
-│   │   ├── swap_quote.py       # Get swap quotes
-│   │   ├── swap_execute.py     # Execute swaps
-│   │   ├── swap_history.py     # Swap history/status
-│   │   └── pools.py            # Pool discovery & LP management
-│   └── config/                 # Configuration module
-│       ├── __init__.py         # /config command
-│       ├── servers.py          # API server management
-│       ├── api_keys.py         # Exchange credentials
-│       └── user_preferences.py # User preference storage
+│   │   ├── trade.py            # Order placement
+│   │   ├── orders.py           # Order management
+│   │   └── positions.py        # Position tracking
+│   ├── dex/                    # DEX trading module (/swap, /lp)
+│   │   ├── __init__.py         # Main commands, callback router
+│   │   ├── swap.py             # Quote, execute, history
+│   │   ├── liquidity.py        # LP positions management
+│   │   └── pools.py            # Pool info and discovery
+│   ├── config/                 # Configuration module (/config)
+│   │   ├── __init__.py         # Main command
+│   │   ├── servers.py          # API server management
+│   │   ├── api_keys.py         # Exchange credentials
+│   │   └── gateway/            # Gateway configuration
+│   ├── routines/               # Routines module (/routines)
+│   │   └── __init__.py         # Script discovery and execution
+│   └── admin/                  # Admin panel (via /config)
+├── routines/                   # User-defined automation scripts
 ├── utils/                      # Utilities
-│   ├── auth.py                 # @restricted decorator
-│   ├── telegram_formatters.py  # Message formatting
-│   ├── portfolio_graphs.py     # Dashboard chart generation
-│   └── trading_data.py         # Data aggregation helpers
-├── servers/                    # Server management
-│   ├── server_manager.py       # Server CRUD & client pool
-│   └── servers.yml             # Server configuration
+│   ├── auth.py                 # @restricted, @admin_required decorators
+│   └── telegram_formatters.py  # Message formatting
+├── config_manager.py           # Unified config (servers, users, permissions)
 ├── hummingbot_api_client/      # API client library
-├── hummingbot_mcp/             # MCP AI tools (Docker)
-├── flows/                      # Documentation
-│   ├── bots_flow.txt           # /bots command flow
-│   ├── portfolio_flow.txt      # /portfolio command flow
-│   ├── clob_trading_flow.txt   # CLOB trading flow
-│   ├── dex_trading_flow.txt    # DEX trading flow
-│   ├── config_flow.txt         # Configuration flow
-│   └── common_patterns.txt     # Shared patterns
 └── main.py                     # Entry point
 ```
 
@@ -121,7 +97,7 @@ condor/
 - **Dashboard** - Combined chart with value history, token distribution, account breakdown
 - **Settings** - Configure time period (1d, 3d, 7d, 14d, 30d)
 
-### CLOB Trading (`/clob_trading`)
+### CEX Trading (`/trade`)
 - **Overview** - Account balances, positions, orders at a glance
 - **Place Orders** - Interactive menu with dual input (buttons + direct text)
   - Toggle: side, order type, position mode
@@ -131,14 +107,23 @@ condor/
 - **Search Orders** - View/filter/cancel orders
 - **Manage Positions** - View, trade, close positions with confirmation
 
-### DEX Trading (`/dex_trading`)
+### DEX Swaps (`/swap`)
 - **Gateway Balances** - Token balances across DEX wallets
 - **Swap Quote** - Get quotes before executing
 - **Execute Swap** - Perform swaps with slippage control
 - **Quick Swap** - Repeat last swap with minimal input
+
+### Liquidity Pools (`/lp`)
 - **Pool Discovery** - Search pools by connector and token
 - **Pool Info** - Detailed pool stats with liquidity charts
 - **LP Positions** - Manage CLMM positions (add, close, collect fees)
+
+### Routines (`/routines`)
+- **Auto-Discovery** - Python scripts auto-discovered from `routines/` folder
+- **Pydantic Config** - Type-safe configuration with descriptions
+- **One-shot Scripts** - Run once, optionally schedule (interval or daily)
+- **Continuous Scripts** - Long-running tasks with start/stop control
+- **Multi-instance** - Run multiple instances with different configs
 
 ### Configuration (`/config`)
 - **API Servers** - Add, modify, delete Hummingbot Backend API servers
@@ -155,15 +140,15 @@ condor/
 Preferences are automatically saved and persist across sessions:
 
 - **Portfolio** - Graph time period (days, interval)
-- **CLOB** - Active account, last order parameters
+- **CEX** - Active account, last order parameters
 - **DEX** - Default network/connector, last swap parameters
 - **General** - Active server
 
 ## Security
 
-- **User ID Whitelist** - Only `TELEGRAM_ALLOWED_IDS` can access
+- **Admin Whitelist** - Only `ADMIN_USER_ID` has initial access
+- **Role-Based Access** - Admin, User, Pending, Blocked roles
 - **@restricted Decorator** - Applied to all command handlers
-- **Environment Credentials** - API keys stored in `.env`
 - **Secret Masking** - Passwords hidden in UI
 
 ## Configuration Files
@@ -171,31 +156,49 @@ Preferences are automatically saved and persist across sessions:
 ### `.env`
 ```bash
 TELEGRAM_TOKEN=your_bot_token
-TELEGRAM_ALLOWED_IDS=123456789,987654321
+ADMIN_USER_ID=123456789
 OPENAI_API_KEY=sk-...  # Optional, for AI features
 ```
 
-### `servers.yml`
+### `config.yml` (auto-created on first run)
 ```yaml
-default_server: main
 servers:
   main:
     host: localhost
     port: 8000
     username: admin
     password: admin
-    enabled: true
+default_server: main
+admin_id: 123456789
+users: {}
+server_access: {}
+chat_defaults: {}
+audit_log: []
 ```
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| Bot not responding | Check `TELEGRAM_TOKEN` and `TELEGRAM_ALLOWED_IDS` |
+| Bot not responding | Check `TELEGRAM_TOKEN` and `ADMIN_USER_ID` in `.env` |
+| Access pending | Admin must approve user via /config > Admin Panel |
 | Commands failing | Verify Hummingbot API is running |
 | Connection refused | Check server host:port in `/config` |
 | Auth error | Verify server credentials |
 | DEX features unavailable | Ensure Gateway is configured and running |
+
+## Docker Deployment
+
+```bash
+# Setup and run with Docker
+make setup       # Interactive configuration
+docker compose up -d
+```
+
+Volumes mounted:
+- `condor_bot_data.pickle` - User preferences and state
+- `config.yml` - Server and permission configuration
+- `routines/` - Custom automation scripts
 
 ## Development
 
