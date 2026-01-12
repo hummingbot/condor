@@ -798,8 +798,13 @@ async def get_client(chat_id: int, user_id: int = None, context=None):
     """Get the API client for the user's preferred server."""
     preferred_server = None
     if context is not None:
-        if user_id is None:
-            user_id = context.user_data.get('_user_id')
-        preferred_server = get_effective_server(chat_id, context.user_data)
+        # Handle both normal context and job context (where user_data may be None)
+        user_data = context.user_data
+        if user_data is None:
+            user_data = getattr(context, '_user_data', None)
+
+        if user_id is None and user_data is not None:
+            user_id = user_data.get('_user_id')
+        preferred_server = get_effective_server(chat_id, user_data)
 
     return await get_config_manager().get_client_for_chat(chat_id, user_id, preferred_server)
