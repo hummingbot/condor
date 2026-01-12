@@ -277,27 +277,38 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         reply_markup = InlineKeyboardMarkup(keyboard)
         text_content = "\n".join(lines)
 
-        # Handle photo messages (use getattr for FakeMessage compatibility)
-        if getattr(query.message, 'photo', None):
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-            await query.message.chat.send_message(
-                text_content,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
-        else:
-            try:
-                await query.message.edit_text(
+        # Handle command vs callback
+        if query and query.message:
+            # Called from callback - edit the message
+            if getattr(query.message, 'photo', None):
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
                     text_content,
                     parse_mode="MarkdownV2",
                     reply_markup=reply_markup
                 )
-            except BadRequest as e:
-                if "Message is not modified" not in str(e):
-                    raise
+            else:
+                try:
+                    await query.message.edit_text(
+                        text_content,
+                        parse_mode="MarkdownV2",
+                        reply_markup=reply_markup
+                    )
+                except BadRequest as e:
+                    if "Message is not modified" not in str(e):
+                        raise
+        else:
+            # Called from command - send new message
+            msg = update.message
+            if msg:
+                await msg.reply_text(
+                    text_content,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
 
     except Exception as e:
         logger.error(f"Error loading controller configs: {e}", exc_info=True)
@@ -307,18 +318,25 @@ async def show_controller_configs_menu(update: Update, context: ContextTypes.DEF
         ]
         error_msg = format_error_message(f"Failed to load configs: {str(e)}")
         try:
-            if getattr(query.message, 'photo', None):
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
-                await query.message.chat.send_message(
-                    error_msg,
-                    parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            else:
-                await query.message.edit_text(
+            if query and query.message:
+                if getattr(query.message, 'photo', None):
+                    try:
+                        await query.message.delete()
+                    except Exception:
+                        pass
+                    await query.message.chat.send_message(
+                        error_msg,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                else:
+                    await query.message.edit_text(
+                        error_msg,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+            elif update.message:
+                await update.message.reply_text(
                     error_msg,
                     parse_mode="MarkdownV2",
                     reply_markup=InlineKeyboardMarkup(keyboard)

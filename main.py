@@ -194,7 +194,7 @@ def register_handlers(application: Application) -> None:
     """Register all command handlers."""
     # Import fresh versions after reload
     from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
-    from handlers.bots import bots_command, bots_callback_handler, get_bots_document_handler
+    from handlers.bots import bots_command, new_bot_command, bots_callback_handler, get_bots_document_handler
     from handlers.trading import trade_command as unified_trade_command
     from handlers.trading.router import unified_trade_callback_handler
     from handlers.cex import cex_callback_handler
@@ -213,6 +213,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("bots", bots_command))
+    application.add_handler(CommandHandler("new_bot", new_bot_command))
     application.add_handler(CommandHandler("trade", unified_trade_command))  # Unified trade (CEX + DEX)
     application.add_handler(CommandHandler("swap", unified_trade_command))   # Alias for /trade
     application.add_handler(CommandHandler("lp", lp_command))
@@ -285,6 +286,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Welcome message and server status"),
         BotCommand("portfolio", "View detailed portfolio breakdown"),
         BotCommand("bots", "Check status of all trading bots"),
+        BotCommand("new_bot", "Create and manage bot configurations"),
         BotCommand("trade", "Unified trading - CEX orders and DEX swaps"),
         BotCommand("lp", "Liquidity pool management"),
         BotCommand("routines", "Run configurable Python scripts"),
