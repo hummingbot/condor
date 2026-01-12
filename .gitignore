@@ -161,3 +161,4 @@ cython_debug/
 # Telegram Bot Persistence
 condor_bot_data.pickle
 condor_bot_data.pickle.bak
+.DS_Store
