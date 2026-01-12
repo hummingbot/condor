@@ -190,28 +190,39 @@ def _is_position_active(pos: Dict[str, Any]) -> bool:
     Returns:
         True if position appears to be active (has liquidity)
     """
+    # Must not have CLOSED status
+    if pos.get('status') == 'CLOSED':
+        return False
+
     # Check liquidity field (exact field name may vary)
     liquidity = pos.get('liquidity') or pos.get('current_liquidity') or pos.get('liq')
     if liquidity is not None:
         try:
-            if float(liquidity) <= 0:
-                return False
+            return float(liquidity) > 0
         except (ValueError, TypeError):
             pass
 
     # Check if position has any token amounts remaining
-    base_amount = pos.get('base_amount') or pos.get('amount_base') or pos.get('token_a_amount')
-    quote_amount = pos.get('quote_amount') or pos.get('amount_quote') or pos.get('token_b_amount')
+    # Use the same field names as the /lp command (liquidity.py)
+    base_amount = (
+        pos.get('base_token_amount') or pos.get('base_amount') or
+        pos.get('amount_base') or pos.get('token_a_amount')
+    )
+    quote_amount = (
+        pos.get('quote_token_amount') or pos.get('quote_amount') or
+        pos.get('amount_quote') or pos.get('token_b_amount')
+    )
 
-    if base_amount is not None and quote_amount is not None:
+    # If we have token amount data, check if at least one is > 0
+    if base_amount is not None or quote_amount is not None:
         try:
-            if float(base_amount) <= 0 and float(quote_amount) <= 0:
-                return False
+            return float(base_amount or 0) > 0 or float(quote_amount or 0) > 0
         except (ValueError, TypeError):
             pass
 
-    # If we can't determine, assume it's active
-    return True
+    # If we can't determine from liquidity or token amounts, assume closed
+    # (positions should have at least one of these fields if active)
+    return False
 
 
 async def get_lp_positions(client, account_names: Optional[List[str]] = None) -> Dict[str, Any]:

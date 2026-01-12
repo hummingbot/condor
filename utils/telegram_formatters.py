@@ -1407,35 +1407,34 @@ def format_portfolio_overview(
                         if value > 0:
                             total_value += value
 
-    # Show total value prominently with 24h PNL inline
+    # Show total value with all PNL indicators on one line
     pnl_24h = pnl_indicators.get("pnl_24h") if pnl_indicators else None
+    pnl_7d = pnl_indicators.get("pnl_7d") if pnl_indicators else None
+    pnl_30d = pnl_indicators.get("pnl_30d") if pnl_indicators else None
+    detected_movements = pnl_indicators.get("detected_movements", []) if pnl_indicators else []
+
     if total_value > 0:
         total_str = format_number(total_value)
+        line = f"💵 *Total:* `{escape_markdown_v2(total_str)}`"
         if pnl_24h is not None:
-            pnl_str = format_pnl_indicator(pnl_24h)
-            message += f"💵 *Total:* `{escape_markdown_v2(total_str)}` \\({escape_markdown_v2(pnl_str)} 24h\\)\n"
-        else:
-            message += f"💵 *Total:* `{escape_markdown_v2(total_str)}`\n"
+            line += f" \\({escape_markdown_v2(format_pnl_indicator(pnl_24h))} 24h\\)"
     else:
-        message += f"💵 *Total:* `{escape_markdown_v2('$0.00')}`\n"
+        line = f"💵 *Total:* `{escape_markdown_v2('$0.00')}`"
 
-    # Show additional PNL indicators (7d, 30d) if available
-    if pnl_indicators:
-        pnl_7d = pnl_indicators.get("pnl_7d")
-        pnl_30d = pnl_indicators.get("pnl_30d")
-        detected_movements = pnl_indicators.get("detected_movements", [])
+    # Add 7d/30d PNL on the same line
+    pnl_parts = []
+    if pnl_7d is not None:
+        pnl_parts.append(f"7d: {escape_markdown_v2(format_pnl_indicator(pnl_7d))}")
+    if pnl_30d is not None:
+        pnl_parts.append(f"30d: {escape_markdown_v2(format_pnl_indicator(pnl_30d))}")
 
-        pnl_parts = []
-        if pnl_7d is not None:
-            pnl_parts.append(f"7d: `{escape_markdown_v2(format_pnl_indicator(pnl_7d))}`")
-        if pnl_30d is not None:
-            pnl_parts.append(f"30d: `{escape_markdown_v2(format_pnl_indicator(pnl_30d))}`")
+    if pnl_parts:
+        line += " 📈 " + " \\| ".join(pnl_parts)
 
-        if pnl_parts:
-            message += "📈 " + " \\| ".join(pnl_parts) + "\n"
+    message += line + "\n"
 
-        if detected_movements:
-            message += f"_\\({len(detected_movements)} movement\\(s\\) adjusted\\)_\n"
+    if detected_movements:
+        message += f"_\\({len(detected_movements)} movement\\(s\\) adjusted\\)_\n"
 
     message += "\n"
 
