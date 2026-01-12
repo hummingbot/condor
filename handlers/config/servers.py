@@ -1470,15 +1470,24 @@ async def set_share_permission(query, context: ContextTypes.DEFAULT_TYPE, server
     context.user_data.pop('share_chat_id', None)
 
     if success:
+        # Auto-set as default if this is the user's only accessible server
+        accessible = cm.get_accessible_servers(target_user_id)
+        if accessible and len(accessible) == 1:
+            cm.set_chat_default_server(target_user_id, server_name)
+            auto_default = True
+        else:
+            auto_default = False
+
         # Notify target user
         try:
             perm_label = "Trader" if perm == ServerPermission.TRADER else "Viewer"
+            default_note = "\n\n_This server has been set as your default\\._" if auto_default else ""
             await context.bot.send_message(
                 chat_id=target_user_id,
                 text=(
                     f"📥 *Server Shared With You*\n\n"
                     f"You now have *{escape_markdown_v2(perm_label)}* access to server:\n"
-                    f"`{escape_markdown_v2(server_name)}`\n\n"
+                    f"`{escape_markdown_v2(server_name)}`{default_note}\n\n"
                     f"Use /config \\> API Servers to access it\\."
                 ),
                 parse_mode="MarkdownV2"
