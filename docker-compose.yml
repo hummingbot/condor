@@ -6,11 +6,13 @@ services:
     environment:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN}
       ADMIN_USER_ID: ${ADMIN_USER_ID}
+      # Where to store the bot persistence file inside the container
+      CONDOR_PERSISTENCE_FILE: /app/data/condor_bot_data.pickle
     env_file:
       - .env
     volumes:
-      # Persist bot data (user preferences, trading context, etc.)
-      - ./condor_bot_data.pickle:/app/condor_bot_data.pickle
+      # The pickle file will be created as /app/data/condor_bot_data.pickle.
+      - ./data:/app/data
       # Mount config (servers, users, permissions)
       - ./config.yml:/app/config.yml
       # Mount routines for auto-discovery
