@@ -72,34 +72,23 @@ else
         break
     done
 
-    # 4. Prompt for OpenAI API Key (optional)
-    echo ""
-    echo "Enter your OpenAI API Key (optional, for AI features)."
-    echo "Press Enter to skip if not using AI features."
-    echo -n "OpenAI API Key: "
-    read -r openai_key < /dev/tty || openai_key=""
-    openai_key=$(echo "$openai_key" | tr -d '[:space:]')
-
-    # 5. Create .env file with escaped values
+    # 4. Create .env file with escaped values
     {
         echo "TELEGRAM_TOKEN=$(escape_env_value "$telegram_token")"
         echo "ADMIN_USER_ID=$(escape_env_value "$admin_id")"
-        if [ -n "$openai_key" ]; then
-            echo "OPENAI_API_KEY=$(escape_env_value "$openai_key")"
-        fi
     } > "$ENV_FILE"
 
     echo ""
     echo "✅ $ENV_FILE file created successfully!"
 fi
 
-# 6. Ensure data directory exists
+# 5. Ensure data directory exists
 if [ ! -d "$DATA_DIR" ]; then
     echo "Ensuring $DATA_DIR directory exists for persistence..."
     mkdir -p "$DATA_DIR"
 fi
 
-# 7. Create blank config.yml if it doesn't exist
+# 6. Create blank config.yml if it doesn't exist
 if [ -f "$CONFIG_FILE" ]; then
     echo ""
     echo ">> Found existing $CONFIG_FILE file."
@@ -114,7 +103,7 @@ else
     echo "      using the /config command in your Telegram bot."
 fi
 
-# 8. Display Run Instructions
+# 7. Display Run Instructions
 echo ""
 echo "✅ Setup Complete! Environment and config files are ready."
 echo "=========================================================="
