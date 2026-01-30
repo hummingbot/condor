@@ -92,17 +92,10 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
     )
     from .grid import (
         start_grid_wizard,
-        show_step_1_connector,
         handle_connector_select,
         handle_pair_input,
         show_step_2_combined,
-        handle_side_select,
-        handle_leverage_select,
-        handle_amount_select,
-        handle_custom_amount,
         handle_interval_select,
-        show_edit_prices,
-        show_edit_settings,
         handle_deploy,
     )
 
@@ -153,33 +146,16 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
         pair = parts[2]
         await handle_pair_input(update, context, pair)
 
+    elif action == "grid_pair_select" and len(parts) >= 3:
+        pair = parts[2]
+        await handle_pair_input(update, context, pair)
+
     elif action == "grid_step2":
         await show_step_2_combined(update, context)
-
-    elif action == "grid_side" and len(parts) >= 3:
-        side_str = parts[2]
-        await handle_side_select(update, context, side_str)
-
-    elif action == "grid_lev" and len(parts) >= 3:
-        leverage = int(parts[2])
-        await handle_leverage_select(update, context, leverage)
-
-    elif action == "grid_amt" and len(parts) >= 3:
-        amount = int(parts[2])
-        await handle_amount_select(update, context, amount)
-
-    elif action == "grid_amt_custom":
-        await handle_custom_amount(update, context)
 
     elif action == "grid_interval" and len(parts) >= 3:
         interval = parts[2]
         await handle_interval_select(update, context, interval)
-
-    elif action == "grid_edit_prices":
-        await show_edit_prices(update, context)
-
-    elif action == "grid_edit_settings":
-        await show_edit_settings(update, context)
 
     elif action == "grid_deploy":
         await handle_deploy(update, context)
@@ -208,25 +184,15 @@ async def executors_message_handler(update: Update, context: ContextTypes.DEFAUL
 
     from .grid import (
         handle_pair_input,
-        handle_amount_input,
-        handle_prices_input,
-        handle_settings_input,
+        handle_config_input,
     )
 
     if state == "wizard_pair_input":
         await handle_pair_input(update, context, text)
         return True
 
-    elif state == "wizard_amount_input":
-        await handle_amount_input(update, context, text)
-        return True
-
-    elif state == "wizard_prices_input":
-        await handle_prices_input(update, context, text)
-        return True
-
-    elif state == "wizard_settings_input":
-        await handle_settings_input(update, context, text)
+    elif state == "wizard_config_input":
+        await handle_config_input(update, context, text)
         return True
 
     return False

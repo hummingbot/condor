@@ -38,6 +38,7 @@ GRID_EXECUTOR_DEFAULTS = {
     "max_orders_per_batch": 2,
     "order_frequency": 1,
     "take_profit": 0.0002,
+    "activation_bounds": 0.001,
 }
 
 
@@ -125,7 +126,7 @@ async def get_executors_client(chat_id: Optional[int] = None, user_data: Optiona
 
 async def search_running_executors(
     client,
-    status: str = "running",
+    status: str = "RUNNING",
     limit: int = 50
 ) -> List[Dict[str, Any]]:
     """Search for executors with a specific status
@@ -143,9 +144,23 @@ async def search_running_executors(
             status=status,
             limit=limit
         )
+        logger.info(f"search_executors response type={type(result).__name__}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}, len={len(result) if isinstance(result, (list, dict)) else 'N/A'}")
         if isinstance(result, dict):
-            return result.get("executors", result.get("data", []))
-        return result if isinstance(result, list) else []
+            # Try known keys in order of likelihood
+            for key in ("executors", "data", "results", "items"):
+                if key in result and isinstance(result[key], list):
+                    logger.info(f"search_executors found {len(result[key])} executors under key '{key}'")
+                    executors = result[key]
+                    if executors:
+                        logger.info(f"search_executors first executor keys: {list(executors[0].keys()) if isinstance(executors[0], dict) else type(executors[0]).__name__}")
+                    return executors
+            # If dict has no recognized list key, log and return empty
+            logger.warning(f"search_executors: no recognized list key in response: {list(result.keys())}")
+            return []
+        executors = result if isinstance(result, list) else []
+        if executors and isinstance(executors[0], dict):
+            logger.info(f"search_executors first executor keys: {list(executors[0].keys())}")
+        return executors
     except Exception as e:
         logger.error(f"Error searching executors: {e}", exc_info=True)
         return []
@@ -228,10 +243,40 @@ async def get_executor_detail(
 # FORMATTERS
 # ============================================
 
+def get_executor_pnl(executor: Dict[str, Any]) -> float:
+    """Extract PnL from an executor response.
+
+    Checks multiple field names since the API response structure varies.
+    """
+    for key in ("net_pnl_quote", "pnl_quote", "unrealized_pnl_quote", "realized_pnl_quote"):
+        val = executor.get(key)
+        if val is not None and val != 0:
+            return float(val)
+    return 0.0
+
+
+def get_executor_volume(executor: Dict[str, Any]) -> float:
+    """Extract filled/traded volume from an executor response."""
+    for key in ("filled_amount_quote", "volume_traded", "total_volume"):
+        val = executor.get(key)
+        if val is not None and val != 0:
+            return float(val)
+    return 0.0
+
+
+def get_executor_fees(executor: Dict[str, Any]) -> float:
+    """Extract cumulative fees from an executor response."""
+    for key in ("cum_fees_quote", "fees_quote", "total_fees"):
+        val = executor.get(key)
+        if val is not None and val != 0:
+            return float(val)
+    return 0.0
+
+
 def format_executor_status_line(executor: Dict[str, Any]) -> str:
     """Format a single executor as a compact status line
 
-    Format: SOL-USDT L 10x +$12.50
+    Format: SOL-USDT S 20x +$12.50 (V:$150)
 
     Args:
         executor: Executor dict from API
@@ -246,11 +291,14 @@ def format_executor_status_line(executor: Dict[str, Any]) -> str:
 
     side_str = "L" if side == SIDE_LONG else "S"
 
-    # Get PnL if available
-    pnl = executor.get("pnl_quote", 0) or executor.get("unrealized_pnl_quote", 0) or 0
-    pnl_str = f"{pnl:+.2f}"
+    pnl = get_executor_pnl(executor)
+    volume = get_executor_volume(executor)
 
-    return f"{pair} {side_str} {leverage}x ${pnl_str}"
+    parts = [f"{pair} {side_str} {leverage}x ${pnl:+.2f}"]
+    if volume:
+        parts.append(f"V:${volume:,.0f}")
+
+    return " ".join(parts)
 
 
 def format_executor_pnl(pnl: float) -> str:
@@ -292,7 +340,9 @@ def format_executor_summary(executor: Dict[str, Any]) -> str:
     end_price = config.get("end_price", 0)
     limit_price = config.get("limit_price", 0)
 
-    pnl = executor.get("pnl_quote", 0) or 0
+    pnl = get_executor_pnl(executor)
+    volume = get_executor_volume(executor)
+    fees = get_executor_fees(executor)
     status = executor.get("status", "unknown")
 
     lines = [
@@ -306,6 +356,11 @@ def format_executor_summary(executor: Dict[str, Any]) -> str:
         f"Status: {status}",
         f"PnL: {format_executor_pnl(pnl)}",
     ]
+
+    if volume:
+        lines.append(f"Volume: ${volume:,.2f}")
+    if fees:
+        lines.append(f"Fees: ${fees:,.2f}")
 
     return "\n".join(lines)
 
