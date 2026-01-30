@@ -1250,11 +1250,14 @@ async def _show_wizard_connector_step(update: Update, context: ContextTypes.DEFA
         keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
 
         await query.message.edit_text(
-            r"*📈 Grid Strike \- Step 1*" + "\n\n"
-            r"🏦 *Select Connector*" + "\n\n"
-            r"Grid Strike automatically places a grid of buy or sell orders within a set price range\." + "\n"
-            r"[📖 Strategy Guide](https://hummingbot.org/blog/strategy-guide-grid-strike/)" + "\n\n"
-            r"Choose the exchange for this grid \(spot or perpetual\):",
+            r"*📈 Grid Strike*" + "\n\n"
+            r"A market making strategy that places a series of buy and sell "
+            r"limit orders at predetermined price intervals above and below "
+            r"a reference price, forming a \"grid\.\"" + "\n\n"
+            r"[📖 Read the strategy guide](https://hummingbot.org/blog/strategy-guide-grid-strike/)" + "\n\n"
+            r"─────────────────────────" + "\n\n"
+            r"*Step 1: Select Exchange*" + "\n\n"
+            r"Grid Strike works on both spot and perpetual exchanges\.",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard),
             disable_web_page_preview=True
@@ -1389,7 +1392,13 @@ async def _show_wizard_side_step(update: Update, context: ContextTypes.DEFAULT_T
     await query.message.edit_text(
         rf"*📈 Grid Strike \- Step 3/{total_steps}*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
-        r"🎯 *Select Side*",
+        r"🎯 *Select Side*" + "\n\n"
+        r"📈 *Long Grid* \- Opens long positions on dips and closes them "
+        r"on bounces\. Bullish bias—profits from oscillations while "
+        r"expecting price to trend upward\." + "\n\n"
+        r"📉 *Short Grid* \- Opens short positions on rallies and closes "
+        r"them on pullbacks\. Bearish bias—profits from oscillations while "
+        r"expecting price to trend downward\.",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -1584,13 +1593,20 @@ async def _show_wizard_amount_step(update: Update, context: ContextTypes.DEFAULT
     step_num = 5 if is_perp else 4
     total_steps = 6 if is_perp else 5
 
+    # Calculate margin example for leverage explanation
+    margin_example = 100 / leverage if leverage > 1 else 100
+
     message_text = (
         rf"*📈 Grid Strike \- Step {step_num}/{total_steps}*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n"
         f"🎯 {side} \\| ⚡ `{leverage}x`" + "\n\n"
         + balance_text +
         r"💰 *Total Amount \(Quote\)*" + "\n\n"
-        r"Select or type amount:"
+        rf"This is the total position size in {escape_markdown_v2(quote_token or 'quote asset')}, "
+        r"including leverage\." + "\n\n"
+        rf"_Example: 100 {escape_markdown_v2(quote_token or 'USDT')} at {leverage}x \= "
+        rf"{margin_example:.1f} margin used_" + "\n\n"
+        r"Select a preset or type a custom amount:"
     )
 
     # Handle both text and photo messages (when going back from chart step)
