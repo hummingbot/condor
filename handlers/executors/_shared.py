@@ -28,12 +28,16 @@ GRID_EXECUTOR_DEFAULTS = {
     "trading_pair": "",
     "side": SIDE_LONG,
     "leverage": 10,
-    "total_amount_quote": 1000,
+    "total_amount_quote": 300,
     "start_price": 0.0,
     "end_price": 0.0,
     "limit_price": 0.0,
-    "max_open_orders": 3,
-    "take_profit": 0.0005,
+    "min_spread_between_orders": 0.0001,
+    "min_order_amount_quote": 6,
+    "max_open_orders": 5,
+    "max_orders_per_batch": 2,
+    "order_frequency": 1,
+    "take_profit": 0.0002,
 }
 
 

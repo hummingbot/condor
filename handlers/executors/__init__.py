@@ -95,15 +95,14 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
         show_step_1_connector,
         handle_connector_select,
         handle_pair_input,
-        show_step_2_config,
+        show_step_2_combined,
         handle_side_select,
         handle_leverage_select,
         handle_amount_select,
         handle_custom_amount,
-        show_step_3_prices,
         handle_interval_select,
         show_edit_prices,
-        show_step_4_review,
+        show_edit_settings,
         handle_deploy,
     )
 
@@ -155,7 +154,7 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
         await handle_pair_input(update, context, pair)
 
     elif action == "grid_step2":
-        await show_step_2_config(update, context)
+        await show_step_2_combined(update, context)
 
     elif action == "grid_side" and len(parts) >= 3:
         side_str = parts[2]
@@ -172,9 +171,6 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif action == "grid_amt_custom":
         await handle_custom_amount(update, context)
 
-    elif action == "grid_step3":
-        await show_step_3_prices(update, context)
-
     elif action == "grid_interval" and len(parts) >= 3:
         interval = parts[2]
         await handle_interval_select(update, context, interval)
@@ -182,8 +178,8 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif action == "grid_edit_prices":
         await show_edit_prices(update, context)
 
-    elif action == "grid_step4":
-        await show_step_4_review(update, context)
+    elif action == "grid_edit_settings":
+        await show_edit_settings(update, context)
 
     elif action == "grid_deploy":
         await handle_deploy(update, context)
@@ -214,6 +210,7 @@ async def executors_message_handler(update: Update, context: ContextTypes.DEFAUL
         handle_pair_input,
         handle_amount_input,
         handle_prices_input,
+        handle_settings_input,
     )
 
     if state == "wizard_pair_input":
@@ -226,6 +223,10 @@ async def executors_message_handler(update: Update, context: ContextTypes.DEFAUL
 
     elif state == "wizard_prices_input":
         await handle_prices_input(update, context, text)
+        return True
+
+    elif state == "wizard_settings_input":
+        await handle_settings_input(update, context, text)
         return True
 
     return False

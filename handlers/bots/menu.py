@@ -562,6 +562,9 @@ def _shorten_controller_name(name: str, max_len: int = 28) -> str:
     side = ""
     seq_num = ""
 
+    # Known prefixes to skip (strategy type identifiers)
+    type_prefixes = {"gs", "grid", "strike", "pmm", "mister", "cfg"}
+
     for p in parts:
         p_lower = p.lower()
         p_upper = p.upper()
@@ -569,11 +572,16 @@ def _shorten_controller_name(name: str, max_len: int = 28) -> str:
             side = "L" if p_upper == "LONG" else "S"
         elif "-" in p:
             pair = p.upper()
-        elif p_lower in ("binance", "hyperliquid", "kucoin", "okx", "bybit", "gate", "mexc"):
-            connector = p_lower[:7]
+        elif p_lower in type_prefixes:
+            continue
+        elif p_lower in ("perpetual", "spot"):
+            continue
         elif p.isdigit() and len(p) <= 5:
-            # Capture sequence number (last numeric part)
             seq_num = p
+        elif "." in p:
+            continue  # Skip decimal values (prices)
+        elif not connector:
+            connector = p_lower[:7]
 
     if pair:
         if connector and side and seq_num:
