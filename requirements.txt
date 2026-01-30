@@ -1,5 +1,5 @@
 python-telegram-bot[job-queue]
-hummingbot-api-client==1.2.6
+hummingbot-api-client==1.2.8
 python-dotenv
 pytest
 pre-commit
