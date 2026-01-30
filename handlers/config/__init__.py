@@ -214,6 +214,13 @@ def get_modify_value_handler():
             await bots_message_handler(update, context)
             return
 
+        # 3.5. Check Executors state
+        if context.user_data.get('executors_state'):
+            from handlers.executors import executors_message_handler
+            handled = await executors_message_handler(update, context)
+            if handled:
+                return
+
         # 4. Check config flows - server modification
         if context.user_data.get('awaiting_add_server_input') or context.user_data.get('awaiting_modify_input'):
             await handle_server_input(update, context)

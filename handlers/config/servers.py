@@ -249,120 +249,139 @@ async def handle_api_server_action(query, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def show_server_details(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
-    """Show details and actions for a specific server.
-    Actions are restricted based on user's permission level.
-    """
+    """Show details and actions for a specific server (callback query wrapper)."""
     try:
-        from config_manager import get_config_manager, ServerPermission
-
-        # Clear any modify state when showing server details
-        context.user_data.pop('modifying_server', None)
-        context.user_data.pop('modifying_field', None)
-        context.user_data.pop('awaiting_modify_input', None)
-
-        server = get_config_manager().get_server(server_name)
-        if not server:
-            await query.answer("❌ Server not found")
-            return
-
         user_id = query.from_user.id
-        cm = get_config_manager()
+        chat_id = query.message.chat_id
 
-        # Check user's permission level
-        perm = cm.get_server_permission(user_id, server_name)
-        if not perm:
-            await query.answer("❌ No access to this server")
-            return
+        async def edit_message(text, parse_mode=None, reply_markup=None):
+            await query.message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-        is_owner = perm == ServerPermission.OWNER
-        can_trade = perm in (ServerPermission.OWNER, ServerPermission.TRADER)
+        async def send_error(text):
+            await query.answer(text)
 
-        from config_manager import get_effective_server
-        is_user_default = server_name == get_effective_server(query.message.chat_id, context.user_data)
-
-        # Check status
-        status_result = await get_config_manager().check_server_status(server_name)
-        status = status_result["status"]
-        message = status_result.get("message", "")
-
-        if status == "online":
-            status_text = "*\\[Online\\]*"
-        elif status == "auth_error":
-            status_text = f"*\\[Auth Error\\]*\n_{escape_markdown_v2(message)}_"
-        elif status == "offline":
-            status_text = f"*\\[Offline\\]*\n_{escape_markdown_v2(message)}_"
-        else:
-            status_text = f"*\\[Error\\]*\n_{escape_markdown_v2(message)}_"
-
-        name_escaped = escape_markdown_v2(server_name)
-        host_escaped = escape_markdown_v2(server['host'])
-        port_escaped = escape_markdown_v2(str(server['port']))
-
-        # Permission badge
-        perm_labels = {
-            ServerPermission.OWNER: "👑 Owner",
-            ServerPermission.TRADER: "💱 Trader",
-            ServerPermission.VIEWER: "👁 Viewer",
-        }
-        perm_label = perm_labels.get(perm, "Unknown")
-
-        message_text = (
-            f"🔌 *Server: {name_escaped}*\n\n"
-            f"*Status:* {status_text}\n"
-            f"*Host:* `{host_escaped}`\n"
-            f"*Port:* `{port_escaped}`\n"
-            f"*Access:* {escape_markdown_v2(perm_label)}\n"
-        )
-
-        # Only show username to owners
-        if is_owner:
-            username_escaped = escape_markdown_v2(server['username'])
-            message_text += f"*Username:* `{username_escaped}`\n"
-
-        # Show if this is the user's default
-        if is_user_default:
-            message_text += "\n⭐️ _Your default server_"
-
-        # Different help text based on permission
-        if is_owner:
-            message_text += "\n\n_You can modify, share, or delete this server\\._"
-        elif can_trade:
-            message_text += "\n\n_You can use this server for trading\\._"
-        else:
-            message_text += "\n\n_You have view\\-only access to this server\\._"
-
-        keyboard = []
-
-        # Show Set as Default button for traders and owners
-        if can_trade and not is_user_default:
-            keyboard.append([InlineKeyboardButton("⭐️ Set as Default", callback_data=f"api_server_set_default_{server_name}")])
-
-        # Only owners can modify server settings
-        if is_owner:
-            keyboard.append([
-                InlineKeyboardButton("🌐 Host", callback_data=f"modify_field_host_{server_name}"),
-                InlineKeyboardButton("🔌 Port", callback_data=f"modify_field_port_{server_name}"),
-                InlineKeyboardButton("👤 User", callback_data=f"modify_field_username_{server_name}"),
-                InlineKeyboardButton("🔑 Pass", callback_data=f"modify_field_password_{server_name}"),
-            ])
-            keyboard.append([
-                InlineKeyboardButton("📤 Share", callback_data=f"api_server_share_{server_name}"),
-                InlineKeyboardButton("🗑 Delete", callback_data=f"api_server_delete_{server_name}"),
-            ])
-
-        keyboard.append([InlineKeyboardButton("« Back to Servers", callback_data="config_api_servers")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
-
+        await _show_server_details(context, server_name, user_id, chat_id, edit_message, send_error)
     except Exception as e:
         logger.error(f"Error showing server details: {e}", exc_info=True)
         await query.answer(f"❌ Error: {str(e)}")
+
+
+async def _show_server_details(
+    context: ContextTypes.DEFAULT_TYPE,
+    server_name: str,
+    user_id: int,
+    chat_id: int,
+    edit_message,
+    send_error,
+) -> None:
+    """Show details and actions for a specific server.
+    Actions are restricted based on user's permission level.
+    """
+    from config_manager import get_config_manager, ServerPermission
+
+    # Clear any modify state when showing server details
+    context.user_data.pop('modifying_server', None)
+    context.user_data.pop('modifying_field', None)
+    context.user_data.pop('awaiting_modify_input', None)
+
+    server = get_config_manager().get_server(server_name)
+    if not server:
+        await send_error("❌ Server not found")
+        return
+
+    cm = get_config_manager()
+
+    # Check user's permission level
+    perm = cm.get_server_permission(user_id, server_name)
+    if not perm:
+        await send_error("❌ No access to this server")
+        return
+
+    is_owner = perm == ServerPermission.OWNER
+    can_trade = perm in (ServerPermission.OWNER, ServerPermission.TRADER)
+
+    from config_manager import get_effective_server
+    is_user_default = server_name == get_effective_server(chat_id, context.user_data)
+
+    # Check status
+    status_result = await get_config_manager().check_server_status(server_name)
+    status = status_result["status"]
+    message = status_result.get("message", "")
+
+    if status == "online":
+        status_text = "*\\[Online\\]*"
+    elif status == "auth_error":
+        status_text = f"*\\[Auth Error\\]*\n_{escape_markdown_v2(message)}_"
+    elif status == "offline":
+        status_text = f"*\\[Offline\\]*\n_{escape_markdown_v2(message)}_"
+    else:
+        status_text = f"*\\[Error\\]*\n_{escape_markdown_v2(message)}_"
+
+    name_escaped = escape_markdown_v2(server_name)
+    host_escaped = escape_markdown_v2(server['host'])
+    port_escaped = escape_markdown_v2(str(server['port']))
+
+    # Permission badge
+    perm_labels = {
+        ServerPermission.OWNER: "👑 Owner",
+        ServerPermission.TRADER: "💱 Trader",
+        ServerPermission.VIEWER: "👁 Viewer",
+    }
+    perm_label = perm_labels.get(perm, "Unknown")
+
+    message_text = (
+        f"🔌 *Server: {name_escaped}*\n\n"
+        f"*Status:* {status_text}\n"
+        f"*Host:* `{host_escaped}`\n"
+        f"*Port:* `{port_escaped}`\n"
+        f"*Access:* {escape_markdown_v2(perm_label)}\n"
+    )
+
+    # Only show username to owners
+    if is_owner:
+        username_escaped = escape_markdown_v2(server['username'])
+        message_text += f"*Username:* `{username_escaped}`\n"
+
+    # Show if this is the user's default
+    if is_user_default:
+        message_text += "\n⭐️ _Your default server_"
+
+    # Different help text based on permission
+    if is_owner:
+        message_text += "\n\n_You can modify, share, or delete this server\\._"
+    elif can_trade:
+        message_text += "\n\n_You can use this server for trading\\._"
+    else:
+        message_text += "\n\n_You have view\\-only access to this server\\._"
+
+    keyboard = []
+
+    # Show Set as Default button for traders and owners
+    if can_trade and not is_user_default:
+        keyboard.append([InlineKeyboardButton("⭐️ Set as Default", callback_data=f"api_server_set_default_{server_name}")])
+
+    # Only owners can modify server settings
+    if is_owner:
+        keyboard.append([
+            InlineKeyboardButton("🌐 Host", callback_data=f"modify_field_host_{server_name}"),
+            InlineKeyboardButton("🔌 Port", callback_data=f"modify_field_port_{server_name}"),
+            InlineKeyboardButton("👤 User", callback_data=f"modify_field_username_{server_name}"),
+            InlineKeyboardButton("🔑 Pass", callback_data=f"modify_field_password_{server_name}"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📤 Share", callback_data=f"api_server_share_{server_name}"),
+            InlineKeyboardButton("🗑 Delete", callback_data=f"api_server_delete_{server_name}"),
+        ])
+
+    keyboard.append([InlineKeyboardButton("« Back to Servers", callback_data="config_api_servers")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await edit_message(
+        message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=reply_markup
+    )
 
 
 async def set_default_server(query, context: ContextTypes.DEFAULT_TYPE, server_name: str) -> None:
@@ -1024,39 +1043,26 @@ async def handle_modify_value_input(update: Update, context: ContextTypes.DEFAUL
             if modify_message_id and modify_chat_id:
                 logger.info(f"Attempting to show server details for message {modify_message_id}")
 
-                # Create a fake message object
-                class FakeMessage:
-                    def __init__(self, msg_id, ch_id, bot):
-                        self.message_id = msg_id
-                        self.chat_id = ch_id
-                        self._bot = bot
-
-                    async def edit_text(self, text, parse_mode=None, reply_markup=None):
-                        logger.info(f"FakeMessage.edit_text called for msg_id={self.message_id}")
-                        return await self._bot.edit_message_text(
-                            chat_id=self.chat_id,
-                            message_id=self.message_id,
-                            text=text,
-                            parse_mode=parse_mode,
-                            reply_markup=reply_markup
-                        )
-
-                # Create a fake query object
-                class FakeQuery:
-                    def __init__(self, msg_id, ch_id, bot):
-                        self.message = FakeMessage(msg_id, ch_id, bot)
-
-                    async def answer(self, text=""):
-                        pass
-
-                fake_query = FakeQuery(modify_message_id, modify_chat_id, context.bot)
-
-                # Clear these after creating FakeQuery but before calling show_server_details
                 context.user_data.pop('modify_message_id', None)
                 context.user_data.pop('modify_chat_id', None)
 
+                async def edit_message(text, parse_mode=None, reply_markup=None):
+                    await context.bot.edit_message_text(
+                        chat_id=modify_chat_id,
+                        message_id=modify_message_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                        reply_markup=reply_markup,
+                    )
+
+                async def send_error(text):
+                    await context.bot.send_message(chat_id=chat_id, text=text)
+
                 try:
-                    await show_server_details(fake_query, context, server_name)
+                    await _show_server_details(
+                        context, server_name, update.message.from_user.id,
+                        modify_chat_id, edit_message, send_error,
+                    )
                     logger.info("Successfully showed server details")
                 except Exception as e:
                     logger.error(f"Error showing server details: {e}", exc_info=True)
