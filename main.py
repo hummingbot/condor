@@ -103,7 +103,8 @@ You can control me by sending these commands:
 /keys \\- add exchange API keys
 /portfolio \\- view balances across exchanges
 /bots \\- deploy and manage trading bots
-/trade \\- place CEX and DEX orders"""
+/trade \\- place CEX and DEX orders
+/chat \\- chat with AI assistant \\(streaming\\)"""
 
     await update.message.reply_text(reply_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
 
@@ -178,6 +179,7 @@ def reload_handlers():
         'handlers.config.user_preferences',
         'handlers.routines',
         'handlers.admin',
+        'handlers.chat',
         'routines.base',
         'utils.auth',
         'utils.telegram_formatters',
@@ -205,6 +207,7 @@ def register_handlers(application: Application) -> None:
     from handlers.config.gateway import gateway_command
     from handlers.admin import admin_command
     from handlers.routines import routines_command, routines_callback_handler
+    from handlers.chat import get_chat_handlers
 
     # Clear existing handlers
     application.handlers.clear()
@@ -223,6 +226,10 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("keys", keys_command))
     application.add_handler(CommandHandler("gateway", gateway_command))
     application.add_handler(CommandHandler("admin", admin_command))
+
+    # Add chat handlers (LLM with streaming)
+    for handler in get_chat_handlers():
+        application.add_handler(handler)
 
     # Add callback query handler for start menu navigation
     application.add_handler(CallbackQueryHandler(start_callback_handler, pattern="^start:"))
@@ -291,6 +298,7 @@ async def post_init(application: Application) -> None:
         BotCommand("servers", "Manage Hummingbot API servers"),
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Deploy Gateway for DEX trading"),
+        BotCommand("chat", "Chat with AI assistant (streaming)"),
     ]
     await application.bot.set_my_commands(commands)
 
