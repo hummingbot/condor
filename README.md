@@ -9,7 +9,7 @@ A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
 - **CLOB Trading** - Place orders on centralized exchanges (Binance, Bybit, etc.) with interactive menus
 - **DEX Trading** - Swap tokens and manage CLMM liquidity positions via Gateway
 - **Configuration** - Manage API servers and exchange credentials through Telegram
-- **AI Assistant** - Natural language queries via GPT-4o + MCP (coming soon)
+- **AI Chat** - Streaming LLM responses with multi-provider support (Claude, GPT-4o, Gemini)
 
 ## Quick Start
 
@@ -38,6 +38,7 @@ make deploy      # Start with Docker Compose
 | `/swap` | DEX swap trading (quotes, execution, history) |
 | `/lp` | DEX liquidity pool management (positions, pools) |
 | `/routines` | Auto-discoverable Python scripts with scheduling |
+| `/chat` | AI chat with streaming responses (Claude, GPT-4o, Gemini) |
 | `/config` | Configuration menu (servers, API keys, Gateway, admin) |
 
 ## Architecture
@@ -76,10 +77,13 @@ condor/
 │   │   └── gateway/            # Gateway configuration
 │   ├── routines/               # Routines module (/routines)
 │   │   └── __init__.py         # Script discovery and execution
+│   ├── chat/                   # AI Chat module (/chat)
+│   │   └── __init__.py         # Multi-provider LLM with streaming
 │   └── admin/                  # Admin panel (via /config)
 ├── routines/                   # User-defined automation scripts
 ├── utils/                      # Utilities
 │   ├── auth.py                 # @restricted, @admin_required decorators
+│   ├── streaming.py            # LLM streaming via sendMessageDraft
 │   └── telegram_formatters.py  # Message formatting
 ├── config_manager.py           # Unified config (servers, users, permissions)
 ├── hummingbot_api_client/      # API client library
@@ -125,6 +129,33 @@ condor/
 - **Continuous Scripts** - Long-running tasks with start/stop control
 - **Multi-instance** - Run multiple instances with different configs
 
+### AI Chat (`/chat`)
+- **Multi-Provider** - Choose between Claude, GPT-4o, or Gemini models
+- **Streaming Responses** - See responses as they're generated in real-time
+- **Conversation History** - Maintains context across messages (last 20)
+- **Model Switching** - Change models on the fly via inline buttons
+
+**Available Models:**
+| Provider | Models | API Key |
+|----------|--------|---------|
+| Anthropic | Claude 3.5 Sonnet, Claude 3.5 Haiku | `ANTHROPIC_API_KEY` |
+| OpenAI | GPT-4o, GPT-4o-mini | `OPENAI_API_KEY` |
+| Google | Gemini 2.0 Flash, Gemini 1.5 Pro | `GOOGLE_API_KEY` |
+
+**Enabling Streaming (Threaded Mode):**
+
+For real-time streaming responses, the bot must have Threaded Mode enabled:
+
+1. Open **@BotFather** in Telegram
+2. Send `/mybots`
+3. Select your bot
+4. Go to **Bot Settings**
+5. Toggle **Threaded Mode** → ON
+
+Once enabled, users can create topic threads in their chat with the bot. Messages sent within topics will display streaming responses as they're generated.
+
+> **Note:** Without Threaded Mode, the bot falls back to progressive message editing which still works but updates less smoothly.
+
 ### Configuration (`/config`)
 - **API Servers** - Add, modify, delete Hummingbot Backend API servers
   - Real-time status checking (online/offline/auth error)
@@ -157,7 +188,11 @@ Preferences are automatically saved and persist across sessions:
 ```bash
 TELEGRAM_TOKEN=your_bot_token
 ADMIN_USER_ID=123456789
-OPENAI_API_KEY=sk-...  # Optional, for AI features
+
+# LLM API Keys (at least one required for /chat)
+ANTHROPIC_API_KEY=sk-ant-...  # For Claude models
+OPENAI_API_KEY=sk-...         # For GPT models
+GOOGLE_API_KEY=AIza...        # For Gemini models
 ```
 
 ### `config.yml` (auto-created on first run)
@@ -186,6 +221,8 @@ audit_log: []
 | Connection refused | Check server host:port in `/config` |
 | Auth error | Verify server credentials |
 | DEX features unavailable | Ensure Gateway is configured and running |
+| /chat shows no models | Set at least one LLM API key in `.env` |
+| Chat not streaming | Enable Threaded Mode in @BotFather, use topic threads |
 
 ## Docker Deployment
 
