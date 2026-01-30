@@ -7,7 +7,7 @@ black
 isort
 PyYAML
 pydantic-ai
-pydantic-ai-slim[openai]
+pydantic-ai-slim[openai,anthropic,google]
 aiohttp
 watchfiles
 kaleido
