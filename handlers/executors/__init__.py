@@ -92,11 +92,18 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
     )
     from .grid import (
         start_grid_wizard,
-        handle_connector_select,
-        handle_pair_input,
+        handle_connector_select as grid_handle_connector_select,
+        handle_pair_input as grid_handle_pair_input,
         show_step_2_combined,
         handle_interval_select,
-        handle_deploy,
+        handle_deploy as grid_handle_deploy,
+    )
+    from .position import (
+        start_position_wizard,
+        handle_connector_select as pos_handle_connector_select,
+        handle_pair_input as pos_handle_pair_input,
+        show_step_2_config,
+        handle_deploy as pos_handle_deploy,
     )
 
     # Menu actions
@@ -134,21 +141,24 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif action == "create_grid":
         await start_grid_wizard(update, context)
 
+    elif action == "create_position":
+        await start_position_wizard(update, context)
+
     elif action == "close":
         await handle_close(update, context)
 
     # Grid wizard actions
     elif action == "grid_conn" and len(parts) >= 3:
         connector = parts[2]
-        await handle_connector_select(update, context, connector)
+        await grid_handle_connector_select(update, context, connector)
 
     elif action == "grid_pair" and len(parts) >= 3:
         pair = parts[2]
-        await handle_pair_input(update, context, pair)
+        await grid_handle_pair_input(update, context, pair)
 
     elif action == "grid_pair_select" and len(parts) >= 3:
         pair = parts[2]
-        await handle_pair_input(update, context, pair)
+        await grid_handle_pair_input(update, context, pair)
 
     elif action == "grid_step2":
         await show_step_2_combined(update, context)
@@ -158,7 +168,26 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
         await handle_interval_select(update, context, interval)
 
     elif action == "grid_deploy":
-        await handle_deploy(update, context)
+        await grid_handle_deploy(update, context)
+
+    # Position wizard actions
+    elif action == "pos_conn" and len(parts) >= 3:
+        connector = parts[2]
+        await pos_handle_connector_select(update, context, connector)
+
+    elif action == "pos_pair" and len(parts) >= 3:
+        pair = parts[2]
+        await pos_handle_pair_input(update, context, pair)
+
+    elif action == "pos_pair_select" and len(parts) >= 3:
+        pair = parts[2]
+        await pos_handle_pair_input(update, context, pair)
+
+    elif action == "pos_step2":
+        await show_step_2_config(update, context)
+
+    elif action == "pos_deploy":
+        await pos_handle_deploy(update, context)
 
 
 # ============================================
@@ -181,19 +210,32 @@ async def executors_message_handler(update: Update, context: ContextTypes.DEFAUL
         return False
 
     text = update.message.text.strip()
+    wizard_type = context.user_data.get("executor_wizard_type", "grid")
 
-    from .grid import (
-        handle_pair_input,
-        handle_config_input,
-    )
+    if wizard_type == "position":
+        from .position import (
+            handle_pair_input as pos_pair_input,
+            handle_config_input as pos_config_input,
+        )
 
-    if state == "wizard_pair_input":
-        await handle_pair_input(update, context, text)
-        return True
+        if state == "wizard_pair_input":
+            await pos_pair_input(update, context, text)
+            return True
+        elif state == "wizard_config_input":
+            await pos_config_input(update, context, text)
+            return True
+    else:
+        from .grid import (
+            handle_pair_input as grid_pair_input,
+            handle_config_input as grid_config_input,
+        )
 
-    elif state == "wizard_config_input":
-        await handle_config_input(update, context, text)
-        return True
+        if state == "wizard_pair_input":
+            await grid_pair_input(update, context, text)
+            return True
+        elif state == "wizard_config_input":
+            await grid_config_input(update, context, text)
+            return True
 
     return False
 

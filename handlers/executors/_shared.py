@@ -41,6 +41,22 @@ GRID_EXECUTOR_DEFAULTS = {
     "activation_bounds": 0.001,
 }
 
+# Position executor defaults
+POSITION_EXECUTOR_DEFAULTS = {
+    "type": "position_executor",
+    "connector_name": "",
+    "trading_pair": "",
+    "side": SIDE_LONG,
+    "leverage": 10,
+    "amount": 0.0,
+    "entry_price": 0.0,
+    "stop_loss": 0.03,
+    "take_profit": 0.02,
+    "time_limit": 0,
+    "trailing_stop_activation": 0.0,
+    "trailing_stop_delta": 0.0,
+}
+
 
 # ============================================
 # STATE MANAGEMENT
@@ -56,6 +72,7 @@ def clear_executors_state(context) -> None:
     context.user_data.pop("executor_config_params", None)
     context.user_data.pop("executor_wizard_step", None)
     context.user_data.pop("executor_wizard_data", None)
+    context.user_data.pop("executor_wizard_type", None)
     context.user_data.pop("executor_list_page", None)
     context.user_data.pop("executor_chart_interval", None)
 
@@ -94,6 +111,8 @@ def init_new_executor_config(context, executor_type: str = "grid") -> Dict[str, 
     """
     if executor_type == "grid":
         config = GRID_EXECUTOR_DEFAULTS.copy()
+    elif executor_type == "position":
+        config = POSITION_EXECUTOR_DEFAULTS.copy()
     else:
         config = GRID_EXECUTOR_DEFAULTS.copy()
 

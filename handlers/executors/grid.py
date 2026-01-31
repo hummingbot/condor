@@ -188,6 +188,7 @@ async def start_grid_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["executors_state"] = "wizard"
     context.user_data["executor_wizard_step"] = 1
+    context.user_data["executor_wizard_type"] = "grid"
     context.user_data["executor_wizard_data"] = {}
     context.user_data["executor_wizard_chat_id"] = query.message.chat_id
     context.user_data["executor_wizard_msg_id"] = query.message.message_id

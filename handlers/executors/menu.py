@@ -587,6 +587,7 @@ async def show_create_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     keyboard = [
         [InlineKeyboardButton("📐 Grid Executor", callback_data="executors:create_grid")],
+        [InlineKeyboardButton("🎯 Position Executor", callback_data="executors:create_position")],
         [InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")],
     ]
 
