@@ -87,8 +87,8 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
             # Build table in code block
             lines.append("```")
-            lines.append("Pair            T Side    PnL      Vol")
-            lines.append("─────────────── ─ ──── ──────── ───────")
+            lines.append("Pair         Type Side    PnL      Vol")
+            lines.append("──────────── ──── ──── ──────── ───────")
 
             for ex in executors[:max_shown]:
                 ex_type = get_executor_type(ex)
@@ -97,24 +97,25 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 side_val = config.get("side", SIDE_LONG)
                 leverage = config.get("leverage", 1)
                 side_display = f"{'L' if side_val == SIDE_LONG else 'S'} {leverage}x"
-                type_col = "G" if ex_type == "grid" else "P"
+                type_col = {"grid": "Grid", "position": "Pos"}.get(ex_type, "Ord")
 
                 pnl = get_executor_pnl(ex)
                 vol = get_executor_volume(ex)
 
-                pair_col = pair[:15].ljust(15)
+                pair_col = pair[:12].ljust(12)
+                type_display = type_col.ljust(4)
                 side_col = side_display.ljust(4)
                 pnl_col = f"{pnl:+.2f}".rjust(8)
                 vol_col = f"{vol/1000:.1f}k".rjust(7) if vol >= 1000 else f"{vol:.0f}".rjust(7)
 
-                lines.append(f"{pair_col} {type_col} {side_col} {pnl_col} {vol_col}")
+                lines.append(f"{pair_col} {type_display} {side_col} {pnl_col} {vol_col}")
                 displayed.append((ex, ex_type))
 
             if len(executors) > max_shown:
                 lines.append(f"  ...and {len(executors) - max_shown} more")
 
             if len(executors) > 1:
-                lines.append("─────────────── ─ ──── ──────── ───────")
+                lines.append("──────────── ──── ──── ──────── ───────")
                 total_label = "TOTAL".ljust(22)
                 pnl_col = f"{total_pnl:+.2f}".rjust(8)
                 vol_col = f"{total_volume/1000:.1f}k".rjust(7) if total_volume >= 1000 else f"{total_volume:.0f}".rjust(7)
@@ -164,7 +165,8 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 ])
 
         keyboard.append([
-            InlineKeyboardButton("➕ Create", callback_data="executors:create"),
+            InlineKeyboardButton("📐 Create Grid", callback_data="executors:create_grid"),
+            InlineKeyboardButton("🎯 Create Position", callback_data="executors:create_position"),
         ])
 
         keyboard.append([
@@ -409,19 +411,13 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Extract config
         config = executor.get("config", executor)
+        ex_type = get_executor_type(executor)
         pair = config.get("trading_pair", "UNKNOWN")
         connector = config.get("connector_name", "unknown")
         side = config.get("side", SIDE_LONG)
         leverage = config.get("leverage", 1)
-        amount = config.get("total_amount_quote", 0)
 
         side_str = "LONG" if side == SIDE_LONG else "SHORT"
-
-        start_price = config.get("start_price", 0)
-        end_price = config.get("end_price", 0)
-        limit_price = config.get("limit_price", 0)
-        max_orders = config.get("max_open_orders", 3)
-        take_profit = config.get("take_profit", 0.0005)
 
         pnl = get_executor_pnl(executor)
         volume = get_executor_volume(executor)
@@ -438,17 +434,58 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             "",
             f"{side_emoji} *{escape_markdown_v2(pair)}* \\| {escape_markdown_v2(side_str)} {leverage}x",
             f"🏦 `{escape_markdown_v2(connector)}`",
-            f"💰 Amount: `${escape_markdown_v2(f'{amount:,.2f}')}`",
-            "",
-            f"📐 *Grid Config*",
-            f"  Start: `{escape_markdown_v2(f'{start_price:.6g}')}`",
-            f"  End: `{escape_markdown_v2(f'{end_price:.6g}')}`",
-            f"  Limit: `{escape_markdown_v2(f'{limit_price:.6g}')}`",
-            f"  Max Orders: `{max_orders}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`",
-            "",
-            f"📊 *Performance*",
-            f"  {pnl_emoji} PnL: `{escape_markdown_v2(f'${pnl:+,.2f}')}`",
         ]
+
+        if ex_type == "position":
+            amount = config.get("amount", 0)
+            entry_price = config.get("entry_price", 0)
+
+            # SL/TP may be nested under triple_barrier_config
+            tbc = config.get("triple_barrier_config", {})
+            stop_loss = config.get("stop_loss", 0) or tbc.get("stop_loss", 0)
+            take_profit = config.get("take_profit", 0) or tbc.get("take_profit", 0)
+            time_limit = config.get("time_limit", 0) or tbc.get("time_limit", 0)
+            trailing_cfg = tbc.get("trailing_stop", {})
+            trailing_act = config.get("trailing_stop_activation", 0) or trailing_cfg.get("activation_price", 0)
+            trailing_delta = config.get("trailing_stop_delta", 0) or trailing_cfg.get("trailing_delta", 0)
+
+            # Amount is in base units — compute quote value if entry_price available
+            if amount and entry_price:
+                quote_val = amount * entry_price
+                base_token = pair.split("-")[0] if "-" in pair else ""
+                lines.append(f"💰 Amount: `{escape_markdown_v2(f'{amount:,.4g}')}` {escape_markdown_v2(base_token)} ≈ `${escape_markdown_v2(f'{quote_val:,.2f}')}`")
+            elif amount:
+                base_token = pair.split("-")[0] if "-" in pair else ""
+                lines.append(f"💰 Amount: `{escape_markdown_v2(f'{amount:,.4g}')}` {escape_markdown_v2(base_token)}")
+
+            lines.append("")
+            lines.append(f"🎯 *Position Config*")
+            if entry_price:
+                lines.append(f"  Entry: `{escape_markdown_v2(f'{entry_price:.6g}')}`")
+            lines.append(f"  SL: `{escape_markdown_v2(f'{stop_loss:.4%}')}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`")
+            if trailing_act:
+                lines.append(f"  Trail: `{escape_markdown_v2(f'{trailing_act:.4%}')}` δ `{escape_markdown_v2(f'{trailing_delta:.4%}')}`")
+            if time_limit:
+                lines.append(f"  Time Limit: `{time_limit}s`")
+        else:
+            amount = config.get("total_amount_quote", 0)
+            start_price = config.get("start_price", 0)
+            end_price = config.get("end_price", 0)
+            limit_price = config.get("limit_price", 0)
+            max_orders = config.get("max_open_orders", 3)
+            take_profit = config.get("take_profit", 0.0005)
+
+            lines.append(f"💰 Amount: `${escape_markdown_v2(f'{amount:,.2f}')}`")
+            lines.append("")
+            lines.append(f"📐 *Grid Config*")
+            lines.append(f"  Start: `{escape_markdown_v2(f'{start_price:.6g}')}`")
+            lines.append(f"  End: `{escape_markdown_v2(f'{end_price:.6g}')}`")
+            lines.append(f"  Limit: `{escape_markdown_v2(f'{limit_price:.6g}')}`")
+            lines.append(f"  Max Orders: `{max_orders}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`")
+
+        lines.append("")
+        lines.append(f"📊 *Performance*")
+        lines.append(f"  {pnl_emoji} PnL: `{escape_markdown_v2(f'${pnl:+,.2f}')}`")
 
         if volume:
             lines.append(f"  📈 Volume: `${escape_markdown_v2(f'{volume:,.2f}')}`")
