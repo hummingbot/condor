@@ -25,6 +25,7 @@ from ._shared import (
     get_executor_pnl,
     get_executor_volume,
     get_executor_fees,
+    get_executor_type,
     SIDE_LONG,
     invalidate_cache,
 )
@@ -81,33 +82,39 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         if executors:
             lines.append("")
 
+            max_shown = 8
+            displayed = []  # (executor, type) tuples for buttons
+
             # Build table in code block
             lines.append("```")
-            lines.append("Pair              Side    PnL      Vol")
-            lines.append("───────────────── ──── ──────── ───────")
+            lines.append("Pair            T Side    PnL      Vol")
+            lines.append("─────────────── ─ ──── ──────── ───────")
 
-            for ex in executors[:8]:
+            for ex in executors[:max_shown]:
+                ex_type = get_executor_type(ex)
                 config = ex.get("config", ex)
                 pair = config.get("trading_pair", "???")
                 side_val = config.get("side", SIDE_LONG)
                 leverage = config.get("leverage", 1)
                 side_display = f"{'L' if side_val == SIDE_LONG else 'S'} {leverage}x"
+                type_col = "G" if ex_type == "grid" else "P"
 
                 pnl = get_executor_pnl(ex)
                 vol = get_executor_volume(ex)
 
-                pair_col = pair[:17].ljust(17)
+                pair_col = pair[:15].ljust(15)
                 side_col = side_display.ljust(4)
                 pnl_col = f"{pnl:+.2f}".rjust(8)
                 vol_col = f"{vol/1000:.1f}k".rjust(7) if vol >= 1000 else f"{vol:.0f}".rjust(7)
 
-                lines.append(f"{pair_col} {side_col} {pnl_col} {vol_col}")
+                lines.append(f"{pair_col} {type_col} {side_col} {pnl_col} {vol_col}")
+                displayed.append((ex, ex_type))
 
-            if len(executors) > 8:
-                lines.append(f"  ...and {len(executors) - 8} more")
+            if len(executors) > max_shown:
+                lines.append(f"  ...and {len(executors) - max_shown} more")
 
             if len(executors) > 1:
-                lines.append("───────────────── ──── ──────── ───────")
+                lines.append("─────────────── ─ ──── ──────── ───────")
                 total_label = "TOTAL".ljust(22)
                 pnl_col = f"{total_pnl:+.2f}".rjust(8)
                 vol_col = f"{total_volume/1000:.1f}k".rjust(7) if total_volume >= 1000 else f"{total_volume:.0f}".rjust(7)
@@ -128,10 +135,33 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Build keyboard
         keyboard = []
 
+        # Executor selection buttons (2 per row) - direct to detail
         if executors:
-            keyboard.append([
-                InlineKeyboardButton(f"📋 View All ({len(executors)})", callback_data="executors:list"),
-            ])
+            row = []
+            for ex, ex_type in displayed:
+                executor_id = ex.get("id", ex.get("executor_id", ""))
+                config = ex.get("config", ex)
+                pair = config.get("trading_pair", "???")[:10]
+                side_val = config.get("side", SIDE_LONG)
+                side_label = "L" if side_val == SIDE_LONG else "S"
+                type_icon = "📐" if ex_type == "grid" else "🎯"
+
+                row.append(InlineKeyboardButton(
+                    f"{type_icon} {pair} {side_label}",
+                    callback_data=f"executors:detail:{executor_id[:20]}"
+                ))
+
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+
+            if row:
+                keyboard.append(row)
+
+            if len(executors) > max_shown:
+                keyboard.append([
+                    InlineKeyboardButton(f"📋 View All ({len(executors)})", callback_data="executors:list"),
+                ])
 
         keyboard.append([
             InlineKeyboardButton("➕ Create", callback_data="executors:create"),
@@ -314,11 +344,17 @@ async def show_running_executors(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup = InlineKeyboardMarkup(keyboard)
         message_text = "\n".join(lines)
 
-        await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
-        )
+        try:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup
+            )
+        except BadRequest as e:
+            if "Message is not modified" in str(e):
+                await query.answer("✅ Already up to date")
+            else:
+                raise
 
     except Exception as e:
         logger.error(f"Error showing executors list: {e}", exc_info=True)
@@ -450,11 +486,17 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=reply_markup
             )
         else:
-            await query.message.edit_text(
-                message_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+            try:
+                await query.message.edit_text(
+                    message_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    await query.answer("✅ Already up to date")
+                else:
+                    raise
 
     except Exception as e:
         logger.error(f"Error showing executor detail: {e}", exc_info=True)

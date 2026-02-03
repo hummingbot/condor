@@ -58,6 +58,27 @@ POSITION_EXECUTOR_DEFAULTS = {
 }
 
 
+def get_executor_type(executor: Dict[str, Any]) -> str:
+    """Determine executor type from its data.
+
+    Returns: 'grid' or 'position'
+    """
+    config = executor.get("config", executor)
+    for source in (config, executor):
+        ex_type = source.get("type", "")
+        if isinstance(ex_type, str):
+            if "position" in ex_type.lower():
+                return "position"
+            if "grid" in ex_type.lower():
+                return "grid"
+    # Heuristic fallback based on config fields
+    if "total_amount_quote" in config or "start_price" in config:
+        return "grid"
+    if "stop_loss" in config or "trailing_stop" in config:
+        return "position"
+    return "grid"
+
+
 # ============================================
 # STATE MANAGEMENT
 # ============================================
@@ -170,15 +191,21 @@ async def search_running_executors(
                 if key in result and isinstance(result[key], list):
                     logger.info(f"search_executors found {len(result[key])} executors under key '{key}'")
                     executors = result[key]
-                    if executors:
-                        logger.info(f"search_executors first executor keys: {list(executors[0].keys()) if isinstance(executors[0], dict) else type(executors[0]).__name__}")
+                    for ex in executors:
+                        if isinstance(ex, dict):
+                            ex_t = get_executor_type(ex)
+                            numeric = {k: v for k, v in ex.items() if isinstance(v, (int, float))}
+                            logger.info(f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}")
                     return executors
             # If dict has no recognized list key, log and return empty
             logger.warning(f"search_executors: no recognized list key in response: {list(result.keys())}")
             return []
         executors = result if isinstance(result, list) else []
-        if executors and isinstance(executors[0], dict):
-            logger.info(f"search_executors first executor keys: {list(executors[0].keys())}")
+        for ex in executors:
+            if isinstance(ex, dict):
+                ex_t = get_executor_type(ex)
+                numeric = {k: v for k, v in ex.items() if isinstance(v, (int, float))}
+                logger.info(f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}")
         return executors
     except Exception as e:
         logger.error(f"Error searching executors: {e}", exc_info=True)
@@ -267,10 +294,20 @@ def get_executor_pnl(executor: Dict[str, Any]) -> float:
 
     Checks multiple field names since the API response structure varies.
     """
-    for key in ("net_pnl_quote", "pnl_quote", "unrealized_pnl_quote", "realized_pnl_quote"):
+    pnl_keys = ("net_pnl_quote", "pnl_quote", "unrealized_pnl_quote", "realized_pnl_quote",
+                 "net_pnl", "pnl", "close_pnl")
+    for key in pnl_keys:
         val = executor.get(key)
         if val is not None and val != 0:
             return float(val)
+
+    # Log available keys when PnL is 0 to help debug
+    ex_type = get_executor_type(executor)
+    if ex_type == "position":
+        available = {k: v for k, v in executor.items()
+                     if isinstance(v, (int, float)) and k != "timestamp"}
+        logger.debug(f"Position executor PnL=0, numeric fields: {available}")
+
     return 0.0
 
 
@@ -475,6 +512,13 @@ async def fetch_candles(
             interval=interval,
             max_records=max_records
         )
+        # Validate that candles actually contain data
+        if not candles:
+            return None
+        data = candles if isinstance(candles, list) else candles.get("data", [])
+        if not data:
+            logger.debug(f"No candle data available for {trading_pair} on {connector_name}")
+            return None
         return candles
     except Exception as e:
         logger.error(f"Error fetching candles for {trading_pair}: {e}", exc_info=True)

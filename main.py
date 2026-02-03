@@ -159,6 +159,7 @@ def reload_handlers():
         'handlers.executors',
         'handlers.executors.menu',
         'handlers.executors.grid',
+        'handlers.executors.position',
         'handlers.executors._shared',
         'handlers.trading',
         'handlers.trading.router',
