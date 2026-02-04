@@ -445,7 +445,7 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             stop_loss = config.get("stop_loss", 0) or tbc.get("stop_loss", 0)
             take_profit = config.get("take_profit", 0) or tbc.get("take_profit", 0)
             time_limit = config.get("time_limit", 0) or tbc.get("time_limit", 0)
-            trailing_cfg = tbc.get("trailing_stop", {})
+            trailing_cfg = tbc.get("trailing_stop") or {}
             trailing_act = config.get("trailing_stop_activation", 0) or trailing_cfg.get("activation_price", 0)
             trailing_delta = config.get("trailing_stop_delta", 0) or trailing_cfg.get("trailing_delta", 0)
 
@@ -618,7 +618,7 @@ async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEF
         context.user_data.pop("running_executors", None)
         context.user_data.pop("current_executor", None)
 
-        if result.get("status") == "success" or "stopped" in str(result).lower():
+        if result.get("status") in ("success", "stopping", "stopped") or "stop" in str(result).lower():
             keyboard = [[InlineKeyboardButton("📋 Back to List", callback_data="executors:list")]]
             await query.message.edit_text(
                 f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`",
