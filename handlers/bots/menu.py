@@ -37,13 +37,28 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
     """
     keyboard = []
 
-    # Add a button for each bot (max 5)
-    for bot_name in list(bots_dict.keys())[:5]:
-        # Truncate name for button
-        display_name = bot_name[:30] + "..." if len(bot_name) > 30 else bot_name
-        keyboard.append([
-            InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:bot_detail:{bot_name}")
-        ])
+    # Add a button for each bot (show all bots)
+    # Group bots in rows of 2 for better layout when there are many bots
+    bot_names = list(bots_dict.keys())
+    
+    # For 1-3 bots: one per row
+    # For 4+ bots: two per row for better space utilization
+    if len(bot_names) <= 3:
+        for bot_name in bot_names:
+            display_name = bot_name[:30] + "..." if len(bot_name) > 30 else bot_name
+            keyboard.append([
+                InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:bot_detail:{bot_name}")
+            ])
+    else:
+        # Two bots per row for better space utilization
+        for i in range(0, len(bot_names), 2):
+            row = []
+            for j in range(i, min(i + 2, len(bot_names))):
+                bot_name = bot_names[j]
+                # Shorter display name when two per row
+                display_name = bot_name[:25] + "..." if len(bot_name) > 25 else bot_name
+                row.append(InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:bot_detail:{bot_name}"))
+            keyboard.append(row)
 
     # Action buttons - historical
     keyboard.append([

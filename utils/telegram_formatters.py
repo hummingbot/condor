@@ -448,7 +448,7 @@ def format_active_bots(
             message += f"{'Controller':<28} {'PnL':>8} {'Vol':>7}\n"
             message += f"{'─'*28} {'─'*8} {'─'*7}\n"
 
-            for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())[:6]):
+            for idx, (ctrl_name, ctrl_info) in enumerate(list(performance.items())):
                 if isinstance(ctrl_info, dict):
                     ctrl_status = ctrl_info.get("status", "running")
                     ctrl_perf = ctrl_info.get("performance", {})
