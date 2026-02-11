@@ -384,20 +384,27 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
 
     try:
-        # Find executor in cached list or fetch fresh
-        executors = context.user_data.get("running_executors", [])
+        # Always fetch fresh data for refresh button or if not cached
+        client, _ = await get_executors_client(chat_id, context.user_data)
         executor = None
-
-        for ex in executors:
-            ex_id = ex.get("id", ex.get("executor_id", ""))
-            if ex_id.startswith(executor_id) or executor_id.startswith(ex_id[:20]):
-                executor = ex
-                break
-
-        if not executor:
-            # Try to fetch from API
-            client, _ = await get_executors_client(chat_id, context.user_data)
+        
+        # First try to get specific executor details from API
+        try:
             executor = await client.executors.get_executor(executor_id=executor_id)
+        except Exception as e:
+            logger.warning(f"Could not fetch specific executor {executor_id}: {e}")
+        
+        # If specific fetch failed, try to find in fresh list of running executors
+        if not executor:
+            executors = await search_running_executors(client, status="RUNNING", limit=100)
+            # Update cache with fresh data
+            context.user_data["running_executors"] = executors
+            
+            for ex in executors:
+                ex_id = ex.get("id", ex.get("executor_id", ""))
+                if ex_id.startswith(executor_id) or executor_id.startswith(ex_id[:20]):
+                    executor = ex
+                    break
 
         if not executor:
             await query.answer("Executor not found", show_alert=True)
@@ -473,7 +480,9 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             end_price = config.get("end_price", 0)
             limit_price = config.get("limit_price", 0)
             max_orders = config.get("max_open_orders", 3)
-            take_profit = config.get("take_profit", 0.0005)
+            # Take profit may be nested under triple_barrier_config for grid executors too
+            tbc = config.get("triple_barrier_config", {})
+            take_profit = config.get("take_profit", 0) or tbc.get("take_profit", 0) or 0.0002
 
             lines.append(f"💰 Amount: `${escape_markdown_v2(f'{amount:,.2f}')}`")
             lines.append("")
@@ -606,11 +615,30 @@ async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEF
     await query.answer("Stopping...")
 
     try:
+        # Get client first
+        client, _ = await get_executors_client(chat_id, context.user_data)
+        
         # Get full executor ID if we have a partial match
         executor = context.user_data.get("current_executor", {})
         full_id = executor.get("id", executor.get("executor_id", executor_id))
-
-        client, _ = await get_executors_client(chat_id, context.user_data)
+        
+        # If we still have a short ID, search in cached executors for the full ID
+        if len(full_id) <= 20:
+            executors = context.user_data.get("running_executors", [])
+            for ex in executors:
+                ex_id = ex.get("id", ex.get("executor_id", ""))
+                if ex_id.startswith(executor_id) or executor_id.startswith(ex_id[:20]):
+                    full_id = ex_id
+                    break
+            
+            # If still not found, fetch fresh list to find the full ID
+            if len(full_id) <= 20:
+                fresh_executors = await search_running_executors(client, status="RUNNING", limit=100)
+                for ex in fresh_executors:
+                    ex_id = ex.get("id", ex.get("executor_id", ""))
+                    if ex_id.startswith(executor_id) or executor_id.startswith(ex_id[:20]):
+                        full_id = ex_id
+                        break
         result = await stop_executor(client, full_id, keep_position=False)
 
         # Invalidate cache
@@ -627,7 +655,16 @@ async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEF
             )
         else:
             error_msg = result.get("message", str(result))
-            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"executors:detail:{executor_id}")]]
+            
+            # If executor not found, it might have already stopped - offer to refresh list
+            if "not found" in error_msg.lower():
+                keyboard = [[
+                    InlineKeyboardButton("🔄 Refresh List", callback_data="executors:list"),
+                    InlineKeyboardButton("⬅️ Back", callback_data=f"executors:detail:{executor_id}"),
+                ]]
+            else:
+                keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"executors:detail:{executor_id}")]]
+                
             await query.message.edit_text(
                 f"❌ *Stop Failed*\n\n{escape_markdown_v2(error_msg[:200])}",
                 parse_mode="MarkdownV2",

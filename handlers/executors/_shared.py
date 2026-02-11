@@ -261,7 +261,17 @@ async def stop_executor(
         return result
     except Exception as e:
         logger.error(f"Error stopping executor: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        
+        # Handle specific error cases
+        error_str = str(e)
+        if "404" in error_str and "not found" in error_str.lower():
+            return {"status": "error", "message": "Executor not found (may have already stopped or expired)"}
+        elif "403" in error_str:
+            return {"status": "error", "message": "Permission denied - cannot stop this executor"}
+        elif "400" in error_str:
+            return {"status": "error", "message": "Bad request - executor may be in invalid state"}
+        else:
+            return {"status": "error", "message": str(e)}
 
 
 async def get_executor_detail(
