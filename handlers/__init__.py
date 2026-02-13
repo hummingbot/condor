@@ -126,3 +126,7 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("share_target_user_id", None)
     context.user_data.pop("share_message_id", None)
     context.user_data.pop("share_chat_id", None)
+
+    # Chat states (LLM chat mode)
+    context.user_data.pop("chat_state", None)
+    context.user_data.pop("chat_history", None)

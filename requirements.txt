@@ -1,4 +1,4 @@
-python-telegram-bot[job-queue]
+python-telegram-bot[job-queue]>=21.10
 hummingbot-api-client==1.2.6
 python-dotenv
 pytest
@@ -7,7 +7,7 @@ black
 isort
 PyYAML
 pydantic-ai
-pydantic-ai-slim[openai]
+pydantic-ai-slim[openai,anthropic,google]
 aiohttp
 watchfiles
 kaleido

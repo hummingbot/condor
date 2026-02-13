@@ -240,7 +240,14 @@ def get_modify_value_handler():
             await routines_message_handler(update, context)
             return
 
-        # 8. Check server share state
+        # 8. Check chat state (LLM chat mode)
+        if context.user_data.get('chat_state'):
+            from handlers.chat import handle_chat_message
+            handled = await handle_chat_message(update, context)
+            if handled:
+                return
+
+        # 9. Check server share state
         if context.user_data.get('awaiting_share_user_id'):
             from handlers.config.servers import handle_share_user_id_input
             await handle_share_user_id_input(update, context)
