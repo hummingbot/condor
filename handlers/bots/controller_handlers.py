@@ -5028,6 +5028,15 @@ async def _get_available_credentials(client) -> List[str]:
         logger.warning(f"Could not fetch accounts, using default: {e}")
         return ["master_account"]
 
+async def _get_available_images(client) -> List[str]:
+    """Fetch list of available docker images (placeholder for future dynamic fetching)"""
+    try:
+        images: List[str] = await client.docker.get_available_images("hummingbot")
+        return list(set(images + AVAILABLE_IMAGES)) if images else AVAILABLE_IMAGES
+    except Exception as e:
+        logger.warning(f"Could not fetch available images, using defaults: {e}")
+        return AVAILABLE_IMAGES
+
 
 async def show_deploy_config_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show streamlined deploy configuration with clickable buttons for name, credentials, and image"""
@@ -5162,11 +5171,13 @@ async def handle_select_credentials(update: Update, context: ContextTypes.DEFAUL
 async def handle_select_image(update: Update, context: ContextTypes.DEFAULT_TYPE, image: str) -> None:
     """Handle docker image selection"""
     query = update.callback_query
+    chat_id = update.effective_chat.id
 
     if image == "_show":
         # Show available images
         deploy_params = context.user_data.get("deploy_params", {})
         current = deploy_params.get("image", "hummingbot/hummingbot:latest")
+        client, _ = await get_bots_client(chat_id, context.user_data)
 
         lines = [
             r"*Select Docker Image*",
@@ -5177,12 +5188,13 @@ async def handle_select_image(update: Update, context: ContextTypes.DEFAULT_TYPE
         ]
 
         # Build buttons for each image
+        available_images = await _get_available_images(client)
         keyboard = []
-        for img in AVAILABLE_IMAGES:
+        for img in available_images:
             marker = "✓ " if img == current else ""
-            img_short = img.split("/")[-1] if "/" in img else img
+            # img_short = img.split("/")[-1] if "/" in img else img
             keyboard.append([
-                InlineKeyboardButton(f"{marker}{img_short}", callback_data=f"bots:select_image:{img}")
+                InlineKeyboardButton(f"{marker}{img}", callback_data=f"bots:select_image:{img}")
             ])
 
         keyboard.append([
