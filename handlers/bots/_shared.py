@@ -385,6 +385,13 @@ async def fetch_candles(
             interval=interval,
             max_records=max_records
         )
+        # Validate that candles actually contain data
+        if not candles:
+            return None
+        data = candles if isinstance(candles, list) else candles.get("data", [])
+        if not data:
+            logger.debug(f"No candle data available for {trading_pair} on {connector_name}")
+            return None
         return candles
     except Exception as e:
         logger.error(f"Error fetching candles for {trading_pair}: {e}", exc_info=True)

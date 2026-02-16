@@ -126,3 +126,11 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("share_target_user_id", None)
     context.user_data.pop("share_message_id", None)
     context.user_data.pop("share_chat_id", None)
+
+    # Executors states
+    context.user_data.pop("executors_state", None)
+    context.user_data.pop("executor_config_params", None)
+    context.user_data.pop("executor_wizard_step", None)
+    context.user_data.pop("executor_wizard_data", None)
+    context.user_data.pop("executor_list_page", None)
+    context.user_data.pop("executor_chart_interval", None)

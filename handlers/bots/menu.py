@@ -37,23 +37,31 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
     """
     keyboard = []
 
-    # Add a button for each bot (max 5)
-    for bot_name in list(bots_dict.keys())[:5]:
-        # Truncate name for button
-        display_name = bot_name[:30] + "..." if len(bot_name) > 30 else bot_name
-        keyboard.append([
-            InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:bot_detail:{bot_name}")
-        ])
+    # Add a button for each bot (show all bots)
+    # Group bots in rows of 2 for better layout when there are many bots
+    bot_names = list(bots_dict.keys())
+    
+    # For 1-3 bots: one per row
+    # For 4+ bots: two per row for better space utilization
+    if len(bot_names) <= 3:
+        for bot_name in bot_names:
+            display_name = bot_name[:30] + "..." if len(bot_name) > 30 else bot_name
+            keyboard.append([
+                InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:bot_detail:{bot_name}")
+            ])
+    else:
+        # Two bots per row for better space utilization
+        for i in range(0, len(bot_names), 2):
+            row = []
+            for j in range(i, min(i + 2, len(bot_names))):
+                bot_name = bot_names[j]
+                # Shorter display name when two per row
+                display_name = bot_name[:25] + "..." if len(bot_name) > 25 else bot_name
+                row.append(InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:bot_detail:{bot_name}"))
+            keyboard.append(row)
 
-    # Action buttons - controller creation
+    # Action buttons - historical
     keyboard.append([
-        InlineKeyboardButton("➕ Grid Strike", callback_data="bots:new_grid_strike"),
-        InlineKeyboardButton("➕ PMM Mister", callback_data="bots:new_pmm_mister"),
-    ])
-
-    # Action buttons - configs and historical
-    keyboard.append([
-        InlineKeyboardButton("📁 Configs", callback_data="bots:controller_configs"),
         InlineKeyboardButton("📜 Historical", callback_data="bots:archived"),
     ])
 
@@ -569,6 +577,9 @@ def _shorten_controller_name(name: str, max_len: int = 28) -> str:
     side = ""
     seq_num = ""
 
+    # Known prefixes to skip (strategy type identifiers)
+    type_prefixes = {"gs", "grid", "strike", "pmm", "mister", "cfg"}
+
     for p in parts:
         p_lower = p.lower()
         p_upper = p.upper()
@@ -576,11 +587,16 @@ def _shorten_controller_name(name: str, max_len: int = 28) -> str:
             side = "L" if p_upper == "LONG" else "S"
         elif "-" in p:
             pair = p.upper()
-        elif p_lower in ("binance", "hyperliquid", "kucoin", "okx", "bybit", "gate", "mexc"):
-            connector = p_lower[:7]
+        elif p_lower in type_prefixes:
+            continue
+        elif p_lower in ("perpetual", "spot"):
+            continue
         elif p.isdigit() and len(p) <= 5:
-            # Capture sequence number (last numeric part)
             seq_num = p
+        elif "." in p:
+            continue  # Skip decimal values (prices)
+        elif not connector:
+            connector = p_lower[:7]
 
     if pair:
         if connector and side and seq_num:

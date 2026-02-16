@@ -217,6 +217,17 @@ async def bots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await show_bots_menu(update, context)
 
 
+@restricted
+@hummingbot_api_required
+async def new_bot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /new_bot command - Show controller configs menu for creating new bots"""
+    clear_all_input_states(context)
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    if msg:
+        await msg.reply_chat_action("typing")
+    await show_controller_configs_menu(update, context)
+
+
 # ============================================
 # CALLBACK HANDLER
 # ============================================
