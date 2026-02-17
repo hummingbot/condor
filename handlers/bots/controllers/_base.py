@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 @dataclass
 class ControllerField:
     """Definition of a controller configuration field."""
+
     name: str
     label: str
     type: str  # "str", "int", "float", "bool"
@@ -69,7 +70,7 @@ class BaseController(ABC):
         cls,
         config: Dict[str, Any],
         candles_data: List[Dict[str, Any]],
-        current_price: Optional[float] = None
+        current_price: Optional[float] = None,
     ) -> io.BytesIO:
         """
         Generate a visualization chart for this controller configuration.
@@ -87,9 +88,7 @@ class BaseController(ABC):
     @classmethod
     @abstractmethod
     def generate_id(
-        cls,
-        config: Dict[str, Any],
-        existing_configs: List[Dict[str, Any]]
+        cls, config: Dict[str, Any], existing_configs: List[Dict[str, Any]]
     ) -> str:
         """
         Generate a unique ID for this configuration.

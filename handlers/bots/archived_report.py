@@ -11,7 +11,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +122,7 @@ def build_report_json(
 
 
 async def save_full_report(
-    client,
-    db_path: str,
-    include_chart: bool = True
+    client, db_path: str, include_chart: bool = True
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Fetch all data and save comprehensive report.
@@ -195,11 +193,14 @@ async def save_full_report(
 
         # Fetch executors
         executors_response = await client.archived_bots.get_database_executors(db_path)
-        executors = executors_response.get("executors", []) if executors_response else []
+        executors = (
+            executors_response.get("executors", []) if executors_response else []
+        )
         logger.info(f"Fetched {len(executors)} executors")
 
         # Calculate PnL from trades
         from .archived_chart import calculate_pnl_from_trades
+
         pnl_data = calculate_pnl_from_trades(all_trades)
         logger.info(f"Calculated PnL: ${pnl_data.get('total_pnl', 0):.2f}")
 
@@ -276,14 +277,16 @@ def list_reports() -> List[Dict[str, Any]]:
                 png_file = json_file.with_suffix(".png")
                 has_chart = png_file.exists()
 
-                reports.append({
-                    "filename": json_file.name,
-                    "path": str(json_file),
-                    "chart_path": str(png_file) if has_chart else None,
-                    "generated_at": metadata.get("generated_at"),
-                    "bot_name": summary.get("bot_name"),
-                    "db_path": metadata.get("db_path"),
-                })
+                reports.append(
+                    {
+                        "filename": json_file.name,
+                        "path": str(json_file),
+                        "chart_path": str(png_file) if has_chart else None,
+                        "generated_at": metadata.get("generated_at"),
+                        "bot_name": summary.get("bot_name"),
+                        "db_path": metadata.get("db_path"),
+                    }
+                )
             except Exception as e:
                 logger.debug(f"Error reading report {json_file}: {e}")
                 continue

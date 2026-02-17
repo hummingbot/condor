@@ -6,149 +6,148 @@ Dispatches to appropriate handlers based on action patterns.
 """
 
 import logging
-from typing import Callable, Awaitable
+from typing import Awaitable, Callable
 
 from telegram import Update
-from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 from utils.auth import restricted
 from utils.telegram_formatters import format_error_message
 
-from .menu import cancel_dex_loading_task
+from .geckoterminal import (
+    handle_back_to_list,
+    handle_copy_address,
+    handle_gecko_add_liquidity,
+    handle_gecko_add_tokens,
+    handle_gecko_networks,
+    handle_gecko_new,
+    handle_gecko_pool_tf,
+    handle_gecko_refresh,
+    handle_gecko_restart_gateway,
+    handle_gecko_search,
+    handle_gecko_search_network,
+    handle_gecko_search_set_network,
+    handle_gecko_select_network,
+    handle_gecko_set_network,
+    handle_gecko_show_pools,
+    handle_gecko_swap,
+    handle_gecko_toggle_view,
+    handle_gecko_token_add,
+    handle_gecko_token_info,
+    handle_gecko_token_search,
+    handle_gecko_top,
+    handle_gecko_trending,
+    process_gecko_search,
+    show_gecko_charts_menu,
+    show_gecko_combined,
+    show_gecko_explore_menu,
+    show_gecko_info,
+    show_gecko_liquidity,
+    show_network_menu,
+    show_new_pools,
+    show_ohlcv_chart,
+    show_pool_detail,
+    show_recent_trades,
+    show_top_pools,
+    show_trending_pools,
+)
+from .liquidity import (
+    handle_liquidity,
+    handle_lp_collect_all,
+    handle_lp_hist_clear,
+    handle_lp_hist_filter_connector,
+    handle_lp_hist_filter_pair,
+    handle_lp_hist_filter_status,
+    handle_lp_hist_page,
+    handle_lp_hist_set_filter,
+    handle_lp_history,
+    handle_lp_pos_view,
+    handle_lp_refresh,
+)
+from .lp_monitor_handlers import (
+    handle_lpm_cancel_countdown,
+    handle_lpm_collect_fees,
+    handle_lpm_detail,
+    handle_lpm_dismiss,
+    handle_lpm_navigation,
+    handle_lpm_oor_navigation,
+    handle_lpm_rebalance,
+    handle_lpm_rebalance_execute,
+    handle_lpm_skip,
+)
+from .menu import cancel_dex_loading_task, handle_close, handle_refresh
+from .pools import (
+    handle_add_position,
+    handle_add_to_gateway,
+    handle_manage_positions,
+    handle_plot_liquidity,
+    handle_pool_combined_chart,
+    handle_pool_detail_refresh,
+    handle_pool_info,
+    handle_pool_list,
+    handle_pool_list_back,
+    handle_pool_ohlcv,
+    handle_pool_select,
+    handle_pos_add_confirm,
+    handle_pos_close_confirm,
+    handle_pos_close_execute,
+    handle_pos_collect_fees,
+    handle_pos_help,
+    handle_pos_refresh,
+    handle_pos_set_base,
+    handle_pos_set_connector,
+    handle_pos_set_lower,
+    handle_pos_set_network,
+    handle_pos_set_pool,
+    handle_pos_set_quote,
+    handle_pos_set_upper,
+    handle_pos_toggle_strategy,
+    handle_pos_use_max_range,
+    handle_pos_view,
+    handle_pos_view_pool,
+    handle_position_list,
+    process_add_position,
+    process_pool_info,
+    process_pool_list,
+    process_pos_set_base,
+    process_pos_set_connector,
+    process_pos_set_lower,
+    process_pos_set_network,
+    process_pos_set_pool,
+    process_pos_set_quote,
+    process_pos_set_upper,
+    process_position_list,
+    show_add_position_menu,
+)
 
 # Import all handler modules
 from .swap import (
     handle_swap,
-    handle_swap_refresh,
-    handle_swap_toggle_side,
-    handle_swap_set_connector,
     handle_swap_connector_select,
-    handle_swap_set_network,
-    handle_swap_network_select,
-    handle_swap_set_pair,
-    handle_swap_set_amount,
-    handle_swap_set_slippage,
-    handle_swap_get_quote,
     handle_swap_execute_confirm,
-    handle_swap_history,
-    handle_swap_status,
-    handle_swap_hist_filter_pair,
-    handle_swap_hist_filter_connector,
-    handle_swap_hist_filter_status,
-    handle_swap_hist_set_filter,
-    handle_swap_hist_page,
+    handle_swap_get_quote,
     handle_swap_hist_clear,
+    handle_swap_hist_filter_connector,
+    handle_swap_hist_filter_pair,
+    handle_swap_hist_filter_status,
+    handle_swap_hist_page,
+    handle_swap_hist_set_filter,
+    handle_swap_history,
+    handle_swap_network_select,
+    handle_swap_refresh,
+    handle_swap_set_amount,
+    handle_swap_set_connector,
+    handle_swap_set_network,
+    handle_swap_set_pair,
+    handle_swap_set_slippage,
+    handle_swap_status,
+    handle_swap_toggle_side,
     process_swap,
-    process_swap_set_pair,
     process_swap_set_amount,
+    process_swap_set_pair,
     process_swap_set_slippage,
     process_swap_status,
 )
-from .pools import (
-    handle_pool_info,
-    handle_pool_list,
-    handle_pool_select,
-    handle_pool_list_back,
-    handle_pool_detail_refresh,
-    handle_add_to_gateway,
-    handle_plot_liquidity,
-    handle_pool_ohlcv,
-    handle_pool_combined_chart,
-    handle_manage_positions,
-    handle_pos_view,
-    handle_pos_view_pool,
-    handle_pos_collect_fees,
-    handle_pos_close_confirm,
-    handle_pos_close_execute,
-    handle_position_list,
-    handle_add_position,
-    show_add_position_menu,
-    handle_pos_set_connector,
-    handle_pos_set_network,
-    handle_pos_set_pool,
-    handle_pos_set_lower,
-    handle_pos_set_upper,
-    handle_pos_set_base,
-    handle_pos_set_quote,
-    handle_pos_add_confirm,
-    handle_pos_use_max_range,
-    handle_pos_help,
-    handle_pos_toggle_strategy,
-    handle_pos_refresh,
-    process_pool_info,
-    process_pool_list,
-    process_position_list,
-    process_add_position,
-    process_pos_set_connector,
-    process_pos_set_network,
-    process_pos_set_pool,
-    process_pos_set_lower,
-    process_pos_set_upper,
-    process_pos_set_base,
-    process_pos_set_quote,
-)
-from .geckoterminal import (
-    show_gecko_explore_menu,
-    handle_gecko_toggle_view,
-    handle_gecko_select_network,
-    handle_gecko_set_network,
-    handle_gecko_show_pools,
-    handle_gecko_refresh,
-    handle_gecko_trending,
-    show_trending_pools,
-    handle_gecko_top,
-    show_top_pools,
-    handle_gecko_new,
-    show_new_pools,
-    handle_gecko_networks,
-    show_network_menu,
-    handle_gecko_search,
-    handle_gecko_search_network,
-    handle_gecko_search_set_network,
-    process_gecko_search,
-    show_pool_detail,
-    show_gecko_charts_menu,
-    show_ohlcv_chart,
-    show_recent_trades,
-    show_gecko_liquidity,
-    show_gecko_combined,
-    handle_copy_address,
-    handle_gecko_token_info,
-    handle_gecko_token_search,
-    handle_gecko_token_add,
-    handle_back_to_list,
-    handle_gecko_add_liquidity,
-    handle_gecko_swap,
-    show_gecko_info,
-    handle_gecko_pool_tf,
-    handle_gecko_add_tokens,
-    handle_gecko_restart_gateway,
-)
-from .liquidity import (
-    handle_liquidity,
-    handle_lp_refresh,
-    handle_lp_pos_view,
-    handle_lp_collect_all,
-    handle_lp_history,
-    handle_lp_hist_filter_pair,
-    handle_lp_hist_filter_connector,
-    handle_lp_hist_filter_status,
-    handle_lp_hist_set_filter,
-    handle_lp_hist_page,
-    handle_lp_hist_clear,
-)
-from .lp_monitor_handlers import (
-    handle_lpm_navigation,
-    handle_lpm_detail,
-    handle_lpm_collect_fees,
-    handle_lpm_rebalance,
-    handle_lpm_rebalance_execute,
-    handle_lpm_oor_navigation,
-    handle_lpm_skip,
-    handle_lpm_dismiss,
-    handle_lpm_cancel_countdown,
-)
-from .menu import handle_close, handle_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -160,23 +159,64 @@ HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 # SLOW ACTIONS (require typing indicator)
 # ============================================
 
-SLOW_ACTIONS = frozenset({
-    "main_menu", "swap", "swap_refresh", "swap_get_quote", "swap_execute_confirm", "swap_history",
-    "swap_hist_clear", "swap_hist_filter_pair", "swap_hist_filter_connector", "swap_hist_filter_status",
-    "swap_hist_page_prev", "swap_hist_page_next",
-    "liquidity", "lp_refresh", "lp_history", "lp_collect_all",
-    "lp_hist_clear", "lp_hist_filter_pair", "lp_hist_filter_connector", "lp_hist_filter_status",
-    "lp_hist_page_prev", "lp_hist_page_next",
-    "pool_info", "pool_list", "manage_positions", "pos_add_confirm", "pos_close_exec",
-    "add_to_gateway", "pool_detail_refresh",
-    "gecko_networks", "gecko_trades", "gecko_show_pools", "gecko_refresh", "gecko_token_search", "gecko_token_add",
-    "gecko_explore", "gecko_swap", "gecko_info", "gecko_add_tokens", "gecko_restart_gateway"
-})
+SLOW_ACTIONS = frozenset(
+    {
+        "main_menu",
+        "swap",
+        "swap_refresh",
+        "swap_get_quote",
+        "swap_execute_confirm",
+        "swap_history",
+        "swap_hist_clear",
+        "swap_hist_filter_pair",
+        "swap_hist_filter_connector",
+        "swap_hist_filter_status",
+        "swap_hist_page_prev",
+        "swap_hist_page_next",
+        "liquidity",
+        "lp_refresh",
+        "lp_history",
+        "lp_collect_all",
+        "lp_hist_clear",
+        "lp_hist_filter_pair",
+        "lp_hist_filter_connector",
+        "lp_hist_filter_status",
+        "lp_hist_page_prev",
+        "lp_hist_page_next",
+        "pool_info",
+        "pool_list",
+        "manage_positions",
+        "pos_add_confirm",
+        "pos_close_exec",
+        "add_to_gateway",
+        "pool_detail_refresh",
+        "gecko_networks",
+        "gecko_trades",
+        "gecko_show_pools",
+        "gecko_refresh",
+        "gecko_token_search",
+        "gecko_token_add",
+        "gecko_explore",
+        "gecko_swap",
+        "gecko_info",
+        "gecko_add_tokens",
+        "gecko_restart_gateway",
+    }
+)
 
 SLOW_PREFIXES = (
-    "gecko_trending_", "gecko_top_", "gecko_new_", "gecko_pool:", "gecko_ohlcv:",
-    "gecko_pool_tf:", "gecko_token:", "swap_hist_set_", "lp_hist_set_",
-    "lpm_nav:", "lpm_cancel_countdown:", "pos_close:"
+    "gecko_trending_",
+    "gecko_top_",
+    "gecko_new_",
+    "gecko_pool:",
+    "gecko_ohlcv:",
+    "gecko_pool_tf:",
+    "gecko_token:",
+    "swap_hist_set_",
+    "lp_hist_set_",
+    "lpm_nav:",
+    "lpm_cancel_countdown:",
+    "pos_close:",
 )
 
 
@@ -197,7 +237,6 @@ SIMPLE_ACTIONS: dict[str, HandlerFunc] = {
     "refresh": handle_refresh,
     "noop": lambda u, c: None,  # No-op for page indicators
     "lpm_noop": lambda u, c: None,
-
     # Swap
     "swap": handle_swap,
     "swap_refresh": handle_swap_refresh,
@@ -215,12 +254,10 @@ SIMPLE_ACTIONS: dict[str, HandlerFunc] = {
     "swap_hist_filter_connector": handle_swap_hist_filter_connector,
     "swap_hist_filter_status": handle_swap_hist_filter_status,
     "swap_hist_clear": handle_swap_hist_clear,
-
     # Legacy swap redirects
     "swap_quote": handle_swap,
     "swap_execute": handle_swap,
     "swap_search": handle_swap_history,
-
     # Liquidity
     "liquidity": handle_liquidity,
     "lp_refresh": handle_lp_refresh,
@@ -230,17 +267,14 @@ SIMPLE_ACTIONS: dict[str, HandlerFunc] = {
     "lp_hist_filter_connector": handle_lp_hist_filter_connector,
     "lp_hist_filter_status": handle_lp_hist_filter_status,
     "lp_hist_clear": handle_lp_hist_clear,
-
     # Legacy liquidity redirects
     "explore_pools": handle_lp_refresh,
-
     # Pool
     "pool_info": handle_pool_info,
     "pool_list": handle_pool_list,
     "pool_list_back": handle_pool_list_back,
     "pool_detail_refresh": handle_pool_detail_refresh,
     "add_to_gateway": handle_add_to_gateway,
-
     # Position management
     "manage_positions": handle_manage_positions,
     "position_list": handle_position_list,
@@ -257,7 +291,6 @@ SIMPLE_ACTIONS: dict[str, HandlerFunc] = {
     "pos_help": handle_pos_help,
     "pos_toggle_strategy": handle_pos_toggle_strategy,
     "pos_refresh": handle_pos_refresh,
-
     # GeckoTerminal
     "gecko_explore": show_gecko_explore_menu,
     "gecko_toggle_view": handle_gecko_toggle_view,
@@ -289,17 +322,16 @@ SIMPLE_ACTIONS: dict[str, HandlerFunc] = {
 # CEX SWITCH HANDLER
 # ============================================
 
+
 async def _handle_switch_to_cex(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    connector_name: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str
 ) -> None:
     """Switch from DEX to CEX trading"""
-    from handlers.config.user_preferences import (
-        set_last_trade_connector,
-        get_clob_order_defaults,
-    )
     from handlers.cex.trade import handle_trade as cex_handle_trade
+    from handlers.config.user_preferences import (
+        get_clob_order_defaults,
+        set_last_trade_connector,
+    )
 
     # Clear DEX state
     context.user_data.pop("dex_state", None)
@@ -319,10 +351,9 @@ async def _handle_switch_to_cex(
 # PARAMETERIZED ACTION HANDLERS
 # ============================================
 
+
 async def _handle_parameterized_action(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    action: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, action: str
 ) -> bool:
     """
     Handle actions that require parameter extraction.
@@ -459,7 +490,9 @@ async def _handle_parameterized_action(
     # Copy pool address
     if action.startswith("copy_pool:"):
         selected_pool = context.user_data.get("selected_pool", {})
-        pool_address = selected_pool.get('pool_address', selected_pool.get('address', 'N/A'))
+        pool_address = selected_pool.get(
+            "pool_address", selected_pool.get("address", "N/A")
+        )
         await query.answer("Address sent below ⬇️")
         await query.message.reply_text(f"`{pool_address}`", parse_mode="Markdown")
         return True
@@ -469,9 +502,11 @@ async def _handle_parameterized_action(
         await query.answer("Loading position form...")
         selected_pool = context.user_data.get("selected_pool", {})
         if selected_pool:
-            pool_address = selected_pool.get('pool_address', selected_pool.get('address', ''))
+            pool_address = selected_pool.get(
+                "pool_address", selected_pool.get("address", "")
+            )
             context.user_data["add_position_params"] = {
-                "connector": selected_pool.get('connector', 'meteora'),
+                "connector": selected_pool.get("connector", "meteora"),
                 "network": "solana-mainnet-beta",
                 "pool_address": pool_address,
                 "lower_price": "",
@@ -611,12 +646,10 @@ MESSAGE_STATE_HANDLERS: dict[str, Callable] = {
     "swap_set_amount": process_swap_set_amount,
     "swap_set_slippage": process_swap_set_slippage,
     "swap_status": process_swap_status,
-
     # Pool states
     "pool_info": process_pool_info,
     "pool_list": process_pool_list,
     "position_list": process_position_list,
-
     # Add position states
     "add_position": process_add_position,
     "pos_set_connector": process_pos_set_connector,
@@ -626,23 +659,25 @@ MESSAGE_STATE_HANDLERS: dict[str, Callable] = {
     "pos_set_upper": process_pos_set_upper,
     "pos_set_base": process_pos_set_base,
     "pos_set_quote": process_pos_set_quote,
-
     # GeckoTerminal
     "gecko_search": process_gecko_search,
 }
 
 # States that should be cleared after processing
-CLEAR_STATE_AFTER = frozenset({
-    "swap", "swap_status", "pool_info", "pool_list", "position_list", "add_position"
-})
+CLEAR_STATE_AFTER = frozenset(
+    {"swap", "swap_status", "pool_info", "pool_list", "position_list", "add_position"}
+)
 
 
 # ============================================
 # MAIN CALLBACK HANDLER
 # ============================================
 
+
 @restricted
-async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def dex_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle inline button callbacks - Routes to appropriate sub-module."""
     query = update.callback_query
     await query.answer()
@@ -692,8 +727,11 @@ async def dex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # MAIN MESSAGE HANDLER
 # ============================================
 
+
 @restricted
-async def dex_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def dex_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle user text input - Routes to appropriate processor."""
     dex_state = context.user_data.get("dex_state")
 
@@ -725,17 +763,12 @@ async def dex_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 # HANDLER FACTORIES
 # ============================================
 
+
 def get_dex_callback_handler() -> CallbackQueryHandler:
     """Get the callback query handler for DEX menu."""
-    return CallbackQueryHandler(
-        dex_callback_handler,
-        pattern="^dex:"
-    )
+    return CallbackQueryHandler(dex_callback_handler, pattern="^dex:")
 
 
 def get_dex_message_handler() -> MessageHandler:
     """Returns the message handler for DEX text input."""
-    return MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        dex_message_handler
-    )
+    return MessageHandler(filters.TEXT & ~filters.COMMAND, dex_message_handler)

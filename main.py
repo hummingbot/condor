@@ -1,16 +1,16 @@
-import logging
-import importlib
-import sys
-import os
 import asyncio
+import importlib
+import logging
+import os
+import sys
 from pathlib import Path
 
-from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     PicklePersistence,
 )
@@ -41,11 +41,9 @@ def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the conversation and display available commands (BotFather style)."""
-    from config_manager import get_config_manager, UserRole
+    from config_manager import UserRole, get_config_manager
     from utils.auth import _notify_admin_new_user
 
     user_id = update.effective_user.id
@@ -105,11 +103,15 @@ You can control me by sending these commands:
 /bots \\- deploy and manage trading bots
 /trade \\- place CEX and DEX orders"""
 
-    await update.message.reply_text(reply_text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+    await update.message.reply_text(
+        reply_text, parse_mode="MarkdownV2", disable_web_page_preview=True
+    )
 
 
 @restricted
-async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle callbacks from the start menu."""
     query = update.callback_query
     await query.answer()
@@ -125,25 +127,29 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     # Handle navigation to config options
     if data.startswith("start:"):
         if action == "config_servers":
-            from handlers.config.servers import show_api_servers
             from handlers import clear_all_input_states
+            from handlers.config.servers import show_api_servers
+
             clear_all_input_states(context)
             await show_api_servers(query, context)
         elif action == "config_keys":
-            from handlers.config.api_keys import show_api_keys
             from handlers import clear_all_input_states
+            from handlers.config.api_keys import show_api_keys
+
             clear_all_input_states(context)
             await show_api_keys(query, context)
         elif action == "config_gateway":
-            from handlers.config.gateway import show_gateway_menu
             from handlers import clear_all_input_states
+            from handlers.config.gateway import show_gateway_menu
+
             clear_all_input_states(context)
             context.user_data.pop("dex_state", None)
             context.user_data.pop("cex_state", None)
             await show_gateway_menu(query, context)
         elif action == "admin":
-            from handlers.admin import _show_admin_menu
             from handlers import clear_all_input_states
+            from handlers.admin import _show_admin_menu
+
             clear_all_input_states(context)
             await _show_admin_menu(query, context)
 
@@ -151,42 +157,42 @@ async def start_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 def reload_handlers():
     """Reload all handler modules."""
     modules_to_reload = [
-        'handlers.portfolio',
-        'handlers.bots',
-        'handlers.bots.menu',
-        'handlers.bots.controllers',
-        'handlers.bots._shared',
-        'handlers.executors',
-        'handlers.executors.menu',
-        'handlers.executors.grid',
-        'handlers.executors.position',
-        'handlers.executors._shared',
-        'handlers.trading',
-        'handlers.trading.router',
-        'handlers.cex',
-        'handlers.cex.menu',
-        'handlers.cex.trade',
-        'handlers.cex.orders',
-        'handlers.cex.positions',
-        'handlers.cex._shared',
-        'handlers.dex',
-        'handlers.dex.menu',
-        'handlers.dex.swap_quote',
-        'handlers.dex.swap_execute',
-        'handlers.dex.swap_history',
-        'handlers.dex.pools',
-        'handlers.dex._shared',
-        'handlers.config',
-        'handlers.config.servers',
-        'handlers.config.api_keys',
-        'handlers.config.gateway',
-        'handlers.config.user_preferences',
-        'handlers.routines',
-        'handlers.admin',
-        'routines.base',
-        'utils.auth',
-        'utils.telegram_formatters',
-        'config_manager',
+        "handlers.portfolio",
+        "handlers.bots",
+        "handlers.bots.menu",
+        "handlers.bots.controllers",
+        "handlers.bots._shared",
+        "handlers.executors",
+        "handlers.executors.menu",
+        "handlers.executors.grid",
+        "handlers.executors.position",
+        "handlers.executors._shared",
+        "handlers.trading",
+        "handlers.trading.router",
+        "handlers.cex",
+        "handlers.cex.menu",
+        "handlers.cex.trade",
+        "handlers.cex.orders",
+        "handlers.cex.positions",
+        "handlers.cex._shared",
+        "handlers.dex",
+        "handlers.dex.menu",
+        "handlers.dex.swap_quote",
+        "handlers.dex.swap_execute",
+        "handlers.dex.swap_history",
+        "handlers.dex.pools",
+        "handlers.dex._shared",
+        "handlers.config",
+        "handlers.config.servers",
+        "handlers.config.api_keys",
+        "handlers.config.gateway",
+        "handlers.config.user_preferences",
+        "handlers.routines",
+        "handlers.admin",
+        "routines.base",
+        "utils.auth",
+        "utils.telegram_formatters",
+        "config_manager",
     ]
 
     for module_name in modules_to_reload:
@@ -198,19 +204,24 @@ def reload_handlers():
 def register_handlers(application: Application) -> None:
     """Register all command handlers."""
     # Import fresh versions after reload
-    from handlers.portfolio import portfolio_command, get_portfolio_callback_handler
-    from handlers.bots import bots_command, new_bot_command, bots_callback_handler, get_bots_document_handler
-    from handlers.executors import executors_command, executors_callback_handler
-    from handlers.trading import trade_command as unified_trade_command
-    from handlers.trading.router import unified_trade_callback_handler
+    from handlers.admin import admin_command
+    from handlers.bots import (
+        bots_callback_handler,
+        bots_command,
+        get_bots_document_handler,
+        new_bot_command,
+    )
     from handlers.cex import cex_callback_handler
-    from handlers.dex import lp_command, dex_callback_handler
     from handlers.config import get_config_callback_handler, get_modify_value_handler
-    from handlers.config.servers import servers_command
     from handlers.config.api_keys import keys_command
     from handlers.config.gateway import gateway_command
-    from handlers.admin import admin_command
-    from handlers.routines import routines_command, routines_callback_handler
+    from handlers.config.servers import servers_command
+    from handlers.dex import dex_callback_handler, lp_command
+    from handlers.executors import executors_callback_handler, executors_command
+    from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
+    from handlers.routines import routines_callback_handler, routines_command
+    from handlers.trading import trade_command as unified_trade_command
+    from handlers.trading.router import unified_trade_callback_handler
 
     # Clear existing handlers
     application.handlers.clear()
@@ -220,8 +231,12 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("bots", bots_command))
     application.add_handler(CommandHandler("new_bot", new_bot_command))
-    application.add_handler(CommandHandler("trade", unified_trade_command))  # Unified trade (CEX + DEX)
-    application.add_handler(CommandHandler("swap", unified_trade_command))   # Alias for /trade
+    application.add_handler(
+        CommandHandler("trade", unified_trade_command)
+    )  # Unified trade (CEX + DEX)
+    application.add_handler(
+        CommandHandler("swap", unified_trade_command)
+    )  # Alias for /trade
     application.add_handler(CommandHandler("lp", lp_command))
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
@@ -233,21 +248,34 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("admin", admin_command))
 
     # Add callback query handler for start menu navigation
-    application.add_handler(CallbackQueryHandler(start_callback_handler, pattern="^start:"))
+    application.add_handler(
+        CallbackQueryHandler(start_callback_handler, pattern="^start:")
+    )
 
     # Add unified trade callback handler BEFORE cex/dex handlers (for connector switching)
-    application.add_handler(CallbackQueryHandler(unified_trade_callback_handler, pattern="^trade:"))
+    application.add_handler(
+        CallbackQueryHandler(unified_trade_callback_handler, pattern="^trade:")
+    )
 
     # Add callback query handlers for trading operations
     application.add_handler(CallbackQueryHandler(cex_callback_handler, pattern="^cex:"))
     application.add_handler(CallbackQueryHandler(dex_callback_handler, pattern="^dex:"))
-    application.add_handler(CallbackQueryHandler(bots_callback_handler, pattern="^bots:"))
-    application.add_handler(CallbackQueryHandler(routines_callback_handler, pattern="^routines:"))
-    application.add_handler(CallbackQueryHandler(executors_callback_handler, pattern="^executors:"))
+    application.add_handler(
+        CallbackQueryHandler(bots_callback_handler, pattern="^bots:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(routines_callback_handler, pattern="^routines:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(executors_callback_handler, pattern="^executors:")
+    )
 
     # Add admin callback handler
     from handlers.admin import admin_callback_handler
-    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin:"))
+
+    application.add_handler(
+        CallbackQueryHandler(admin_callback_handler, pattern="^admin:")
+    )
 
     # Add callback query handler for portfolio settings
     application.add_handler(get_portfolio_callback_handler())
@@ -284,6 +312,7 @@ async def sync_server_permissions() -> None:
 async def post_init(application: Application) -> None:
     """Register bot commands after initialization."""
     from telegram import BotCommandScopeChat
+
     from utils.config import ADMIN_USER_ID
 
     # Sync server permissions (ensures all servers have ownership entries)
@@ -312,14 +341,14 @@ async def post_init(application: Application) -> None:
         ]
         try:
             await application.bot.set_my_commands(
-                admin_commands,
-                scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID))
+                admin_commands, scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID))
             )
         except Exception as e:
             logger.warning(f"Failed to set admin-specific commands: {e}")
 
     # Restore scheduled routine jobs from persistence
     from handlers.routines import restore_scheduled_jobs
+
     await restore_scheduled_jobs(application)
 
     # Start file watcher
@@ -331,7 +360,9 @@ async def watch_and_reload(application: Application) -> None:
     try:
         from watchfiles import awatch
     except ImportError:
-        logger.warning("watchfiles not installed. Auto-reload disabled. Install with: pip install watchfiles")
+        logger.warning(
+            "watchfiles not installed. Auto-reload disabled. Install with: pip install watchfiles"
+        )
         return
 
     handlers_path = Path(__file__).parent / "handlers"
@@ -346,6 +377,7 @@ async def watch_and_reload(application: Application) -> None:
             logger.info("✅ Auto-reloaded handlers successfully")
         except Exception as e:
             logger.error(f"❌ Auto-reload failed: {e}", exc_info=True)
+
 
 def get_persistence() -> PicklePersistence:
     """
@@ -363,6 +395,7 @@ def get_persistence() -> PicklePersistence:
     persistence_path.parent.mkdir(parents=True, exist_ok=True)
 
     return PicklePersistence(filepath=persistence_path)
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle errors gracefully."""

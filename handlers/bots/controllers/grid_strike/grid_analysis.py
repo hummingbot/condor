@@ -8,8 +8,8 @@ Provides:
 - Grid metrics calculation
 """
 
-from typing import Any, Dict, List, Optional
 import logging
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,7 @@ def calculate_natr(candles: List[Dict[str, Any]], period: int = 14) -> Optional[
             continue
 
         # True Range = max(high - low, |high - prev_close|, |low - prev_close|)
-        tr = max(
-            high - low,
-            abs(high - prev_close),
-            abs(low - prev_close)
-        )
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
         true_ranges.append(tr)
 
     if len(true_ranges) < period:
@@ -63,7 +59,9 @@ def calculate_natr(candles: List[Dict[str, Any]], period: int = 14) -> Optional[
     return natr
 
 
-def calculate_price_stats(candles: List[Dict[str, Any]], lookback: int = 100) -> Dict[str, float]:
+def calculate_price_stats(
+    candles: List[Dict[str, Any]], lookback: int = 100
+) -> Dict[str, float]:
     """
     Calculate price statistics from candles.
 
@@ -193,7 +191,9 @@ def suggest_grid_params(
     reasoning.append(f"Est. levels: ~{estimated_levels}")
 
     if estimated_levels > min_levels:
-        reasoning.append(f"Capital allows ~{min_levels} orders at ${min_notional:.0f} min")
+        reasoning.append(
+            f"Capital allows ~{min_levels} orders at ${min_notional:.0f} min"
+        )
 
     return {
         "start_price": round(start_price, 8),
@@ -265,7 +265,9 @@ def generate_theoretical_grid(
     if trading_rules:
         min_notional = max(min_order_amount, trading_rules.get("min_notional_size", 0))
         min_price_increment = trading_rules.get("min_price_increment", 0.0001) or 0.0001
-        min_base_increment = trading_rules.get("min_base_amount_increment", 0.0001) or 0.0001
+        min_base_increment = (
+            trading_rules.get("min_base_amount_increment", 0.0001) or 0.0001
+        )
 
     # Add safety margin (executor uses 1.05)
     min_notional_with_margin = min_notional * 1.05
@@ -279,19 +281,20 @@ def generate_theoretical_grid(
     min_base_amount = max(min_base_from_notional, min_base_from_quantization)
 
     # Quantize the minimum base amount (round up to increment)
-    min_base_amount = math.ceil(min_base_amount / min_base_increment) * min_base_increment
+    min_base_amount = (
+        math.ceil(min_base_amount / min_base_increment) * min_base_increment
+    )
 
     # Calculate minimum quote amount from quantized base
     min_quote_amount = min_base_amount * current_price
 
     # Calculate minimum step size (matches executor)
-    min_step_size = max(
-        min_spread,
-        min_price_increment / current_price
-    )
+    min_step_size = max(min_spread, min_price_increment / current_price)
 
     # Calculate maximum possible levels based on total amount
-    max_possible_levels = int(total_amount / min_quote_amount) if min_quote_amount > 0 else 0
+    max_possible_levels = (
+        int(total_amount / min_quote_amount) if min_quote_amount > 0 else 0
+    )
 
     if max_possible_levels == 0:
         return {
@@ -304,7 +307,9 @@ def generate_theoretical_grid(
         }
 
     # Calculate optimal number of levels (matches executor)
-    max_levels_by_step = int(grid_range / min_step_size) if min_step_size > 0 else max_possible_levels
+    max_levels_by_step = (
+        int(grid_range / min_step_size) if min_step_size > 0 else max_possible_levels
+    )
     n_levels = min(max_possible_levels, max_levels_by_step)
 
     if n_levels == 0:
@@ -314,7 +319,8 @@ def generate_theoretical_grid(
         # Calculate base amount per level with quantization (matches executor)
         base_amount_per_level = max(
             min_base_amount,
-            math.floor(total_amount / (current_price * n_levels) / min_base_increment) * min_base_increment
+            math.floor(total_amount / (current_price * n_levels) / min_base_increment)
+            * min_base_increment,
         )
         quote_amount_per_level = base_amount_per_level * current_price
 
@@ -365,7 +371,9 @@ def generate_theoretical_grid(
         "num_levels": n_levels,
         "grid_range_pct": round(grid_range_pct, 3),
         "price_step": round(step * low_price, 8) if n_levels > 1 else 0,
-        "spread_pct": round(step * 100, 3) if n_levels > 1 else round(min_spread * 100, 3),
+        "spread_pct": (
+            round(step * 100, 3) if n_levels > 1 else round(min_spread * 100, 3)
+        ),
         "max_levels_by_budget": max_possible_levels,
         "max_levels_by_spread": max_levels_by_step,
         "warnings": warnings,

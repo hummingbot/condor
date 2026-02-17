@@ -8,26 +8,27 @@ Provides:
 """
 
 import logging
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from utils.telegram_formatters import escape_markdown_v2, format_error_message
+
 from ._shared import (
-    get_executors_client,
+    SIDE_LONG,
     clear_executors_state,
+    format_executor_pnl,
+    format_executor_status_line,
+    get_executor_fees,
+    get_executor_pnl,
+    get_executor_type,
+    get_executor_volume,
+    get_executors_client,
+    invalidate_cache,
     search_running_executors,
     stop_executor,
-    format_executor_status_line,
-    format_executor_pnl,
-    get_executor_pnl,
-    get_executor_volume,
-    get_executor_fees,
-    get_executor_type,
-    SIDE_LONG,
-    invalidate_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,10 @@ EXECUTORS_PER_PAGE = 8
 # MAIN MENU
 # ============================================
 
-async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def show_executors_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Display the main executors menu with running summary
 
     Args:
@@ -106,9 +110,15 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 type_display = type_col.ljust(4)
                 side_col = side_display.ljust(4)
                 pnl_col = f"{pnl:+.2f}".rjust(8)
-                vol_col = f"{vol/1000:.1f}k".rjust(7) if vol >= 1000 else f"{vol:.0f}".rjust(7)
+                vol_col = (
+                    f"{vol/1000:.1f}k".rjust(7)
+                    if vol >= 1000
+                    else f"{vol:.0f}".rjust(7)
+                )
 
-                lines.append(f"{pair_col} {type_display} {side_col} {pnl_col} {vol_col}")
+                lines.append(
+                    f"{pair_col} {type_display} {side_col} {pnl_col} {vol_col}"
+                )
                 displayed.append((ex, ex_type))
 
             if len(executors) > max_shown:
@@ -118,16 +128,24 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 lines.append("──────────── ──── ──── ──────── ───────")
                 total_label = "TOTAL".ljust(22)
                 pnl_col = f"{total_pnl:+.2f}".rjust(8)
-                vol_col = f"{total_volume/1000:.1f}k".rjust(7) if total_volume >= 1000 else f"{total_volume:.0f}".rjust(7)
+                vol_col = (
+                    f"{total_volume/1000:.1f}k".rjust(7)
+                    if total_volume >= 1000
+                    else f"{total_volume:.0f}".rjust(7)
+                )
                 lines.append(f"{total_label} {pnl_col} {vol_col}")
 
             lines.append("```")
 
             # Summary line below table
             pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
-            summary_parts = [f"{pnl_emoji} PnL: `{escape_markdown_v2(f'${total_pnl:+,.2f}')}`"]
+            summary_parts = [
+                f"{pnl_emoji} PnL: `{escape_markdown_v2(f'${total_pnl:+,.2f}')}`"
+            ]
             if total_volume:
-                summary_parts.append(f"📊 Vol: `{escape_markdown_v2(f'${total_volume:,.0f}')}`")
+                summary_parts.append(
+                    f"📊 Vol: `{escape_markdown_v2(f'${total_volume:,.0f}')}`"
+                )
             lines.append(" \\| ".join(summary_parts))
         else:
             lines.append("")
@@ -147,10 +165,12 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 side_label = "L" if side_val == SIDE_LONG else "S"
                 type_icon = "📐" if ex_type == "grid" else "🎯"
 
-                row.append(InlineKeyboardButton(
-                    f"{type_icon} {pair} {side_label}",
-                    callback_data=f"executors:detail:{executor_id[:20]}"
-                ))
+                row.append(
+                    InlineKeyboardButton(
+                        f"{type_icon} {pair} {side_label}",
+                        callback_data=f"executors:detail:{executor_id[:20]}",
+                    )
+                )
 
                 if len(row) == 2:
                     keyboard.append(row)
@@ -160,19 +180,32 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                 keyboard.append(row)
 
             if len(executors) > max_shown:
-                keyboard.append([
-                    InlineKeyboardButton(f"📋 View All ({len(executors)})", callback_data="executors:list"),
-                ])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            f"📋 View All ({len(executors)})",
+                            callback_data="executors:list",
+                        ),
+                    ]
+                )
 
-        keyboard.append([
-            InlineKeyboardButton("📐 Create Grid", callback_data="executors:create_grid"),
-            InlineKeyboardButton("🎯 Create Position", callback_data="executors:create_position"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📐 Create Grid", callback_data="executors:create_grid"
+                ),
+                InlineKeyboardButton(
+                    "🎯 Create Position", callback_data="executors:create_position"
+                ),
+            ]
+        )
 
-        keyboard.append([
-            InlineKeyboardButton("🔄 Refresh", callback_data="executors:menu"),
-            InlineKeyboardButton("❌ Close", callback_data="executors:close"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="executors:menu"),
+                InlineKeyboardButton("❌ Close", callback_data="executors:close"),
+            ]
+        )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         message_text = "\n".join(lines)
@@ -180,9 +213,7 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         if query:
             try:
                 await query.message.edit_text(
-                    message_text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
                 )
             except BadRequest as e:
                 if "no text in the message" in str(e).lower():
@@ -191,32 +222,32 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
                         chat_id=query.message.chat_id,
                         text=message_text,
                         parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
+                        reply_markup=reply_markup,
                     )
                 elif "Message is not modified" not in str(e):
                     raise
         else:
             await msg.reply_text(
-                message_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
 
     except Exception as e:
         logger.error(f"Error showing executors menu: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to fetch executors: {str(e)}")
 
-        keyboard = [[
-            InlineKeyboardButton("🔄 Retry", callback_data="executors:menu"),
-            InlineKeyboardButton("❌ Close", callback_data="executors:close"),
-        ]]
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Retry", callback_data="executors:menu"),
+                InlineKeyboardButton("❌ Close", callback_data="executors:close"),
+            ]
+        ]
 
         if query:
             try:
                 await query.message.edit_text(
                     error_message,
                     parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             except BadRequest:
                 pass
@@ -224,7 +255,7 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
             await msg.reply_text(
                 error_message,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
 
@@ -232,7 +263,10 @@ async def show_executors_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 # RUNNING EXECUTORS LIST
 # ============================================
 
-async def show_running_executors(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def show_running_executors(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Display paginated list of running executors
 
     Args:
@@ -253,11 +287,13 @@ async def show_running_executors(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data["running_executors"] = executors
 
         if not executors:
-            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")]]
+            keyboard = [
+                [InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")]
+            ]
             await query.message.edit_text(
                 "📋 *Running Executors*\n\n_No executors running\\._",
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
 
@@ -317,10 +353,12 @@ async def show_running_executors(update: Update, context: ContextTypes.DEFAULT_T
             side_val = config.get("side", SIDE_LONG)
             side_label = "L" if side_val == SIDE_LONG else "S"
 
-            row.append(InlineKeyboardButton(
-                f"{'🟢' if side_val == SIDE_LONG else '🔴'} {pair} {side_label}",
-                callback_data=f"executors:detail:{executor_id[:20]}"
-            ))
+            row.append(
+                InlineKeyboardButton(
+                    f"{'🟢' if side_val == SIDE_LONG else '🔴'} {pair} {side_label}",
+                    callback_data=f"executors:detail:{executor_id[:20]}",
+                )
+            )
 
             if len(row) == 2:
                 keyboard.append(row)
@@ -332,25 +370,29 @@ async def show_running_executors(update: Update, context: ContextTypes.DEFAULT_T
         # Pagination buttons
         nav_row = []
         if page > 0:
-            nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data="executors:list_prev"))
+            nav_row.append(
+                InlineKeyboardButton("◀️ Prev", callback_data="executors:list_prev")
+            )
         if page < total_pages - 1:
-            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data="executors:list_next"))
+            nav_row.append(
+                InlineKeyboardButton("Next ▶️", callback_data="executors:list_next")
+            )
         if nav_row:
             keyboard.append(nav_row)
 
-        keyboard.append([
-            InlineKeyboardButton("🔄 Refresh", callback_data="executors:list"),
-            InlineKeyboardButton("⬅️ Back", callback_data="executors:menu"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="executors:list"),
+                InlineKeyboardButton("⬅️ Back", callback_data="executors:menu"),
+            ]
+        )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         message_text = "\n".join(lines)
 
         try:
             await query.message.edit_text(
-                message_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         except BadRequest as e:
             if "Message is not modified" in str(e):
@@ -364,7 +406,7 @@ async def show_running_executors(update: Update, context: ContextTypes.DEFAULT_T
         await query.message.edit_text(
             format_error_message(f"Error: {str(e)[:100]}"),
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
 
@@ -372,7 +414,10 @@ async def show_running_executors(update: Update, context: ContextTypes.DEFAULT_T
 # EXECUTOR DETAIL VIEW
 # ============================================
 
-async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, executor_id: str) -> None:
+
+async def show_executor_detail(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, executor_id: str
+) -> None:
     """Show detailed view for a specific executor
 
     Args:
@@ -387,19 +432,21 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         # Always fetch fresh data for refresh button or if not cached
         client, _ = await get_executors_client(chat_id, context.user_data)
         executor = None
-        
+
         # First try to get specific executor details from API
         try:
             executor = await client.executors.get_executor(executor_id=executor_id)
         except Exception as e:
             logger.warning(f"Could not fetch specific executor {executor_id}: {e}")
-        
+
         # If specific fetch failed, try to find in fresh list of running executors
         if not executor:
-            executors = await search_running_executors(client, status="RUNNING", limit=100)
+            executors = await search_running_executors(
+                client, status="RUNNING", limit=100
+            )
             # Update cache with fresh data
             context.user_data["running_executors"] = executors
-            
+
             for ex in executors:
                 ex_id = ex.get("id", ex.get("executor_id", ""))
                 if ex_id.startswith(executor_id) or executor_id.startswith(ex_id[:20]):
@@ -453,25 +500,37 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             take_profit = config.get("take_profit", 0) or tbc.get("take_profit", 0)
             time_limit = config.get("time_limit", 0) or tbc.get("time_limit", 0)
             trailing_cfg = tbc.get("trailing_stop") or {}
-            trailing_act = config.get("trailing_stop_activation", 0) or trailing_cfg.get("activation_price", 0)
-            trailing_delta = config.get("trailing_stop_delta", 0) or trailing_cfg.get("trailing_delta", 0)
+            trailing_act = config.get(
+                "trailing_stop_activation", 0
+            ) or trailing_cfg.get("activation_price", 0)
+            trailing_delta = config.get("trailing_stop_delta", 0) or trailing_cfg.get(
+                "trailing_delta", 0
+            )
 
             # Amount is in base units — compute quote value if entry_price available
             if amount and entry_price:
                 quote_val = amount * entry_price
                 base_token = pair.split("-")[0] if "-" in pair else ""
-                lines.append(f"💰 Amount: `{escape_markdown_v2(f'{amount:,.4g}')}` {escape_markdown_v2(base_token)} ≈ `${escape_markdown_v2(f'{quote_val:,.2f}')}`")
+                lines.append(
+                    f"💰 Amount: `{escape_markdown_v2(f'{amount:,.4g}')}` {escape_markdown_v2(base_token)} ≈ `${escape_markdown_v2(f'{quote_val:,.2f}')}`"
+                )
             elif amount:
                 base_token = pair.split("-")[0] if "-" in pair else ""
-                lines.append(f"💰 Amount: `{escape_markdown_v2(f'{amount:,.4g}')}` {escape_markdown_v2(base_token)}")
+                lines.append(
+                    f"💰 Amount: `{escape_markdown_v2(f'{amount:,.4g}')}` {escape_markdown_v2(base_token)}"
+                )
 
             lines.append("")
             lines.append(f"🎯 *Position Config*")
             if entry_price:
                 lines.append(f"  Entry: `{escape_markdown_v2(f'{entry_price:.6g}')}`")
-            lines.append(f"  SL: `{escape_markdown_v2(f'{stop_loss:.4%}')}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`")
+            lines.append(
+                f"  SL: `{escape_markdown_v2(f'{stop_loss:.4%}')}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`"
+            )
             if trailing_act:
-                lines.append(f"  Trail: `{escape_markdown_v2(f'{trailing_act:.4%}')}` δ `{escape_markdown_v2(f'{trailing_delta:.4%}')}`")
+                lines.append(
+                    f"  Trail: `{escape_markdown_v2(f'{trailing_act:.4%}')}` δ `{escape_markdown_v2(f'{trailing_delta:.4%}')}`"
+                )
             if time_limit:
                 lines.append(f"  Time Limit: `{time_limit}s`")
         else:
@@ -482,7 +541,9 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             max_orders = config.get("max_open_orders", 3)
             # Take profit may be nested under triple_barrier_config for grid executors too
             tbc = config.get("triple_barrier_config", {})
-            take_profit = config.get("take_profit", 0) or tbc.get("take_profit", 0) or 0.0002
+            take_profit = (
+                config.get("take_profit", 0) or tbc.get("take_profit", 0) or 0.0002
+            )
 
             lines.append(f"💰 Amount: `${escape_markdown_v2(f'{amount:,.2f}')}`")
             lines.append("")
@@ -490,7 +551,9 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             lines.append(f"  Start: `{escape_markdown_v2(f'{start_price:.6g}')}`")
             lines.append(f"  End: `{escape_markdown_v2(f'{end_price:.6g}')}`")
             lines.append(f"  Limit: `{escape_markdown_v2(f'{limit_price:.6g}')}`")
-            lines.append(f"  Max Orders: `{max_orders}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`")
+            lines.append(
+                f"  Max Orders: `{max_orders}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`"
+            )
 
         lines.append("")
         lines.append(f"📊 *Performance*")
@@ -509,10 +572,14 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         # Build keyboard
         keyboard = [
             [
-                InlineKeyboardButton("🛑 Stop", callback_data=f"executors:stop:{full_id[:20]}"),
+                InlineKeyboardButton(
+                    "🛑 Stop", callback_data=f"executors:stop:{full_id[:20]}"
+                ),
             ],
             [
-                InlineKeyboardButton("🔄 Refresh", callback_data=f"executors:detail:{full_id[:20]}"),
+                InlineKeyboardButton(
+                    "🔄 Refresh", callback_data=f"executors:detail:{full_id[:20]}"
+                ),
                 InlineKeyboardButton("⬅️ Back", callback_data="executors:list"),
             ],
         ]
@@ -521,22 +588,18 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         message_text = "\n".join(lines)
 
         # Handle photo messages
-        if getattr(query.message, 'photo', None):
+        if getattr(query.message, "photo", None):
             try:
                 await query.message.delete()
             except Exception:
                 pass
             await query.message.chat.send_message(
-                message_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         else:
             try:
                 await query.message.edit_text(
-                    message_text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
                 )
             except BadRequest as e:
                 if "Message is not modified" in str(e):
@@ -551,7 +614,7 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             await query.message.edit_text(
                 format_error_message(f"Error: {str(e)[:100]}"),
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         except Exception:
             pass
@@ -561,7 +624,10 @@ async def show_executor_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 # STOP EXECUTOR
 # ============================================
 
-async def handle_stop_executor(update: Update, context: ContextTypes.DEFAULT_TYPE, executor_id: str) -> None:
+
+async def handle_stop_executor(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, executor_id: str
+) -> None:
     """Handle stop executor request - show confirmation
 
     Args:
@@ -581,8 +647,12 @@ async def handle_stop_executor(update: Update, context: ContextTypes.DEFAULT_TYP
 
     keyboard = [
         [
-            InlineKeyboardButton("🛑 Yes, Stop", callback_data=f"executors:confirm_stop:{executor_id}"),
-            InlineKeyboardButton("⬅️ Cancel", callback_data=f"executors:detail:{executor_id}"),
+            InlineKeyboardButton(
+                "🛑 Yes, Stop", callback_data=f"executors:confirm_stop:{executor_id}"
+            ),
+            InlineKeyboardButton(
+                "⬅️ Cancel", callback_data=f"executors:detail:{executor_id}"
+            ),
         ],
     ]
 
@@ -597,11 +667,13 @@ async def handle_stop_executor(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.message.edit_text(
         message_text,
         parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEFAULT_TYPE, executor_id: str) -> None:
+async def handle_confirm_stop_executor(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, executor_id: str
+) -> None:
     """Actually stop the executor
 
     Args:
@@ -617,11 +689,11 @@ async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEF
     try:
         # Get client first
         client, _ = await get_executors_client(chat_id, context.user_data)
-        
+
         # Get full executor ID if we have a partial match
         executor = context.user_data.get("current_executor", {})
         full_id = executor.get("id", executor.get("executor_id", executor_id))
-        
+
         # If we still have a short ID, search in cached executors for the full ID
         if len(full_id) <= 20:
             executors = context.user_data.get("running_executors", [])
@@ -630,13 +702,17 @@ async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEF
                 if ex_id.startswith(executor_id) or executor_id.startswith(ex_id[:20]):
                     full_id = ex_id
                     break
-            
+
             # If still not found, fetch fresh list to find the full ID
             if len(full_id) <= 20:
-                fresh_executors = await search_running_executors(client, status="RUNNING", limit=100)
+                fresh_executors = await search_running_executors(
+                    client, status="RUNNING", limit=100
+                )
                 for ex in fresh_executors:
                     ex_id = ex.get("id", ex.get("executor_id", ""))
-                    if ex_id.startswith(executor_id) or executor_id.startswith(ex_id[:20]):
+                    if ex_id.startswith(executor_id) or executor_id.startswith(
+                        ex_id[:20]
+                    ):
                         full_id = ex_id
                         break
         result = await stop_executor(client, full_id, keep_position=False)
@@ -646,29 +722,50 @@ async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEF
         context.user_data.pop("running_executors", None)
         context.user_data.pop("current_executor", None)
 
-        if result.get("status") in ("success", "stopping", "stopped") or "stop" in str(result).lower():
-            keyboard = [[InlineKeyboardButton("📋 Back to List", callback_data="executors:list")]]
+        if (
+            result.get("status") in ("success", "stopping", "stopped")
+            or "stop" in str(result).lower()
+        ):
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "📋 Back to List", callback_data="executors:list"
+                    )
+                ]
+            ]
             await query.message.edit_text(
                 f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`",
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
             error_msg = result.get("message", str(result))
-            
+
             # If executor not found, it might have already stopped - offer to refresh list
             if "not found" in error_msg.lower():
-                keyboard = [[
-                    InlineKeyboardButton("🔄 Refresh List", callback_data="executors:list"),
-                    InlineKeyboardButton("⬅️ Back", callback_data=f"executors:detail:{executor_id}"),
-                ]]
+                keyboard = [
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Refresh List", callback_data="executors:list"
+                        ),
+                        InlineKeyboardButton(
+                            "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
+                        ),
+                    ]
+                ]
             else:
-                keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data=f"executors:detail:{executor_id}")]]
-                
+                keyboard = [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
+                        )
+                    ]
+                ]
+
             await query.message.edit_text(
                 f"❌ *Stop Failed*\n\n{escape_markdown_v2(error_msg[:200])}",
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
     except Exception as e:
@@ -677,13 +774,14 @@ async def handle_confirm_stop_executor(update: Update, context: ContextTypes.DEF
         await query.message.edit_text(
             f"*Error*\n\n{escape_markdown_v2(str(e)[:200])}",
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
 
 # ============================================
 # CREATE MENU
 # ============================================
+
 
 async def show_create_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show menu for creating new executors
@@ -702,21 +800,30 @@ async def show_create_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ]
 
     keyboard = [
-        [InlineKeyboardButton("📐 Grid Executor", callback_data="executors:create_grid")],
-        [InlineKeyboardButton("🎯 Position Executor", callback_data="executors:create_position")],
+        [
+            InlineKeyboardButton(
+                "📐 Grid Executor", callback_data="executors:create_grid"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎯 Position Executor", callback_data="executors:create_position"
+            )
+        ],
         [InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")],
     ]
 
     await query.message.edit_text(
         "\n".join(lines),
         parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 # ============================================
 # CLOSE HANDLER
 # ============================================
+
 
 async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle close button - delete message and clear state

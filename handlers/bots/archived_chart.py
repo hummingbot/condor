@@ -11,8 +11,8 @@ import io
 import logging
 import os
 from collections import defaultdict
-from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +25,9 @@ DARK_THEME = {
     "font_family": "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif",
     "grid_color": "#21262d",
     "axis_color": "#8b949e",
-    "up_color": "#10b981",      # Green for profit
-    "down_color": "#ef4444",    # Red for loss
-    "neutral_color": "#6b7280", # Gray for zero
+    "up_color": "#10b981",  # Green for profit
+    "down_color": "#ef4444",  # Red for loss
+    "neutral_color": "#6b7280",  # Gray for zero
 }
 
 
@@ -47,7 +47,7 @@ def _parse_timestamp(ts) -> Optional[datetime]:
         if isinstance(ts, datetime):
             return ts
 
-        if hasattr(ts, 'to_pydatetime'):  # pandas Timestamp
+        if hasattr(ts, "to_pydatetime"):  # pandas Timestamp
             return ts.to_pydatetime()
 
         if isinstance(ts, str) and ts:
@@ -217,14 +217,18 @@ def _calculate_pnl_average_cost(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         # Record cumulative PnL point for charting
         if ts:
-            cumulative_pnl.append({
-                "timestamp": ts,
-                "pnl": running_pnl,
-                "pair": pair,
-            })
+            cumulative_pnl.append(
+                {
+                    "timestamp": ts,
+                    "pnl": running_pnl,
+                    "pair": pair,
+                }
+            )
 
-    logger.info(f"PnL calculation (avg cost): {len(trades)} trades, {buy_count} BUY, {sell_count} SELL, "
-                f"{realized_trades} realized, total_pnl=${running_pnl:.4f}")
+    logger.info(
+        f"PnL calculation (avg cost): {len(trades)} trades, {buy_count} BUY, {sell_count} SELL, "
+        f"{realized_trades} realized, total_pnl=${running_pnl:.4f}"
+    )
 
     return {
         "total_pnl": running_pnl,
@@ -330,14 +334,18 @@ def _calculate_pnl_open_close(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         # Record cumulative PnL point for charting
         if ts:
-            cumulative_pnl.append({
-                "timestamp": ts,
-                "pnl": running_pnl,
-                "pair": pair,
-            })
+            cumulative_pnl.append(
+                {
+                    "timestamp": ts,
+                    "pnl": running_pnl,
+                    "pair": pair,
+                }
+            )
 
-    logger.info(f"PnL calculation (open/close): {len(trades)} trades, {open_count} OPEN, {close_count} CLOSE, "
-                f"{close_with_position} CLOSE with matching position, total_pnl=${running_pnl:.4f}")
+    logger.info(
+        f"PnL calculation (open/close): {len(trades)} trades, {open_count} OPEN, {close_count} CLOSE, "
+        f"{close_with_position} CLOSE with matching position, total_pnl=${running_pnl:.4f}"
+    )
 
     return {
         "total_pnl": running_pnl,
@@ -348,7 +356,9 @@ def _calculate_pnl_open_close(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def get_time_range_from_trades(trades: List[Dict[str, Any]]) -> Tuple[Optional[datetime], Optional[datetime]]:
+def get_time_range_from_trades(
+    trades: List[Dict[str, Any]],
+) -> Tuple[Optional[datetime], Optional[datetime]]:
     """Extract start and end time from trades list."""
     if not trades:
         return None, None
@@ -411,14 +421,16 @@ def generate_timeline_chart(
                 if end_time.tzinfo:
                     end_time = end_time.replace(tzinfo=None)
 
-                processed.append({
-                    "name": bot_name,
-                    "start": start_time,
-                    "end": end_time,
-                    "pnl": total_pnl,
-                    "color": _get_pnl_color(total_pnl),
-                    "trades": summary.get("total_trades", len(trades)),
-                })
+                processed.append(
+                    {
+                        "name": bot_name,
+                        "start": start_time,
+                        "end": end_time,
+                        "pnl": total_pnl,
+                        "color": _get_pnl_color(total_pnl),
+                        "trades": summary.get("total_trades", len(trades)),
+                    }
+                )
 
         if not processed:
             logger.warning("No bots with valid time data for timeline")
@@ -436,25 +448,27 @@ def generate_timeline_chart(
             duration = (bot["end"] - bot["start"]).total_seconds() / 3600
 
             # Create the bar using a horizontal bar chart approach
-            fig.add_trace(go.Bar(
-                y=[bot["name"]],
-                x=[duration],
-                base=[bot["start"]],
-                orientation='h',
-                marker_color=bot["color"],
-                marker_line_width=0,
-                text=f'{_format_pnl(bot["pnl"])}',
-                textposition="inside",
-                textfont=dict(color="white", size=11),
-                hovertemplate=(
-                    f"<b>{bot['name']}</b><br>"
-                    f"Start: {bot['start'].strftime('%b %d %H:%M')}<br>"
-                    f"End: {bot['end'].strftime('%b %d %H:%M')}<br>"
-                    f"PnL: {_format_pnl(bot['pnl'])}<br>"
-                    f"Trades: {bot['trades']}<extra></extra>"
-                ),
-                showlegend=False,
-            ))
+            fig.add_trace(
+                go.Bar(
+                    y=[bot["name"]],
+                    x=[duration],
+                    base=[bot["start"]],
+                    orientation="h",
+                    marker_color=bot["color"],
+                    marker_line_width=0,
+                    text=f'{_format_pnl(bot["pnl"])}',
+                    textposition="inside",
+                    textfont=dict(color="white", size=11),
+                    hovertemplate=(
+                        f"<b>{bot['name']}</b><br>"
+                        f"Start: {bot['start'].strftime('%b %d %H:%M')}<br>"
+                        f"End: {bot['end'].strftime('%b %d %H:%M')}<br>"
+                        f"PnL: {_format_pnl(bot['pnl'])}<br>"
+                        f"Trades: {bot['trades']}<extra></extra>"
+                    ),
+                    showlegend=False,
+                )
+            )
 
         # Calculate totals for subtitle
         total_pnl = sum(b["pnl"] for b in processed)
@@ -488,13 +502,15 @@ def generate_timeline_chart(
             barmode="overlay",
             bargap=0.3,
             margin=dict(l=150, r=30, t=80, b=50),
-            height=max(height, 100 + len(processed) * 40),  # Dynamic height based on number of bots
+            height=max(
+                height, 100 + len(processed) * 40
+            ),  # Dynamic height based on number of bots
             width=width,
         )
 
         # Export to PNG
         img_bytes = io.BytesIO()
-        fig.write_image(img_bytes, format='png', scale=2)
+        fig.write_image(img_bytes, format="png", scale=2)
         img_bytes.seek(0)
 
         return img_bytes
@@ -545,12 +561,17 @@ def generate_performance_chart(
 
         # Create figure with subplots
         fig = make_subplots(
-            rows=2, cols=2,
+            rows=2,
+            cols=2,
             specs=[
                 [{"colspan": 2}, None],
                 [{"type": "bar"}, {"type": "pie"}],
             ],
-            subplot_titles=("Cumulative PnL Over Time", "PnL by Trading Pair", "Trade Distribution"),
+            subplot_titles=(
+                "Cumulative PnL Over Time",
+                "PnL by Trading Pair",
+                "Trade Distribution",
+            ),
             vertical_spacing=0.15,
             horizontal_spacing=0.1,
             row_heights=[0.6, 0.4],
@@ -567,23 +588,33 @@ def generate_performance_chart(
                 go.Scatter(
                     x=timestamps,
                     y=pnl_values,
-                    mode='lines',
-                    name='Net PnL',
+                    mode="lines",
+                    name="Net PnL",
                     line=dict(color=line_color, width=2),
-                    fill='tozeroy',
+                    fill="tozeroy",
                     fillcolor=f'rgba{tuple(list(int(line_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)) + [0.15])}',
                     hovertemplate="<b>%{x|%b %d %H:%M}</b><br>PnL: $%{y:,.4f}<extra></extra>",
                 ),
-                row=1, col=1
+                row=1,
+                col=1,
             )
 
             # Add zero line
-            fig.add_hline(y=0, line_dash="dash", line_color=DARK_THEME["axis_color"], opacity=0.5, row=1, col=1)
+            fig.add_hline(
+                y=0,
+                line_dash="dash",
+                line_color=DARK_THEME["axis_color"],
+                opacity=0.5,
+                row=1,
+                col=1,
+            )
 
         # Panel 2: PnL by trading pair (bar chart)
         if pnl_by_pair:
             # Sort by absolute PnL
-            sorted_pairs = sorted(pnl_by_pair.items(), key=lambda x: abs(x[1]), reverse=True)[:8]
+            sorted_pairs = sorted(
+                pnl_by_pair.items(), key=lambda x: abs(x[1]), reverse=True
+            )[:8]
             pairs = [p[0] for p in sorted_pairs]
             pnls = [p[1] for p in sorted_pairs]
             colors = [_get_pnl_color(p) for p in pnls]
@@ -596,7 +627,8 @@ def generate_performance_chart(
                     showlegend=False,
                     hovertemplate="<b>%{x}</b><br>PnL: $%{y:,.2f}<extra></extra>",
                 ),
-                row=2, col=1
+                row=2,
+                col=1,
             )
 
         # Panel 3: Trade type distribution (pie chart)
@@ -614,7 +646,8 @@ def generate_performance_chart(
                     textfont=dict(color="white"),
                     showlegend=False,
                 ),
-                row=2, col=2
+                row=2,
+                col=2,
             )
 
         # Get time range
@@ -645,12 +678,20 @@ def generate_performance_chart(
         )
 
         # Update axes styling
-        fig.update_xaxes(showgrid=True, gridcolor=DARK_THEME["grid_color"], tickfont=dict(color=DARK_THEME["axis_color"]))
-        fig.update_yaxes(showgrid=True, gridcolor=DARK_THEME["grid_color"], tickfont=dict(color=DARK_THEME["axis_color"]))
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor=DARK_THEME["grid_color"],
+            tickfont=dict(color=DARK_THEME["axis_color"]),
+        )
+        fig.update_yaxes(
+            showgrid=True,
+            gridcolor=DARK_THEME["grid_color"],
+            tickfont=dict(color=DARK_THEME["axis_color"]),
+        )
 
         # Export to PNG
         img_bytes = io.BytesIO()
-        fig.write_image(img_bytes, format='png', scale=2)
+        fig.write_image(img_bytes, format="png", scale=2)
         img_bytes.seek(0)
 
         return img_bytes
@@ -703,7 +744,8 @@ def generate_report_chart(
 
         # Create 2x2 subplot layout
         fig = make_subplots(
-            rows=2, cols=2,
+            rows=2,
+            cols=2,
             specs=[
                 [{"type": "scatter"}, {"type": "bar"}],
                 [{"type": "bar", "colspan": 2}, None],
@@ -728,18 +770,21 @@ def generate_report_chart(
                 go.Scatter(
                     x=timestamps,
                     y=pnl_values,
-                    mode='lines',
+                    mode="lines",
                     line=dict(color=line_color, width=2),
-                    fill='tozeroy',
+                    fill="tozeroy",
                     fillcolor=f'rgba{tuple(list(int(line_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)) + [0.15])}',
                     showlegend=False,
                 ),
-                row=1, col=1
+                row=1,
+                col=1,
             )
 
         # Panel 2: PnL by trading pair
         if pnl_by_pair:
-            sorted_pairs = sorted(pnl_by_pair.items(), key=lambda x: abs(x[1]), reverse=True)[:8]
+            sorted_pairs = sorted(
+                pnl_by_pair.items(), key=lambda x: abs(x[1]), reverse=True
+            )[:8]
             pairs = [p[0] for p in sorted_pairs]
             pnls = [p[1] for p in sorted_pairs]
             colors = [_get_pnl_color(p) for p in pnls]
@@ -751,7 +796,8 @@ def generate_report_chart(
                     marker_color=colors,
                     showlegend=False,
                 ),
-                row=1, col=2
+                row=1,
+                col=2,
             )
 
         # Panel 3: Volume by market (bar chart)
@@ -764,7 +810,9 @@ def generate_report_chart(
             market_volume[pair] = market_volume.get(pair, 0) + volume
 
         if market_volume:
-            sorted_markets = sorted(market_volume.items(), key=lambda x: x[1], reverse=True)[:10]
+            sorted_markets = sorted(
+                market_volume.items(), key=lambda x: x[1], reverse=True
+            )[:10]
             markets = [m[0] for m in sorted_markets]
             volumes = [m[1] for m in sorted_markets]
 
@@ -775,7 +823,8 @@ def generate_report_chart(
                     marker_color=DARK_THEME["up_color"],
                     showlegend=False,
                 ),
-                row=2, col=1
+                row=2,
+                col=1,
             )
 
         # Update layout
@@ -806,7 +855,7 @@ def generate_report_chart(
 
         # Export to PNG
         img_bytes = io.BytesIO()
-        fig.write_image(img_bytes, format='png', scale=2)
+        fig.write_image(img_bytes, format="png", scale=2)
         img_bytes.seek(0)
 
         return img_bytes

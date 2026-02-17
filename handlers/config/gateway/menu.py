@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from ..server_context import build_config_message_header, format_server_selection_needed
-from ._shared import logger, escape_markdown_v2
+from ._shared import escape_markdown_v2, logger
 
 
 async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -28,7 +28,7 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "🌐 Gateway Configuration",
                 include_gateway=True,
                 chat_id=chat_id,
-                user_data=context.user_data
+                user_data=context.user_data,
             )
 
             message_text = header
@@ -39,40 +39,62 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 message_text += "⚠️ _Server is offline\\. Cannot manage Gateway\\._"
             elif gateway_running:
                 message_text += "_Gateway is running\\. Configure DEX settings or manage the container\\._"
-                keyboard.extend([
+                keyboard.extend(
                     [
-                        InlineKeyboardButton("🔑 Wallets", callback_data="gateway_wallets"),
-                        InlineKeyboardButton("🔌 Connectors", callback_data="gateway_connectors"),
-                    ],
-                    [
-                        InlineKeyboardButton("🌍 Networks", callback_data="gateway_networks"),
-                        InlineKeyboardButton("💧 Pools", callback_data="gateway_pools"),
-                    ],
-                    [
-                        InlineKeyboardButton("🪙 Tokens", callback_data="gateway_tokens"),
-                        InlineKeyboardButton("📋 Logs", callback_data="gateway_logs"),
-                    ],
-                    [
-                        InlineKeyboardButton("🔄 Restart", callback_data="gateway_restart"),
-                        InlineKeyboardButton("⏹ Stop", callback_data="gateway_stop"),
-                    ],
-                ])
+                        [
+                            InlineKeyboardButton(
+                                "🔑 Wallets", callback_data="gateway_wallets"
+                            ),
+                            InlineKeyboardButton(
+                                "🔌 Connectors", callback_data="gateway_connectors"
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🌍 Networks", callback_data="gateway_networks"
+                            ),
+                            InlineKeyboardButton(
+                                "💧 Pools", callback_data="gateway_pools"
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🪙 Tokens", callback_data="gateway_tokens"
+                            ),
+                            InlineKeyboardButton(
+                                "📋 Logs", callback_data="gateway_logs"
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "🔄 Restart", callback_data="gateway_restart"
+                            ),
+                            InlineKeyboardButton(
+                                "⏹ Stop", callback_data="gateway_stop"
+                            ),
+                        ],
+                    ]
+                )
             else:
                 message_text += "_Gateway is not running\\. Deploy it to start configuring DEX operations\\._"
-                keyboard.append([
-                    InlineKeyboardButton("🚀 Deploy Gateway", callback_data="gateway_deploy"),
-                ])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🚀 Deploy Gateway", callback_data="gateway_deploy"
+                        ),
+                    ]
+                )
 
             # Add close button
-            keyboard.append([InlineKeyboardButton("« Close", callback_data="config_close")])
+            keyboard.append(
+                [InlineKeyboardButton("« Close", callback_data="config_close")]
+            )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         try:
             await query.message.edit_text(
-                message_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         except Exception as e:
             error_str = str(e)
@@ -93,7 +115,9 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         error_text = f"❌ Error loading gateway: {escape_markdown_v2(str(e))}"
         keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+        await query.message.edit_text(
+            error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
 
 
 async def show_server_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,8 +129,7 @@ async def show_server_selection(query, context: ContextTypes.DEFAULT_TYPE) -> No
         default_server = get_config_manager().get_default_server()
 
         message_text = (
-            "🔄 *Select Server*\n\n"
-            "Choose which server's Gateway to configure:"
+            "🔄 *Select Server*\n\n" "Choose which server's Gateway to configure:"
         )
 
         # Create server buttons
@@ -115,9 +138,13 @@ async def show_server_selection(query, context: ContextTypes.DEFAULT_TYPE) -> No
             button_text = server_name
             if server_name == default_server:
                 button_text += " ⭐️"
-            server_buttons.append([
-                InlineKeyboardButton(button_text, callback_data=f"gateway_server_{server_name}")
-            ])
+            server_buttons.append(
+                [
+                    InlineKeyboardButton(
+                        button_text, callback_data=f"gateway_server_{server_name}"
+                    )
+                ]
+            )
 
         keyboard = server_buttons + [
             [InlineKeyboardButton("« Back", callback_data="config_gateway")]
@@ -126,9 +153,7 @@ async def show_server_selection(query, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
     except Exception as e:

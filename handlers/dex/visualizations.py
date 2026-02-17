@@ -10,8 +10,8 @@ Provides unified chart generation for DEX pools:
 
 import io
 import logging
-from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +27,10 @@ DARK_THEME = {
     "font_family": "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif",
     "grid_color": "#21262d",
     "axis_color": "#8b949e",
-    "up_color": "#10b981",      # Green for bullish
-    "down_color": "#ef4444",    # Red for bearish
+    "up_color": "#10b981",  # Green for bullish
+    "down_color": "#ef4444",  # Red for bearish
     "current_price_color": "#f59e0b",  # Orange for current price
-    "line_color": "#3b82f6",    # Blue for lines
+    "line_color": "#3b82f6",  # Blue for lines
 }
 
 
@@ -48,23 +48,27 @@ def _normalize_candles(candles: List[Union[Dict, List]]) -> List[Dict[str, Any]]
 
     for candle in candles:
         if isinstance(candle, dict):
-            normalized.append({
-                "timestamp": candle.get("timestamp"),
-                "open": float(candle.get("open", 0) or 0),
-                "high": float(candle.get("high", 0) or 0),
-                "low": float(candle.get("low", 0) or 0),
-                "close": float(candle.get("close", 0) or 0),
-                "volume": float(candle.get("volume", 0) or 0),
-            })
+            normalized.append(
+                {
+                    "timestamp": candle.get("timestamp"),
+                    "open": float(candle.get("open", 0) or 0),
+                    "high": float(candle.get("high", 0) or 0),
+                    "low": float(candle.get("low", 0) or 0),
+                    "close": float(candle.get("close", 0) or 0),
+                    "volume": float(candle.get("volume", 0) or 0),
+                }
+            )
         elif isinstance(candle, (list, tuple)) and len(candle) >= 5:
-            normalized.append({
-                "timestamp": candle[0],
-                "open": float(candle[1] or 0),
-                "high": float(candle[2] or 0),
-                "low": float(candle[3] or 0),
-                "close": float(candle[4] or 0),
-                "volume": float(candle[5] or 0) if len(candle) > 5 else 0,
-            })
+            normalized.append(
+                {
+                    "timestamp": candle[0],
+                    "open": float(candle[1] or 0),
+                    "high": float(candle[2] or 0),
+                    "low": float(candle[3] or 0),
+                    "close": float(candle[4] or 0),
+                    "volume": float(candle[5] or 0) if len(candle) > 5 else 0,
+                }
+            )
 
     return normalized
 
@@ -77,7 +81,7 @@ def _parse_timestamp(raw_ts) -> Optional[datetime]:
     try:
         if isinstance(raw_ts, datetime):
             return raw_ts
-        if hasattr(raw_ts, 'to_pydatetime'):  # pandas Timestamp
+        if hasattr(raw_ts, "to_pydatetime"):  # pandas Timestamp
             return raw_ts.to_pydatetime()
         if isinstance(raw_ts, (int, float)):
             # Unix timestamp (seconds or milliseconds)
@@ -177,7 +181,8 @@ def generate_candlestick_chart(
         # Create figure with or without volume subplot
         if show_volume and any(v > 0 for v in volumes):
             fig = make_subplots(
-                rows=2, cols=1,
+                rows=2,
+                cols=1,
                 shared_xaxes=True,
                 vertical_spacing=0.03,
                 row_heights=[0.75, 0.25],
@@ -198,7 +203,7 @@ def generate_candlestick_chart(
             decreasing_line_color=DARK_THEME["down_color"],
             increasing_fillcolor=DARK_THEME["up_color"],
             decreasing_fillcolor=DARK_THEME["down_color"],
-            name="Price"
+            name="Price",
         )
 
         if volume_row:
@@ -209,18 +214,23 @@ def generate_candlestick_chart(
         # Add volume bars if enabled
         if volume_row:
             volume_colors = [
-                DARK_THEME["up_color"] if closes[i] >= opens[i] else DARK_THEME["down_color"]
+                (
+                    DARK_THEME["up_color"]
+                    if closes[i] >= opens[i]
+                    else DARK_THEME["down_color"]
+                )
                 for i in range(len(timestamps))
             ]
             fig.add_trace(
                 go.Bar(
                     x=timestamps,
                     y=volumes,
-                    name='Volume',
+                    name="Volume",
                     marker_color=volume_colors,
                     opacity=0.7,
                 ),
-                row=2, col=1
+                row=2,
+                col=1,
             )
 
         # Add horizontal rectangles (grid zones, etc.)
@@ -233,10 +243,11 @@ def generate_candlestick_chart(
                     line_width=0,
                     annotation_text=rect.get("label"),
                     annotation_position="top left",
-                    annotation_font=dict(
-                        color=DARK_THEME["font_color"],
-                        size=11
-                    ) if rect.get("label") else None
+                    annotation_font=(
+                        dict(color=DARK_THEME["font_color"], size=11)
+                        if rect.get("label")
+                        else None
+                    ),
                 )
 
         # Add horizontal lines (start price, end price, limit price, etc.)
@@ -249,10 +260,13 @@ def generate_candlestick_chart(
                     line_width=hline.get("width", 2),
                     annotation_text=hline.get("label"),
                     annotation_position=hline.get("label_position", "right"),
-                    annotation_font=dict(
-                        color=hline.get("color", DARK_THEME["line_color"]),
-                        size=10
-                    ) if hline.get("label") else None
+                    annotation_font=(
+                        dict(
+                            color=hline.get("color", DARK_THEME["line_color"]), size=10
+                        )
+                        if hline.get("label")
+                        else None
+                    ),
                 )
 
         # Add current price line
@@ -264,10 +278,7 @@ def generate_candlestick_chart(
                 line_width=2,
                 annotation_text=f"Current: {current_price:,.4f}",
                 annotation_position="left",
-                annotation_font=dict(
-                    color=DARK_THEME["current_price_color"],
-                    size=10
-                )
+                annotation_font=dict(color=DARK_THEME["current_price_color"], size=10),
             )
 
         # Calculate height based on volume
@@ -275,22 +286,23 @@ def generate_candlestick_chart(
 
         # Update layout with dark theme
         fig.update_layout(
-            title=dict(
-                text=f"<b>{title}</b>" if title else None,
-                font=dict(
-                    family=DARK_THEME["font_family"],
-                    size=18,
-                    color=DARK_THEME["font_color"]
-                ),
-                x=0.5,
-                xanchor="center"
-            ) if title else None,
+            title=(
+                dict(
+                    text=f"<b>{title}</b>" if title else None,
+                    font=dict(
+                        family=DARK_THEME["font_family"],
+                        size=18,
+                        color=DARK_THEME["font_color"],
+                    ),
+                    x=0.5,
+                    xanchor="center",
+                )
+                if title
+                else None
+            ),
             paper_bgcolor=DARK_THEME["paper_bgcolor"],
             plot_bgcolor=DARK_THEME["plot_bgcolor"],
-            font=dict(
-                family=DARK_THEME["font_family"],
-                color=DARK_THEME["font_color"]
-            ),
+            font=dict(family=DARK_THEME["font_family"], color=DARK_THEME["font_color"]),
             xaxis=dict(
                 gridcolor=DARK_THEME["grid_color"],
                 color=DARK_THEME["axis_color"],
@@ -308,32 +320,31 @@ def generate_candlestick_chart(
                 gridcolor=DARK_THEME["grid_color"],
                 color=DARK_THEME["axis_color"],
                 side="right",
-                showgrid=True
+                showgrid=True,
             ),
             showlegend=False,
             width=width,
             height=actual_height,
-            margin=dict(l=10, r=120, t=50, b=50)
+            margin=dict(l=10, r=120, t=50, b=50),
         )
 
         # Update volume subplot axes if present
         if volume_row:
             fig.update_xaxes(
-                gridcolor=DARK_THEME["grid_color"],
-                showgrid=True,
-                row=2, col=1
+                gridcolor=DARK_THEME["grid_color"], showgrid=True, row=2, col=1
             )
             fig.update_yaxes(
                 gridcolor=DARK_THEME["grid_color"],
                 color=DARK_THEME["axis_color"],
                 showgrid=True,
                 side="right",
-                row=2, col=1
+                row=2,
+                col=1,
             )
 
         # Convert to PNG bytes
         img_bytes = io.BytesIO()
-        fig.write_image(img_bytes, format='png', scale=2)
+        fig.write_image(img_bytes, format="png", scale=2)
         img_bytes.seek(0)
 
         return img_bytes
@@ -352,7 +363,7 @@ def generate_liquidity_chart(
     current_price: float = None,
     pair_name: str = "Pool",
     lower_price: float = None,
-    upper_price: float = None
+    upper_price: float = None,
 ) -> Optional[bytes]:
     """Generate liquidity distribution chart image using Plotly
 
@@ -376,53 +387,59 @@ def generate_liquidity_chart(
         # Process bin data - convert base token to quote value for comparison
         bin_data = []
         for b in bins:
-            base = float(b.get('base_token_amount', 0) or 0)
-            quote = float(b.get('quote_token_amount', 0) or 0)
-            price = float(b.get('price', 0) or 0)
-            bin_id = b.get('bin_id')
+            base = float(b.get("base_token_amount", 0) or 0)
+            quote = float(b.get("quote_token_amount", 0) or 0)
+            price = float(b.get("price", 0) or 0)
+            bin_id = b.get("bin_id")
 
             if price > 0:
                 # Convert base token amount to quote token value
                 base_value_in_quote = base * price
-                bin_data.append({
-                    'bin_id': bin_id,
-                    'base_value': base_value_in_quote,
-                    'quote': quote,
-                    'price': price,
-                    'is_active': bin_id == active_bin_id
-                })
+                bin_data.append(
+                    {
+                        "bin_id": bin_id,
+                        "base_value": base_value_in_quote,
+                        "quote": quote,
+                        "price": price,
+                        "is_active": bin_id == active_bin_id,
+                    }
+                )
 
         if not bin_data:
             return None
 
         # Sort by price
-        bin_data.sort(key=lambda x: x['price'])
+        bin_data.sort(key=lambda x: x["price"])
 
         # Extract data for plotting
-        prices = [b['price'] for b in bin_data]
-        base_values = [b['base_value'] for b in bin_data]
-        quote_amounts = [b['quote'] for b in bin_data]
+        prices = [b["price"] for b in bin_data]
+        base_values = [b["base_value"] for b in bin_data]
+        quote_amounts = [b["quote"] for b in bin_data]
 
         # Create figure with stacked bars
         fig = go.Figure()
 
         # Quote token bars (bottom)
-        fig.add_trace(go.Bar(
-            x=prices,
-            y=quote_amounts,
-            name='Quote Token',
-            marker_color='#22c55e',
-            hovertemplate='Price: %{x:.6f}<br>Quote Value: %{y:,.2f}<extra></extra>'
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=prices,
+                y=quote_amounts,
+                name="Quote Token",
+                marker_color="#22c55e",
+                hovertemplate="Price: %{x:.6f}<br>Quote Value: %{y:,.2f}<extra></extra>",
+            )
+        )
 
         # Base token bars (top) - showing value in quote terms
-        fig.add_trace(go.Bar(
-            x=prices,
-            y=base_values,
-            name='Base Token (in Quote)',
-            marker_color='#3b82f6',
-            hovertemplate='Price: %{x:.6f}<br>Base Value: %{y:,.2f}<extra></extra>'
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=prices,
+                y=base_values,
+                name="Base Token (in Quote)",
+                marker_color="#3b82f6",
+                hovertemplate="Price: %{x:.6f}<br>Base Value: %{y:,.2f}<extra></extra>",
+            )
+        )
 
         # Add current price line (use unified theme)
         if current_price:
@@ -433,7 +450,7 @@ def generate_liquidity_chart(
                 line_width=2,
                 annotation_text=f"Current: {current_price:.6f}",
                 annotation_position="top",
-                annotation_font_color=DARK_THEME["down_color"]
+                annotation_font_color=DARK_THEME["down_color"],
             )
 
         # Add lower price range line
@@ -445,7 +462,7 @@ def generate_liquidity_chart(
                 line_width=2,
                 annotation_text=f"L: {lower_price:.6f}",
                 annotation_position="bottom left",
-                annotation_font_color=DARK_THEME["current_price_color"]
+                annotation_font_color=DARK_THEME["current_price_color"],
             )
 
         # Add upper price range line
@@ -457,7 +474,7 @@ def generate_liquidity_chart(
                 line_width=2,
                 annotation_text=f"U: {upper_price:.6f}",
                 annotation_position="bottom right",
-                annotation_font_color=DARK_THEME["current_price_color"]
+                annotation_font_color=DARK_THEME["current_price_color"],
             )
 
         # Update layout (use unified theme)
@@ -467,29 +484,22 @@ def generate_liquidity_chart(
                 font=dict(
                     family=DARK_THEME["font_family"],
                     size=18,
-                    color=DARK_THEME["font_color"]
+                    color=DARK_THEME["font_color"],
                 ),
-                x=0.5
+                x=0.5,
             ),
             xaxis_title="Price",
             yaxis_title="Liquidity (Quote Value)",
-            barmode='stack',
+            barmode="stack",
             paper_bgcolor=DARK_THEME["paper_bgcolor"],
             plot_bgcolor=DARK_THEME["plot_bgcolor"],
-            font=dict(
-                family=DARK_THEME["font_family"],
-                color=DARK_THEME["font_color"]
-            ),
+            font=dict(family=DARK_THEME["font_family"], color=DARK_THEME["font_color"]),
             legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
             ),
             margin=dict(l=60, r=40, t=80, b=60),
             width=800,
-            height=500
+            height=500,
         )
 
         # Update axes (use unified theme)
@@ -498,13 +508,13 @@ def generate_liquidity_chart(
             gridwidth=1,
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
-            tickformat='.5f'
+            tickformat=".5f",
         )
         fig.update_yaxes(
             showgrid=True,
             gridwidth=1,
             gridcolor=DARK_THEME["grid_color"],
-            color=DARK_THEME["axis_color"]
+            color=DARK_THEME["axis_color"],
         )
 
         # Export to bytes
@@ -524,7 +534,7 @@ def generate_ohlcv_chart(
     pair_name: str,
     timeframe: str,
     base_symbol: str = None,
-    quote_symbol: str = None
+    quote_symbol: str = None,
 ) -> Optional[io.BytesIO]:
     """Generate OHLCV candlestick chart using the unified candlestick function.
 
@@ -566,7 +576,7 @@ def generate_combined_chart(
     quote_symbol: str = None,
     lower_price: float = None,
     upper_price: float = None,
-    entry_price: float = None
+    entry_price: float = None,
 ) -> Optional[io.BytesIO]:
     """Generate combined OHLCV + Liquidity distribution chart
 
@@ -626,13 +636,15 @@ def generate_combined_chart(
                 # Parse timestamp
                 if isinstance(ts, (int, float)):
                     times.append(datetime.fromtimestamp(ts))
-                elif hasattr(ts, 'to_pydatetime'):
+                elif hasattr(ts, "to_pydatetime"):
                     times.append(ts.to_pydatetime())
                 elif isinstance(ts, datetime):
                     times.append(ts)
                 else:
                     try:
-                        times.append(datetime.fromisoformat(str(ts).replace('Z', '+00:00')))
+                        times.append(
+                            datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                        )
                     except Exception:
                         continue
 
@@ -660,21 +672,23 @@ def generate_combined_chart(
         bin_data = []
         if bins:
             for b in bins:
-                base = float(b.get('base_token_amount', 0) or 0)
-                quote = float(b.get('quote_token_amount', 0) or 0)
-                price = float(b.get('price', 0) or 0)
+                base = float(b.get("base_token_amount", 0) or 0)
+                quote = float(b.get("quote_token_amount", 0) or 0)
+                price = float(b.get("price", 0) or 0)
 
                 if price > 0:
                     base_value_in_quote = base * price
                     total_liquidity = base_value_in_quote + quote
-                    bin_data.append({
-                        'price': price,
-                        'base_value': base_value_in_quote,
-                        'quote': quote,
-                        'total': total_liquidity
-                    })
+                    bin_data.append(
+                        {
+                            "price": price,
+                            "base_value": base_value_in_quote,
+                            "quote": quote,
+                            "total": total_liquidity,
+                        }
+                    )
 
-            bin_data.sort(key=lambda x: x['price'])
+            bin_data.sort(key=lambda x: x["price"])
 
         has_liquidity = len(bin_data) > 0
 
@@ -683,7 +697,8 @@ def generate_combined_chart(
         # Row 2: Volume (left only)
         if has_liquidity:
             fig = make_subplots(
-                rows=2, cols=2,
+                rows=2,
+                cols=2,
                 shared_yaxes=True,  # Share Y-axis between OHLCV and Liquidity
                 column_widths=[0.7, 0.3],
                 row_heights=[0.7, 0.3],
@@ -691,13 +706,14 @@ def generate_combined_chart(
                 horizontal_spacing=0.02,
                 specs=[
                     [{"type": "candlestick"}, {"type": "bar"}],
-                    [{"type": "bar"}, None]  # Volume only on left
-                ]
+                    [{"type": "bar"}, None],  # Volume only on left
+                ],
             )
         else:
             # Fallback to OHLCV-only layout
             fig = make_subplots(
-                rows=2, cols=1,
+                rows=2,
+                cols=1,
                 shared_xaxes=True,
                 vertical_spacing=0.03,
                 row_heights=[0.7, 0.3],
@@ -711,37 +727,49 @@ def generate_combined_chart(
                 high=highs,
                 low=lows,
                 close=closes,
-                name='Price',
+                name="Price",
                 increasing_line_color=DARK_THEME["up_color"],
                 decreasing_line_color=DARK_THEME["down_color"],
                 increasing_fillcolor=DARK_THEME["up_color"],
                 decreasing_fillcolor=DARK_THEME["down_color"],
             ),
-            row=1, col=1
+            row=1,
+            col=1,
         )
 
         # Add volume bars (use unified theme colors)
-        volume_colors = [DARK_THEME["up_color"] if closes[i] >= opens[i] else DARK_THEME["down_color"] for i in range(len(times))]
+        volume_colors = [
+            (
+                DARK_THEME["up_color"]
+                if closes[i] >= opens[i]
+                else DARK_THEME["down_color"]
+            )
+            for i in range(len(times))
+        ]
         fig.add_trace(
             go.Bar(
                 x=times,
                 y=volumes,
-                name='Volume',
+                name="Volume",
                 marker_color=volume_colors,
                 opacity=0.7,
             ),
-            row=2, col=1
+            row=2,
+            col=1,
         )
 
         # Add liquidity distribution if available
         if has_liquidity:
-            liq_prices = [b['price'] for b in bin_data]
-            liq_quote = [b['quote'] for b in bin_data]
-            liq_base = [b['base_value'] for b in bin_data]
+            liq_prices = [b["price"] for b in bin_data]
+            liq_quote = [b["quote"] for b in bin_data]
+            liq_base = [b["base_value"] for b in bin_data]
 
             # Calculate bar width for proper spacing
             if len(liq_prices) > 1:
-                price_diffs = [liq_prices[i+1] - liq_prices[i] for i in range(len(liq_prices)-1)]
+                price_diffs = [
+                    liq_prices[i + 1] - liq_prices[i]
+                    for i in range(len(liq_prices) - 1)
+                ]
                 bar_width = min(price_diffs) * 0.8 if price_diffs else None
             else:
                 bar_width = None
@@ -751,15 +779,16 @@ def generate_combined_chart(
                 go.Bar(
                     x=liq_quote,
                     y=liq_prices,
-                    name='Quote Liquidity',
-                    marker_color='#22c55e',
-                    marker_line_color='#16a34a',
+                    name="Quote Liquidity",
+                    marker_color="#22c55e",
+                    marker_line_color="#16a34a",
                     marker_line_width=1,
-                    orientation='h',
+                    orientation="h",
                     width=bar_width,
-                    hovertemplate='Price: %{y:.6f}<br>Quote: %{x:,.2f}<extra></extra>'
+                    hovertemplate="Price: %{y:.6f}<br>Quote: %{x:,.2f}<extra></extra>",
                 ),
-                row=1, col=2
+                row=1,
+                col=2,
             )
 
             # Base token bars stacked
@@ -767,15 +796,16 @@ def generate_combined_chart(
                 go.Bar(
                     x=liq_base,
                     y=liq_prices,
-                    name='Base Liquidity',
-                    marker_color='#3b82f6',
-                    marker_line_color='#2563eb',
+                    name="Base Liquidity",
+                    marker_color="#3b82f6",
+                    marker_line_color="#2563eb",
                     marker_line_width=1,
-                    orientation='h',
+                    orientation="h",
                     width=bar_width,
-                    hovertemplate='Price: %{y:.6f}<br>Base: %{x:,.2f}<extra></extra>'
+                    hovertemplate="Price: %{y:.6f}<br>Base: %{x:,.2f}<extra></extra>",
                 ),
-                row=1, col=2
+                row=1,
+                col=2,
             )
 
         # Add current price line (use unified theme colors)
@@ -786,7 +816,8 @@ def generate_combined_chart(
                 line_dash="dash",
                 line_color=DARK_THEME["current_price_color"],
                 opacity=0.7,
-                row=1, col=1,
+                row=1,
+                col=1,
                 annotation_text=f"${price_to_mark:.6f}",
                 annotation_position="left",
                 annotation_font_color=DARK_THEME["current_price_color"],
@@ -797,7 +828,8 @@ def generate_combined_chart(
                     line_dash="dash",
                     line_color=DARK_THEME["current_price_color"],
                     opacity=0.7,
-                    row=1, col=2,
+                    row=1,
+                    col=2,
                 )
 
         # Add lower price range line
@@ -807,7 +839,8 @@ def generate_combined_chart(
                 line_dash="dot",
                 line_color="#3b82f6",  # Blue
                 line_width=2,
-                row=1, col=1,
+                row=1,
+                col=1,
                 annotation_text=f"Lower: {lower_price:.6f}",
                 annotation_position="right",
                 annotation_font_color="#3b82f6",
@@ -818,7 +851,8 @@ def generate_combined_chart(
                     line_dash="dot",
                     line_color="#3b82f6",
                     line_width=2,
-                    row=1, col=2,
+                    row=1,
+                    col=2,
                 )
 
         # Add upper price range line
@@ -828,7 +862,8 @@ def generate_combined_chart(
                 line_dash="dot",
                 line_color="#3b82f6",  # Blue
                 line_width=2,
-                row=1, col=1,
+                row=1,
+                col=1,
                 annotation_text=f"Upper: {upper_price:.6f}",
                 annotation_position="right",
                 annotation_font_color="#3b82f6",
@@ -839,7 +874,8 @@ def generate_combined_chart(
                     line_dash="dot",
                     line_color="#3b82f6",
                     line_width=2,
-                    row=1, col=2,
+                    row=1,
+                    col=2,
                 )
 
         # Add entry price line (green dashed) - for viewing existing positions
@@ -849,7 +885,8 @@ def generate_combined_chart(
                 line_dash="dash",
                 line_color="#22c55e",  # Green
                 line_width=2,
-                row=1, col=1,
+                row=1,
+                col=1,
                 annotation_text=f"Entry: {entry_price:.6f}",
                 annotation_position="left",
                 annotation_font_color="#22c55e",
@@ -860,7 +897,8 @@ def generate_combined_chart(
                     line_dash="dash",
                     line_color="#22c55e",
                     line_width=2,
-                    row=1, col=2,
+                    row=1,
+                    col=2,
                 )
 
         # Build title
@@ -876,40 +914,45 @@ def generate_combined_chart(
                 font=dict(
                     family=DARK_THEME["font_family"],
                     color=DARK_THEME["font_color"],
-                    size=18
+                    size=18,
                 ),
                 x=0.5,
             ),
             paper_bgcolor=DARK_THEME["paper_bgcolor"],
             plot_bgcolor=DARK_THEME["plot_bgcolor"],
-            font=dict(
-                family=DARK_THEME["font_family"],
-                color=DARK_THEME["font_color"]
-            ),
+            font=dict(family=DARK_THEME["font_family"], color=DARK_THEME["font_color"]),
             xaxis_rangeslider_visible=False,
             showlegend=has_liquidity,  # Show legend when liquidity panel exists
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="center",
-                x=0.85,
-                font=dict(size=10),
-            ) if has_liquidity else None,
+            legend=(
+                dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.85,
+                    font=dict(size=10),
+                )
+                if has_liquidity
+                else None
+            ),
             height=700,
             width=1200,
             margin=dict(l=50, r=50, t=70, b=50),
-            barmode='stack',
+            barmode="stack",
             bargap=0.1,  # Gap between bars
         )
 
         # Calculate expected interval for rangebreaks (to hide gaps in trading)
         if len(times) >= 2:
             # Calculate time delta between candles
-            time_deltas = [(times[i+1] - times[i]).total_seconds() for i in range(len(times)-1) if times[i+1] > times[i]]
+            time_deltas = [
+                (times[i + 1] - times[i]).total_seconds()
+                for i in range(len(times) - 1)
+                if times[i + 1] > times[i]
+            ]
             if time_deltas:
                 # Use median delta as the expected interval
-                expected_interval = sorted(time_deltas)[len(time_deltas)//2]
+                expected_interval = sorted(time_deltas)[len(time_deltas) // 2]
                 # Set dvalue for rangebreaks (gaps > 2x expected interval)
                 gap_threshold = expected_interval * 2 * 1000  # Convert to ms
             else:
@@ -937,14 +980,14 @@ def generate_combined_chart(
         )
 
         # Axis titles
-        fig.update_yaxes(title_text="Price", row=1, col=1, side='left')
+        fig.update_yaxes(title_text="Price", row=1, col=1, side="left")
         fig.update_yaxes(title_text="Volume", row=2, col=1)
         if has_liquidity:
             fig.update_xaxes(title_text="Liquidity", row=1, col=2)
 
         # Save to buffer
         buf = io.BytesIO()
-        fig.write_image(buf, format='png', scale=2)
+        fig.write_image(buf, format="png", scale=2)
         buf.seek(0)
 
         return buf
@@ -958,8 +1001,7 @@ def generate_combined_chart(
 
 
 def generate_aggregated_liquidity_chart(
-    pools_data: list,
-    pair_name: str = "Aggregated"
+    pools_data: list, pair_name: str = "Aggregated"
 ) -> Optional[bytes]:
     """Generate aggregated liquidity distribution chart from multiple pools
 
@@ -974,15 +1016,16 @@ def generate_aggregated_liquidity_chart(
         PNG image bytes or None if failed
     """
     try:
-        import plotly.graph_objects as go
         from collections import defaultdict
+
+        import plotly.graph_objects as go
 
         if not pools_data:
             logger.warning("No pools_data provided to aggregated chart")
             return None
 
         # Filter pools that have bins data
-        valid_pools = [p for p in pools_data if p.get('bins')]
+        valid_pools = [p for p in pools_data if p.get("bins")]
         if not valid_pools:
             logger.warning("No valid pools with bins data")
             return None
@@ -993,62 +1036,70 @@ def generate_aggregated_liquidity_chart(
         weighted_price_sum = 0
 
         for pool_data in valid_pools:
-            pool = pool_data.get('pool', {})
-            pool_info = pool_data.get('pool_info', {})
-            bins = pool_data.get('bins', [])
+            pool = pool_data.get("pool", {})
+            pool_info = pool_data.get("pool_info", {})
+            bins = pool_data.get("bins", [])
 
-            tvl = float(pool.get('liquidity', 0) or pool_info.get('liquidity', 0) or 0)
-            current_price = float(pool_info.get('price', 0) or pool.get('current_price', 0) or 0)
+            tvl = float(pool.get("liquidity", 0) or pool_info.get("liquidity", 0) or 0)
+            current_price = float(
+                pool_info.get("price", 0) or pool.get("current_price", 0) or 0
+            )
 
             if tvl > 0 and current_price > 0:
                 total_tvl += tvl
                 weighted_price_sum += current_price * tvl
 
             for b in bins:
-                base = float(b.get('base_token_amount', 0) or 0)
-                quote = float(b.get('quote_token_amount', 0) or 0)
-                price = float(b.get('price', 0) or 0)
+                base = float(b.get("base_token_amount", 0) or 0)
+                quote = float(b.get("quote_token_amount", 0) or 0)
+                price = float(b.get("price", 0) or 0)
 
                 if price > 0:
                     base_value_in_quote = base * price
                     total_value = base_value_in_quote + quote
                     if total_value > 0:
-                        all_bins.append({
-                            'price': price,
-                            'base_value': base_value_in_quote,
-                            'quote': quote,
-                            'total': total_value
-                        })
+                        all_bins.append(
+                            {
+                                "price": price,
+                                "base_value": base_value_in_quote,
+                                "quote": quote,
+                                "total": total_value,
+                            }
+                        )
 
         if not all_bins:
             logger.warning("No bins collected from pools")
             return None
 
         # Calculate weighted average price
-        avg_price = weighted_price_sum / total_tvl if total_tvl > 0 else sum(b['price'] for b in all_bins) / len(all_bins)
+        avg_price = (
+            weighted_price_sum / total_tvl
+            if total_tvl > 0
+            else sum(b["price"] for b in all_bins) / len(all_bins)
+        )
 
         # Sort bins by price
-        all_bins.sort(key=lambda x: x['price'])
+        all_bins.sort(key=lambda x: x["price"])
 
         # Filter outliers (keep middle 95% by value)
         cumulative = 0
-        total_value = sum(b['total'] for b in all_bins)
+        total_value = sum(b["total"] for b in all_bins)
         min_idx, max_idx = 0, len(all_bins) - 1
 
         for i, b in enumerate(all_bins):
-            cumulative += b['total']
+            cumulative += b["total"]
             if cumulative >= total_value * 0.025 and min_idx == 0:
                 min_idx = i
             if cumulative >= total_value * 0.975:
                 max_idx = i
                 break
 
-        filtered_bins = all_bins[min_idx:max_idx + 1]
+        filtered_bins = all_bins[min_idx : max_idx + 1]
         if len(filtered_bins) < 5:
             filtered_bins = all_bins
 
         # Create price buckets
-        prices = [b['price'] for b in filtered_bins]
+        prices = [b["price"] for b in filtered_bins]
         min_price, max_price = min(prices), max(prices)
         price_range = max_price - min_price
 
@@ -1057,37 +1108,43 @@ def generate_aggregated_liquidity_chart(
         bucket_size = price_range / num_buckets if price_range > 0 else 1
 
         # Aggregate into buckets
-        buckets = defaultdict(lambda: {'base_value': 0, 'quote': 0})
+        buckets = defaultdict(lambda: {"base_value": 0, "quote": 0})
         for b in filtered_bins:
-            bucket_idx = int((b['price'] - min_price) / bucket_size) if bucket_size > 0 else 0
+            bucket_idx = (
+                int((b["price"] - min_price) / bucket_size) if bucket_size > 0 else 0
+            )
             bucket_idx = min(bucket_idx, num_buckets - 1)
             bucket_price = min_price + (bucket_idx + 0.5) * bucket_size
-            buckets[bucket_price]['base_value'] += b['base_value']
-            buckets[bucket_price]['quote'] += b['quote']
+            buckets[bucket_price]["base_value"] += b["base_value"]
+            buckets[bucket_price]["quote"] += b["quote"]
 
         # Extract for plotting
         bucket_prices = sorted(buckets.keys())
-        base_values = [buckets[p]['base_value'] for p in bucket_prices]
-        quote_values = [buckets[p]['quote'] for p in bucket_prices]
+        base_values = [buckets[p]["base_value"] for p in bucket_prices]
+        quote_values = [buckets[p]["quote"] for p in bucket_prices]
 
         # Create figure
         fig = go.Figure()
 
-        fig.add_trace(go.Bar(
-            x=bucket_prices,
-            y=quote_values,
-            name='Quote Token',
-            marker_color='#22c55e',
-            hovertemplate='Price: %{x:.6f}<br>Quote: %{y:,.2f}<extra></extra>'
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=bucket_prices,
+                y=quote_values,
+                name="Quote Token",
+                marker_color="#22c55e",
+                hovertemplate="Price: %{x:.6f}<br>Quote: %{y:,.2f}<extra></extra>",
+            )
+        )
 
-        fig.add_trace(go.Bar(
-            x=bucket_prices,
-            y=base_values,
-            name='Base Token',
-            marker_color='#3b82f6',
-            hovertemplate='Price: %{x:.6f}<br>Base: %{y:,.2f}<extra></extra>'
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=bucket_prices,
+                y=base_values,
+                name="Base Token",
+                marker_color="#3b82f6",
+                hovertemplate="Price: %{x:.6f}<br>Base: %{y:,.2f}<extra></extra>",
+            )
+        )
 
         # Add average price line (use unified theme)
         if avg_price and min_price <= avg_price <= max_price:
@@ -1098,7 +1155,7 @@ def generate_aggregated_liquidity_chart(
                 line_width=2,
                 annotation_text=f"Avg: {avg_price:.6f}",
                 annotation_position="top",
-                annotation_font_color=DARK_THEME["down_color"]
+                annotation_font_color=DARK_THEME["down_color"],
             )
 
         # Update layout (use unified theme)
@@ -1108,29 +1165,22 @@ def generate_aggregated_liquidity_chart(
                 font=dict(
                     family=DARK_THEME["font_family"],
                     size=18,
-                    color=DARK_THEME["font_color"]
+                    color=DARK_THEME["font_color"],
                 ),
-                x=0.5
+                x=0.5,
             ),
             xaxis_title="Price",
             yaxis_title="Liquidity (Quote Value)",
-            barmode='stack',
+            barmode="stack",
             paper_bgcolor=DARK_THEME["paper_bgcolor"],
             plot_bgcolor=DARK_THEME["plot_bgcolor"],
-            font=dict(
-                family=DARK_THEME["font_family"],
-                color=DARK_THEME["font_color"]
-            ),
+            font=dict(family=DARK_THEME["font_family"], color=DARK_THEME["font_color"]),
             legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
             ),
             margin=dict(l=60, r=40, t=80, b=60),
             width=900,
-            height=550
+            height=550,
         )
 
         # Update axes (use unified theme)
@@ -1139,13 +1189,13 @@ def generate_aggregated_liquidity_chart(
             gridwidth=1,
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
-            tickformat='.5f'
+            tickformat=".5f",
         )
         fig.update_yaxes(
             showgrid=True,
             gridwidth=1,
             gridcolor=DARK_THEME["grid_color"],
-            color=DARK_THEME["axis_color"]
+            color=DARK_THEME["axis_color"],
         )
 
         img_bytes = fig.to_image(format="png", scale=2)

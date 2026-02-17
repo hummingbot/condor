@@ -9,16 +9,29 @@ Provides:
 import logging
 import re
 from decimal import Decimal
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
-from telegram.error import BadRequest
 
-from utils.telegram_formatters import escape_markdown_v2, format_error_message, resolve_token_symbol, format_amount, KNOWN_TOKENS
-from handlers.config.user_preferences import set_dex_last_pool, get_dex_last_pool
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
+from telegram.ext import ContextTypes
+
 from config_manager import get_client
-from ._shared import get_cached, set_cached, DEFAULT_CACHE_TTL, invalidate_cache
-from .visualizations import generate_liquidity_chart, generate_ohlcv_chart, generate_combined_chart, generate_aggregated_liquidity_chart
-from .pool_data import fetch_ohlcv, fetch_liquidity_bins, get_gecko_network
+from handlers.config.user_preferences import get_dex_last_pool, set_dex_last_pool
+from utils.telegram_formatters import (
+    KNOWN_TOKENS,
+    escape_markdown_v2,
+    format_amount,
+    format_error_message,
+    resolve_token_symbol,
+)
+
+from ._shared import DEFAULT_CACHE_TTL, get_cached, invalidate_cache, set_cached
+from .pool_data import fetch_liquidity_bins, fetch_ohlcv, get_gecko_network
+from .visualizations import (
+    generate_aggregated_liquidity_chart,
+    generate_combined_chart,
+    generate_liquidity_chart,
+    generate_ohlcv_chart,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +40,10 @@ logger = logging.getLogger(__name__)
 # TOKEN CACHE HELPERS
 # ============================================
 
-async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta", chat_id: int = None) -> dict:
+
+async def get_token_cache_from_gateway(
+    network: str = "solana-mainnet-beta", chat_id: int = None
+) -> dict:
     """
     Fetch tokens from Gateway and build address->symbol cache.
 
@@ -44,20 +60,24 @@ async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta", cha
         client = await get_client(chat_id, context=context)
 
         # Try to get tokens from Gateway
-        if hasattr(client, 'gateway'):
+        if hasattr(client, "gateway"):
             try:
-                if hasattr(client.gateway, 'get_network_tokens') and callable(client.gateway.get_network_tokens):
+                if hasattr(client.gateway, "get_network_tokens") and callable(
+                    client.gateway.get_network_tokens
+                ):
                     response = await client.gateway.get_network_tokens(network)
-                    tokens = response.get('tokens', []) if response else []
+                    tokens = response.get("tokens", []) if response else []
                 else:
                     # Fallback: get tokens from network config
                     config_response = await client.gateway.get_network_config(network)
-                    tokens = config_response.get('tokens', []) if config_response else []
+                    tokens = (
+                        config_response.get("tokens", []) if config_response else []
+                    )
 
                 # Build cache from Gateway tokens
                 for token in tokens:
-                    address = token.get('address', '')
-                    symbol = token.get('symbol', '')
+                    address = token.get("address", "")
+                    symbol = token.get("symbol", "")
                     if address and symbol:
                         token_cache[address] = symbol
 
@@ -70,7 +90,9 @@ async def get_token_cache_from_gateway(network: str = "solana-mainnet-beta", cha
     return token_cache
 
 
-def format_pair_from_addresses(base_token: str, quote_token: str, token_cache: dict = None) -> str:
+def format_pair_from_addresses(
+    base_token: str, quote_token: str, token_cache: dict = None
+) -> str:
     """Format a trading pair from token addresses using symbols."""
     base_symbol = resolve_token_symbol(base_token, token_cache)
     quote_symbol = resolve_token_symbol(quote_token, token_cache)
@@ -104,6 +126,7 @@ def get_dex_pool_url(connector: str, pool_address: str) -> str:
 # POOL INFO (by address - supports meteora, raydium, orca)
 # ============================================
 
+
 async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle CLMM pool info lookup by address"""
     help_text = (
@@ -122,9 +145,7 @@ async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["dex_state"] = "pool_info"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
@@ -139,52 +160,56 @@ def _format_pool_info(pool: dict) -> str:
     """
     lines = []
 
-    pair = pool.get('trading_pair', pool.get('name', 'N/A'))
+    pair = pool.get("trading_pair", pool.get("name", "N/A"))
     lines.append(f"🏊 Pool: {pair}")
     lines.append("")
 
     # Basic info
-    if pool.get('pool_address') or pool.get('address'):
-        addr = pool.get('pool_address') or pool.get('address')
+    if pool.get("pool_address") or pool.get("address"):
+        addr = pool.get("pool_address") or pool.get("address")
         lines.append(f"📍 Address: {addr[:12]}...{addr[-8:]}")
 
-    if pool.get('bin_step'):
+    if pool.get("bin_step"):
         lines.append(f"📊 Bin Step: {pool.get('bin_step')}")
 
-    if pool.get('fee') is not None:
-        fee_pct = float(pool.get('fee', 0)) * 100 if float(pool.get('fee', 0)) < 1 else pool.get('fee')
+    if pool.get("fee") is not None:
+        fee_pct = (
+            float(pool.get("fee", 0)) * 100
+            if float(pool.get("fee", 0)) < 1
+            else pool.get("fee")
+        )
         lines.append(f"💸 Fee: {fee_pct:.2f}%")
 
     lines.append("")
 
     # TVL and volume
-    tvl = pool.get('liquidity') or pool.get('tvl')
+    tvl = pool.get("liquidity") or pool.get("tvl")
     if tvl is not None:
         lines.append(f"💰 TVL: ${_format_number(tvl)}")
 
-    vol_24h = pool.get('volume_24h')
+    vol_24h = pool.get("volume_24h")
     if vol_24h is not None:
         lines.append(f"📈 Volume 24h: ${_format_number(vol_24h)}")
 
     # APR/Fees
-    apr = pool.get('apr')
+    apr = pool.get("apr")
     if apr is not None:
         lines.append(f"📊 APR: {_format_percent(apr)}")
 
-    fee_tvl = pool.get('fee_tvl_ratio', {})
-    if isinstance(fee_tvl, dict) and fee_tvl.get('hour_24'):
+    fee_tvl = pool.get("fee_tvl_ratio", {})
+    if isinstance(fee_tvl, dict) and fee_tvl.get("hour_24"):
         lines.append(f"💵 Fee/TVL 24h: {_format_percent(fee_tvl.get('hour_24'))}")
 
     lines.append("")
 
     # Prices
-    current_price = pool.get('current_price') or pool.get('price')
+    current_price = pool.get("current_price") or pool.get("price")
     if current_price is not None:
         lines.append(f"💱 Current Price: {current_price}")
 
     # Token info
-    base_token = pool.get('base_token') or pool.get('token_a')
-    quote_token = pool.get('quote_token') or pool.get('token_b')
+    base_token = pool.get("base_token") or pool.get("token_a")
+    quote_token = pool.get("quote_token") or pool.get("token_b")
     if base_token:
         lines.append(f"🪙 Base: {base_token}")
     if quote_token:
@@ -194,15 +219,15 @@ def _format_pool_info(pool: dict) -> str:
 
 
 async def process_pool_info(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process pool info lookup by address - shows full pool details with chart"""
     try:
         parts = user_input.split()
         if len(parts) < 2:
-            raise ValueError("Need: connector pool_address\n\nExample: meteora 5Q5...abc")
+            raise ValueError(
+                "Need: connector pool_address\n\nExample: meteora 5Q5...abc"
+            )
 
         connector = parts[0].lower()
         pool_address = parts[1]
@@ -210,12 +235,14 @@ async def process_pool_info(
         # Validate connector - must be a supported CLMM connector
         supported_connectors = ["meteora", "raydium", "orca"]
         if connector not in supported_connectors:
-            raise ValueError(f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}")
+            raise ValueError(
+                f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}"
+            )
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         # Send loading message
@@ -225,7 +252,7 @@ async def process_pool_info(
         result = await client.gateway_clmm.get_pool_info(
             connector=connector,
             network="solana-mainnet-beta",
-            pool_address=pool_address
+            pool_address=pool_address,
         )
 
         # Delete loading message
@@ -239,35 +266,40 @@ async def process_pool_info(
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
-                message,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
             return
 
         # Construct pool dict with connector info for _show_pool_detail
         pool = {
-            'pool_address': pool_address,
-            'address': pool_address,
-            'connector': connector,
-            'trading_pair': result.get('trading_pair', result.get('name', 'N/A')),
+            "pool_address": pool_address,
+            "address": pool_address,
+            "connector": connector,
+            "trading_pair": result.get("trading_pair", result.get("name", "N/A")),
             # Copy over any available data from result
-            'liquidity': result.get('liquidity') or result.get('tvl'),
-            'volume_24h': result.get('volume_24h'),
-            'fees_24h': result.get('fees_24h'),
-            'base_fee_percentage': result.get('base_fee_percentage') or result.get('fee'),
-            'max_fee_percentage': result.get('max_fee_percentage'),
-            'apr': result.get('apr'),
-            'apy': result.get('apy'),
-            'bin_step': result.get('bin_step'),
-            'current_price': result.get('current_price') or result.get('price'),
-            'mint_x': result.get('mint_x') or result.get('base_token') or result.get('token_a'),
-            'mint_y': result.get('mint_y') or result.get('quote_token') or result.get('token_b'),
+            "liquidity": result.get("liquidity") or result.get("tvl"),
+            "volume_24h": result.get("volume_24h"),
+            "fees_24h": result.get("fees_24h"),
+            "base_fee_percentage": result.get("base_fee_percentage")
+            or result.get("fee"),
+            "max_fee_percentage": result.get("max_fee_percentage"),
+            "apr": result.get("apr"),
+            "apy": result.get("apy"),
+            "bin_step": result.get("bin_step"),
+            "current_price": result.get("current_price") or result.get("price"),
+            "mint_x": result.get("mint_x")
+            or result.get("base_token")
+            or result.get("token_a"),
+            "mint_y": result.get("mint_y")
+            or result.get("quote_token")
+            or result.get("token_b"),
         }
 
         # Use the rich pool detail display with chart and add liquidity button
         # has_list_context=False since there's no list to go back to
-        await _show_pool_detail(update, context, pool, from_callback=False, has_list_context=False)
+        await _show_pool_detail(
+            update, context, pool, from_callback=False, has_list_context=False
+        )
 
     except Exception as e:
         logger.error(f"Error getting pool info: {e}", exc_info=True)
@@ -278,6 +310,7 @@ async def process_pool_info(
 # ============================================
 # POOL LIST (meteora only)
 # ============================================
+
 
 def _build_balance_table_compact(gateway_data: dict) -> str:
     """Build a compact balance table for display in pool list prompt (Solana tokens only)"""
@@ -335,9 +368,7 @@ async def handle_pool_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     balance_table = _build_balance_table_compact(gateway_data)
 
     help_text = (
-        r"📋 *List CLMM Pools*" + "\n\n" +
-        balance_table +
-        r"Reply with:" + "\n\n"
+        r"📋 *List CLMM Pools*" + "\n\n" + balance_table + r"Reply with:" + "\n\n"
         r"`[search_term] [limit]`" + "\n\n"
         r"*Examples:*" + "\n"
         r"`SOL 10`" + "\n"
@@ -354,9 +385,7 @@ async def handle_pool_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["pool_list_chat_id"] = update.callback_query.message.chat_id
 
     await update.callback_query.message.edit_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
@@ -420,12 +449,12 @@ def _format_pool_table(pools: list) -> str:
     for i, pool in enumerate(pools):
         idx = str(i + 1)
         # Truncate pair to 11 chars
-        pair = pool.get('trading_pair', 'N/A')[:11]
+        pair = pool.get("trading_pair", "N/A")[:11]
 
         # Get TVL value
         tvl_val = 0
         try:
-            tvl_val = float(pool.get('liquidity', 0) or 0)
+            tvl_val = float(pool.get("liquidity", 0) or 0)
         except (ValueError, TypeError):
             pass
 
@@ -433,7 +462,7 @@ def _format_pool_table(pools: list) -> str:
         tvl = _format_compact(tvl_val)
 
         # Base fee percentage - compact
-        base_fee = pool.get('base_fee_percentage')
+        base_fee = pool.get("base_fee_percentage")
         if base_fee:
             try:
                 fee_val = float(base_fee)
@@ -444,7 +473,7 @@ def _format_pool_table(pools: list) -> str:
             fee_str = "—"
 
         # APR percentage - compact format for large values
-        apr = pool.get('apr')
+        apr = pool.get("apr")
         if apr:
             try:
                 apr_val = float(apr)
@@ -464,9 +493,11 @@ def _format_pool_table(pools: list) -> str:
             apr_str = "—"
 
         # Bin step
-        bin_step = pool.get('bin_step', '—')
+        bin_step = pool.get("bin_step", "—")
 
-        lines.append(f"{idx:>2} {pair:<11} {apr_str:>7} {bin_step:>3} {fee_str:>5} {tvl:>5}")
+        lines.append(
+            f"{idx:>2} {pair:<11} {apr_str:>7} {bin_step:>3} {fee_str:>5} {tvl:>5}"
+        )
 
     lines.append("```")
 
@@ -492,7 +523,9 @@ def _format_compact(value) -> str:
         return "—"
 
 
-def _build_pool_selection_keyboard(pools: list, search_term: str = None, is_pair_search: bool = False) -> InlineKeyboardMarkup:
+def _build_pool_selection_keyboard(
+    pools: list, search_term: str = None, is_pair_search: bool = False
+) -> InlineKeyboardMarkup:
     """Build keyboard with numbered buttons for pool selection
 
     Args:
@@ -517,25 +550,33 @@ def _build_pool_selection_keyboard(pools: list, search_term: str = None, is_pair
 
     # Add Plot Liquidity buttons for pair searches (BASE-QUOTE format)
     if is_pair_search and len(pools) > 1:
-        keyboard.append([
-            InlineKeyboardButton("📊 Plot Top 75%", callback_data="dex:plot_liquidity:75"),
-            InlineKeyboardButton("📊 Top 90%", callback_data="dex:plot_liquidity:90"),
-            InlineKeyboardButton("📊 Top 99%", callback_data="dex:plot_liquidity:99"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📊 Plot Top 75%", callback_data="dex:plot_liquidity:75"
+                ),
+                InlineKeyboardButton(
+                    "📊 Top 90%", callback_data="dex:plot_liquidity:90"
+                ),
+                InlineKeyboardButton(
+                    "📊 Top 99%", callback_data="dex:plot_liquidity:99"
+                ),
+            ]
+        )
 
     # Add search again and back buttons
-    keyboard.append([
-        InlineKeyboardButton("🔍 New Search", callback_data="dex:pool_list"),
-        InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton("🔍 New Search", callback_data="dex:pool_list"),
+            InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity"),
+        ]
+    )
 
     return InlineKeyboardMarkup(keyboard)
 
 
 async def process_pool_list(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process pool list (meteora only) or select a pool by number"""
     try:
@@ -550,7 +591,7 @@ async def process_pool_list(
                 pool = cached_pools[pool_index]
 
                 # Show immediate feedback
-                pair = pool.get('trading_pair', pool.get('name', 'Pool'))
+                pair = pool.get("trading_pair", pool.get("name", "Pool"))
 
                 # Delete user's message
                 try:
@@ -570,7 +611,7 @@ async def process_pool_list(
                             chat_id=chat_id,
                             message_id=message_id,
                             text=loading_text,
-                            parse_mode="MarkdownV2"
+                            parse_mode="MarkdownV2",
                         )
                     except Exception:
                         pass
@@ -611,14 +652,16 @@ async def process_pool_list(
                     chat_id=chat_id,
                     message_id=message_id,
                     text=loading_msg,
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
                 )
                 loading_sent = "edited"
             except Exception:
                 loading_sent = None
 
         if not loading_sent:
-            sent_msg = await update.message.reply_text(loading_msg, parse_mode="MarkdownV2")
+            sent_msg = await update.message.reply_text(
+                loading_msg, parse_mode="MarkdownV2"
+            )
             context.user_data["pool_list_message_id"] = sent_msg.message_id
             context.user_data["pool_list_chat_id"] = sent_msg.chat_id
             chat_id = sent_msg.chat_id  # Ensure chat_id is set
@@ -630,14 +673,11 @@ async def process_pool_list(
 
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         result = await client.gateway_clmm.get_pools(
-            connector=connector,
-            page=0,
-            limit=api_limit,
-            search_term=search_term
+            connector=connector, page=0, limit=api_limit, search_term=search_term
         )
 
         pools = result.get("pools", [])
@@ -645,18 +685,24 @@ async def process_pool_list(
         if not pools:
             message = escape_markdown_v2("📋 No pools found")
             context.user_data["pool_list_cache"] = []
-            keyboard = [[InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")]]
+            keyboard = [
+                [InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")]
+            ]
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
             # Sort by APR% descending, filter out low TVL pools (< $100)
-            active_pools = [p for p in pools if float(p.get('liquidity', 0) or 0) >= 100]
-            active_pools.sort(key=lambda x: float(x.get('apr', 0) or 0), reverse=True)
+            active_pools = [
+                p for p in pools if float(p.get("liquidity", 0) or 0) >= 100
+            ]
+            active_pools.sort(key=lambda x: float(x.get("apr", 0) or 0), reverse=True)
 
             # If no active pools, show all
-            display_pools = active_pools[:display_limit] if active_pools else pools[:display_limit]
+            display_pools = (
+                active_pools[:display_limit] if active_pools else pools[:display_limit]
+            )
 
             # Detect if this is a BASE-QUOTE pair search (e.g., "ORE-SOL", "BTC-USDC")
-            is_pair_search = bool(search_term and '-' in search_term)
+            is_pair_search = bool(search_term and "-" in search_term)
 
             # Cache pools for selection (with search term for back navigation)
             context.user_data["pool_list_cache"] = display_pools
@@ -668,13 +714,18 @@ async def process_pool_list(
             actual_total = len(active_pools) if active_pools else len(pools)
             search_info = f" for '{search_term}'" if search_term else ""
 
-            header = rf"📋 *CLMM Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {actual_total}\)" + "\n\n"
+            header = (
+                rf"📋 *CLMM Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {actual_total}\)"
+                + "\n\n"
+            )
 
             table = _format_pool_table(display_pools)
             message = header + table + "\n\n_Select pool number:_"
 
             # Build keyboard with numbered buttons (add Plot Liquidity for pair searches)
-            reply_markup = _build_pool_selection_keyboard(display_pools, search_term, is_pair_search)
+            reply_markup = _build_pool_selection_keyboard(
+                display_pools, search_term, is_pair_search
+            )
 
         # Keep state for pool selection
         context.user_data["dex_state"] = "pool_list"
@@ -689,14 +740,12 @@ async def process_pool_list(
                 message_id=message_id,
                 text=message,
                 parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
         except Exception as e:
             logger.warning(f"Failed to edit message, sending new: {e}")
             sent_msg = await update.message.reply_text(
-                message,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
             context.user_data["pool_list_message_id"] = sent_msg.message_id
             context.user_data["pool_list_chat_id"] = sent_msg.chat_id
@@ -708,9 +757,7 @@ async def process_pool_list(
 
 
 async def handle_plot_liquidity(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    percentile: int = 90
+    update: Update, context: ContextTypes.DEFAULT_TYPE, percentile: int = 90
 ) -> None:
     """Handle Plot Liquidity button - aggregates liquidity from top pools by TVL
 
@@ -734,13 +781,11 @@ async def handle_plot_liquidity(
 
     # Sort pools by TVL descending
     pools_by_tvl = sorted(
-        cached_pools,
-        key=lambda x: float(x.get('liquidity', 0) or 0),
-        reverse=True
+        cached_pools, key=lambda x: float(x.get("liquidity", 0) or 0), reverse=True
     )
 
     # Calculate TVL threshold for percentile
-    total_tvl = sum(float(p.get('liquidity', 0) or 0) for p in pools_by_tvl)
+    total_tvl = sum(float(p.get("liquidity", 0) or 0) for p in pools_by_tvl)
     if total_tvl == 0:
         await query.answer("No pools with liquidity found.", show_alert=True)
         return
@@ -751,7 +796,7 @@ async def handle_plot_liquidity(
     selected_pools = []
 
     for pool in pools_by_tvl:
-        pool_tvl = float(pool.get('liquidity', 0) or 0)
+        pool_tvl = float(pool.get("liquidity", 0) or 0)
         if pool_tvl > 0:
             selected_pools.append(pool)
             accumulated_tvl += pool_tvl
@@ -776,30 +821,34 @@ async def handle_plot_liquidity(
 
         async def fetch_pool_with_info(pool):
             """Fetch pool info and return combined data"""
-            pool_address = pool.get('pool_address', pool.get('address', ''))
-            connector = pool.get('connector', 'meteora')
+            pool_address = pool.get("pool_address", pool.get("address", ""))
+            connector = pool.get("connector", "meteora")
             try:
                 pool_info = await asyncio.wait_for(
                     _fetch_pool_info(client, pool_address, connector),
-                    timeout=POOL_FETCH_TIMEOUT
+                    timeout=POOL_FETCH_TIMEOUT,
                 )
-                bins = pool_info.get('bins', [])
-                bin_step = pool.get('bin_step') or pool_info.get('bin_step')
+                bins = pool_info.get("bins", [])
+                bin_step = pool.get("bin_step") or pool_info.get("bin_step")
 
                 # Log what we're getting
-                logger.info(f"Pool {pool_address[:8]}... bins={len(bins)}, bin_step={bin_step}")
+                logger.info(
+                    f"Pool {pool_address[:8]}... bins={len(bins)}, bin_step={bin_step}"
+                )
                 if bins:
                     # Log first bin structure for debugging
                     logger.debug(f"First bin sample: {bins[0]}")
 
                 return {
-                    'pool': pool,
-                    'pool_info': pool_info,
-                    'bins': bins,
-                    'bin_step': bin_step
+                    "pool": pool,
+                    "pool_info": pool_info,
+                    "bins": bins,
+                    "bin_step": bin_step,
                 }
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout fetching pool {pool_address[:12]}... after {POOL_FETCH_TIMEOUT}s")
+                logger.warning(
+                    f"Timeout fetching pool {pool_address[:12]}... after {POOL_FETCH_TIMEOUT}s"
+                )
                 return None
             except Exception as e:
                 logger.warning(f"Failed to fetch pool {pool_address}: {e}")
@@ -810,7 +859,9 @@ async def handle_plot_liquidity(
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Filter successful results and count failures
-        pools_data = [r for r in results if r is not None and not isinstance(r, Exception)]
+        pools_data = [
+            r for r in results if r is not None and not isinstance(r, Exception)
+        ]
         failed_count = len(selected_pools) - len(pools_data)
 
         if not pools_data:
@@ -820,7 +871,7 @@ async def handle_plot_liquidity(
             return
 
         # Log summary of what we got
-        total_bins = sum(len(p.get('bins', [])) for p in pools_data)
+        total_bins = sum(len(p.get("bins", [])) for p in pools_data)
         logger.info(f"Fetched {len(pools_data)} pools with total {total_bins} bins")
 
         # Check if we have any bins at all
@@ -844,18 +895,22 @@ async def handle_plot_liquidity(
             # Try to give more info about what went wrong
             bins_with_liquidity = 0
             for pd in pools_data:
-                for b in pd.get('bins', []):
-                    base = float(b.get('base_token_amount', 0) or 0)
-                    quote = float(b.get('quote_token_amount', 0) or 0)
+                for b in pd.get("bins", []):
+                    base = float(b.get("base_token_amount", 0) or 0)
+                    quote = float(b.get("quote_token_amount", 0) or 0)
                     if base > 0 or quote > 0:
                         bins_with_liquidity += 1
 
-            error_detail = f"Total bins: {total_bins}, bins with liquidity: {bins_with_liquidity}"
+            error_detail = (
+                f"Total bins: {total_bins}, bins with liquidity: {bins_with_liquidity}"
+            )
             logger.error(f"Failed to generate aggregated chart. {error_detail}")
 
             await query.message.edit_text(
-                escape_markdown_v2(f"❌ Failed to generate aggregated liquidity chart.\n{error_detail}"),
-                parse_mode="MarkdownV2"
+                escape_markdown_v2(
+                    f"❌ Failed to generate aggregated liquidity chart.\n{error_detail}"
+                ),
+                parse_mode="MarkdownV2",
             )
             return
 
@@ -866,14 +921,17 @@ async def handle_plot_liquidity(
             pass
 
         # Build summary message
-        total_tvl_selected = sum(float(p['pool'].get('liquidity', 0) or 0) for p in pools_data)
-        bin_steps = [p.get('bin_step', 0) for p in pools_data if p.get('bin_step')]
-        min_bin_step = min(bin_steps) if bin_steps else 'N/A'
+        total_tvl_selected = sum(
+            float(p["pool"].get("liquidity", 0) or 0) for p in pools_data
+        )
+        bin_steps = [p.get("bin_step", 0) for p in pools_data if p.get("bin_step")]
+        min_bin_step = min(bin_steps) if bin_steps else "N/A"
 
         lines = [
             f"📊 Aggregated Liquidity: {pair_name}",
             "",
-            f"📈 Pools included: {len(pools_data)}" + (f" ({failed_count} failed)" if failed_count else ""),
+            f"📈 Pools included: {len(pools_data)}"
+            + (f" ({failed_count} failed)" if failed_count else ""),
             f"💰 Total TVL: ${_format_number(total_tvl_selected)}",
             f"📊 Percentile: Top {percentile}%",
             f"🎯 Min bin step (resolution): {min_bin_step}",
@@ -884,8 +942,10 @@ async def handle_plot_liquidity(
         # Build keyboard
         keyboard = [
             [
-                InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-                InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
+                InlineKeyboardButton(
+                    "« Back to List", callback_data="dex:pool_list_back"
+                ),
+                InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -898,7 +958,7 @@ async def handle_plot_liquidity(
             photo=photo_file,
             caption=message,
             parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
         )
 
     except Exception as e:
@@ -907,7 +967,9 @@ async def handle_plot_liquidity(
         await query.message.edit_text(error_message, parse_mode="MarkdownV2")
 
 
-async def _fetch_pool_info(client, pool_address: str, connector: str = "meteora") -> dict:
+async def _fetch_pool_info(
+    client, pool_address: str, connector: str = "meteora"
+) -> dict:
     """Fetch detailed pool info including bins
 
     Args:
@@ -919,11 +981,11 @@ async def _fetch_pool_info(client, pool_address: str, connector: str = "meteora"
         Pool info dict with bins data
     """
     try:
-        if hasattr(client, 'gateway_clmm'):
+        if hasattr(client, "gateway_clmm"):
             result = await client.gateway_clmm.get_pool_info(
                 connector=connector,
                 network="solana-mainnet-beta",
-                pool_address=pool_address
+                pool_address=pool_address,
             )
             return result or {}
     except Exception as e:
@@ -931,18 +993,20 @@ async def _fetch_pool_info(client, pool_address: str, connector: str = "meteora"
         # If get_pool_info fails with validation error (pool not in DLMM list),
         # try finding via get_pools search as fallback
         if "validation error" in error_str.lower() or "Field required" in error_str:
-            logger.info(f"Pool {pool_address[:12]}... not found via get_pool_info, trying get_pools search")
+            logger.info(
+                f"Pool {pool_address[:12]}... not found via get_pool_info, trying get_pools search"
+            )
             try:
                 search_result = await client.gateway_clmm.get_pools(
-                    connector=connector,
-                    search_term=pool_address,
-                    limit=1
+                    connector=connector, search_term=pool_address, limit=1
                 )
                 pools = search_result.get("pools", [])
                 if pools:
                     pool_info = pools[0]
-                    pool_info['address'] = pool_address
-                    logger.info(f"Found pool via get_pools: {pool_info.get('trading_pair', 'Unknown')}")
+                    pool_info["address"] = pool_address
+                    logger.info(
+                        f"Found pool via get_pools: {pool_info.get('trading_pair', 'Unknown')}"
+                    )
                     return pool_info
             except Exception as search_e:
                 logger.warning(f"get_pools search also failed: {search_e}")
@@ -957,7 +1021,7 @@ async def _show_pool_detail(
     pool: dict,
     from_callback: bool = False,
     has_list_context: bool = True,
-    timeframe: str = "1h"
+    timeframe: str = "1h",
 ) -> None:
     """Show detailed pool information with inline add liquidity controls
 
@@ -971,11 +1035,12 @@ async def _show_pool_detail(
     """
     import asyncio
     from io import BytesIO
+
     from utils.telegram_formatters import resolve_token_symbol
 
-    pool_address = pool.get('pool_address', pool.get('address', 'N/A'))
-    connector = pool.get('connector', 'meteora')
-    network = 'solana-mainnet-beta'
+    pool_address = pool.get("pool_address", pool.get("address", "N/A"))
+    connector = pool.get("connector", "meteora")
+    network = "solana-mainnet-beta"
     chat_id = update.effective_chat.id
 
     # Parallel fetch: pool_info, token_cache, and OHLCV data
@@ -1003,7 +1068,7 @@ async def _show_pool_detail(
                 network=gecko_network,
                 timeframe=timeframe,
                 currency="token",
-                user_data=context.user_data
+                user_data=context.user_data,
             )
             if error:
                 logger.warning(f"Failed to fetch OHLCV: {error}")
@@ -1015,9 +1080,7 @@ async def _show_pool_detail(
 
     # Run all fetches in parallel
     pool_info, token_cache, ohlcv_data = await asyncio.gather(
-        fetch_pool_info_task(),
-        fetch_token_cache_task(),
-        fetch_ohlcv_task()
+        fetch_pool_info_task(), fetch_token_cache_task(), fetch_ohlcv_task()
     )
 
     # Cache results
@@ -1027,14 +1090,18 @@ async def _show_pool_detail(
         context.user_data["token_cache"] = token_cache
 
     # Try to get trading pair name from multiple sources
-    pair = pool.get('trading_pair') or pool.get('name')
-    mint_x = pool.get('mint_x') or pool_info.get('mint_x') or pool_info.get('token_x_mint')
-    mint_y = pool.get('mint_y') or pool_info.get('mint_y') or pool_info.get('token_y_mint')
+    pair = pool.get("trading_pair") or pool.get("name")
+    mint_x = (
+        pool.get("mint_x") or pool_info.get("mint_x") or pool_info.get("token_x_mint")
+    )
+    mint_y = (
+        pool.get("mint_y") or pool_info.get("mint_y") or pool_info.get("token_y_mint")
+    )
 
-    if not pair or pair == 'N/A':
+    if not pair or pair == "N/A":
         # Try to construct from pool_info token symbols
-        token_x = pool_info.get('token_x_symbol') or pool_info.get('base_symbol')
-        token_y = pool_info.get('token_y_symbol') or pool_info.get('quote_symbol')
+        token_x = pool_info.get("token_x_symbol") or pool_info.get("base_symbol")
+        token_y = pool_info.get("token_y_symbol") or pool_info.get("quote_symbol")
         if token_x and token_y:
             pair = f"{token_x}/{token_y}"
         elif mint_x and mint_y:
@@ -1042,35 +1109,37 @@ async def _show_pool_detail(
             quote_symbol = resolve_token_symbol(mint_y, token_cache)
             pair = f"{base_symbol}/{quote_symbol}"
             # Store resolved symbols in pool for later use
-            pool['base_token'] = mint_x
-            pool['quote_token'] = mint_y
+            pool["base_token"] = mint_x
+            pool["quote_token"] = mint_y
         else:
             pair = "Unknown Pair"
 
     # Extract base/quote symbols - prioritize trading pair over address resolution
     # Trading pair (e.g., "MET-USDC") has accurate symbols, resolve_token_symbol may truncate
-    if pair and pair not in ('N/A', 'Unknown Pair'):
-        if '-' in pair:
-            parts = pair.split('-')
+    if pair and pair not in ("N/A", "Unknown Pair"):
+        if "-" in pair:
+            parts = pair.split("-")
             base_symbol = parts[0].strip()
-            quote_symbol = parts[1].strip() if len(parts) > 1 else 'QUOTE'
-        elif '/' in pair:
-            parts = pair.split('/')
+            quote_symbol = parts[1].strip() if len(parts) > 1 else "QUOTE"
+        elif "/" in pair:
+            parts = pair.split("/")
             base_symbol = parts[0].strip()
-            quote_symbol = parts[1].strip() if len(parts) > 1 else 'QUOTE'
+            quote_symbol = parts[1].strip() if len(parts) > 1 else "QUOTE"
         else:
             base_symbol = pair
-            quote_symbol = 'QUOTE'
+            quote_symbol = "QUOTE"
     else:
         # Fallback to resolving from addresses (may return truncated)
-        base_symbol = resolve_token_symbol(mint_x, token_cache) if mint_x else 'BASE'
-        quote_symbol = resolve_token_symbol(mint_y, token_cache) if mint_y else 'QUOTE'
+        base_symbol = resolve_token_symbol(mint_x, token_cache) if mint_x else "BASE"
+        quote_symbol = resolve_token_symbol(mint_y, token_cache) if mint_y else "QUOTE"
 
     # Get current price and bin step
-    current_price = pool_info.get('price') or pool.get('current_price') or pool.get('price')
-    bin_step = pool.get('bin_step') or pool_info.get('bin_step')
-    bins = pool_info.get('bins', [])
-    active_bin = pool_info.get('active_bin_id')
+    current_price = (
+        pool_info.get("price") or pool.get("current_price") or pool.get("price")
+    )
+    bin_step = pool.get("bin_step") or pool_info.get("bin_step")
+    bins = pool_info.get("bins", [])
+    active_bin = pool_info.get("active_bin_id")
 
     # Initialize or get add_position_params
     if "add_position_params" not in context.user_data:
@@ -1090,41 +1159,50 @@ async def _show_pool_detail(
             bin_step_int = int(bin_step)
 
             # Get default percentages for 20 bins each side
-            default_lower_pct, default_upper_pct = _get_default_range_percent(bin_step_int, 20)
+            default_lower_pct, default_upper_pct = _get_default_range_percent(
+                bin_step_int, 20
+            )
 
             suggested_lower, suggested_upper = _calculate_max_range(
-                current_price_float,
-                bin_step_int
+                current_price_float, bin_step_int
             )
             # Auto-fill if empty - store both price and percentage
-            if suggested_lower and not params.get('lower_price'):
-                params['lower_price'] = f"{suggested_lower:.10f}".rstrip('0').rstrip('.')
-                params['lower_pct'] = default_lower_pct
-            if suggested_upper and not params.get('upper_price'):
-                params['upper_price'] = f"{suggested_upper:.10f}".rstrip('0').rstrip('.')
-                params['upper_pct'] = default_upper_pct
+            if suggested_lower and not params.get("lower_price"):
+                params["lower_price"] = f"{suggested_lower:.10f}".rstrip("0").rstrip(
+                    "."
+                )
+                params["lower_pct"] = default_lower_pct
+            if suggested_upper and not params.get("upper_price"):
+                params["upper_price"] = f"{suggested_upper:.10f}".rstrip("0").rstrip(
+                    "."
+                )
+                params["upper_pct"] = default_upper_pct
 
             # Calculate percentages for existing prices if not set
-            if params.get('lower_price') and not params.get('lower_pct'):
+            if params.get("lower_price") and not params.get("lower_pct"):
                 try:
-                    params['lower_pct'] = _price_to_percent(current_price_float, float(params['lower_price']))
+                    params["lower_pct"] = _price_to_percent(
+                        current_price_float, float(params["lower_price"])
+                    )
                 except (ValueError, TypeError):
                     pass
-            if params.get('upper_price') and not params.get('upper_pct'):
+            if params.get("upper_price") and not params.get("upper_pct"):
                 try:
-                    params['upper_pct'] = _price_to_percent(current_price_float, float(params['upper_price']))
+                    params["upper_pct"] = _price_to_percent(
+                        current_price_float, float(params["upper_price"])
+                    )
                 except (ValueError, TypeError):
                     pass
         except (ValueError, TypeError) as e:
             logger.warning(f"Failed to calculate range: {e}")
 
     # Set defaults for amounts
-    if not params.get('amount_base'):
-        params['amount_base'] = "10%"
-    if not params.get('amount_quote'):
-        params['amount_quote'] = "10%"
-    if not params.get('strategy_type'):
-        params['strategy_type'] = "0"
+    if not params.get("amount_base"):
+        params["amount_base"] = "10%"
+    if not params.get("amount_quote"):
+        params["amount_quote"] = "10%"
+    if not params.get("strategy_type"):
+        params["strategy_type"] = "0"
 
     # Check if tokens are already in gateway (for Add to Gateway button visibility)
     base_in_gateway = mint_x and mint_x in token_cache
@@ -1132,18 +1210,27 @@ async def _show_pool_detail(
     tokens_in_gateway = base_in_gateway and quote_in_gateway
 
     # Get pool metrics
-    tvl = pool.get('liquidity') or pool.get('tvl') or pool_info.get('liquidity') or pool_info.get('tvl')
-    vol_24h = pool.get('volume_24h') or pool_info.get('volume_24h')
-    fees_24h = pool.get('fees_24h') or pool_info.get('fees_24h')
-    base_fee = pool.get('base_fee_percentage') or pool_info.get('base_fee_percentage')
-    apr = pool.get('apr') or pool_info.get('apr')
+    tvl = (
+        pool.get("liquidity")
+        or pool.get("tvl")
+        or pool_info.get("liquidity")
+        or pool_info.get("tvl")
+    )
+    vol_24h = pool.get("volume_24h") or pool_info.get("volume_24h")
+    fees_24h = pool.get("fees_24h") or pool_info.get("fees_24h")
+    base_fee = pool.get("base_fee_percentage") or pool_info.get("base_fee_percentage")
+    apr = pool.get("apr") or pool_info.get("apr")
 
     # Build message - matching show_add_position_menu format
     message = r"➕ *Add CLMM Position*" + "\n\n"
 
     # Pool header - compact info
     message += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
-    addr_short = f"{pool_address[:6]}...{pool_address[-4:]}" if len(pool_address) > 12 else pool_address
+    addr_short = (
+        f"{pool_address[:6]}...{pool_address[-4:]}"
+        if len(pool_address) > 12
+        else pool_address
+    )
     message += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
     if current_price:
         message += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
@@ -1173,15 +1260,21 @@ async def _show_pool_detail(
     # Fetch wallet balances
     try:
         balance_cache_key = f"token_balances_{network}_{base_symbol}_{quote_symbol}"
-        balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
+        balances = get_cached(
+            context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL
+        )
         if balances is None:
             client = await get_client(chat_id, context=context)
-            balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
+            balances = await _fetch_token_balances(
+                client, network, base_symbol, quote_symbol
+            )
             set_cached(context.user_data, balance_cache_key, balances)
         context.user_data["token_balances"] = balances
     except Exception as e:
         logger.warning(f"Could not fetch token balances: {e}")
-        balances = context.user_data.get("token_balances", {"base_balance": 0, "quote_balance": 0})
+        balances = context.user_data.get(
+            "token_balances", {"base_balance": 0, "quote_balance": 0}
+        )
 
     # Store pool for add position and add to gateway
     context.user_data["selected_pool"] = pool
@@ -1207,11 +1300,11 @@ async def _show_pool_detail(
     message += "\n" + escape_markdown_v2("━━━ Position Preview ━━━") + "\n"
 
     # Get amounts and calculate actual values
-    base_amount_str = params.get('amount_base', '10%')
-    quote_amount_str = params.get('amount_quote', '10%')
+    base_amount_str = params.get("amount_base", "10%")
+    quote_amount_str = params.get("amount_quote", "10%")
 
     try:
-        if base_amount_str.endswith('%'):
+        if base_amount_str.endswith("%"):
             base_pct_val = float(base_amount_str[:-1])
             base_amount = base_bal * base_pct_val / 100
         else:
@@ -1220,7 +1313,7 @@ async def _show_pool_detail(
         base_amount = 0
 
     try:
-        if quote_amount_str.endswith('%'):
+        if quote_amount_str.endswith("%"):
             quote_pct_val = float(quote_amount_str[:-1])
             quote_amount = quote_bal * quote_pct_val / 100
         else:
@@ -1229,10 +1322,10 @@ async def _show_pool_detail(
         quote_amount = 0
 
     # Show price range with percentages
-    lower_pct_preview = params.get('lower_pct')
-    upper_pct_preview = params.get('upper_pct')
-    lower_price_str = params.get('lower_price', '')
-    upper_price_str = params.get('upper_price', '')
+    lower_pct_preview = params.get("lower_pct")
+    upper_pct_preview = params.get("upper_pct")
+    lower_price_str = params.get("lower_price", "")
+    upper_price_str = params.get("upper_price", "")
 
     if lower_price_str and upper_price_str:
         try:
@@ -1255,8 +1348,12 @@ async def _show_pool_detail(
                 u_str = f"{upper_p:.8f}"
 
             # Show range with percentages
-            l_pct_str = f"({lower_pct_preview:+.1f}%)" if lower_pct_preview is not None else ""
-            u_pct_str = f"({upper_pct_preview:+.1f}%)" if upper_pct_preview is not None else ""
+            l_pct_str = (
+                f"({lower_pct_preview:+.1f}%)" if lower_pct_preview is not None else ""
+            )
+            u_pct_str = (
+                f"({upper_pct_preview:+.1f}%)" if upper_pct_preview is not None else ""
+            )
             message += f"📉 *Lower:* `{escape_markdown_v2(l_str)}` _{escape_markdown_v2(l_pct_str)}_\n"
             message += f"📈 *Upper:* `{escape_markdown_v2(u_str)}` _{escape_markdown_v2(u_pct_str)}_\n"
 
@@ -1286,20 +1383,26 @@ async def _show_pool_detail(
     except (ValueError, TypeError, ZeroDivisionError):
         base_usd, quote_usd = 0, 0
 
-    base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
-    quote_usd_str = f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+    base_usd_str = (
+        f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
+    )
+    quote_usd_str = (
+        f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+    )
 
-    message += f"💰 *Add:* `{base_amt_fmt}` {escape_markdown_v2(base_symbol)}{base_usd_str}\n"
+    message += (
+        f"💰 *Add:* `{base_amt_fmt}` {escape_markdown_v2(base_symbol)}{base_usd_str}\n"
+    )
     message += f"💵 *Add:* `{quote_amt_fmt}` {escape_markdown_v2(quote_symbol)}{quote_usd_str}\n"
 
     # Build edit template - each field on its own line
-    lower_pct = params.get('lower_pct')
-    upper_pct = params.get('upper_pct')
+    lower_pct = params.get("lower_pct")
+    upper_pct = params.get("upper_pct")
     l_pct_edit = f"{lower_pct:.1f}%" if lower_pct is not None else "-5%"
     # For upper, don't show + prefix (parser treats unsigned as positive)
     u_pct_edit = f"{upper_pct:.1f}%" if upper_pct is not None else "5%"
-    base_edit = params.get('amount_base') or '10%'
-    quote_edit = params.get('amount_quote') or '10%'
+    base_edit = params.get("amount_base") or "10%"
+    quote_edit = params.get("amount_quote") or "10%"
 
     message += f"\n_To edit, send:_\n"
     message += f"`L:{escape_markdown_v2(l_pct_edit)}`\n"
@@ -1307,9 +1410,9 @@ async def _show_pool_detail(
     message += f"`B:{escape_markdown_v2(base_edit)}`\n"
     message += f"`Q:{escape_markdown_v2(quote_edit)}`\n"
 
-    strategy_display = params.get('strategy_type', '0')
-    strategy_names = {'0': 'Spot', '1': 'Curve', '2': 'BidAsk'}
-    strategy_name = strategy_names.get(strategy_display, 'Spot')
+    strategy_display = params.get("strategy_type", "0")
+    strategy_names = {"0": "Spot", "1": "Curve", "2": "BidAsk"}
+    strategy_name = strategy_names.get(strategy_display, "Spot")
 
     # Build GeckoTerminal link for pool
     gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
@@ -1329,8 +1432,12 @@ async def _show_pool_detail(
         ],
         # Row 2: Strategy + Add Position
         [
-            InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
-            InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
+            InlineKeyboardButton(
+                f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"
+            ),
+            InlineKeyboardButton(
+                "➕ Add Position", callback_data="dex:pos_add_confirm"
+            ),
         ],
         # Row 3: Refresh + Gecko link
         [
@@ -1341,19 +1448,27 @@ async def _show_pool_detail(
 
     # Only show Add to Gateway if tokens not already in gateway
     if not tokens_in_gateway:
-        keyboard.append([
-            InlineKeyboardButton("🔗 Add to Gateway", callback_data="dex:add_to_gateway"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "🔗 Add to Gateway", callback_data="dex:add_to_gateway"
+                ),
+            ]
+        )
 
     if has_list_context:
-        keyboard.append([
-            InlineKeyboardButton("« Back to List", callback_data="dex:pool_list_back"),
-            InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "« Back to List", callback_data="dex:pool_list_back"
+                ),
+                InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity"),
+            ]
+        )
     else:
-        keyboard.append([
-            InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")
-        ])
+        keyboard.append(
+            [InlineKeyboardButton("« LP Menu", callback_data="dex:liquidity")]
+        )
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1365,10 +1480,10 @@ async def _show_pool_detail(
     lower_float = None
     upper_float = None
     try:
-        if params.get('lower_price'):
-            lower_float = float(params['lower_price'])
-        if params.get('upper_price'):
-            upper_float = float(params['upper_price'])
+        if params.get("lower_price"):
+            lower_float = float(params["lower_price"])
+        if params.get("upper_price"):
+            upper_float = float(params["upper_price"])
     except (ValueError, TypeError):
         pass
 
@@ -1384,7 +1499,7 @@ async def _show_pool_detail(
                 base_symbol=base_symbol,
                 quote_symbol=quote_symbol,
                 lower_price=lower_float,
-                upper_price=upper_float
+                upper_price=upper_float,
             )
         except Exception as e:
             logger.warning(f"Failed to generate combined chart: {e}")
@@ -1397,7 +1512,7 @@ async def _show_pool_detail(
                         current_price=price_float,
                         pair_name=pair,
                         lower_price=lower_float,
-                        upper_price=upper_float
+                        upper_price=upper_float,
                     )
                 except Exception as e2:
                     logger.warning(f"Failed to generate fallback chart: {e2}")
@@ -1411,7 +1526,9 @@ async def _show_pool_detail(
         loading_chat_id = context.user_data.pop("_loading_chat_id", None)
         if loading_msg_id and loading_chat_id:
             try:
-                await update.get_bot().delete_message(chat_id=loading_chat_id, message_id=loading_msg_id)
+                await update.get_bot().delete_message(
+                    chat_id=loading_chat_id, message_id=loading_msg_id
+                )
             except Exception:
                 pass
         else:
@@ -1431,7 +1548,9 @@ async def _show_pool_detail(
         chat_id = context.user_data.get("pool_list_chat_id")
         if message_id and chat_id:
             try:
-                await update.get_bot().delete_message(chat_id=chat_id, message_id=message_id)
+                await update.get_bot().delete_message(
+                    chat_id=chat_id, message_id=message_id
+                )
             except Exception:
                 pass
 
@@ -1450,7 +1569,7 @@ async def _show_pool_detail(
                 photo=photo_file,
                 caption=message,
                 parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
             # Store message ID for back navigation and edits
             context.user_data["pool_detail_message_id"] = sent_msg.message_id
@@ -1461,9 +1580,7 @@ async def _show_pool_detail(
         except Exception as e:
             logger.warning(f"Failed to send chart photo: {e}")
             sent_msg = await chat.send_message(
-                text=message,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                text=message, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
             context.user_data["pool_detail_message_id"] = sent_msg.message_id
             context.user_data["pool_detail_chat_id"] = sent_msg.chat.id
@@ -1472,9 +1589,7 @@ async def _show_pool_detail(
             context.user_data["add_position_menu_is_photo"] = False
     else:
         sent_msg = await chat.send_message(
-            text=message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            text=message, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
         context.user_data["pool_detail_message_id"] = sent_msg.message_id
         context.user_data["pool_detail_chat_id"] = sent_msg.chat.id
@@ -1483,7 +1598,9 @@ async def _show_pool_detail(
         context.user_data["add_position_menu_is_photo"] = False
 
 
-async def handle_pool_select(update: Update, context: ContextTypes.DEFAULT_TYPE, pool_index: int) -> None:
+async def handle_pool_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pool_index: int
+) -> None:
     """Handle pool selection from numbered button"""
     query = update.callback_query
     cached_pools = context.user_data.get("pool_list_cache", [])
@@ -1492,7 +1609,7 @@ async def handle_pool_select(update: Update, context: ContextTypes.DEFAULT_TYPE,
         pool = cached_pools[pool_index]
 
         # Show immediate feedback
-        pair = pool.get('trading_pair', pool.get('name', 'Pool'))
+        pair = pool.get("trading_pair", pool.get("name", "Pool"))
         await query.answer(f"Loading {pair}...")
 
         # Show loading state in message
@@ -1509,7 +1626,9 @@ async def handle_pool_select(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await query.answer("Pool not found. Please search again.")
 
 
-async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None) -> None:
+async def handle_pool_detail_refresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None
+) -> None:
     """Refresh pool detail by clearing cache and re-fetching
 
     Args:
@@ -1523,8 +1642,8 @@ async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAU
         await query.answer("No pool selected")
         return
 
-    pool_address = selected_pool.get('pool_address', selected_pool.get('address', ''))
-    connector = selected_pool.get('connector', 'meteora')
+    pool_address = selected_pool.get("pool_address", selected_pool.get("address", ""))
+    connector = selected_pool.get("connector", "meteora")
 
     # Only clear cache on full refresh (no timeframe switch)
     if timeframe is None:
@@ -1546,12 +1665,14 @@ async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAU
         await query.answer(f"Loading {timeframe} candles...")
 
         # Show loading state - need to handle both photo and text messages
-        pair = selected_pool.get('trading_pair', selected_pool.get('name', 'Pool'))
+        pair = selected_pool.get("trading_pair", selected_pool.get("name", "Pool"))
         loading_msg = rf"⏳ *Loading {timeframe} candles\.\.\.*" + "\n\n"
         loading_msg += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
         loading_msg += r"_Fetching OHLCV data\.\.\._"
 
-        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+        loading_keyboard = [
+            [InlineKeyboardButton("⏳ Loading...", callback_data="noop")]
+        ]
 
         try:
             # Try to delete current message (works for both photo and text)
@@ -1563,22 +1684,27 @@ async def handle_pool_detail_refresh(update: Update, context: ContextTypes.DEFAU
         loading_sent = await query.message.chat.send_message(
             loading_msg,
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(loading_keyboard)
+            reply_markup=InlineKeyboardMarkup(loading_keyboard),
         )
         # Store loading message ID for deletion
         context.user_data["_loading_msg_id"] = loading_sent.message_id
         context.user_data["_loading_chat_id"] = loading_sent.chat.id
 
-    await _show_pool_detail(update, context, selected_pool, from_callback=True, timeframe=timeframe)
+    await _show_pool_detail(
+        update, context, selected_pool, from_callback=True, timeframe=timeframe
+    )
 
 
-async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_add_to_gateway(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Add pool tokens to Gateway token list
 
     Fetches token details from GeckoTerminal and adds both base and quote tokens
     to the Gateway configuration for the network.
     """
     from geckoterminal_py import GeckoTerminalAsyncClient
+
     from config_manager import get_config_manager
 
     query = update.callback_query
@@ -1591,8 +1717,16 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # Get token addresses
-    mint_x = selected_pool.get('mint_x') or pool_info.get('mint_x') or pool_info.get('token_x_mint')
-    mint_y = selected_pool.get('mint_y') or pool_info.get('mint_y') or pool_info.get('token_y_mint')
+    mint_x = (
+        selected_pool.get("mint_x")
+        or pool_info.get("mint_x")
+        or pool_info.get("token_x_mint")
+    )
+    mint_y = (
+        selected_pool.get("mint_y")
+        or pool_info.get("mint_y")
+        or pool_info.get("token_y_mint")
+    )
 
     if not mint_x or not mint_y:
         await query.answer("Token addresses not available", show_alert=True)
@@ -1606,12 +1740,16 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         # Edit message to show progress
-        await query.message.edit_caption(
-            caption=escape_markdown_v2("🔄 Adding tokens to Gateway..."),
-            parse_mode="MarkdownV2"
-        ) if getattr(query.message, 'photo', None) else await query.message.edit_text(
-            escape_markdown_v2("🔄 Adding tokens to Gateway..."),
-            parse_mode="MarkdownV2"
+        (
+            await query.message.edit_caption(
+                caption=escape_markdown_v2("🔄 Adding tokens to Gateway..."),
+                parse_mode="MarkdownV2",
+            )
+            if getattr(query.message, "photo", None)
+            else await query.message.edit_text(
+                escape_markdown_v2("🔄 Adding tokens to Gateway..."),
+                parse_mode="MarkdownV2",
+            )
         )
     except Exception:
         pass
@@ -1624,14 +1762,16 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
         """Fetch token info and add to gateway"""
         try:
             # Fetch from GeckoTerminal
-            result = await gecko_client.get_specific_token_on_network(gecko_network, token_address)
+            result = await gecko_client.get_specific_token_on_network(
+                gecko_network, token_address
+            )
 
             if isinstance(result, dict):
-                token_data = result.get('data', result) if 'data' in result else result
-                attrs = token_data.get('attributes', token_data)
-                symbol = attrs.get('symbol', '???')
-                decimals = attrs.get('decimals', 9)
-                name = attrs.get('name')
+                token_data = result.get("data", result) if "data" in result else result
+                attrs = token_data.get("attributes", token_data)
+                symbol = attrs.get("symbol", "???")
+                decimals = attrs.get("decimals", 9)
+                name = attrs.get("name")
 
                 # Add to gateway
                 client = await get_config_manager().get_default_client()
@@ -1640,14 +1780,17 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
                     address=token_address,
                     symbol=symbol,
                     decimals=decimals,
-                    name=name
+                    name=name,
                 )
                 return symbol
             return None
         except Exception as e:
             error_str = str(e)
             # Ignore "already exists" errors
-            if "already exists" in error_str.lower() or "duplicate" in error_str.lower():
+            if (
+                "already exists" in error_str.lower()
+                or "duplicate" in error_str.lower()
+            ):
                 return "exists"
             logger.warning(f"Failed to add token {token_address[:12]}...: {e}")
             return None
@@ -1682,23 +1825,28 @@ async def handle_add_to_gateway(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Go back to pool detail
     try:
-        await query.message.edit_caption(
-            caption=escape_markdown_v2(success_msg),
-            parse_mode="MarkdownV2"
-        ) if getattr(query.message, 'photo', None) else await query.message.edit_text(
-            escape_markdown_v2(success_msg),
-            parse_mode="MarkdownV2"
+        (
+            await query.message.edit_caption(
+                caption=escape_markdown_v2(success_msg), parse_mode="MarkdownV2"
+            )
+            if getattr(query.message, "photo", None)
+            else await query.message.edit_text(
+                escape_markdown_v2(success_msg), parse_mode="MarkdownV2"
+            )
         )
     except Exception:
         pass
 
     # After short delay, refresh pool detail
     import asyncio
+
     await asyncio.sleep(2)
     await _show_pool_detail(update, context, selected_pool, from_callback=True)
 
 
-async def handle_pool_list_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pool_list_back(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle back button to return to pool list"""
     cached_pools = context.user_data.get("pool_list_cache", [])
     search_term = context.user_data.get("pool_list_search_term")
@@ -1717,7 +1865,9 @@ async def handle_pool_list_back(update: Update, context: ContextTypes.DEFAULT_TY
     table = _format_pool_table(cached_pools)
     message = header + table + "\n\n_Select pool number:_"
 
-    reply_markup = _build_pool_selection_keyboard(cached_pools, search_term, is_pair_search)
+    reply_markup = _build_pool_selection_keyboard(
+        cached_pools, search_term, is_pair_search
+    )
 
     # Keep state for pool selection
     context.user_data["dex_state"] = "pool_list"
@@ -1731,9 +1881,7 @@ async def handle_pool_list_back(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Send new message with pool list
     sent_msg = await chat.send_message(
-        text=message,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        text=message, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
     # Store message ID for future navigation
@@ -1745,7 +1893,13 @@ async def handle_pool_list_back(update: Update, context: ContextTypes.DEFAULT_TY
 # POOL OHLCV CHARTS (via GeckoTerminal)
 # ============================================
 
-async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str, currency: str = "usd") -> None:
+
+async def handle_pool_ohlcv(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    timeframe: str,
+    currency: str = "usd",
+) -> None:
     """Show OHLCV chart for the selected pool using GeckoTerminal
 
     Args:
@@ -1766,19 +1920,21 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await query.message.reply_text("No pool selected. Please select a pool first.")
         return
 
-    pool_address = pool.get('pool_address', pool.get('address', ''))
-    pair = pool.get('trading_pair') or pool.get('name', 'Pool')
+    pool_address = pool.get("pool_address", pool.get("address", ""))
+    pair = pool.get("trading_pair") or pool.get("name", "Pool")
 
     # Get quote token symbol for display
-    quote_token = pool.get('quote_token', pool.get('token_b', ''))
-    quote_symbol = pool.get('quote_symbol', '')
+    quote_token = pool.get("quote_token", pool.get("token_b", ""))
+    quote_symbol = pool.get("quote_symbol", "")
     if not quote_symbol and quote_token:
-        quote_symbol = resolve_token_symbol(quote_token, context.user_data.get("token_cache", {}))
+        quote_symbol = resolve_token_symbol(
+            quote_token, context.user_data.get("token_cache", {})
+        )
     if not quote_symbol:
         quote_symbol = "Quote"
 
     # Get network - default to Solana for CLMM pools
-    network = pool.get('network', 'solana')
+    network = pool.get("network", "solana")
 
     # Show loading in caption if photo, otherwise edit text
     msg = query.message
@@ -1786,12 +1942,12 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if msg.photo:
             await msg.edit_caption(
                 caption=escape_markdown_v2(f"📈 Loading {pair} chart..."),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
         else:
             await msg.edit_text(
                 escape_markdown_v2(f"📈 Loading {pair} chart..."),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
     except Exception:
         pass
@@ -1803,36 +1959,62 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             network=network,
             timeframe=timeframe,
             currency="token",
-            user_data=context.user_data
+            user_data=context.user_data,
         )
 
         if error or not ohlcv_data:
-            error_msg = escape_markdown_v2(f"❌ Failed to load OHLCV: {error or 'No data'}")
-            keyboard = [[InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh")]]
+            error_msg = escape_markdown_v2(
+                f"❌ Failed to load OHLCV: {error or 'No data'}"
+            )
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "« Back to Pool", callback_data="dex:pool_detail_refresh"
+                    )
+                ]
+            ]
             if msg.photo:
-                await msg.edit_caption(caption=error_msg, parse_mode="MarkdownV2",
-                                       reply_markup=InlineKeyboardMarkup(keyboard))
+                await msg.edit_caption(
+                    caption=error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
             else:
-                await msg.edit_text(error_msg, parse_mode="MarkdownV2",
-                                    reply_markup=InlineKeyboardMarkup(keyboard))
+                await msg.edit_text(
+                    error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
             return
 
         # Generate chart
         chart_buf = generate_ohlcv_chart(
             ohlcv_data=ohlcv_data,
             pair_name=pair,
-            timeframe=_format_timeframe_label(timeframe)
+            timeframe=_format_timeframe_label(timeframe),
         )
 
         if not chart_buf:
             error_msg = escape_markdown_v2("❌ Failed to generate chart")
-            keyboard = [[InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh")]]
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "« Back to Pool", callback_data="dex:pool_detail_refresh"
+                    )
+                ]
+            ]
             if msg.photo:
-                await msg.edit_caption(caption=error_msg, parse_mode="MarkdownV2",
-                                       reply_markup=InlineKeyboardMarkup(keyboard))
+                await msg.edit_caption(
+                    caption=error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
             else:
-                await msg.edit_text(error_msg, parse_mode="MarkdownV2",
-                                    reply_markup=InlineKeyboardMarkup(keyboard))
+                await msg.edit_text(
+                    error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
             return
 
         # Toggle currency for button
@@ -1843,17 +2025,34 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Build timeframe buttons
         keyboard = [
             [
-                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data=f"dex:pool_ohlcv:1m:{currency}"),
-                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data=f"dex:pool_ohlcv:1h:{currency}"),
-                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data=f"dex:pool_ohlcv:1d:{currency}"),
+                InlineKeyboardButton(
+                    "1h" if timeframe != "1m" else "• 1h •",
+                    callback_data=f"dex:pool_ohlcv:1m:{currency}",
+                ),
+                InlineKeyboardButton(
+                    "1d" if timeframe != "1h" else "• 1d •",
+                    callback_data=f"dex:pool_ohlcv:1h:{currency}",
+                ),
+                InlineKeyboardButton(
+                    "7d" if timeframe != "1d" else "• 7d •",
+                    callback_data=f"dex:pool_ohlcv:1d:{currency}",
+                ),
             ],
             [
-                InlineKeyboardButton(f"💱 {toggle_label}", callback_data=f"dex:pool_ohlcv:{timeframe}:{other_currency}"),
-                InlineKeyboardButton("📊 + Liquidity", callback_data=f"dex:pool_combined:{timeframe}:{currency}"),
+                InlineKeyboardButton(
+                    f"💱 {toggle_label}",
+                    callback_data=f"dex:pool_ohlcv:{timeframe}:{other_currency}",
+                ),
+                InlineKeyboardButton(
+                    "📊 + Liquidity",
+                    callback_data=f"dex:pool_combined:{timeframe}:{currency}",
+                ),
             ],
             [
-                InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh"),
-            ]
+                InlineKeyboardButton(
+                    "« Back to Pool", callback_data="dex:pool_detail_refresh"
+                ),
+            ],
         ]
 
         # Build caption
@@ -1865,8 +2064,10 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Edit existing message with new photo
         if msg.photo:
             await msg.edit_media(
-                media=InputMediaPhoto(media=chart_buf, caption=caption, parse_mode="MarkdownV2"),
-                reply_markup=reply_markup
+                media=InputMediaPhoto(
+                    media=chart_buf, caption=caption, parse_mode="MarkdownV2"
+                ),
+                reply_markup=reply_markup,
             )
         else:
             # Delete text message and send photo
@@ -1875,25 +2076,42 @@ async def handle_pool_ohlcv(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 photo=chart_buf,
                 caption=caption,
                 parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
 
     except Exception as e:
         logger.error(f"Error generating OHLCV chart: {e}", exc_info=True)
         error_msg = escape_markdown_v2(f"❌ Error: {str(e)[:100]}")
-        keyboard = [[InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh")]]
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "« Back to Pool", callback_data="dex:pool_detail_refresh"
+                )
+            ]
+        ]
         try:
             if msg.photo:
-                await msg.edit_caption(caption=error_msg, parse_mode="MarkdownV2",
-                                       reply_markup=InlineKeyboardMarkup(keyboard))
+                await msg.edit_caption(
+                    caption=error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
             else:
-                await msg.edit_text(error_msg, parse_mode="MarkdownV2",
-                                    reply_markup=InlineKeyboardMarkup(keyboard))
+                await msg.edit_text(
+                    error_msg,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
         except Exception:
             pass
 
 
-async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str, currency: str = "usd") -> None:
+async def handle_pool_combined_chart(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    timeframe: str,
+    currency: str = "usd",
+) -> None:
     """Show combined OHLCV + Liquidity chart for the selected pool
 
     Args:
@@ -1913,35 +2131,37 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
         await query.message.reply_text("No pool selected. Please select a pool first.")
         return
 
-    pool_address = pool.get('pool_address', pool.get('address', ''))
-    pair = pool.get('trading_pair') or pool.get('name', 'Pool')
-    connector = pool.get('connector', 'meteora')
-    network = pool.get('network', 'solana')
-    current_price = pool_info.get('price') or pool.get('current_price')
+    pool_address = pool.get("pool_address", pool.get("address", ""))
+    pair = pool.get("trading_pair") or pool.get("name", "Pool")
+    connector = pool.get("connector", "meteora")
+    network = pool.get("network", "solana")
+    current_price = pool_info.get("price") or pool.get("current_price")
 
     # Get quote token symbol for display
-    quote_token = pool.get('quote_token', pool.get('token_b', ''))
-    quote_symbol = pool.get('quote_symbol', '')
+    quote_token = pool.get("quote_token", pool.get("token_b", ""))
+    quote_symbol = pool.get("quote_symbol", "")
     if not quote_symbol and quote_token:
-        quote_symbol = resolve_token_symbol(quote_token, context.user_data.get("token_cache", {}))
+        quote_symbol = resolve_token_symbol(
+            quote_token, context.user_data.get("token_cache", {})
+        )
     if not quote_symbol:
         quote_symbol = "Quote"
 
     # Show loading - keep the message reference for editing
     loading_msg = query.message
-    if getattr(query.message, 'photo', None):
+    if getattr(query.message, "photo", None):
         # Edit photo caption to show loading
         try:
             await query.message.edit_caption(
                 caption=f"📊 Loading combined chart for {escape_markdown_v2(pair)}\\.\\.\\.",
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
         except Exception:
             pass
     else:
         await query.message.edit_text(
             f"📊 Loading combined chart for {escape_markdown_v2(pair)}\\.\\.\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
     try:
@@ -1951,18 +2171,18 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
             network=network,
             timeframe=timeframe,
             currency="token",
-            user_data=context.user_data
+            user_data=context.user_data,
         )
 
         # Get bins from cached pool_info or fetch
-        bins = pool_info.get('bins', [])
+        bins = pool_info.get("bins", [])
         if not bins:
             chat_id = update.effective_chat.id
             bins, _, _ = await fetch_liquidity_bins(
                 pool_address=pool_address,
                 connector=connector,
                 user_data=context.user_data,
-                chat_id=chat_id
+                chat_id=chat_id,
             )
 
         if not ohlcv_data and not bins:
@@ -1974,10 +2194,10 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
         lower_price = None
         upper_price = None
         try:
-            if params.get('lower_price'):
-                lower_price = float(params['lower_price'])
-            if params.get('upper_price'):
-                upper_price = float(params['upper_price'])
+            if params.get("lower_price"):
+                lower_price = float(params["lower_price"])
+            if params.get("upper_price"):
+                upper_price = float(params["upper_price"])
         except (ValueError, TypeError):
             pass
 
@@ -1989,7 +2209,7 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
             timeframe=_format_timeframe_label(timeframe),
             current_price=float(current_price) if current_price else None,
             lower_price=lower_price,
-            upper_price=upper_price
+            upper_price=upper_price,
         )
 
         if not chart_buf:
@@ -2004,17 +2224,34 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
         # Build keyboard
         keyboard = [
             [
-                InlineKeyboardButton("1h" if timeframe != "1m" else "• 1h •", callback_data=f"dex:pool_combined:1m:{currency}"),
-                InlineKeyboardButton("1d" if timeframe != "1h" else "• 1d •", callback_data=f"dex:pool_combined:1h:{currency}"),
-                InlineKeyboardButton("7d" if timeframe != "1d" else "• 7d •", callback_data=f"dex:pool_combined:1d:{currency}"),
+                InlineKeyboardButton(
+                    "1h" if timeframe != "1m" else "• 1h •",
+                    callback_data=f"dex:pool_combined:1m:{currency}",
+                ),
+                InlineKeyboardButton(
+                    "1d" if timeframe != "1h" else "• 1d •",
+                    callback_data=f"dex:pool_combined:1h:{currency}",
+                ),
+                InlineKeyboardButton(
+                    "7d" if timeframe != "1d" else "• 7d •",
+                    callback_data=f"dex:pool_combined:1d:{currency}",
+                ),
             ],
             [
-                InlineKeyboardButton(f"💱 {toggle_label}", callback_data=f"dex:pool_combined:{timeframe}:{other_currency}"),
-                InlineKeyboardButton("📈 OHLCV Only", callback_data=f"dex:pool_ohlcv:{timeframe}:{currency}"),
+                InlineKeyboardButton(
+                    f"💱 {toggle_label}",
+                    callback_data=f"dex:pool_combined:{timeframe}:{other_currency}",
+                ),
+                InlineKeyboardButton(
+                    "📈 OHLCV Only",
+                    callback_data=f"dex:pool_ohlcv:{timeframe}:{currency}",
+                ),
             ],
             [
-                InlineKeyboardButton("« Back to Pool", callback_data="dex:pool_detail_refresh"),
-            ]
+                InlineKeyboardButton(
+                    "« Back to Pool", callback_data="dex:pool_detail_refresh"
+                ),
+            ],
         ]
 
         # Build caption
@@ -2023,11 +2260,14 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
 
         # Edit or send photo
         from telegram import InputMediaPhoto
+
         if loading_msg.photo:
             # Edit existing photo message
             await loading_msg.edit_media(
-                media=InputMediaPhoto(media=chart_buf, caption=caption, parse_mode="MarkdownV2"),
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                media=InputMediaPhoto(
+                    media=chart_buf, caption=caption, parse_mode="MarkdownV2"
+                ),
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
             # Replace text with photo
@@ -2036,7 +2276,7 @@ async def handle_pool_combined_chart(update: Update, context: ContextTypes.DEFAU
                 photo=chart_buf,
                 caption=caption,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
     except Exception as e:
@@ -2061,7 +2301,13 @@ def _format_timeframe_label(timeframe: str) -> str:
 # MANAGE POSITIONS (unified view)
 # ============================================
 
-def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool = False, token_prices: dict = None) -> str:
+
+def _format_position_detail(
+    pos: dict,
+    token_cache: dict = None,
+    detailed: bool = False,
+    token_prices: dict = None,
+) -> str:
     """
     Format a single position for display.
 
@@ -2078,34 +2324,44 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
     token_prices = token_prices or {}
 
     # Resolve token addresses to symbols
-    base_token = pos.get('base_token', pos.get('token_a', ''))
-    quote_token = pos.get('quote_token', pos.get('token_b', ''))
+    base_token = pos.get("base_token", pos.get("token_a", ""))
+    quote_token = pos.get("quote_token", pos.get("token_b", ""))
     base_symbol = resolve_token_symbol(base_token, token_cache)
     quote_symbol = resolve_token_symbol(quote_token, token_cache)
 
-    connector = pos.get('connector', 'unknown')
-    pool_address = pos.get('pool_address', '')
+    connector = pos.get("connector", "unknown")
+    pool_address = pos.get("pool_address", "")
 
     # Get current amounts
-    base_amount = pos.get('base_token_amount', pos.get('amount_a', pos.get('token_a_amount', 0)))
-    quote_amount = pos.get('quote_token_amount', pos.get('amount_b', pos.get('token_b_amount', 0)))
+    base_amount = pos.get(
+        "base_token_amount", pos.get("amount_a", pos.get("token_a_amount", 0))
+    )
+    quote_amount = pos.get(
+        "quote_token_amount", pos.get("amount_b", pos.get("token_b_amount", 0))
+    )
 
     # Get price range
-    lower = pos.get('lower_price', pos.get('price_lower', ''))
-    upper = pos.get('upper_price', pos.get('price_upper', ''))
+    lower = pos.get("lower_price", pos.get("price_lower", ""))
+    upper = pos.get("upper_price", pos.get("price_upper", ""))
 
     # Get in-range status
-    in_range = pos.get('in_range', '')
-    range_emoji = "🟢" if in_range == "IN_RANGE" else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
+    in_range = pos.get("in_range", "")
+    range_emoji = (
+        "🟢" if in_range == "IN_RANGE" else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
+    )
 
     # Get PNL data
-    pnl_summary = pos.get('pnl_summary', {})
-    base_pnl = pnl_summary.get('base_pnl')
-    quote_pnl = pnl_summary.get('quote_pnl')
+    pnl_summary = pos.get("pnl_summary", {})
+    base_pnl = pnl_summary.get("base_pnl")
+    quote_pnl = pnl_summary.get("quote_pnl")
 
     # Get pending fees
-    base_fee = pos.get('base_fee_pending', pos.get('unclaimed_fee_a', pos.get('fees_a', 0)))
-    quote_fee = pos.get('quote_fee_pending', pos.get('unclaimed_fee_b', pos.get('fees_b', 0)))
+    base_fee = pos.get(
+        "base_fee_pending", pos.get("unclaimed_fee_a", pos.get("fees_a", 0))
+    )
+    quote_fee = pos.get(
+        "quote_fee_pending", pos.get("unclaimed_fee_b", pos.get("fees_b", 0))
+    )
 
     lines = []
 
@@ -2137,13 +2393,15 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
                 lines.append(f"{range_emoji} Range: [{lower} - {upper}]")
 
         # Current price and entry price from pnl_summary
-        entry_price = pnl_summary.get('entry_price')
-        current_price = pnl_summary.get('current_price') or pos.get('current_price')
+        entry_price = pnl_summary.get("entry_price")
+        current_price = pnl_summary.get("current_price") or pos.get("current_price")
         if entry_price and current_price:
             try:
-                price_change = pnl_summary.get('price_change_pct', 0) or 0
+                price_change = pnl_summary.get("price_change_pct", 0) or 0
                 sign = "+" if price_change >= 0 else ""
-                lines.append(f"💱 Price: {float(current_price):.6f} (entry: {float(entry_price):.6f}, {sign}{price_change:.2f}%)")
+                lines.append(
+                    f"💱 Price: {float(current_price):.6f} (entry: {float(entry_price):.6f}, {sign}{price_change:.2f}%)"
+                )
             except (ValueError, TypeError):
                 pass
 
@@ -2180,18 +2438,24 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
                 base_amt_str = format_amount(float(base_amount))
                 quote_amt_str = format_amount(float(quote_amount))
                 lines.append(f"━━━ Holdings ━━━")
-                lines.append(f"💰 {base_amt_str} {base_symbol} / {quote_amt_str} {quote_symbol}")
+                lines.append(
+                    f"💰 {base_amt_str} {base_symbol} / {quote_amt_str} {quote_symbol}"
+                )
             except (ValueError, TypeError):
                 pass
 
         # Value information from pnl_summary - convert to USD
-        initial_value = pnl_summary.get('initial_value_quote')
-        current_value = pnl_summary.get('current_lp_value_quote') or pnl_summary.get('current_total_value_quote')
+        initial_value = pnl_summary.get("initial_value_quote")
+        current_value = pnl_summary.get("current_lp_value_quote") or pnl_summary.get(
+            "current_total_value_quote"
+        )
         if initial_value and current_value:
             try:
                 initial_usd = float(initial_value) * quote_price_f
                 current_usd = float(current_value) * quote_price_f
-                lines.append(f"💵 Value: ${current_usd:.2f} (initial: ${initial_usd:.2f})")
+                lines.append(
+                    f"💵 Value: ${current_usd:.2f} (initial: ${initial_usd:.2f})"
+                )
             except (ValueError, TypeError):
                 pass
 
@@ -2199,20 +2463,22 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
         lines.append("━━━ Performance ━━━")
 
         # PnL from pnl_summary - convert to USD
-        total_pnl = pnl_summary.get('total_pnl_quote')
-        total_pnl_pct = pnl_summary.get('total_pnl_pct')
+        total_pnl = pnl_summary.get("total_pnl_quote")
+        total_pnl_pct = pnl_summary.get("total_pnl_pct")
         if total_pnl is not None:
             try:
                 pnl_val = float(total_pnl) * quote_price_f
                 pnl_pct = float(total_pnl_pct) if total_pnl_pct else 0
                 emoji = "📈" if pnl_val >= 0 else "📉"
                 sign = "+" if pnl_val >= 0 else ""
-                lines.append(f"{emoji} PnL: {sign}${pnl_val:.2f} ({sign}{pnl_pct:.2f}%)")
+                lines.append(
+                    f"{emoji} PnL: {sign}${pnl_val:.2f} ({sign}{pnl_pct:.2f}%)"
+                )
             except (ValueError, TypeError):
                 pass
 
         # Impermanent loss - convert to USD
-        il = pnl_summary.get('impermanent_loss_quote')
+        il = pnl_summary.get("impermanent_loss_quote")
         if il is not None:
             try:
                 il_val = float(il) * quote_price_f
@@ -2224,14 +2490,18 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
         # Fees - show pending and collected separately in USD
         try:
             # Get fee amounts
-            base_fee_pending = float(pos.get('base_fee_pending', 0) or 0)
-            quote_fee_pending = float(pos.get('quote_fee_pending', 0) or 0)
-            base_fee_collected = float(pos.get('base_fee_collected', 0) or 0)
-            quote_fee_collected = float(pos.get('quote_fee_collected', 0) or 0)
+            base_fee_pending = float(pos.get("base_fee_pending", 0) or 0)
+            quote_fee_pending = float(pos.get("quote_fee_pending", 0) or 0)
+            base_fee_collected = float(pos.get("base_fee_collected", 0) or 0)
+            quote_fee_collected = float(pos.get("quote_fee_collected", 0) or 0)
 
             # Convert to USD
-            pending_usd = (base_fee_pending * base_price_f) + (quote_fee_pending * quote_price_f)
-            collected_usd = (base_fee_collected * base_price_f) + (quote_fee_collected * quote_price_f)
+            pending_usd = (base_fee_pending * base_price_f) + (
+                quote_fee_pending * quote_price_f
+            )
+            collected_usd = (base_fee_collected * base_price_f) + (
+                quote_fee_collected * quote_price_f
+            )
 
             # Show pending fees (available to collect)
             if pending_usd > 0.01:
@@ -2248,8 +2518,8 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
             pass
 
         # Duration and APR
-        duration_hours = pnl_summary.get('duration_hours')
-        fee_apr = pnl_summary.get('fee_apr_estimate')
+        duration_hours = pnl_summary.get("duration_hours")
+        fee_apr = pnl_summary.get("fee_apr_estimate")
         if duration_hours is not None:
             try:
                 hours = float(duration_hours)
@@ -2288,7 +2558,9 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
             base_amt = float(base_amount) if base_amount else 0
             quote_amt = float(quote_amount) if quote_amount else 0
             if base_amt > 0 or quote_amt > 0:
-                lines.append(f"   {range_emoji} {range_str} | {format_amount(base_amt)} {base_symbol} / {format_amount(quote_amt)} {quote_symbol}")
+                lines.append(
+                    f"   {range_emoji} {range_str} | {format_amount(base_amt)} {base_symbol} / {format_amount(quote_amt)} {quote_symbol}"
+                )
             else:
                 lines.append(f"   {range_emoji} Range: {range_str}")
         except (ValueError, TypeError):
@@ -2320,13 +2592,15 @@ def _format_position_detail(pos: dict, token_cache: dict = None, detailed: bool 
     return "\n".join(lines)
 
 
-async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_manage_positions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Display manage positions menu with all active LP positions"""
     try:
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         # Fetch token cache for symbol resolution
@@ -2335,9 +2609,7 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
 
         # Fetch all open positions
         result = await client.gateway_clmm.search_positions(
-            limit=50,
-            offset=0,
-            status="OPEN"
+            limit=50, offset=0, status="OPEN"
         )
 
         all_positions = result.get("data", []) if result else []
@@ -2345,20 +2617,28 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
         # Filter out CLOSED positions and positions with 0 liquidity
         def is_active_position(pos):
             # Check status field first - exclude CLOSED positions
-            status = pos.get('status', '').upper()
-            if status == 'CLOSED':
+            status = pos.get("status", "").upper()
+            if status == "CLOSED":
                 return False
 
             # Check liquidity
-            liq = pos.get('liquidity') or pos.get('current_liquidity')
+            liq = pos.get("liquidity") or pos.get("current_liquidity")
             if liq is not None:
                 try:
                     return float(liq) > 0
                 except (ValueError, TypeError):
                     pass
             # Check token amounts as fallback (use correct field names)
-            base = pos.get('base_token_amount') or pos.get('base_amount') or pos.get('amount_base')
-            quote = pos.get('quote_token_amount') or pos.get('quote_amount') or pos.get('amount_quote')
+            base = (
+                pos.get("base_token_amount")
+                or pos.get("base_amount")
+                or pos.get("amount_base")
+            )
+            quote = (
+                pos.get("quote_token_amount")
+                or pos.get("quote_amount")
+                or pos.get("amount_quote")
+            )
             if base is not None or quote is not None:
                 try:
                     base_val = float(base) if base is not None else 0
@@ -2370,19 +2650,29 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
 
         positions = [p for p in all_positions if is_active_position(p)]
         if len(positions) < len(all_positions):
-            logger.info(f"Filtered {len(all_positions) - len(positions)} closed/empty positions")
+            logger.info(
+                f"Filtered {len(all_positions) - len(positions)} closed/empty positions"
+            )
 
         # Build message
         if positions:
             header = rf"📍 *Manage LP Positions* \({len(positions)} active\)" + "\n\n"
 
             for i, pos in enumerate(positions[:10]):  # Show top 10
-                pos_detail = _format_position_detail(pos, token_cache=token_cache, detailed=False)
+                pos_detail = _format_position_detail(
+                    pos, token_cache=token_cache, detailed=False
+                )
                 # Add index number prefix to correlate with buttons
-                header += escape_markdown_v2(f"#{i+1} ") + escape_markdown_v2(pos_detail) + "\n\n"
+                header += (
+                    escape_markdown_v2(f"#{i+1} ")
+                    + escape_markdown_v2(pos_detail)
+                    + "\n\n"
+                )
 
             if len(positions) > 10:
-                header += escape_markdown_v2(f"... and {len(positions) - 10} more positions")
+                header += escape_markdown_v2(
+                    f"... and {len(positions) - 10} more positions"
+                )
         else:
             header = r"📍 *Manage LP Positions*" + "\n\n"
             header += r"_No active positions found\._" + "\n\n"
@@ -2398,33 +2688,43 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
         # Add buttons for each position (max 5 for manageability)
         for i, pos in enumerate(positions[:5]):
             # Resolve pair name for button label
-            base_token = pos.get('base_token', pos.get('token_a', ''))
-            quote_token = pos.get('quote_token', pos.get('token_b', ''))
+            base_token = pos.get("base_token", pos.get("token_a", ""))
+            quote_token = pos.get("quote_token", pos.get("token_b", ""))
             pair = format_pair_from_addresses(base_token, quote_token, token_cache)[:10]
 
             # Store position info in context for later use
             context.user_data["positions_cache"][str(i)] = pos
 
             # Use index number to distinguish positions with same pair
-            keyboard.append([
-                InlineKeyboardButton(f"#{i+1} {pair}", callback_data=f"dex:pos_view:{i}"),
-                InlineKeyboardButton("💰 Fees", callback_data=f"dex:pos_collect:{i}"),
-                InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{i}")
-            ])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"#{i+1} {pair}", callback_data=f"dex:pos_view:{i}"
+                    ),
+                    InlineKeyboardButton(
+                        "💰 Fees", callback_data=f"dex:pos_collect:{i}"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Close", callback_data=f"dex:pos_close:{i}"
+                    ),
+                ]
+            )
 
         # Add new position and back buttons
-        keyboard.append([
-            InlineKeyboardButton("➕ New Position", callback_data="dex:add_position"),
-            InlineKeyboardButton("« Back", callback_data="dex:liquidity")
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "➕ New Position", callback_data="dex:add_position"
+                ),
+                InlineKeyboardButton("« Back", callback_data="dex:liquidity"),
+            ]
+        )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         try:
             await update.callback_query.message.edit_text(
-                header,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                header, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         except BadRequest as e:
             if "Message is not modified" not in str(e):
@@ -2436,13 +2736,16 @@ async def handle_manage_positions(update: Update, context: ContextTypes.DEFAULT_
         keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.callback_query.message.edit_text(
-            error_message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            error_message, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
 
-async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str, timeframe: str = "1h") -> None:
+async def handle_pos_view(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    pos_index: str,
+    timeframe: str = "1h",
+) -> None:
     """View detailed info about a position with combined OHLCV + liquidity chart
 
     Args:
@@ -2467,12 +2770,17 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
         await query.answer()
 
         # Get basic position info for loading message
-        base_token = pos.get('base_token', pos.get('token_a', ''))
-        quote_token = pos.get('quote_token', pos.get('token_b', ''))
+        base_token = pos.get("base_token", pos.get("token_a", ""))
+        quote_token = pos.get("quote_token", pos.get("token_b", ""))
         token_cache = context.user_data.get("token_cache", {})
         from utils.telegram_formatters import resolve_token_symbol
-        base_symbol = resolve_token_symbol(base_token, token_cache) if base_token else 'BASE'
-        quote_symbol = resolve_token_symbol(quote_token, token_cache) if quote_token else 'QUOTE'
+
+        base_symbol = (
+            resolve_token_symbol(base_token, token_cache) if base_token else "BASE"
+        )
+        quote_symbol = (
+            resolve_token_symbol(quote_token, token_cache) if quote_token else "QUOTE"
+        )
         pair = f"{base_symbol}/{quote_symbol}"
 
         # Immediately show loading state
@@ -2482,7 +2790,9 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
         loading_msg += r"• Loading liquidity distribution" + "\n"
         loading_msg += r"• Generating chart"
 
-        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+        loading_keyboard = [
+            [InlineKeyboardButton("⏳ Loading...", callback_data="noop")]
+        ]
 
         # Handle loading state for both photo and text messages
         loading_msg_id = None
@@ -2495,7 +2805,7 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
             loading_sent = await query.message.chat.send_message(
                 loading_msg,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(loading_keyboard)
+                reply_markup=InlineKeyboardMarkup(loading_keyboard),
             )
             loading_msg_id = loading_sent.message_id
         else:
@@ -2504,22 +2814,22 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                 await query.message.edit_text(
                     loading_msg,
                     parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(loading_keyboard)
+                    reply_markup=InlineKeyboardMarkup(loading_keyboard),
                 )
             except Exception:
                 pass
 
         chat_id = update.effective_chat.id
-        connector = pos.get('connector', 'meteora')
-        pool_address = pos.get('pool_address', '')
-        network = 'solana-mainnet-beta'
+        connector = pos.get("connector", "meteora")
+        pool_address = pos.get("pool_address", "")
+        network = "solana-mainnet-beta"
 
         # Get position price data
-        lower_price = pos.get('lower_price', pos.get('price_lower'))
-        upper_price = pos.get('upper_price', pos.get('price_upper'))
-        pnl_summary = pos.get('pnl_summary', {})
-        entry_price = pnl_summary.get('entry_price')
-        current_price = pnl_summary.get('current_price')
+        lower_price = pos.get("lower_price", pos.get("price_lower"))
+        upper_price = pos.get("upper_price", pos.get("price_upper"))
+        pnl_summary = pos.get("pnl_summary", {})
+        entry_price = pnl_summary.get("entry_price")
+        current_price = pnl_summary.get("current_price")
 
         # Parallel fetch: token_cache (if needed), pool_info (bins), and OHLCV
         gecko_network = get_gecko_network(network)
@@ -2552,7 +2862,7 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                     network=gecko_network,
                     timeframe=timeframe,
                     currency="token",
-                    user_data=context.user_data
+                    user_data=context.user_data,
                 )
                 return data or []
             except Exception as e:
@@ -2561,9 +2871,7 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
 
         # Run all fetches in parallel
         token_cache_new, pool_info, ohlcv_data = await asyncio.gather(
-            fetch_token_cache_task(),
-            fetch_pool_info_task(),
-            fetch_ohlcv_task()
+            fetch_token_cache_task(), fetch_pool_info_task(), fetch_ohlcv_task()
         )
 
         # Update token cache if fetched
@@ -2573,22 +2881,30 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
 
         # Re-resolve symbols with fresh token cache if needed
         if token_cache_new and token_cache_new != context.user_data.get("token_cache"):
-            base_symbol = resolve_token_symbol(base_token, token_cache) if base_token else 'BASE'
-            quote_symbol = resolve_token_symbol(quote_token, token_cache) if quote_token else 'QUOTE'
+            base_symbol = (
+                resolve_token_symbol(base_token, token_cache) if base_token else "BASE"
+            )
+            quote_symbol = (
+                resolve_token_symbol(quote_token, token_cache)
+                if quote_token
+                else "QUOTE"
+            )
             pair = f"{base_symbol}/{quote_symbol}"
 
         # Get bins from pool_info
-        bins = pool_info.get('bins', [])
+        bins = pool_info.get("bins", [])
 
         # Get current price from pool_info if not in pnl_summary
         if not current_price:
-            current_price = pool_info.get('price')
+            current_price = pool_info.get("price")
 
         # Get token prices for USD conversion
         token_prices = context.user_data.get("token_prices", {})
 
         # Format detailed view with full information
-        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True, token_prices=token_prices)
+        detail = _format_position_detail(
+            pos, token_cache=token_cache, detailed=True, token_prices=token_prices
+        )
         message = r"📍 *Position Details*" + "\n\n"
         message += escape_markdown_v2(detail)
 
@@ -2603,25 +2919,39 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
         keyboard = [
             # Row 1: Timeframe selection
             [
-                InlineKeyboardButton(tf_1m, callback_data=f"dex:pos_view_tf:{pos_index}:1m"),
-                InlineKeyboardButton(tf_1h, callback_data=f"dex:pos_view_tf:{pos_index}:1h"),
-                InlineKeyboardButton(tf_1d, callback_data=f"dex:pos_view_tf:{pos_index}:1d"),
+                InlineKeyboardButton(
+                    tf_1m, callback_data=f"dex:pos_view_tf:{pos_index}:1m"
+                ),
+                InlineKeyboardButton(
+                    tf_1h, callback_data=f"dex:pos_view_tf:{pos_index}:1h"
+                ),
+                InlineKeyboardButton(
+                    tf_1d, callback_data=f"dex:pos_view_tf:{pos_index}:1d"
+                ),
             ],
             # Row 2: Actions
             [
-                InlineKeyboardButton("💰 Collect Fees", callback_data=f"dex:pos_collect:{pos_index}"),
-                InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{pos_index}")
+                InlineKeyboardButton(
+                    "💰 Collect Fees", callback_data=f"dex:pos_collect:{pos_index}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Close", callback_data=f"dex:pos_close:{pos_index}"
+                ),
             ],
         ]
 
         # Add DEX link if available
         if dex_url:
-            keyboard.append([
-                InlineKeyboardButton(f"🌐 {connector.title()}", url=dex_url),
-                InlineKeyboardButton("« Back", callback_data="dex:liquidity")
-            ])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(f"🌐 {connector.title()}", url=dex_url),
+                    InlineKeyboardButton("« Back", callback_data="dex:liquidity"),
+                ]
+            )
         else:
-            keyboard.append([InlineKeyboardButton("« Back", callback_data="dex:liquidity")])
+            keyboard.append(
+                [InlineKeyboardButton("« Back", callback_data="dex:liquidity")]
+            )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -2645,7 +2975,7 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                     quote_symbol=quote_symbol,
                     lower_price=lower_float,
                     upper_price=upper_float,
-                    entry_price=entry_float
+                    entry_price=entry_float,
                 )
             except Exception as e:
                 logger.warning(f"Failed to generate position chart: {e}")
@@ -2679,15 +3009,13 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                     photo=photo_file,
                     caption=message,
                     parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
                 )
             except Exception as e:
                 logger.warning(f"Failed to send position chart: {e}")
                 # Fallback to text
                 await query.message.chat.send_message(
-                    message,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    message, parse_mode="MarkdownV2", reply_markup=reply_markup
                 )
         else:
             # No chart available, just update or send message with details
@@ -2698,32 +3026,28 @@ async def handle_pos_view(update: Update, context: ContextTypes.DEFAULT_TYPE, po
                 except Exception:
                     pass
                 await query.message.chat.send_message(
-                    message,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    message, parse_mode="MarkdownV2", reply_markup=reply_markup
                 )
             else:
                 # Try to edit the text message
                 try:
                     await query.message.edit_text(
-                        message,
-                        parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
+                        message, parse_mode="MarkdownV2", reply_markup=reply_markup
                     )
                 except Exception:
                     # Message was deleted, send new one
                     await query.message.chat.send_message(
-                        message,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
-                )
+                        message, parse_mode="MarkdownV2", reply_markup=reply_markup
+                    )
 
     except Exception as e:
         logger.error(f"Error viewing position: {e}", exc_info=True)
         await query.answer(f"Error: {str(e)[:100]}")
 
 
-async def handle_pos_view_pool(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
+async def handle_pos_view_pool(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str
+) -> None:
     """View pool details from a position - shows pool with liquidity chart"""
     try:
         positions_cache = context.user_data.get("positions_cache", {})
@@ -2733,35 +3057,41 @@ async def handle_pos_view_pool(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.callback_query.answer("Position not found. Please refresh.")
             return
 
-        pool_address = pos.get('pool_address', '')
-        connector = pos.get('connector', 'meteora')
+        pool_address = pos.get("pool_address", "")
+        connector = pos.get("connector", "meteora")
 
         if not pool_address:
-            await update.callback_query.answer("Pool address not available", show_alert=True)
+            await update.callback_query.answer(
+                "Pool address not available", show_alert=True
+            )
             return
 
         # Build pool dict for _show_pool_detail
         pool = {
-            'pool_address': pool_address,
-            'address': pool_address,
-            'connector': connector,
-            'trading_pair': pos.get('trading_pair'),
-            'mint_x': pos.get('base_token'),
-            'mint_y': pos.get('quote_token'),
+            "pool_address": pool_address,
+            "address": pool_address,
+            "connector": connector,
+            "trading_pair": pos.get("trading_pair"),
+            "mint_x": pos.get("base_token"),
+            "mint_y": pos.get("quote_token"),
         }
 
         # Store reference back to position
         context.user_data["viewing_position_index"] = pos_index
 
         await update.callback_query.answer("Loading pool details...")
-        await _show_pool_detail(update, context, pool, from_callback=True, has_list_context=False)
+        await _show_pool_detail(
+            update, context, pool, from_callback=True, has_list_context=False
+        )
 
     except Exception as e:
         logger.error(f"Error viewing pool from position: {e}", exc_info=True)
         await update.callback_query.answer(f"Error: {str(e)[:100]}")
 
 
-async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
+async def handle_pos_collect_fees(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str
+) -> None:
     """Collect fees from a position - shows progress inline then returns to positions"""
     import asyncio
 
@@ -2777,8 +3107,8 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
 
         # Get token cache for better pair display
         token_cache = context.user_data.get("token_cache", {})
-        base_token = pos.get('base_token', pos.get('token_a', ''))
-        quote_token = pos.get('quote_token', pos.get('token_b', ''))
+        base_token = pos.get("base_token", pos.get("token_a", ""))
+        quote_token = pos.get("quote_token", pos.get("token_b", ""))
         pair = format_pair_from_addresses(base_token, quote_token, token_cache)
 
         # Edit message to show collecting status
@@ -2786,19 +3116,19 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
         await query.message.edit_text(
             f"⏳ Collecting fees from {escape_markdown_v2(pair)}\\.\\.\\.",
             parse_mode="MarkdownV2",
-            reply_markup=None
+            reply_markup=None,
         )
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         # Get position details
-        connector = pos.get('connector', 'meteora')
-        network = pos.get('network', 'solana-mainnet-beta')
-        position_address = pos.get('position_address', pos.get('nft_id', ''))
+        connector = pos.get("connector", "meteora")
+        network = pos.get("network", "solana-mainnet-beta")
+        position_address = pos.get("position_address", pos.get("nft_id", ""))
 
         # Call collect fees with 30s timeout
         try:
@@ -2806,17 +3136,19 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
                 client.gateway_clmm.collect_fees(
                     connector=connector,
                     network=network,
-                    position_address=position_address
+                    position_address=position_address,
                 ),
-                timeout=30.0
+                timeout=30.0,
             )
         except asyncio.TimeoutError:
-            raise TimeoutError("Operation timed out. Check your connection to the backend.")
+            raise TimeoutError(
+                "Operation timed out. Check your connection to the backend."
+            )
 
         # Build back button
-        back_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("« Back", callback_data="dex:liquidity")]
-        ])
+        back_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
+        )
 
         # Always invalidate caches after API call - even if result is empty,
         # the transaction was sent and we need fresh data
@@ -2828,20 +3160,22 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
         if result:
             success_msg = f"✅ *Fees collected from {escape_markdown_v2(pair)}\\!*"
             if isinstance(result, dict):
-                tx_hash = result.get('tx_hash') or result.get('txHash') or result.get('signature')
+                tx_hash = (
+                    result.get("tx_hash")
+                    or result.get("txHash")
+                    or result.get("signature")
+                )
                 if tx_hash:
                     success_msg += f"\n\nTx: `{tx_hash[:30]}...`"
 
             await query.message.edit_text(
-                success_msg,
-                parse_mode="MarkdownV2",
-                reply_markup=back_keyboard
+                success_msg, parse_mode="MarkdownV2", reply_markup=back_keyboard
             )
         else:
             await query.message.edit_text(
                 f"ℹ️ No fees to collect from {escape_markdown_v2(pair)}",
                 parse_mode="MarkdownV2",
-                reply_markup=back_keyboard
+                reply_markup=back_keyboard,
             )
 
     except Exception as e:
@@ -2854,22 +3188,30 @@ async def handle_pos_collect_fees(update: Update, context: ContextTypes.DEFAULT_
         else:
             display_error = escape_markdown_v2(error_msg[:150])
 
-        back_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Retry", callback_data=f"dex:pos_collect:{pos_index}")],
-            [InlineKeyboardButton("« Back", callback_data="dex:liquidity")]
-        ])
+        back_keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🔄 Retry", callback_data=f"dex:pos_collect:{pos_index}"
+                    )
+                ],
+                [InlineKeyboardButton("« Back", callback_data="dex:liquidity")],
+            ]
+        )
 
         try:
             await query.message.edit_text(
                 f"❌ *Failed to collect fees*\n\n{display_error}",
                 parse_mode="MarkdownV2",
-                reply_markup=back_keyboard
+                reply_markup=back_keyboard,
             )
         except Exception as edit_error:
             logger.warning(f"Could not edit message: {edit_error}")
 
 
-async def handle_pos_close_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
+async def handle_pos_close_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str
+) -> None:
     """Show confirmation for closing a position"""
     try:
         positions_cache = context.user_data.get("positions_cache", {})
@@ -2882,7 +3224,9 @@ async def handle_pos_close_confirm(update: Update, context: ContextTypes.DEFAULT
         # Get token cache and prices for display
         token_cache = context.user_data.get("token_cache") or {}
         token_prices = context.user_data.get("token_prices", {})
-        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True, token_prices=token_prices)
+        detail = _format_position_detail(
+            pos, token_cache=token_cache, detailed=True, token_prices=token_prices
+        )
 
         message = r"⚠️ *Close Position?*" + "\n\n"
         message += escape_markdown_v2(detail) + "\n\n"
@@ -2890,16 +3234,16 @@ async def handle_pos_close_confirm(update: Update, context: ContextTypes.DEFAULT
 
         keyboard = [
             [
-                InlineKeyboardButton("✅ Yes, Close", callback_data=f"dex:pos_close_exec:{pos_index}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="dex:liquidity")
+                InlineKeyboardButton(
+                    "✅ Yes, Close", callback_data=f"dex:pos_close_exec:{pos_index}"
+                ),
+                InlineKeyboardButton("❌ Cancel", callback_data="dex:liquidity"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
     except Exception as e:
@@ -2907,7 +3251,9 @@ async def handle_pos_close_confirm(update: Update, context: ContextTypes.DEFAULT
         await update.callback_query.answer(f"Error: {str(e)[:100]}")
 
 
-async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str) -> None:
+async def handle_pos_close_execute(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pos_index: str
+) -> None:
     """Execute closing a position (remove all liquidity)"""
     try:
         positions_cache = context.user_data.get("positions_cache", {})
@@ -2920,7 +3266,9 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
         # Get token cache and prices for display
         token_cache = context.user_data.get("token_cache") or {}
         token_prices = context.user_data.get("token_prices", {})
-        detail = _format_position_detail(pos, token_cache=token_cache, detailed=True, token_prices=token_prices)
+        detail = _format_position_detail(
+            pos, token_cache=token_cache, detailed=True, token_prices=token_prices
+        )
 
         # Immediately update message to show closing status (remove keyboard)
         closing_msg = r"⏳ *Closing Position\.\.\.*" + "\n\n"
@@ -2929,26 +3277,23 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
 
         await update.callback_query.answer()
         await update.callback_query.message.edit_text(
-            closing_msg,
-            parse_mode="MarkdownV2"
+            closing_msg, parse_mode="MarkdownV2"
         )
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         # Get position details
-        connector = pos.get('connector', 'meteora')
-        network = pos.get('network', 'solana-mainnet-beta')
-        position_address = pos.get('position_address', pos.get('nft_id', ''))
+        connector = pos.get("connector", "meteora")
+        network = pos.get("network", "solana-mainnet-beta")
+        position_address = pos.get("position_address", pos.get("nft_id", ""))
 
         # Close the position completely
         result = await client.gateway_clmm.close_position(
-            connector=connector,
-            network=network,
-            position_address=position_address
+            connector=connector, network=network, position_address=position_address
         )
 
         if result:
@@ -2958,21 +3303,23 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
                 del positions_cache[pos_index]
             # Clear the full position list cache to force refresh on next view
             context.user_data.pop("all_positions", None)
-            context.user_data.pop("lp_positions_cache", None)  # Also clear LP list cache
+            context.user_data.pop(
+                "lp_positions_cache", None
+            )  # Also clear LP list cache
 
-            pair = pos.get('trading_pair', 'Unknown')
+            pair = pos.get("trading_pair", "Unknown")
             success_msg = escape_markdown_v2(f"✅ Position closed: {pair}")
 
-            if isinstance(result, dict) and result.get('tx_hash'):
-                success_msg += f"\n\nTx: `{escape_markdown_v2(result['tx_hash'][:20])}...`"
+            if isinstance(result, dict) and result.get("tx_hash"):
+                success_msg += (
+                    f"\n\nTx: `{escape_markdown_v2(result['tx_hash'][:20])}...`"
+                )
 
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.callback_query.message.edit_text(
-                success_msg,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                success_msg, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         else:
             await update.callback_query.answer("Failed to close position")
@@ -2980,14 +3327,19 @@ async def handle_pos_close_execute(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         logger.error(f"Error closing position: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to close position: {str(e)}")
-        await update.callback_query.message.reply_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.reply_text(
+            error_message, parse_mode="MarkdownV2"
+        )
 
 
 # ============================================
 # POSITION LIST (legacy - for specific pool query)
 # ============================================
 
-async def handle_position_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_position_list(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle CLMM position list for specific pool"""
     help_text = (
         r"📍 *Get CLMM Positions*" + "\n\n"
@@ -3003,16 +3355,12 @@ async def handle_position_list(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["dex_state"] = "position_list"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
 async def process_position_list(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position list"""
     try:
@@ -3027,34 +3375,33 @@ async def process_position_list(
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         positions = await client.gateway_clmm.get_positions_owned(
-            connector=connector,
-            network=network,
-            pool_address=pool_address
+            connector=connector, network=network, pool_address=pool_address
         )
 
         # Save params
-        set_dex_last_pool(context.user_data, {
-            "connector": connector,
-            "network": network,
-            "pool_address": pool_address
-        })
+        set_dex_last_pool(
+            context.user_data,
+            {"connector": connector, "network": network, "pool_address": pool_address},
+        )
 
         if not positions:
             message = escape_markdown_v2("📍 No positions found")
         else:
             pos_lines = []
             for pos in positions[:5]:
-                pos_id = pos.get('position_address', pos.get('nft_id', 'N/A'))
-                lower = pos.get('lower_price', 'N/A')
-                upper = pos.get('upper_price', 'N/A')
+                pos_id = pos.get("position_address", pos.get("nft_id", "N/A"))
+                lower = pos.get("lower_price", "N/A")
+                upper = pos.get("upper_price", "N/A")
                 pos_lines.append(f"• {pos_id[:8]}... [{lower}-{upper}]")
 
             pos_text = escape_markdown_v2("\n".join(pos_lines))
-            message = rf"📍 *CLMM Positions* \({len(positions)} found\)" + "\n\n" + pos_text
+            message = (
+                rf"📍 *CLMM Positions* \({len(positions)} found\)" + "\n\n" + pos_text
+            )
 
         await update.message.reply_text(message, parse_mode="MarkdownV2")
 
@@ -3068,7 +3415,10 @@ async def process_position_list(
 # ADD POSITION
 # ============================================
 
-async def handle_add_position(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_add_position(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle add CLMM position"""
 
     # Initialize position params with defaults or last used
@@ -3090,7 +3440,9 @@ async def handle_add_position(update: Update, context: ContextTypes.DEFAULT_TYPE
     await show_add_position_menu(update, context)
 
 
-def _calculate_max_range(current_price: float, bin_step: int, max_bins: int = 41) -> tuple:
+def _calculate_max_range(
+    current_price: float, bin_step: int, max_bins: int = 41
+) -> tuple:
     """Calculate price range for liquidity position
 
     Args:
@@ -3111,8 +3463,8 @@ def _calculate_max_range(current_price: float, bin_step: int, max_bins: int = 41
         # Calculate range: 20 bins below, 20 bins above (+ active bin = 41)
         half_bins = max_bins // 2
 
-        lower_price = current_price / (step_multiplier ** half_bins)
-        upper_price = current_price * (step_multiplier ** half_bins)
+        lower_price = current_price / (step_multiplier**half_bins)
+        upper_price = current_price * (step_multiplier**half_bins)
 
         return lower_price, upper_price
     except Exception:
@@ -3132,7 +3484,7 @@ def _bins_to_percent(bin_step: int, num_bins: int) -> float:
     if not bin_step or not num_bins:
         return 0.0
     step_multiplier = 1 + (bin_step / 10000)
-    return (step_multiplier ** num_bins - 1) * 100
+    return (step_multiplier**num_bins - 1) * 100
 
 
 def _percent_to_bins(bin_step: int, percent: float) -> int:
@@ -3148,6 +3500,7 @@ def _percent_to_bins(bin_step: int, percent: float) -> int:
     if not bin_step or not percent:
         return 0
     import math
+
     step_multiplier = 1 + (bin_step / 10000)
     # percent% = (multiplier^n - 1) * 100
     # (percent/100 + 1) = multiplier^n
@@ -3174,7 +3527,13 @@ def _price_to_percent(current_price: float, target_price: float) -> float:
     return ((target_price / current_price) - 1) * 100
 
 
-def _validate_bin_range(lower_price: float, upper_price: float, current_price: float, bin_step: int, max_bins: int = 68) -> tuple:
+def _validate_bin_range(
+    lower_price: float,
+    upper_price: float,
+    current_price: float,
+    bin_step: int,
+    max_bins: int = 68,
+) -> tuple:
     """Validate that the price range doesn't exceed max bins.
 
     Args:
@@ -3195,13 +3554,21 @@ def _validate_bin_range(lower_price: float, upper_price: float, current_price: f
         import math
 
         # Calculate bins from current price to each bound
-        lower_bins = abs(math.log(lower_price / current_price) / math.log(step_multiplier))
-        upper_bins = abs(math.log(upper_price / current_price) / math.log(step_multiplier))
+        lower_bins = abs(
+            math.log(lower_price / current_price) / math.log(step_multiplier)
+        )
+        upper_bins = abs(
+            math.log(upper_price / current_price) / math.log(step_multiplier)
+        )
         total_bins = int(round(lower_bins + upper_bins)) + 1  # +1 for active bin
 
         if total_bins > max_bins:
             max_pct = _bins_to_percent(bin_step, max_bins // 2)
-            return False, total_bins, f"Range too wide: {total_bins} bins (max {max_bins}). Try L:{max_pct:.1f}% U:{max_pct:.1f}%"
+            return (
+                False,
+                total_bins,
+                f"Range too wide: {total_bins} bins (max {max_bins}). Try L:{max_pct:.1f}% U:{max_pct:.1f}%",
+            )
 
         return True, total_bins, None
     except Exception:
@@ -3222,7 +3589,9 @@ def _get_default_range_percent(bin_step: int, num_bins: int = 20) -> tuple:
     return (-pct, pct)
 
 
-async def _fetch_token_balances(client, network: str, base_symbol: str, quote_symbol: str) -> dict:
+async def _fetch_token_balances(
+    client, network: str, base_symbol: str, quote_symbol: str
+) -> dict:
     """Fetch wallet balances for base and quote tokens
 
     Args:
@@ -3242,7 +3611,7 @@ async def _fetch_token_balances(client, network: str, base_symbol: str, quote_sy
     }
 
     try:
-        if not hasattr(client, 'portfolio'):
+        if not hasattr(client, "portfolio"):
             return result
 
         # Fetch portfolio state
@@ -3263,8 +3632,9 @@ async def _fetch_token_balances(client, network: str, base_symbol: str, quote_sy
                 connector_lower = connector_name.lower()
                 # Check if this is a gateway connector matching our network
                 is_match = (
-                    network_key in connector_lower or
-                    "gateway" in connector_lower and network_key in connector_lower
+                    network_key in connector_lower
+                    or "gateway" in connector_lower
+                    and network_key in connector_lower
                 )
 
                 if is_match and balances:
@@ -3286,9 +3656,15 @@ async def _fetch_token_balances(client, network: str, base_symbol: str, quote_sy
     return result
 
 
-def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
-                          current_price: float, width: int = 20, max_bins_per_side: int = 40,
-                          bin_step: int = 2) -> str:
+def _generate_range_ascii(
+    bins: list,
+    lower_price: float,
+    upper_price: float,
+    current_price: float,
+    width: int = 20,
+    max_bins_per_side: int = 40,
+    bin_step: int = 2,
+) -> str:
     """Generate improved ASCII visualization of liquidity with selected range markers
 
     Args:
@@ -3309,23 +3685,23 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
     # Process bins
     bin_data = []
     for b in bins:
-        base = float(b.get('base_token_amount', 0) or 0)
-        quote = float(b.get('quote_token_amount', 0) or 0)
-        price = float(b.get('price', 0) or 0)
+        base = float(b.get("base_token_amount", 0) or 0)
+        quote = float(b.get("quote_token_amount", 0) or 0)
+        price = float(b.get("price", 0) or 0)
         if price > 0:
-            bin_data.append({'price': price, 'liq': base + quote})
+            bin_data.append({"price": price, "liq": base + quote})
 
     if not bin_data:
         return ""
 
     # Sort bins by price
-    bin_data.sort(key=lambda x: x['price'])
+    bin_data.sort(key=lambda x: x["price"])
 
     # Find current price index for centering
     current_idx = 0
     if current_price:
         for i, b in enumerate(bin_data):
-            if b['price'] >= current_price:
+            if b["price"] >= current_price:
                 current_idx = i
                 break
         else:
@@ -3342,7 +3718,7 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
         return ""
 
     # Find max liquidity for scaling (from all bins for consistent scale)
-    max_liq = max((b['liq'] for b in bin_data), default=0)
+    max_liq = max((b["liq"] for b in bin_data), default=0)
     if max_liq <= 0:
         max_liq = 1  # Avoid division by zero
 
@@ -3350,22 +3726,33 @@ def _generate_range_ascii(bins: list, lower_price: float, upper_price: float,
     lines = []
     for i, b in enumerate(display_bins):
         # Only show every bin_step bins, but always show bins near current price and bounds
-        price = b['price']
-        is_current = current_price and abs(price - current_price) / max(current_price, 0.0001) < 0.03
-        near_lower = lower_price and abs(price - lower_price) / max(lower_price, 0.0001) < 0.03
-        near_upper = upper_price and abs(price - upper_price) / max(upper_price, 0.0001) < 0.03
+        price = b["price"]
+        is_current = (
+            current_price
+            and abs(price - current_price) / max(current_price, 0.0001) < 0.03
+        )
+        near_lower = (
+            lower_price and abs(price - lower_price) / max(lower_price, 0.0001) < 0.03
+        )
+        near_upper = (
+            upper_price and abs(price - upper_price) / max(upper_price, 0.0001) < 0.03
+        )
 
         # Skip bins not at step interval unless they're special (current, lower, upper bounds)
         if i % bin_step != 0 and not is_current and not near_lower and not near_upper:
             continue
 
-        liq = b['liq']
+        liq = b["liq"]
 
         # Calculate bar length
         bar_len = int((liq / max_liq) * width) if max_liq > 0 else 0
 
         # Determine if in range
-        in_range = lower_price <= price <= upper_price if lower_price and upper_price else False
+        in_range = (
+            lower_price <= price <= upper_price
+            if lower_price and upper_price
+            else False
+        )
 
         # Build bar with different characters for in/out of range
         bar = "█" * bar_len if in_range else "░" * bar_len
@@ -3396,7 +3783,7 @@ async def show_add_position_menu(
     context: ContextTypes.DEFAULT_TYPE,
     send_new: bool = False,
     show_help: bool = False,
-    timeframe: str = "1h"
+    timeframe: str = "1h",
 ) -> None:
     """Display the add position configuration menu with liquidity chart
 
@@ -3419,37 +3806,51 @@ async def show_add_position_menu(
     pool_info = context.user_data.get("selected_pool_info", {})
 
     # If we have a pool but no pool_info with bins, try to use cached or fetch
-    pool_address = params.get('pool_address') or selected_pool.get('pool_address', selected_pool.get('address', ''))
-    connector = params.get('connector') or selected_pool.get('connector', 'meteora')
+    pool_address = params.get("pool_address") or selected_pool.get(
+        "pool_address", selected_pool.get("address", "")
+    )
+    connector = params.get("connector") or selected_pool.get("connector", "meteora")
 
-    if pool_address and not pool_info.get('bins'):
+    if pool_address and not pool_info.get("bins"):
         # Try to get from cache first
         cache_key = f"pool_info_{connector}_{pool_address}"
         cached_info = get_cached(context.user_data, cache_key, ttl=DEFAULT_CACHE_TTL)
-        if cached_info and cached_info.get('bins'):
+        if cached_info and cached_info.get("bins"):
             pool_info = cached_info
             context.user_data["selected_pool_info"] = pool_info
 
     # Get current price and bin step for range calculation
     # Prefer pool_info (fetched data) over selected_pool (list data)
-    current_price = pool_info.get('price') or selected_pool.get('current_price') or selected_pool.get('price')
-    bin_step = pool_info.get('bin_step') or selected_pool.get('bin_step')
-    bins = pool_info.get('bins', [])
-    network = params.get('network', 'solana-mainnet-beta')
+    current_price = (
+        pool_info.get("price")
+        or selected_pool.get("current_price")
+        or selected_pool.get("price")
+    )
+    bin_step = pool_info.get("bin_step") or selected_pool.get("bin_step")
+    bins = pool_info.get("bins", [])
+    network = params.get("network", "solana-mainnet-beta")
 
     # Extract token addresses/symbols from pool info
-    base_token = selected_pool.get('base_token') or pool_info.get('base_token')
-    quote_token = selected_pool.get('quote_token') or pool_info.get('quote_token')
+    base_token = selected_pool.get("base_token") or pool_info.get("base_token")
+    quote_token = selected_pool.get("quote_token") or pool_info.get("quote_token")
 
     # Try mint addresses if token not set
     if not base_token:
-        base_token = selected_pool.get('mint_x') or pool_info.get('mint_x') or pool_info.get('token_x_mint')
+        base_token = (
+            selected_pool.get("mint_x")
+            or pool_info.get("mint_x")
+            or pool_info.get("token_x_mint")
+        )
     if not quote_token:
-        quote_token = selected_pool.get('mint_y') or pool_info.get('mint_y') or pool_info.get('token_y_mint')
+        quote_token = (
+            selected_pool.get("mint_y")
+            or pool_info.get("mint_y")
+            or pool_info.get("token_y_mint")
+        )
 
     # Get pair name, with fallback to resolving from token addresses
-    pair = selected_pool.get('trading_pair') or pool_info.get('trading_pair')
-    if not pair or pair in ('Pool', 'N/A', 'Unknown Pair'):
+    pair = selected_pool.get("trading_pair") or pool_info.get("trading_pair")
+    if not pair or pair in ("Pool", "N/A", "Unknown Pair"):
         # Try to resolve from token addresses using token_cache
         if base_token and quote_token:
             token_cache = context.user_data.get("token_cache")
@@ -3465,23 +3866,27 @@ async def show_add_position_menu(
             pair = "Pool"
 
     # Extract base/quote symbols - prioritize trading pair over address resolution
-    if pair and pair not in ('Pool', 'N/A', 'Unknown Pair'):
-        if '-' in pair:
-            parts = pair.split('-')
+    if pair and pair not in ("Pool", "N/A", "Unknown Pair"):
+        if "-" in pair:
+            parts = pair.split("-")
             base_symbol = parts[0].strip()
-            quote_symbol = parts[1].strip() if len(parts) > 1 else 'QUOTE'
-        elif '/' in pair:
-            parts = pair.split('/')
+            quote_symbol = parts[1].strip() if len(parts) > 1 else "QUOTE"
+        elif "/" in pair:
+            parts = pair.split("/")
             base_symbol = parts[0].strip()
-            quote_symbol = parts[1].strip() if len(parts) > 1 else 'QUOTE'
+            quote_symbol = parts[1].strip() if len(parts) > 1 else "QUOTE"
         else:
             base_symbol = pair
-            quote_symbol = 'QUOTE'
+            quote_symbol = "QUOTE"
     else:
         # Fallback to resolving from addresses (may return truncated)
         token_cache = context.user_data.get("token_cache", {})
-        base_symbol = resolve_token_symbol(base_token, token_cache) if base_token else 'BASE'
-        quote_symbol = resolve_token_symbol(quote_token, token_cache) if quote_token else 'QUOTE'
+        base_symbol = (
+            resolve_token_symbol(base_token, token_cache) if base_token else "BASE"
+        )
+        quote_symbol = (
+            resolve_token_symbol(quote_token, token_cache) if quote_token else "QUOTE"
+        )
 
     # Calculate max range (20 bins each side = 41 total) and auto-fill if not set
     suggested_lower, suggested_upper = None, None
@@ -3492,29 +3897,38 @@ async def show_add_position_menu(
             bin_step_int = int(bin_step)
 
             # Get default percentages for 20 bins each side
-            default_lower_pct, default_upper_pct = _get_default_range_percent(bin_step_int, 20)
+            default_lower_pct, default_upper_pct = _get_default_range_percent(
+                bin_step_int, 20
+            )
 
             suggested_lower, suggested_upper = _calculate_max_range(
-                current_price_float,
-                bin_step_int
+                current_price_float, bin_step_int
             )
             # Auto-fill if empty - store both price and percentage
-            if suggested_lower and not params.get('lower_price'):
-                params['lower_price'] = f"{suggested_lower:.10f}".rstrip('0').rstrip('.')
-                params['lower_pct'] = default_lower_pct
-            if suggested_upper and not params.get('upper_price'):
-                params['upper_price'] = f"{suggested_upper:.10f}".rstrip('0').rstrip('.')
-                params['upper_pct'] = default_upper_pct
+            if suggested_lower and not params.get("lower_price"):
+                params["lower_price"] = f"{suggested_lower:.10f}".rstrip("0").rstrip(
+                    "."
+                )
+                params["lower_pct"] = default_lower_pct
+            if suggested_upper and not params.get("upper_price"):
+                params["upper_price"] = f"{suggested_upper:.10f}".rstrip("0").rstrip(
+                    "."
+                )
+                params["upper_pct"] = default_upper_pct
 
             # Calculate percentages for existing prices if not set
-            if params.get('lower_price') and not params.get('lower_pct'):
+            if params.get("lower_price") and not params.get("lower_pct"):
                 try:
-                    params['lower_pct'] = _price_to_percent(current_price_float, float(params['lower_price']))
+                    params["lower_pct"] = _price_to_percent(
+                        current_price_float, float(params["lower_price"])
+                    )
                 except (ValueError, TypeError):
                     pass
-            if params.get('upper_price') and not params.get('upper_pct'):
+            if params.get("upper_price") and not params.get("upper_pct"):
                 try:
-                    params['upper_pct'] = _price_to_percent(current_price_float, float(params['upper_price']))
+                    params["upper_pct"] = _price_to_percent(
+                        current_price_float, float(params["upper_price"])
+                    )
                 except (ValueError, TypeError):
                     pass
 
@@ -3524,14 +3938,20 @@ async def show_add_position_menu(
 
     # Get current range values for visualization
     try:
-        lower_val = float(params.get('lower_price', 0)) if params.get('lower_price') else None
-        upper_val = float(params.get('upper_price', 0)) if params.get('upper_price') else None
+        lower_val = (
+            float(params.get("lower_price", 0)) if params.get("lower_price") else None
+        )
+        upper_val = (
+            float(params.get("upper_price", 0)) if params.get("upper_price") else None
+        )
         current_val = float(current_price) if current_price else None
     except (ValueError, TypeError):
         lower_val, upper_val, current_val = None, None, None
 
     # Debug logging for ASCII visualization
-    logger.info(f"Add position - bins: {len(bins)}, lower: {lower_val}, upper: {upper_val}, price: {current_val}")
+    logger.info(
+        f"Add position - bins: {len(bins)}, lower: {lower_val}, upper: {upper_val}, price: {current_val}"
+    )
 
     if show_help:
         # ========== HELP VIEW ==========
@@ -3598,25 +4018,37 @@ async def show_add_position_menu(
         # Pool info header - show pair and address
         help_text += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
         if pool_address:
-            addr_short = f"{pool_address[:6]}...{pool_address[-4:]}" if len(pool_address) > 12 else pool_address
+            addr_short = (
+                f"{pool_address[:6]}...{pool_address[-4:]}"
+                if len(pool_address) > 12
+                else pool_address
+            )
             help_text += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
         if current_price:
-            help_text += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
+            help_text += (
+                f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
+            )
         if bin_step:
             help_text += f"📊 *Bin Step:* `{escape_markdown_v2(str(bin_step))}` _\\(default 20 bins each side\\)_\n"
         # Add fee if available
-        base_fee = pool_info.get('base_fee_percentage') or selected_pool.get('base_fee_percentage')
+        base_fee = pool_info.get("base_fee_percentage") or selected_pool.get(
+            "base_fee_percentage"
+        )
         if base_fee:
             help_text += f"💸 *Fee:* `{escape_markdown_v2(str(base_fee))}%`\n"
 
         # Fetch and display token balances (cached with 60s TTL)
         try:
             balance_cache_key = f"token_balances_{network}_{base_symbol}_{quote_symbol}"
-            balances = get_cached(context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL)
+            balances = get_cached(
+                context.user_data, balance_cache_key, ttl=DEFAULT_CACHE_TTL
+            )
             if balances is None:
                 chat_id = update.effective_chat.id
                 client = await get_client(chat_id, context=context)
-                balances = await _fetch_token_balances(client, network, base_symbol, quote_symbol)
+                balances = await _fetch_token_balances(
+                    client, network, base_symbol, quote_symbol
+                )
                 set_cached(context.user_data, balance_cache_key, balances)
 
             # Always show wallet balances section
@@ -3624,12 +4056,20 @@ async def show_add_position_menu(
 
             # Format base token balance - always show, even if 0
             base_bal_str = _format_number(balances["base_balance"])
-            base_val_str = f"${_format_number(balances['base_value'])}" if balances["base_value"] > 0 else ""
+            base_val_str = (
+                f"${_format_number(balances['base_value'])}"
+                if balances["base_value"] > 0
+                else ""
+            )
             help_text += f"💰 `{escape_markdown_v2(base_symbol)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
 
             # Format quote token balance - always show, even if 0
             quote_bal_str = _format_number(balances["quote_balance"])
-            quote_val_str = f"${_format_number(balances['quote_value'])}" if balances["quote_value"] > 0 else ""
+            quote_val_str = (
+                f"${_format_number(balances['quote_value'])}"
+                if balances["quote_value"] > 0
+                else ""
+            )
             help_text += f"💵 `{escape_markdown_v2(quote_symbol)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
 
             # Store balances in context for percentage calculation
@@ -3637,18 +4077,20 @@ async def show_add_position_menu(
 
         except Exception as e:
             logger.warning(f"Could not fetch token balances: {e}")
-            balances = context.user_data.get("token_balances", {"base_balance": 0, "quote_balance": 0})
+            balances = context.user_data.get(
+                "token_balances", {"base_balance": 0, "quote_balance": 0}
+            )
 
         # ========== POSITION SUMMARY ==========
         # Show the position that will be created with current parameters
         help_text += "\n" + r"━━━ Position Preview ━━━" + "\n"
 
         # Calculate actual amounts from percentages
-        base_amount_str = params.get('amount_base', '10%')
-        quote_amount_str = params.get('amount_quote', '10%')
+        base_amount_str = params.get("amount_base", "10%")
+        quote_amount_str = params.get("amount_quote", "10%")
 
         try:
-            if base_amount_str.endswith('%'):
+            if base_amount_str.endswith("%"):
                 base_pct = float(base_amount_str[:-1])
                 base_amount = balances.get("base_balance", 0) * base_pct / 100
             else:
@@ -3657,7 +4099,7 @@ async def show_add_position_menu(
             base_amount = 0
 
         try:
-            if quote_amount_str.endswith('%'):
+            if quote_amount_str.endswith("%"):
                 quote_pct = float(quote_amount_str[:-1])
                 quote_amount = balances.get("quote_balance", 0) * quote_pct / 100
             else:
@@ -3666,10 +4108,10 @@ async def show_add_position_menu(
             quote_amount = 0
 
         # Price range with percentages
-        lower_pct = params.get('lower_pct')
-        upper_pct = params.get('upper_pct')
-        lower_price_str = params.get('lower_price', '')
-        upper_price_str = params.get('upper_price', '')
+        lower_pct = params.get("lower_pct")
+        upper_pct = params.get("upper_pct")
+        lower_price_str = params.get("lower_price", "")
+        upper_price_str = params.get("upper_price", "")
 
         if lower_price_str and upper_price_str:
             try:
@@ -3695,7 +4137,11 @@ async def show_add_position_menu(
                 # Validate bin range
                 if current_price and bin_step:
                     is_valid, total_bins, error_msg = _validate_bin_range(
-                        lower_p, upper_p, float(current_price), int(bin_step), max_bins=68
+                        lower_p,
+                        upper_p,
+                        float(current_price),
+                        int(bin_step),
+                        max_bins=68,
                     )
                     if not is_valid:
                         help_text += f"⚠️ _{escape_markdown_v2(error_msg)}_\n"
@@ -3722,8 +4168,16 @@ async def show_add_position_menu(
         except (ValueError, TypeError, ZeroDivisionError):
             base_usd, quote_usd = 0, 0
 
-        base_usd_str = f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
-        quote_usd_str = f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+        base_usd_str = (
+            f" _${escape_markdown_v2(_format_number(base_usd))}_"
+            if base_usd > 0
+            else ""
+        )
+        quote_usd_str = (
+            f" _${escape_markdown_v2(_format_number(quote_usd))}_"
+            if quote_usd > 0
+            else ""
+        )
 
         help_text += f"💰 *Add:* `{base_amt_fmt}` {escape_markdown_v2(base_symbol)}{base_usd_str}\n"
         help_text += f"💵 *Add:* `{quote_amt_fmt}` {escape_markdown_v2(quote_symbol)}{quote_usd_str}\n"
@@ -3742,9 +4196,9 @@ async def show_add_position_menu(
         # This is done below, after chart_bytes is generated
 
     # Build simplified keyboard (no L/U/B/Q buttons - use text input instead)
-    strategy_display = params.get('strategy_type', '0')
-    strategy_names = {'0': 'Spot', '1': 'Curve', '2': 'BidAsk'}
-    strategy_name = strategy_names.get(strategy_display, 'Spot')
+    strategy_display = params.get("strategy_type", "0")
+    strategy_names = {"0": "Spot", "1": "Curve", "2": "BidAsk"}
+    strategy_name = strategy_names.get(strategy_display, "Spot")
 
     # Build GeckoTerminal link for pool
     gecko_url = f"https://www.geckoterminal.com/solana/pools/{pool_address}"
@@ -3763,15 +4217,19 @@ async def show_add_position_menu(
         ],
         # Row 2: Strategy + Add Position
         [
-            InlineKeyboardButton(f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"),
-            InlineKeyboardButton("➕ Add Position", callback_data="dex:pos_add_confirm"),
+            InlineKeyboardButton(
+                f"🎯 {strategy_name}", callback_data="dex:pos_toggle_strategy"
+            ),
+            InlineKeyboardButton(
+                "➕ Add Position", callback_data="dex:pos_add_confirm"
+            ),
         ],
         # Row 3: Refresh + Gecko + Back
         [
             InlineKeyboardButton("🔄 Refresh", callback_data="dex:pos_refresh"),
             InlineKeyboardButton("🦎 Gecko", url=gecko_url),
             InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh"),
-        ]
+        ],
     ]
 
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -3783,7 +4241,9 @@ async def show_add_position_menu(
         try:
             gecko_network = get_gecko_network(network)
             ohlcv_cache_key = f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_token"
-            ohlcv_data = get_cached(context.user_data, ohlcv_cache_key, ttl=300)  # 5min cache
+            ohlcv_data = get_cached(
+                context.user_data, ohlcv_cache_key, ttl=300
+            )  # 5min cache
 
             if ohlcv_data is None:
                 # Fetch OHLCV data
@@ -3792,7 +4252,7 @@ async def show_add_position_menu(
                     network=gecko_network,
                     timeframe=timeframe,
                     currency="token",
-                    user_data=context.user_data
+                    user_data=context.user_data,
                 )
                 if ohlcv_error:
                     logger.warning(f"OHLCV fetch error: {ohlcv_error}")
@@ -3809,7 +4269,7 @@ async def show_add_position_menu(
                     base_symbol=base_symbol,
                     quote_symbol=quote_symbol,
                     lower_price=lower_val,
-                    upper_price=upper_val
+                    upper_price=upper_val,
                 )
         except Exception as e:
             logger.warning(f"Failed to generate combined chart: {e}")
@@ -3819,11 +4279,11 @@ async def show_add_position_menu(
             try:
                 chart_bytes = generate_liquidity_chart(
                     bins=bins,
-                    active_bin_id=pool_info.get('active_bin_id'),
+                    active_bin_id=pool_info.get("active_bin_id"),
                     current_price=current_val,
                     pair_name=pair,
                     lower_price=lower_val,
-                    upper_price=upper_val
+                    upper_price=upper_val,
                 )
             except Exception as e:
                 logger.warning(f"Failed to generate fallback chart: {e}")
@@ -3848,14 +4308,17 @@ async def show_add_position_menu(
 
     if loading_msg_id or send_new or not update.callback_query:
         # Loading message case, send_new, or text input - need to send new message
-        chat = update.callback_query.message.chat if update.callback_query else update.message.chat
+        chat = (
+            update.callback_query.message.chat
+            if update.callback_query
+            else update.message.chat
+        )
 
         # Delete loading message if it exists
         if loading_msg_id and loading_chat_id:
             try:
                 await update.get_bot().delete_message(
-                    chat_id=loading_chat_id,
-                    message_id=loading_msg_id
+                    chat_id=loading_chat_id, message_id=loading_msg_id
                 )
             except Exception:
                 pass
@@ -3866,8 +4329,7 @@ async def show_add_position_menu(
             # Delete old message to allow sending new one with updated chart
             try:
                 await update.get_bot().delete_message(
-                    chat_id=stored_menu_chat_id,
-                    message_id=stored_menu_msg_id
+                    chat_id=stored_menu_chat_id, message_id=stored_menu_msg_id
                 )
             except Exception:
                 pass  # Message may already be deleted
@@ -3886,19 +4348,23 @@ async def show_add_position_menu(
                     photo=photo_file,
                     caption=help_text,
                     parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
                 )
                 context.user_data["add_position_menu_msg_id"] = sent_msg.message_id
                 context.user_data["add_position_menu_chat_id"] = chat.id
                 context.user_data["add_position_menu_is_photo"] = True
             except Exception as e:
                 logger.warning(f"Failed to send chart: {e}")
-                sent_msg = await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+                sent_msg = await chat.send_message(
+                    text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+                )
                 context.user_data["add_position_menu_msg_id"] = sent_msg.message_id
                 context.user_data["add_position_menu_chat_id"] = chat.id
                 context.user_data["add_position_menu_is_photo"] = False
         else:
-            sent_msg = await chat.send_message(text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+            sent_msg = await chat.send_message(
+                text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+            )
             context.user_data["add_position_menu_msg_id"] = sent_msg.message_id
             context.user_data["add_position_menu_chat_id"] = chat.id
             context.user_data["add_position_menu_is_photo"] = False
@@ -3918,13 +4384,11 @@ async def show_add_position_menu(
                 await msg.edit_caption(
                     caption=help_text,
                     parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
                 )
             else:
                 await msg.edit_text(
-                    text=help_text,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    text=help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
                 )
         except Exception as e:
             error_str = str(e).lower()
@@ -3948,7 +4412,9 @@ async def handle_pos_help(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await show_add_position_menu(update, context, show_help=True)
 
 
-async def handle_pos_toggle_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_toggle_strategy(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Toggle between strategy types (0=Spot, 1=Curve, 2=BidAsk)"""
     params = context.user_data.get("add_position_params", {})
     current_strategy = params.get("strategy_type", "0")
@@ -3964,7 +4430,9 @@ async def handle_pos_toggle_strategy(update: Update, context: ContextTypes.DEFAU
     await show_add_position_menu(update, context)
 
 
-async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None) -> None:
+async def handle_pos_refresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, timeframe: str = None
+) -> None:
     """Refresh pool info and token balances by clearing cache
 
     Args:
@@ -4011,12 +4479,14 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await query.answer(f"Loading {timeframe} candles...")
 
         # Show loading state - handle both photo and text messages
-        pair = selected_pool.get('trading_pair', selected_pool.get('name', 'Pool'))
+        pair = selected_pool.get("trading_pair", selected_pool.get("name", "Pool"))
         loading_msg = rf"⏳ *Loading {timeframe} candles\.\.\.*" + "\n\n"
         loading_msg += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
         loading_msg += r"_Fetching OHLCV data\.\.\._"
 
-        loading_keyboard = [[InlineKeyboardButton("⏳ Loading...", callback_data="noop")]]
+        loading_keyboard = [
+            [InlineKeyboardButton("⏳ Loading...", callback_data="noop")]
+        ]
 
         try:
             # Delete current message (works for both photo and text)
@@ -4028,7 +4498,7 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE,
         loading_sent = await query.message.chat.send_message(
             loading_msg,
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(loading_keyboard)
+            reply_markup=InlineKeyboardMarkup(loading_keyboard),
         )
         # Store loading message ID for deletion
         context.user_data["_loading_msg_id"] = loading_sent.message_id
@@ -4037,22 +4507,25 @@ async def handle_pos_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await show_add_position_menu(update, context, timeframe=timeframe)
 
 
-async def handle_pos_use_max_range(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_use_max_range(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Auto-fill the default range (41 bins = 20 each side) based on current price and bin step"""
     selected_pool = context.user_data.get("selected_pool", {})
     pool_info = context.user_data.get("selected_pool_info", {})
 
-    current_price = pool_info.get('price') or selected_pool.get('current_price')
-    bin_step = selected_pool.get('bin_step') or pool_info.get('bin_step')
+    current_price = pool_info.get("price") or selected_pool.get("current_price")
+    bin_step = selected_pool.get("bin_step") or pool_info.get("bin_step")
 
     if not current_price or not bin_step:
-        await update.callback_query.answer("No pool info available. Select a pool first.")
+        await update.callback_query.answer(
+            "No pool info available. Select a pool first."
+        )
         return
 
     try:
         suggested_lower, suggested_upper = _calculate_max_range(
-            float(current_price),
-            int(bin_step)
+            float(current_price), int(bin_step)
         )
 
         if suggested_lower and suggested_upper:
@@ -4060,7 +4533,9 @@ async def handle_pos_use_max_range(update: Update, context: ContextTypes.DEFAULT
             params["lower_price"] = f"{suggested_lower:.6f}"
             params["upper_price"] = f"{suggested_upper:.6f}"
 
-            await update.callback_query.answer("Default range (20 bins each side) applied!")
+            await update.callback_query.answer(
+                "Default range (20 bins each side) applied!"
+            )
             await show_add_position_menu(update, context)
         else:
             await update.callback_query.answer("Could not calculate range")
@@ -4073,7 +4548,10 @@ async def handle_pos_use_max_range(update: Update, context: ContextTypes.DEFAULT
 # ADD POSITION - PARAMETER HANDLERS
 # ============================================
 
-async def handle_pos_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_pos_set_connector(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt user to input connector for position"""
     help_text = (
         r"📝 *Set Connector*" + "\n\n"
@@ -4089,13 +4567,13 @@ async def handle_pos_set_connector(update: Update, context: ContextTypes.DEFAULT
     context.user_data["dex_state"] = "pos_set_connector"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_pos_set_network(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_set_network(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt user to input network for position"""
     help_text = (
         r"📝 *Set Network*" + "\n\n"
@@ -4110,13 +4588,13 @@ async def handle_pos_set_network(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["dex_state"] = "pos_set_network"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_pos_set_pool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_set_pool(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt user to input pool address"""
     help_text = (
         r"📝 *Set Pool Address*" + "\n\n"
@@ -4130,13 +4608,13 @@ async def handle_pos_set_pool(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["dex_state"] = "pos_set_pool"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_pos_set_lower(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_set_lower(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt user to input lower price"""
     help_text = (
         r"📝 *Set Lower Price*" + "\n\n"
@@ -4145,19 +4623,21 @@ async def handle_pos_set_lower(update: Update, context: ContextTypes.DEFAULT_TYP
         r"`0\.70` \- Lower price bound"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]]
+    keyboard = [
+        [InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pos_set_lower"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_pos_set_upper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_set_upper(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt user to input upper price"""
     help_text = (
         r"📝 *Set Upper Price*" + "\n\n"
@@ -4166,73 +4646,89 @@ async def handle_pos_set_upper(update: Update, context: ContextTypes.DEFAULT_TYP
         r"`0\.85` \- Upper price bound"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]]
+    keyboard = [
+        [InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pos_set_upper"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_pos_set_base(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_set_base(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt user to input base amount"""
     # Get balance for display
     balances = context.user_data.get("token_balances", {})
     base_bal = balances.get("base_balance", 0)
-    bal_info = f"_Balance: {escape_markdown_v2(_format_number(base_bal))}_\n\n" if base_bal > 0 else ""
+    bal_info = (
+        f"_Balance: {escape_markdown_v2(_format_number(base_bal))}_\n\n"
+        if base_bal > 0
+        else ""
+    )
 
     help_text = (
-        r"📝 *Set Base Token Amount*" + "\n\n" +
-        bal_info +
-        r"Enter the amount of base token:" + "\n\n"
+        r"📝 *Set Base Token Amount*"
+        + "\n\n"
+        + bal_info
+        + r"Enter the amount of base token:"
+        + "\n\n"
         r"*Examples:*" + "\n"
         r"`10%` \- 10% of your balance" + "\n"
         r"`100` \- Exact 100 tokens" + "\n"
         r"`0\.5` \- Exact 0\.5 tokens"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]]
+    keyboard = [
+        [InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pos_set_base"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_pos_set_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_set_quote(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt user to input quote amount"""
     # Get balance for display
     balances = context.user_data.get("token_balances", {})
     quote_bal = balances.get("quote_balance", 0)
-    bal_info = f"_Balance: {escape_markdown_v2(_format_number(quote_bal))}_\n\n" if quote_bal > 0 else ""
+    bal_info = (
+        f"_Balance: {escape_markdown_v2(_format_number(quote_bal))}_\n\n"
+        if quote_bal > 0
+        else ""
+    )
 
     help_text = (
-        r"📝 *Set Quote Token Amount*" + "\n\n" +
-        bal_info +
-        r"Enter the amount of quote token:" + "\n\n"
+        r"📝 *Set Quote Token Amount*"
+        + "\n\n"
+        + bal_info
+        + r"Enter the amount of quote token:"
+        + "\n\n"
         r"*Examples:*" + "\n"
         r"`10%` \- 10% of your balance" + "\n"
         r"`50` \- Exact 50 tokens" + "\n"
         r"`0\.5` \- Exact 0\.5 tokens"
     )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]]
+    keyboard = [
+        [InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pos_set_quote"
 
     await update.callback_query.message.reply_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
@@ -4252,7 +4748,7 @@ def _parse_amount(amount_str: str, balance: float) -> Decimal:
     amount_str = amount_str.strip()
 
     # Check if it's a percentage
-    if amount_str.endswith('%'):
+    if amount_str.endswith("%"):
         try:
             pct = float(amount_str[:-1])
             return Decimal(str(balance * pct / 100))
@@ -4266,7 +4762,9 @@ def _parse_amount(amount_str: str, balance: float) -> Decimal:
         return None
 
 
-async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_pos_add_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Execute adding the position"""
     query = update.callback_query
 
@@ -4284,7 +4782,9 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
 
         # Validate required parameters
         if not all([connector, network, pool_address, lower_price, upper_price]):
-            raise ValueError("Missing required parameters (connector, network, pool, prices)")
+            raise ValueError(
+                "Missing required parameters (connector, network, pool, prices)"
+            )
 
         if not amount_base_str and not amount_quote_str:
             raise ValueError("Need at least one amount (base or quote)")
@@ -4292,8 +4792,12 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         # Validate bin range (max 68 bins to be safe)
         selected_pool = context.user_data.get("selected_pool", {})
         pool_info = context.user_data.get("selected_pool_info", {})
-        current_price = pool_info.get('price') or selected_pool.get('current_price') or selected_pool.get('price')
-        bin_step = pool_info.get('bin_step') or selected_pool.get('bin_step')
+        current_price = (
+            pool_info.get("price")
+            or selected_pool.get("current_price")
+            or selected_pool.get("price")
+        )
+        bin_step = pool_info.get("bin_step") or selected_pool.get("bin_step")
 
         if current_price and bin_step:
             try:
@@ -4302,7 +4806,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
                     float(upper_price),
                     float(current_price),
                     int(bin_step),
-                    max_bins=68
+                    max_bins=68,
                 )
                 if not is_valid:
                     raise ValueError(error_msg)
@@ -4314,16 +4818,21 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         # Show loading message immediately
         await query.answer()
         loading_msg = (
-            r"⏳ *Adding Liquidity\.\.\.*" + "\n\n"
-            + escape_markdown_v2(f"Pool: {pool_address[:16]}...") + "\n"
-            + escape_markdown_v2(f"Range: [{lower_price[:8]} - {upper_price[:8]}]") + "\n\n"
+            r"⏳ *Adding Liquidity\.\.\.*"
+            + "\n\n"
+            + escape_markdown_v2(f"Pool: {pool_address[:16]}...")
+            + "\n"
+            + escape_markdown_v2(f"Range: [{lower_price[:8]} - {upper_price[:8]}]")
+            + "\n\n"
             + r"_Please wait, this may take a moment\._"
         )
 
         # Edit the current message to show loading state
         try:
-            if getattr(query.message, 'photo', None):
-                await query.message.edit_caption(caption=loading_msg, parse_mode="MarkdownV2")
+            if getattr(query.message, "photo", None):
+                await query.message.edit_caption(
+                    caption=loading_msg, parse_mode="MarkdownV2"
+                )
             else:
                 await query.message.edit_text(loading_msg, parse_mode="MarkdownV2")
         except Exception:
@@ -4332,7 +4841,7 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         # Get token balances for percentage calculation
@@ -4341,18 +4850,26 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         quote_balance = balances.get("quote_balance", 0)
 
         # Parse amounts (handles both % and absolute values)
-        amount_base = _parse_amount(amount_base_str, base_balance) if amount_base_str else None
-        amount_quote = _parse_amount(amount_quote_str, quote_balance) if amount_quote_str else None
+        amount_base = (
+            _parse_amount(amount_base_str, base_balance) if amount_base_str else None
+        )
+        amount_quote = (
+            _parse_amount(amount_quote_str, quote_balance) if amount_quote_str else None
+        )
 
         # Validate we have at least one valid amount
         if amount_base is None and amount_quote is None:
-            raise ValueError("Invalid amounts. Use '10%' for percentage or '100' for absolute value.")
+            raise ValueError(
+                "Invalid amounts. Use '10%' for percentage or '100' for absolute value."
+            )
 
         # Check if we have at least one non-zero amount
         base_is_zero = amount_base is None or amount_base == 0
         quote_is_zero = amount_quote is None or amount_quote == 0
         if base_is_zero and quote_is_zero:
-            raise ValueError("Both amounts are 0. Need at least one token to add liquidity.")
+            raise ValueError(
+                "Both amounts are 0. Need at least one token to add liquidity."
+            )
 
         # Build extra_params for strategy type
         extra_params = {"strategyType": strategy_type}
@@ -4376,15 +4893,14 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data.pop("all_positions", None)
 
         # Save pool params
-        set_dex_last_pool(context.user_data, {
-            "connector": connector,
-            "network": network,
-            "pool_address": pool_address
-        })
+        set_dex_last_pool(
+            context.user_data,
+            {"connector": connector, "network": network, "pool_address": pool_address},
+        )
 
         # Strategy name for display
-        strategy_names = {0: 'Spot', 1: 'Curve', 2: 'BidAsk'}
-        strategy_name = strategy_names.get(strategy_type, 'Spot')
+        strategy_names = {0: "Spot", 1: "Curve", 2: "BidAsk"}
+        strategy_name = strategy_names.get(strategy_type, "Spot")
 
         pos_info = escape_markdown_v2(
             f"✅ Position Added!\n\n"
@@ -4400,40 +4916,61 @@ async def handle_pos_add_confirm(update: Update, context: ContextTypes.DEFAULT_T
             pos_info += escape_markdown_v2(f"Quote: {float(amount_quote):.6f}\n")
 
         if isinstance(result, dict):
-            if 'tx_hash' in result:
+            if "tx_hash" in result:
                 pos_info += escape_markdown_v2(f"\nTx: {result['tx_hash'][:16]}...")
-            if 'position_address' in result:
-                pos_info += escape_markdown_v2(f"\nPosition: {result['position_address'][:16]}...")
+            if "position_address" in result:
+                pos_info += escape_markdown_v2(
+                    f"\nPosition: {result['position_address'][:16]}..."
+                )
 
-        keyboard = [[InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]]
+        keyboard = [
+            [InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Edit the loading message with success result
         try:
-            if getattr(query.message, 'photo', None):
-                await query.message.edit_caption(caption=pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup)
+            if getattr(query.message, "photo", None):
+                await query.message.edit_caption(
+                    caption=pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup
+                )
             else:
-                await query.message.edit_text(pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup)
+                await query.message.edit_text(
+                    pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup
+                )
         except Exception:
-            await query.message.reply_text(pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup)
+            await query.message.reply_text(
+                pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup
+            )
 
     except Exception as e:
         logger.error(f"Error adding position: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to add position: {str(e)}")
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]]
+        keyboard = [
+            [InlineKeyboardButton("« Back", callback_data="dex:pool_detail_refresh")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
-            if getattr(query.message, 'photo', None):
-                await query.message.edit_caption(caption=error_message, parse_mode="MarkdownV2", reply_markup=reply_markup)
+            if getattr(query.message, "photo", None):
+                await query.message.edit_caption(
+                    caption=error_message,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup,
+                )
             else:
-                await query.message.edit_text(error_message, parse_mode="MarkdownV2", reply_markup=reply_markup)
+                await query.message.edit_text(
+                    error_message, parse_mode="MarkdownV2", reply_markup=reply_markup
+                )
         except Exception:
-            await query.message.reply_text(error_message, parse_mode="MarkdownV2", reply_markup=reply_markup)
+            await query.message.reply_text(
+                error_message, parse_mode="MarkdownV2", reply_markup=reply_markup
+            )
 
 
 # ============================================
 # TEXT INPUT PROCESSORS FOR POSITION
 # ============================================
+
 
 def _parse_multi_field_input(user_input: str, current_price: float = None) -> dict:
     """
@@ -4459,23 +4996,23 @@ def _parse_multi_field_input(user_input: str, current_price: float = None) -> di
 
     # Key mappings (case-insensitive)
     key_map = {
-        'l': 'lower_price',
-        'lower': 'lower_price',
-        'u': 'upper_price',
-        'upper': 'upper_price',
-        'b': 'amount_base',
-        'base': 'amount_base',
-        'q': 'amount_quote',
-        'quote': 'amount_quote',
+        "l": "lower_price",
+        "lower": "lower_price",
+        "u": "upper_price",
+        "upper": "upper_price",
+        "b": "amount_base",
+        "base": "amount_base",
+        "q": "amount_quote",
+        "quote": "amount_quote",
     }
 
     # Check if this looks like multi-field input (contains key:value pattern)
-    if ':' not in user_input:
+    if ":" not in user_input:
         return {}
 
     # Use regex to find key:value patterns directly (handles negative numbers correctly)
     # Pattern: word followed by : followed by value (which may start with - or +)
-    pattern = r'([a-zA-Z]+)\s*:\s*([+-]?[\d.]+%?|[\d.]+)'
+    pattern = r"([a-zA-Z]+)\s*:\s*([+-]?[\d.]+%?|[\d.]+)"
     matches = re.findall(pattern, user_input, re.IGNORECASE)
 
     # Convert matches to parts format for compatibility with existing logic
@@ -4483,12 +5020,12 @@ def _parse_multi_field_input(user_input: str, current_price: float = None) -> di
 
     # If no regex matches, fall back to simple split (for backwards compatibility)
     if not parts:
-        parts = re.split(r'\s*,\s*|\s+', user_input.strip())
+        parts = re.split(r"\s*,\s*|\s+", user_input.strip())
 
     for part in parts:
         part = part.strip()
-        if ':' in part:
-            key_val = part.split(':', 1)
+        if ":" in part:
+            key_val = part.split(":", 1)
             if len(key_val) == 2:
                 key = key_val[0].strip().lower()
                 value = key_val[1].strip()
@@ -4496,40 +5033,52 @@ def _parse_multi_field_input(user_input: str, current_price: float = None) -> di
                     field_name = key_map[key]
 
                     # Handle percentage for lower_price and upper_price
-                    if field_name in ('lower_price', 'upper_price') and value.endswith('%') and current_price:
+                    if (
+                        field_name in ("lower_price", "upper_price")
+                        and value.endswith("%")
+                        and current_price
+                    ):
                         try:
                             # Parse percentage value (supports +10%, -5%, or just 5%)
                             pct_str = value[:-1].strip()
                             pct = float(pct_str)
 
                             # Default behavior: lower uses negative, upper uses positive
-                            if field_name == 'lower_price':
+                            if field_name == "lower_price":
                                 # l:5% means -5%, l:-5% means -5%, l:+5% means +5%
-                                if not pct_str.startswith('+') and not pct_str.startswith('-'):
+                                if not pct_str.startswith(
+                                    "+"
+                                ) and not pct_str.startswith("-"):
                                     pct = -abs(pct)  # Default to negative for lower
                                 # Store the percentage for display
-                                result['lower_pct'] = pct
+                                result["lower_pct"] = pct
                             else:  # upper_price
                                 # u:5% means +5%, u:+5% means +5%, u:-5% means -5%
-                                if not pct_str.startswith('+') and not pct_str.startswith('-'):
+                                if not pct_str.startswith(
+                                    "+"
+                                ) and not pct_str.startswith("-"):
                                     pct = abs(pct)  # Default to positive for upper
                                 # Store the percentage for display
-                                result['upper_pct'] = pct
+                                result["upper_pct"] = pct
 
                             # Calculate price based on percentage
                             calculated_price = current_price * (1 + pct / 100)
-                            value = f"{calculated_price:.10f}".rstrip('0').rstrip('.')
+                            value = f"{calculated_price:.10f}".rstrip("0").rstrip(".")
                         except (ValueError, TypeError):
                             pass  # Keep original value if parsing fails
-                    elif field_name in ('lower_price', 'upper_price') and not value.endswith('%') and current_price:
+                    elif (
+                        field_name in ("lower_price", "upper_price")
+                        and not value.endswith("%")
+                        and current_price
+                    ):
                         # Calculate percentage from absolute price
                         try:
                             price_val = float(value)
                             pct = _price_to_percent(current_price, price_val)
-                            if field_name == 'lower_price':
-                                result['lower_pct'] = pct
+                            if field_name == "lower_price":
+                                result["lower_pct"] = pct
                             else:
-                                result['upper_pct'] = pct
+                                result["upper_pct"] = pct
                         except (ValueError, TypeError):
                             pass
 
@@ -4539,9 +5088,7 @@ def _parse_multi_field_input(user_input: str, current_price: float = None) -> di
 
 
 async def process_add_position(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process add position from text input.
 
@@ -4554,7 +5101,11 @@ async def process_add_position(
         # Get current price for percentage calculations
         selected_pool = context.user_data.get("selected_pool", {})
         pool_info = context.user_data.get("selected_pool_info", {})
-        current_price = pool_info.get('price') or selected_pool.get('current_price') or selected_pool.get('price')
+        current_price = (
+            pool_info.get("price")
+            or selected_pool.get("current_price")
+            or selected_pool.get("price")
+        )
 
         try:
             current_price_float = float(current_price) if current_price else None
@@ -4575,8 +5126,12 @@ async def process_add_position(
                 pass
 
             # Edit existing menu message instead of sending new one
-            stored_msg_id = context.user_data.get("add_position_menu_msg_id") or context.user_data.get("pool_detail_message_id")
-            stored_chat_id = context.user_data.get("add_position_menu_chat_id") or context.user_data.get("pool_detail_chat_id")
+            stored_msg_id = context.user_data.get(
+                "add_position_menu_msg_id"
+            ) or context.user_data.get("pool_detail_message_id")
+            stored_chat_id = context.user_data.get(
+                "add_position_menu_chat_id"
+            ) or context.user_data.get("pool_detail_chat_id")
 
             if stored_msg_id and stored_chat_id and selected_pool:
                 # Use show_add_position_menu which handles editing properly
@@ -4584,14 +5139,18 @@ async def process_add_position(
                 await show_add_position_menu(update, context, send_new=False)
             elif selected_pool:
                 # Fallback: show pool detail (will send new message)
-                await _show_pool_detail(update, context, selected_pool, from_callback=False)
+                await _show_pool_detail(
+                    update, context, selected_pool, from_callback=False
+                )
             return
 
         # Fall back to original full-input format
         parts = user_input.split()
 
         if len(parts) < 5:
-            raise ValueError("Need: pool_address lower_price upper_price amount_base amount_quote")
+            raise ValueError(
+                "Need: pool_address lower_price upper_price amount_base amount_quote"
+            )
 
         params = context.user_data.get("add_position_params", {})
         params["pool_address"] = parts[0]
@@ -4607,7 +5166,7 @@ async def process_add_position(
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
 
-        if not hasattr(client, 'gateway_clmm'):
+        if not hasattr(client, "gateway_clmm"):
             raise ValueError("Gateway CLMM not available")
 
         result = await client.gateway_clmm.open_position(
@@ -4616,18 +5175,25 @@ async def process_add_position(
             pool_address=params["pool_address"],
             lower_price=Decimal(params["lower_price"]),
             upper_price=Decimal(params["upper_price"]),
-            base_token_amount=Decimal(params["amount_base"]) if params["amount_base"] else None,
-            quote_token_amount=Decimal(params["amount_quote"]) if params["amount_quote"] else None,
+            base_token_amount=(
+                Decimal(params["amount_base"]) if params["amount_base"] else None
+            ),
+            quote_token_amount=(
+                Decimal(params["amount_quote"]) if params["amount_quote"] else None
+            ),
         )
 
         if result is None:
             raise ValueError("Gateway returned no response.")
 
-        set_dex_last_pool(context.user_data, {
-            "connector": connector,
-            "network": network,
-            "pool_address": params["pool_address"]
-        })
+        set_dex_last_pool(
+            context.user_data,
+            {
+                "connector": connector,
+                "network": network,
+                "pool_address": params["pool_address"],
+            },
+        )
 
         pos_info = escape_markdown_v2(
             f"✅ Position Added!\n\n"
@@ -4637,16 +5203,16 @@ async def process_add_position(
             f"Quote: {params['amount_quote']}\n"
         )
 
-        if isinstance(result, dict) and 'tx_hash' in result:
+        if isinstance(result, dict) and "tx_hash" in result:
             pos_info += escape_markdown_v2(f"\nTx: {result['tx_hash'][:16]}...")
 
-        keyboard = [[InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]]
+        keyboard = [
+            [InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            pos_info,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            pos_info, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
     except Exception as e:
@@ -4656,9 +5222,7 @@ async def process_add_position(
 
 
 async def process_pos_set_connector(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position set connector input"""
     params = context.user_data.get("add_position_params", {})
@@ -4671,9 +5235,7 @@ async def process_pos_set_connector(
 
 
 async def process_pos_set_network(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position set network input"""
     params = context.user_data.get("add_position_params", {})
@@ -4686,9 +5248,7 @@ async def process_pos_set_network(
 
 
 async def process_pos_set_pool(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position set pool input"""
     params = context.user_data.get("add_position_params", {})
@@ -4701,9 +5261,7 @@ async def process_pos_set_pool(
 
 
 async def process_pos_set_lower(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position set lower price input"""
     params = context.user_data.get("add_position_params", {})
@@ -4716,10 +5274,12 @@ async def process_pos_set_lower(
         # Show loading message
         loading_msg = await update.message.reply_text(
             escape_markdown_v2(f"✅ Lower set to: {user_input} - Updating chart..."),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         timeframe = params.get("timeframe", "1h")
-        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        await _show_pool_detail(
+            update, context, selected_pool, from_callback=False, timeframe=timeframe
+        )
         # Delete loading message after chart is shown
         try:
             await loading_msg.delete()
@@ -4728,14 +5288,12 @@ async def process_pos_set_lower(
     else:
         await update.message.reply_text(
             escape_markdown_v2(f"✅ Lower price set to: {user_input}"),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
 
 async def process_pos_set_upper(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position set upper price input"""
     params = context.user_data.get("add_position_params", {})
@@ -4748,10 +5306,12 @@ async def process_pos_set_upper(
         # Show loading message
         loading_msg = await update.message.reply_text(
             escape_markdown_v2(f"✅ Upper set to: {user_input} - Updating chart..."),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         timeframe = params.get("timeframe", "1h")
-        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        await _show_pool_detail(
+            update, context, selected_pool, from_callback=False, timeframe=timeframe
+        )
         # Delete loading message after chart is shown
         try:
             await loading_msg.delete()
@@ -4760,14 +5320,12 @@ async def process_pos_set_upper(
     else:
         await update.message.reply_text(
             escape_markdown_v2(f"✅ Upper price set to: {user_input}"),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
 
 async def process_pos_set_base(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position set base amount input"""
     params = context.user_data.get("add_position_params", {})
@@ -4780,10 +5338,12 @@ async def process_pos_set_base(
         # Show loading message
         loading_msg = await update.message.reply_text(
             escape_markdown_v2(f"✅ Base set to: {user_input} - Updating chart..."),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         timeframe = params.get("timeframe", "1h")
-        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        await _show_pool_detail(
+            update, context, selected_pool, from_callback=False, timeframe=timeframe
+        )
         # Delete loading message after chart is shown
         try:
             await loading_msg.delete()
@@ -4792,14 +5352,12 @@ async def process_pos_set_base(
     else:
         await update.message.reply_text(
             escape_markdown_v2(f"✅ Base amount set to: {user_input}"),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
 
 async def process_pos_set_quote(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process position set quote amount input"""
     params = context.user_data.get("add_position_params", {})
@@ -4812,10 +5370,12 @@ async def process_pos_set_quote(
         # Show loading message
         loading_msg = await update.message.reply_text(
             escape_markdown_v2(f"✅ Quote set to: {user_input} - Updating chart..."),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         timeframe = params.get("timeframe", "1h")
-        await _show_pool_detail(update, context, selected_pool, from_callback=False, timeframe=timeframe)
+        await _show_pool_detail(
+            update, context, selected_pool, from_callback=False, timeframe=timeframe
+        )
         # Delete loading message after chart is shown
         try:
             await loading_msg.delete()
@@ -4824,5 +5384,5 @@ async def process_pos_set_quote(
     else:
         await update.message.reply_text(
             escape_markdown_v2(f"✅ Quote amount set to: {user_input}"),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )

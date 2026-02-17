@@ -12,11 +12,11 @@ import asyncio
 import functools
 import logging
 import time
-from typing import Optional, Dict, Any, Callable, TypeVar, List
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar('T')
+T = TypeVar("T")
 
 # Default cache TTL in seconds
 DEFAULT_CACHE_TTL = 60
@@ -26,7 +26,10 @@ DEFAULT_CACHE_TTL = 60
 # CONVERSATION-LEVEL CACHE
 # ============================================
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     """Get a cached value if still valid.
 
     Args:
@@ -84,7 +87,7 @@ async def cached_call(
     fetch_func: Callable,
     ttl: int = DEFAULT_CACHE_TTL,
     *args,
-    **kwargs
+    **kwargs,
 ) -> Any:
     """Execute an async function with caching.
 
@@ -129,8 +132,20 @@ async def cached_call(
 
 # Define which cache keys should be invalidated together
 CACHE_GROUPS = {
-    "balances": ["gateway_balances", "portfolio_data", "wallet_balances", "token_balances", "gateway_data"],
-    "positions": ["clmm_positions", "liquidity_positions", "pool_positions", "gateway_lp_positions", "gateway_closed_positions"],
+    "balances": [
+        "gateway_balances",
+        "portfolio_data",
+        "wallet_balances",
+        "token_balances",
+        "gateway_data",
+    ],
+    "positions": [
+        "clmm_positions",
+        "liquidity_positions",
+        "pool_positions",
+        "gateway_lp_positions",
+        "gateway_closed_positions",
+    ],
     "swaps": ["swap_history", "recent_swaps"],
     "tokens": ["token_cache"],  # Token list from gateway
     "all": None,  # Special: clears entire cache
@@ -176,6 +191,7 @@ def invalidates(*groups: str):
         async def execute_swap(update, context):
             ...
     """
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -184,7 +200,7 @@ def invalidates(*groups: str):
             # Find context in args (usually second arg for handlers)
             context = None
             for arg in args:
-                if hasattr(arg, 'user_data'):
+                if hasattr(arg, "user_data"):
                     context = arg
                     break
 
@@ -192,7 +208,9 @@ def invalidates(*groups: str):
                 invalidate_cache(context.user_data, *groups)
 
             return result
+
         return wrapper
+
     return decorator
 
 
@@ -216,7 +234,9 @@ class BackgroundRefreshManager:
         self._tasks: Dict[int, asyncio.Task] = {}
         self._last_activity: Dict[int, float] = {}
         self._refresh_funcs: Dict[str, Callable] = {}
-        self._user_chat_ids: Dict[int, int] = {}  # Track chat_id per user for server selection
+        self._user_chat_ids: Dict[int, int] = (
+            {}
+        )  # Track chat_id per user for server selection
 
     def register_refresh(self, key: str, func: Callable) -> None:
         """Register a function to be called during background refresh.
@@ -266,7 +286,9 @@ class BackgroundRefreshManager:
             # Check for inactivity
             last = self._last_activity.get(user_id, 0)
             if time.time() - last > INACTIVITY_TIMEOUT:
-                logger.debug(f"Stopping background refresh for user {user_id} (inactive)")
+                logger.debug(
+                    f"Stopping background refresh for user {user_id} (inactive)"
+                )
                 break
 
             # Refresh all registered functions
@@ -305,16 +327,16 @@ def with_background_refresh(func: Callable) -> Callable:
         async def my_handler(update, context):
             ...
     """
+
     @functools.wraps(func)
     async def wrapper(update, context, *args, **kwargs):
         if update.effective_user:
             chat_id = update.effective_chat.id if update.effective_chat else None
             background_refresh.touch(
-                update.effective_user.id,
-                context.user_data,
-                chat_id=chat_id
+                update.effective_user.id, context.user_data, chat_id=chat_id
             )
         return await func(update, context, *args, **kwargs)
+
     return wrapper
 
 
@@ -323,7 +345,6 @@ def with_background_refresh(func: Callable) -> Callable:
 # ============================================
 
 from config_manager import get_client
-
 
 # ============================================
 # EXPLORER URL GENERATION
@@ -394,6 +415,7 @@ def get_explorer_name(network: str) -> str:
 # SWAP FORMATTERS
 # ============================================
 
+
 def format_swap_summary(swap: Dict[str, Any], include_explorer: bool = True) -> str:
     """Format a swap record for display
 
@@ -404,21 +426,21 @@ def format_swap_summary(swap: Dict[str, Any], include_explorer: bool = True) -> 
     Returns:
         Formatted swap summary string (not escaped)
     """
-    pair = swap.get('trading_pair', 'N/A')
-    side = swap.get('side', 'N/A')
-    status = swap.get('status', 'N/A')
-    network = swap.get('network', '')
-    tx_hash = swap.get('transaction_hash', '')
+    pair = swap.get("trading_pair", "N/A")
+    side = swap.get("side", "N/A")
+    status = swap.get("status", "N/A")
+    network = swap.get("network", "")
+    tx_hash = swap.get("transaction_hash", "")
 
     # Format amounts
-    input_amount = swap.get('input_amount')
-    output_amount = swap.get('output_amount')
-    base_token = swap.get('base_token', '')
-    quote_token = swap.get('quote_token', '')
+    input_amount = swap.get("input_amount")
+    output_amount = swap.get("output_amount")
+    base_token = swap.get("base_token", "")
+    quote_token = swap.get("quote_token", "")
 
     # Build amount string
     if input_amount is not None and output_amount is not None:
-        if side == 'BUY':
+        if side == "BUY":
             # Buying base with quote
             amount_str = f"{_format_amount(output_amount)} {base_token} for {_format_amount(input_amount)} {quote_token}"
         else:
@@ -430,7 +452,7 @@ def format_swap_summary(swap: Dict[str, Any], include_explorer: bool = True) -> 
         amount_str = "N/A"
 
     # Format price
-    price = swap.get('price')
+    price = swap.get("price")
     price_str = f"@ {_format_price(price)}" if price else ""
 
     # Build the line
@@ -454,57 +476,65 @@ def format_swap_detail(swap: Dict[str, Any]) -> str:
     lines = []
 
     # Header with status emoji
-    status = swap.get('status', 'UNKNOWN')
+    status = swap.get("status", "UNKNOWN")
     status_emoji = get_status_emoji(status)
     lines.append(f"{status_emoji} Swap Details")
     lines.append("")
 
     # Trading info
-    pair = swap.get('trading_pair', 'N/A')
-    side = swap.get('side', 'N/A')
+    pair = swap.get("trading_pair", "N/A")
+    side = swap.get("side", "N/A")
     lines.append(f"Pair: {pair}")
     lines.append(f"Side: {side}")
 
     # Amounts
-    input_amount = swap.get('input_amount')
-    output_amount = swap.get('output_amount')
-    base_token = swap.get('base_token', '')
-    quote_token = swap.get('quote_token', '')
+    input_amount = swap.get("input_amount")
+    output_amount = swap.get("output_amount")
+    base_token = swap.get("base_token", "")
+    quote_token = swap.get("quote_token", "")
 
     if input_amount is not None:
-        lines.append(f"Input: {_format_amount(input_amount)} {quote_token if side == 'BUY' else base_token}")
+        lines.append(
+            f"Input: {_format_amount(input_amount)} {quote_token if side == 'BUY' else base_token}"
+        )
     if output_amount is not None:
-        lines.append(f"Output: {_format_amount(output_amount)} {base_token if side == 'BUY' else quote_token}")
+        lines.append(
+            f"Output: {_format_amount(output_amount)} {base_token if side == 'BUY' else quote_token}"
+        )
 
     # Price
-    price = swap.get('price')
+    price = swap.get("price")
     if price:
         lines.append(f"Price: {_format_price(price)}")
 
     # Slippage
-    slippage = swap.get('slippage_pct')
+    slippage = swap.get("slippage_pct")
     if slippage is not None:
         lines.append(f"Slippage: {slippage}%")
 
     # Network info
     lines.append("")
-    connector = swap.get('connector', 'N/A')
-    network = swap.get('network', 'N/A')
+    connector = swap.get("connector", "N/A")
+    network = swap.get("network", "N/A")
     lines.append(f"Connector: {connector}")
     lines.append(f"Network: {network}")
 
     # Transaction
-    tx_hash = swap.get('transaction_hash', '')
+    tx_hash = swap.get("transaction_hash", "")
     if tx_hash:
         lines.append(f"Tx: {tx_hash[:16]}...")
 
     # Timestamp
-    timestamp = swap.get('timestamp', '')
+    timestamp = swap.get("timestamp", "")
     if timestamp:
         # Format timestamp for display
-        if 'T' in timestamp:
-            date_part = timestamp.split('T')[0]
-            time_part = timestamp.split('T')[1].split('.')[0] if '.' in timestamp.split('T')[1] else timestamp.split('T')[1].split('+')[0]
+        if "T" in timestamp:
+            date_part = timestamp.split("T")[0]
+            time_part = (
+                timestamp.split("T")[1].split(".")[0]
+                if "." in timestamp.split("T")[1]
+                else timestamp.split("T")[1].split("+")[0]
+            )
             lines.append(f"Time: {date_part} {time_part}")
 
     # Status
@@ -571,6 +601,7 @@ def _format_price(price: float) -> str:
 # RELATIVE TIME FORMATTER
 # ============================================
 
+
 def format_relative_time(timestamp: str) -> str:
     """Format timestamp as relative time (e.g., '53s', '22m', '1h', '2d')
 
@@ -587,16 +618,16 @@ def format_relative_time(timestamp: str) -> str:
 
     try:
         # Parse ISO timestamp
-        if 'T' in timestamp:
+        if "T" in timestamp:
             # Handle various ISO formats
-            ts_str = timestamp.replace('Z', '+00:00')
-            if '.' in ts_str:
+            ts_str = timestamp.replace("Z", "+00:00")
+            if "." in ts_str:
                 # Remove microseconds if present
-                parts = ts_str.split('.')
-                if '+' in parts[1]:
-                    ts_str = parts[0] + '+' + parts[1].split('+')[1]
-                elif '-' in parts[1]:
-                    ts_str = parts[0] + '-' + parts[1].split('-', 1)[1]
+                parts = ts_str.split(".")
+                if "+" in parts[1]:
+                    ts_str = parts[0] + "+" + parts[1].split("+")[1]
+                elif "-" in parts[1]:
+                    ts_str = parts[0] + "-" + parts[1].split("-", 1)[1]
                 else:
                     ts_str = parts[0]
 
@@ -605,7 +636,7 @@ def format_relative_time(timestamp: str) -> str:
                 dt = datetime.fromisoformat(ts_str)
             except ValueError:
                 # Fallback: try without timezone
-                dt = datetime.fromisoformat(timestamp.split('+')[0].split('.')[0])
+                dt = datetime.fromisoformat(timestamp.split("+")[0].split(".")[0])
                 dt = dt.replace(tzinfo=timezone.utc)
         else:
             return ""
@@ -637,6 +668,7 @@ def format_relative_time(timestamp: str) -> str:
 # ============================================
 # STATE HELPERS
 # ============================================
+
 
 def clear_dex_state(context) -> None:
     """Clear all DEX-related state from user context
@@ -679,11 +711,12 @@ DEFAULT_PAGE_SIZE = 10
 @dataclass
 class HistoryFilters:
     """Stores filter and pagination state for history views"""
+
     history_type: HistoryType = "swap"
     trading_pair: Optional[str] = None  # None = All
-    connector: Optional[str] = None     # None = All
-    status: Optional[str] = None        # None = All
-    network: Optional[str] = None       # None = All
+    connector: Optional[str] = None  # None = All
+    status: Optional[str] = None  # None = All
+    network: Optional[str] = None  # None = All
     offset: int = 0
     limit: int = DEFAULT_PAGE_SIZE
     total_count: int = 0
@@ -752,8 +785,7 @@ def set_history_filters(user_data: dict, filters: HistoryFilters) -> None:
 
 
 def build_filter_buttons(
-    filters: HistoryFilters,
-    callback_prefix: str
+    filters: HistoryFilters, callback_prefix: str
 ) -> List[List["InlineKeyboardButton"]]:
     """Build filter button rows for history views
 
@@ -770,24 +802,34 @@ def build_filter_buttons(
 
     # Trading pair filter
     pair_label = filters.trading_pair or "All Pairs"
-    rows.append([
-        InlineKeyboardButton(f"💱 {pair_label}", callback_data=f"{callback_prefix}_filter_pair"),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                f"💱 {pair_label}", callback_data=f"{callback_prefix}_filter_pair"
+            ),
+        ]
+    )
 
     # Connector & Status filters (same row)
     connector_label = filters.connector or "All DEX"
     status_label = filters.status or "All Status"
-    rows.append([
-        InlineKeyboardButton(f"🔌 {connector_label}", callback_data=f"{callback_prefix}_filter_connector"),
-        InlineKeyboardButton(f"📊 {status_label}", callback_data=f"{callback_prefix}_filter_status"),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                f"🔌 {connector_label}",
+                callback_data=f"{callback_prefix}_filter_connector",
+            ),
+            InlineKeyboardButton(
+                f"📊 {status_label}", callback_data=f"{callback_prefix}_filter_status"
+            ),
+        ]
+    )
 
     return rows
 
 
 def build_pagination_buttons(
-    filters: HistoryFilters,
-    callback_prefix: str
+    filters: HistoryFilters, callback_prefix: str
 ) -> List["InlineKeyboardButton"]:
     """Build pagination buttons for history views
 
@@ -804,7 +846,9 @@ def build_pagination_buttons(
 
     # Previous button
     if filters.has_prev:
-        buttons.append(InlineKeyboardButton("« Prev", callback_data=f"{callback_prefix}_page_prev"))
+        buttons.append(
+            InlineKeyboardButton("« Prev", callback_data=f"{callback_prefix}_page_prev")
+        )
     else:
         buttons.append(InlineKeyboardButton(" ", callback_data="dex:noop"))
 
@@ -814,7 +858,9 @@ def build_pagination_buttons(
 
     # Next button
     if filters.has_next:
-        buttons.append(InlineKeyboardButton("Next »", callback_data=f"{callback_prefix}_page_next"))
+        buttons.append(
+            InlineKeyboardButton("Next »", callback_data=f"{callback_prefix}_page_next")
+        )
     else:
         buttons.append(InlineKeyboardButton(" ", callback_data="dex:noop"))
 
@@ -825,7 +871,7 @@ def build_filter_selection_keyboard(
     options: List[str],
     current_value: Optional[str],
     callback_prefix: str,
-    back_callback: str
+    back_callback: str,
 ) -> "InlineKeyboardMarkup":
     """Build a keyboard for selecting a filter value
 
@@ -850,7 +896,9 @@ def build_filter_selection_keyboard(
 
         # Use None for "All" option
         value = "" if opt == "All" else opt
-        row.append(InlineKeyboardButton(label, callback_data=f"{callback_prefix}_{value}"))
+        row.append(
+            InlineKeyboardButton(label, callback_data=f"{callback_prefix}_{value}")
+        )
 
         if len(row) == 2:
             buttons.append(row)

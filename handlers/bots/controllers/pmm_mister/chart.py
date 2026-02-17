@@ -13,14 +13,15 @@ Uses the unified candlestick chart function from visualizations module.
 import io
 from typing import Any, Dict, List, Optional
 
-from handlers.dex.visualizations import generate_candlestick_chart, DARK_THEME
+from handlers.dex.visualizations import DARK_THEME, generate_candlestick_chart
+
 from .config import parse_spreads
 
 
 def generate_chart(
     config: Dict[str, Any],
     candles_data: List[Dict[str, Any]],
-    current_price: Optional[float] = None
+    current_price: Optional[float] = None,
 ) -> io.BytesIO:
     """
     Generate a candlestick chart with PMM spread overlay.
@@ -50,7 +51,9 @@ def generate_chart(
     sell_spreads = parse_spreads(sell_spreads_str)
 
     # Handle both list and dict input
-    data = candles_data if isinstance(candles_data, list) else candles_data.get("data", [])
+    data = (
+        candles_data if isinstance(candles_data, list) else candles_data.get("data", [])
+    )
 
     # Build title
     title = f"{trading_pair} - PMM Mister"
@@ -72,40 +75,46 @@ def generate_chart(
             buy_price = ref_price * (1 - spread)
             # Fade opacity for further levels
             opacity_suffix = "" if i == 0 else f" (L{i+1})"
-            hlines.append({
-                "y": buy_price,
-                "color": DARK_THEME["up_color"],
-                "dash": "dash",
-                "width": 2 if i == 0 else 1,
-                "label": f"Buy{opacity_suffix}: {buy_price:,.4f} (-{spread*100:.1f}%)",
-                "label_position": "left",
-            })
+            hlines.append(
+                {
+                    "y": buy_price,
+                    "color": DARK_THEME["up_color"],
+                    "dash": "dash",
+                    "width": 2 if i == 0 else 1,
+                    "label": f"Buy{opacity_suffix}: {buy_price:,.4f} (-{spread*100:.1f}%)",
+                    "label_position": "left",
+                }
+            )
 
     # Add sell spread levels (above current price)
     if ref_price and sell_spreads:
         for i, spread in enumerate(sell_spreads):
             sell_price = ref_price * (1 + spread)
             opacity_suffix = "" if i == 0 else f" (L{i+1})"
-            hlines.append({
-                "y": sell_price,
-                "color": DARK_THEME["down_color"],
-                "dash": "dash",
-                "width": 2 if i == 0 else 1,
-                "label": f"Sell{opacity_suffix}: {sell_price:,.4f} (+{spread*100:.1f}%)",
-                "label_position": "right",
-            })
+            hlines.append(
+                {
+                    "y": sell_price,
+                    "color": DARK_THEME["down_color"],
+                    "dash": "dash",
+                    "width": 2 if i == 0 else 1,
+                    "label": f"Sell{opacity_suffix}: {sell_price:,.4f} (+{spread*100:.1f}%)",
+                    "label_position": "right",
+                }
+            )
 
     # Build horizontal rectangles for take profit zone
     hrects = []
     if ref_price and take_profit:
         tp_up = ref_price * (1 + take_profit)
         tp_down = ref_price * (1 - take_profit)
-        hrects.append({
-            "y0": tp_down,
-            "y1": tp_up,
-            "color": "rgba(245, 158, 11, 0.1)",  # Light orange
-            "label": f"TP Zone ({take_profit*100:.2f}%)",
-        })
+        hrects.append(
+            {
+                "y0": tp_down,
+                "y1": tp_up,
+                "color": "rgba(245, 158, 11, 0.1)",  # Light orange
+                "label": f"TP Zone ({take_profit*100:.2f}%)",
+            }
+        )
 
     # Use the unified candlestick chart function
     result = generate_candlestick_chart(
@@ -127,13 +136,16 @@ def generate_chart(
         fig = go.Figure()
         fig.add_annotation(
             text="No candle data available",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5, showarrow=False,
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=16,
-                color=DARK_THEME["font_color"]
-            )
+                color=DARK_THEME["font_color"],
+            ),
         )
         fig.update_layout(
             paper_bgcolor=DARK_THEME["paper_bgcolor"],
@@ -143,7 +155,7 @@ def generate_chart(
         )
 
         img_bytes = io.BytesIO()
-        fig.write_image(img_bytes, format='png', scale=2)
+        fig.write_image(img_bytes, format="png", scale=2)
         img_bytes.seek(0)
         return img_bytes
 
@@ -153,7 +165,7 @@ def generate_chart(
 def generate_preview_chart(
     config: Dict[str, Any],
     candles_data: List[Dict[str, Any]],
-    current_price: Optional[float] = None
+    current_price: Optional[float] = None,
 ) -> io.BytesIO:
     """
     Generate a smaller preview chart for config viewing.

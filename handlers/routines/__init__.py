@@ -15,8 +15,8 @@ import logging
 import time
 from datetime import time as dt_time
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackContext
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackContext, ContextTypes
 
 from handlers import clear_all_input_states
 from routines.base import discover_routines, get_routine, get_routine_by_state
@@ -76,16 +76,24 @@ def _get_draft(context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> dict:
     return drafts[routine_name]
 
 
-def _set_draft(context: ContextTypes.DEFAULT_TYPE, routine_name: str, config: dict) -> None:
+def _set_draft(
+    context: ContextTypes.DEFAULT_TYPE, routine_name: str, config: dict
+) -> None:
     """Update draft config for a routine."""
     drafts = _get_drafts(context)
     drafts[routine_name] = config
 
 
-def _get_routine_instances(context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> list[tuple[str, dict]]:
+def _get_routine_instances(
+    context: ContextTypes.DEFAULT_TYPE, routine_name: str
+) -> list[tuple[str, dict]]:
     """Get all instances for a specific routine."""
     instances = _get_instances(context)
-    return [(iid, inst) for iid, inst in instances.items() if inst.get("routine_name") == routine_name]
+    return [
+        (iid, inst)
+        for iid, inst in instances.items()
+        if inst.get("routine_name") == routine_name
+    ]
 
 
 def _generate_instance_id() -> str:
@@ -169,7 +177,9 @@ def _find_job(context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id: str
     return jobs[0] if jobs else None
 
 
-def _stop_instance(context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id: str) -> bool:
+def _stop_instance(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id: str
+) -> bool:
     """Stop a job/task and remove instance. Returns True if found."""
     # Try to stop JobQueue job (for scheduled one-shots)
     job = _find_job(context, chat_id, instance_id)
@@ -199,7 +209,9 @@ def _stop_instance(context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id
     return False
 
 
-def _stop_all_routine(context: ContextTypes.DEFAULT_TYPE, chat_id: int, routine_name: str) -> int:
+def _stop_all_routine(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, routine_name: str
+) -> int:
     """Stop all instances of a routine. Returns count."""
     instances = _get_routine_instances(context, routine_name)
     count = 0
@@ -297,15 +309,21 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     chat_id = data["chat_id"]
 
     # Check if instance still exists (may have been stopped)
-    instances = context.application.user_data.get(chat_id, {}).get("routine_instances", {})
+    instances = context.application.user_data.get(chat_id, {}).get(
+        "routine_instances", {}
+    )
     if instance_id not in instances:
         logger.warning(f"Instance {instance_id} no longer exists, skipping execution")
         return
 
-    result, duration = await _execute_routine(context, instance_id, routine_name, config_dict, chat_id)
+    result, duration = await _execute_routine(
+        context, instance_id, routine_name, config_dict, chat_id
+    )
 
     # Re-check instance exists after execution (may have been stopped during run)
-    instances = context.application.user_data.get(chat_id, {}).get("routine_instances", {})
+    instances = context.application.user_data.get(chat_id, {}).get(
+        "routine_instances", {}
+    )
     if instance_id not in instances:
         logger.warning(f"Instance {instance_id} was removed during execution")
         return
@@ -326,11 +344,15 @@ async def _interval_job_callback(context: CallbackContext) -> None:
         f"```\n{result[:400]}\n```"
     )
     try:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="MarkdownV2"
+        )
     except Exception as e:
         logger.error(f"Failed to send interval result: {e}")
 
-    logger.info(f"Routine {routine_name}[{instance_id}] run #{run_count}: {result[:50]}...")
+    logger.info(
+        f"Routine {routine_name}[{instance_id}] run #{run_count}: {result[:50]}..."
+    )
 
 
 async def _oneshot_job_callback(context: CallbackContext) -> None:
@@ -343,10 +365,14 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     msg_id = data.get("msg_id")
     background = data.get("background", False)
 
-    result, duration = await _execute_routine(context, instance_id, routine_name, config_dict, chat_id)
+    result, duration = await _execute_routine(
+        context, instance_id, routine_name, config_dict, chat_id
+    )
 
     # Remove one-shot instance after completion
-    instances = context.application.user_data.get(chat_id, {}).get("routine_instances", {})
+    instances = context.application.user_data.get(chat_id, {}).get(
+        "routine_instances", {}
+    )
     if instance_id in instances:
         del instances[instance_id]
 
@@ -359,12 +385,16 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
             f"```\n{result[:400]}\n```"
         )
         try:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode="MarkdownV2"
+            )
         except Exception as e:
             logger.error(f"Failed to send result: {e}")
     elif msg_id:
         # Update the detail view
-        await _refresh_detail_msg(context, chat_id, msg_id, routine_name, result, duration)
+        await _refresh_detail_msg(
+            context, chat_id, msg_id, routine_name, result, duration
+        )
 
 
 async def _daily_job_callback(context: CallbackContext) -> None:
@@ -375,15 +405,21 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     config_dict = data["config_dict"]
     chat_id = data["chat_id"]
 
-    result, duration = await _execute_routine(context, instance_id, routine_name, config_dict, chat_id)
+    result, duration = await _execute_routine(
+        context, instance_id, routine_name, config_dict, chat_id
+    )
 
     # Update instance state
-    instances = context.application.user_data.get(chat_id, {}).get("routine_instances", {})
+    instances = context.application.user_data.get(chat_id, {}).get(
+        "routine_instances", {}
+    )
     if instance_id in instances:
         instances[instance_id]["last_run_at"] = time.time()
         instances[instance_id]["last_result"] = result
         instances[instance_id]["last_duration"] = duration
-        instances[instance_id]["run_count"] = instances[instance_id].get("run_count", 0) + 1
+        instances[instance_id]["run_count"] = (
+            instances[instance_id].get("run_count", 0) + 1
+        )
 
     # Send notification
     icon = "✅" if not result.startswith("Error") else "❌"
@@ -392,7 +428,9 @@ async def _daily_job_callback(context: CallbackContext) -> None:
         f"```\n{result[:400]}\n```"
     )
     try:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="MarkdownV2")
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, parse_mode="MarkdownV2"
+        )
     except Exception as e:
         logger.error(f"Failed to send daily result: {e}")
 
@@ -511,7 +549,9 @@ def _create_continuous_instance(
 # =============================================================================
 
 
-async def _edit_or_send(update: Update, text: str, reply_markup: InlineKeyboardMarkup) -> None:
+async def _edit_or_send(
+    update: Update, text: str, reply_markup: InlineKeyboardMarkup
+) -> None:
     """Edit message if callback, otherwise send new."""
     if update.callback_query:
         try:
@@ -548,14 +588,20 @@ async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "No routines found\\.\n\n"
             "Add Python files to `routines/` folder\\."
         )
-        keyboard = [[InlineKeyboardButton("🔄 Reload", callback_data="routines:reload")]]
+        keyboard = [
+            [InlineKeyboardButton("🔄 Reload", callback_data="routines:reload")]
+        ]
     else:
         keyboard = []
 
         if total_running > 0:
-            keyboard.append([
-                InlineKeyboardButton(f"📋 Running ({total_running})", callback_data="routines:tasks")
-            ])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"📋 Running ({total_running})", callback_data="routines:tasks"
+                    )
+                ]
+            )
 
         for name in sorted(routines.keys()):
             routine = routines[name]
@@ -567,9 +613,13 @@ async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 icon = "♾️" if routine.is_continuous else "⚡"
                 label = f"{icon} {_display_name(name)}"
 
-            keyboard.append([InlineKeyboardButton(label, callback_data=f"routines:select:{name}")])
+            keyboard.append(
+                [InlineKeyboardButton(label, callback_data=f"routines:select:{name}")]
+            )
 
-        keyboard.append([InlineKeyboardButton("🔄 Reload", callback_data="routines:reload")])
+        keyboard.append(
+            [InlineKeyboardButton("🔄 Reload", callback_data="routines:reload")]
+        )
 
         status = f"🟢 {total_running} running" if total_running else "All idle"
         text = (
@@ -587,14 +637,14 @@ async def _show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     chat_id = update.effective_chat.id
     instances = _get_instances(context)
 
-    running = [(iid, inst) for iid, inst in instances.items() if inst.get("status") == "running"]
+    running = [
+        (iid, inst)
+        for iid, inst in instances.items()
+        if inst.get("status") == "running"
+    ]
 
     if not running:
-        text = (
-            "📋 *RUNNING TASKS*\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "No tasks running\\."
-        )
+        text = "📋 *RUNNING TASKS*\n" "━━━━━━━━━━━━━━━━━━━━━\n\n" "No tasks running\\."
         keyboard = [[InlineKeyboardButton("« Back", callback_data="routines:menu")]]
     else:
         lines = ["📋 *RUNNING TASKS*", "━━━━━━━━━━━━━━━━━━━━━\n"]
@@ -608,27 +658,39 @@ async def _show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             run_count = inst.get("run_count", 0)
 
             lines.append(f"🟢 *{escape_markdown_v2(_display_name(name))}* `{iid}`")
-            lines.append(f"   {escape_markdown_v2(_format_schedule(schedule))} \\| {escape_markdown_v2(_format_ago(created))}")
-            lines.append(f"   Runs: {run_count} \\| `{escape_markdown_v2(_config_preview(config))}`")
+            lines.append(
+                f"   {escape_markdown_v2(_format_schedule(schedule))} \\| {escape_markdown_v2(_format_ago(created))}"
+            )
+            lines.append(
+                f"   Runs: {run_count} \\| `{escape_markdown_v2(_config_preview(config))}`"
+            )
 
             if inst.get("last_result"):
                 result_preview = inst["last_result"][:40].replace("\n", " ")
                 lines.append(f"   └ {escape_markdown_v2(result_preview)}\\.\\.\\.")
             lines.append("")
 
-            keyboard.append([
-                InlineKeyboardButton(f"⏹ {_display_name(name)[:12]}[{iid}]",
-                                     callback_data=f"routines:stop:{iid}")
-            ])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"⏹ {_display_name(name)[:12]}[{iid}]",
+                        callback_data=f"routines:stop:{iid}",
+                    )
+                ]
+            )
 
-        keyboard.append([InlineKeyboardButton("⏹ Stop All", callback_data="routines:stopall")])
+        keyboard.append(
+            [InlineKeyboardButton("⏹ Stop All", callback_data="routines:stopall")]
+        )
         keyboard.append([InlineKeyboardButton("« Back", callback_data="routines:menu")])
         text = "\n".join(lines)
 
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
-async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> None:
+async def _show_detail(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str
+) -> None:
     """Show routine detail with draft config and running instances."""
     chat_id = update.effective_chat.id
     routine = get_routine(routine_name)
@@ -644,7 +706,9 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, routi
 
     # Get running instances for this routine
     instances = _get_routine_instances(context, routine_name)
-    running = [(iid, inst) for iid, inst in instances if inst.get("status") == "running"]
+    running = [
+        (iid, inst) for iid, inst in instances if inst.get("status") == "running"
+    ]
 
     # Build config display
     config_lines = [f"{k}={draft.get(k, v['default'])}" for k, v in fields.items()]
@@ -668,7 +732,9 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, routi
             cfg_prev = _config_preview(inst.get("config", {}), 1)
             runs = inst.get("run_count", 0)
             inst_lines.append(f"│ `{iid}` {escape_markdown_v2(cfg_prev)}")
-            inst_lines.append(f"│   {escape_markdown_v2(sched)} \\| {runs} runs \\| {escape_markdown_v2(ago)}")
+            inst_lines.append(
+                f"│   {escape_markdown_v2(sched)} \\| {runs} runs \\| {escape_markdown_v2(ago)}"
+            )
         if len(running) > 5:
             inst_lines.append(f"│ _\\+{len(running) - 5} more_")
         inst_lines.append("└────────────────────────────")
@@ -691,30 +757,47 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, routi
         # Continuous routine - just start/stop
         keyboard = [
             [
-                InlineKeyboardButton("▶️ Start", callback_data=f"routines:start:{routine_name}"),
+                InlineKeyboardButton(
+                    "▶️ Start", callback_data=f"routines:start:{routine_name}"
+                ),
             ],
         ]
     else:
         # One-shot routine - can be scheduled
         keyboard = [
             [
-                InlineKeyboardButton("▶️ Run", callback_data=f"routines:run:{routine_name}"),
-                InlineKeyboardButton("🔄 Background", callback_data=f"routines:bg:{routine_name}"),
+                InlineKeyboardButton(
+                    "▶️ Run", callback_data=f"routines:run:{routine_name}"
+                ),
+                InlineKeyboardButton(
+                    "🔄 Background", callback_data=f"routines:bg:{routine_name}"
+                ),
             ],
             [
-                InlineKeyboardButton("⏱️ Schedule", callback_data=f"routines:sched:{routine_name}"),
+                InlineKeyboardButton(
+                    "⏱️ Schedule", callback_data=f"routines:sched:{routine_name}"
+                ),
             ],
         ]
 
     if running:
-        keyboard.append([
-            InlineKeyboardButton(f"⏹ Stop All ({len(running)})", callback_data=f"routines:stopall:{routine_name}")
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"⏹ Stop All ({len(running)})",
+                    callback_data=f"routines:stopall:{routine_name}",
+                )
+            ]
+        )
 
-    keyboard.append([
-        InlineKeyboardButton("❓ Help", callback_data=f"routines:help:{routine_name}"),
-        InlineKeyboardButton("« Back", callback_data="routines:menu"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "❓ Help", callback_data=f"routines:help:{routine_name}"
+            ),
+            InlineKeyboardButton("« Back", callback_data="routines:menu"),
+        ]
+    )
 
     # Store editing state
     context.user_data["routines_state"] = "editing"
@@ -731,7 +814,9 @@ async def _show_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, routi
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
-async def _show_schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> None:
+async def _show_schedule_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str
+) -> None:
     """Show schedule options menu."""
     routine = get_routine(routine_name)
     if not routine:
@@ -747,25 +832,39 @@ async def _show_schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Interval buttons - 3 per row
     row1 = [
-        InlineKeyboardButton(label, callback_data=f"routines:interval:{routine_name}:{secs}")
+        InlineKeyboardButton(
+            label, callback_data=f"routines:interval:{routine_name}:{secs}"
+        )
         for label, secs in SCHEDULE_PRESETS[:3]
     ]
     row2 = [
-        InlineKeyboardButton(label, callback_data=f"routines:interval:{routine_name}:{secs}")
+        InlineKeyboardButton(
+            label, callback_data=f"routines:interval:{routine_name}:{secs}"
+        )
         for label, secs in SCHEDULE_PRESETS[3:6]
     ]
 
     keyboard = [
         row1,
         row2,
-        [InlineKeyboardButton("📅 Daily...", callback_data=f"routines:daily:{routine_name}")],
-        [InlineKeyboardButton("« Cancel", callback_data=f"routines:select:{routine_name}")],
+        [
+            InlineKeyboardButton(
+                "📅 Daily...", callback_data=f"routines:daily:{routine_name}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "« Cancel", callback_data=f"routines:select:{routine_name}"
+            )
+        ],
     ]
 
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
-async def _show_daily_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> None:
+async def _show_daily_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str
+) -> None:
     """Show daily schedule time options."""
     text = (
         f"📅 *Daily Schedule: {escape_markdown_v2(_display_name(routine_name))}*\n"
@@ -787,7 +886,11 @@ async def _show_daily_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, r
     keyboard = [
         row1,
         row2,
-        [InlineKeyboardButton("« Back", callback_data=f"routines:sched:{routine_name}")],
+        [
+            InlineKeyboardButton(
+                "« Back", callback_data=f"routines:sched:{routine_name}"
+            )
+        ],
     ]
 
     # Store state for custom time input
@@ -797,7 +900,9 @@ async def _show_daily_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, r
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
-async def _show_help(update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> None:
+async def _show_help(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str
+) -> None:
     """Show field descriptions."""
     routine = get_routine(routine_name)
     if not routine:
@@ -809,11 +914,19 @@ async def _show_help(update: Update, context: ContextTypes.DEFAULT_TYPE, routine
     ]
 
     for name, info in routine.get_fields().items():
-        lines.append(f"• `{escape_markdown_v2(name)}` _{escape_markdown_v2(info['type'])}_")
+        lines.append(
+            f"• `{escape_markdown_v2(name)}` _{escape_markdown_v2(info['type'])}_"
+        )
         lines.append(f"  {escape_markdown_v2(info['description'])}")
         lines.append(f"  Default: `{escape_markdown_v2(str(info['default']))}`\n")
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data=f"routines:select:{routine_name}")]]
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "« Back", callback_data=f"routines:select:{routine_name}"
+            )
+        ]
+    ]
     await _edit_or_send(update, "\n".join(lines), InlineKeyboardMarkup(keyboard))
 
 
@@ -842,8 +955,11 @@ async def _refresh_detail_msg(
 
     # Get instances
     instances = user_data.get("routine_instances", {})
-    running = [(iid, inst) for iid, inst in instances.items()
-               if inst.get("routine_name") == routine_name and inst.get("status") == "running"]
+    running = [
+        (iid, inst)
+        for iid, inst in instances.items()
+        if inst.get("routine_name") == routine_name and inst.get("status") == "running"
+    ]
 
     status = f"🟢 {len(running)} running" if running else "⚪ Ready"
     type_str = "♾️ Continuous" if routine.is_continuous else "⚡ One\\-shot"
@@ -875,29 +991,46 @@ async def _refresh_detail_msg(
     if routine.is_continuous:
         keyboard = [
             [
-                InlineKeyboardButton("▶️ Start", callback_data=f"routines:start:{routine_name}"),
+                InlineKeyboardButton(
+                    "▶️ Start", callback_data=f"routines:start:{routine_name}"
+                ),
             ],
         ]
     else:
         keyboard = [
             [
-                InlineKeyboardButton("▶️ Run", callback_data=f"routines:run:{routine_name}"),
-                InlineKeyboardButton("🔄 Background", callback_data=f"routines:bg:{routine_name}"),
+                InlineKeyboardButton(
+                    "▶️ Run", callback_data=f"routines:run:{routine_name}"
+                ),
+                InlineKeyboardButton(
+                    "🔄 Background", callback_data=f"routines:bg:{routine_name}"
+                ),
             ],
             [
-                InlineKeyboardButton("⏱️ Schedule", callback_data=f"routines:sched:{routine_name}"),
+                InlineKeyboardButton(
+                    "⏱️ Schedule", callback_data=f"routines:sched:{routine_name}"
+                ),
             ],
         ]
 
     if running:
-        keyboard.append([
-            InlineKeyboardButton(f"⏹ Stop All ({len(running)})", callback_data=f"routines:stopall:{routine_name}")
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"⏹ Stop All ({len(running)})",
+                    callback_data=f"routines:stopall:{routine_name}",
+                )
+            ]
+        )
 
-    keyboard.append([
-        InlineKeyboardButton("❓ Help", callback_data=f"routines:help:{routine_name}"),
-        InlineKeyboardButton("« Back", callback_data="routines:menu"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "❓ Help", callback_data=f"routines:help:{routine_name}"
+            ),
+            InlineKeyboardButton("« Back", callback_data="routines:menu"),
+        ]
+    )
 
     try:
         await context.bot.edit_message_text(
@@ -946,7 +1079,9 @@ async def _run_once(
     msg_id = context.user_data.get("routines_msg_id")
     schedule = {"type": "once"}
 
-    _create_scheduled_instance(context, chat_id, routine_name, draft, schedule, msg_id, background)
+    _create_scheduled_instance(
+        context, chat_id, routine_name, draft, schedule, msg_id, background
+    )
 
     if background:
         await update.callback_query.answer("🔄 Running in background...")
@@ -1011,10 +1146,16 @@ async def _start_interval(
         return
 
     schedule = {"type": "interval", "interval_sec": interval_sec}
-    instance_id = _create_scheduled_instance(context, chat_id, routine_name, draft, schedule)
-    logger.info(f"Created interval schedule {instance_id} for {routine_name}: every {interval_sec}s")
+    instance_id = _create_scheduled_instance(
+        context, chat_id, routine_name, draft, schedule
+    )
+    logger.info(
+        f"Created interval schedule {instance_id} for {routine_name}: every {interval_sec}s"
+    )
 
-    await update.callback_query.answer(f"⏱️ Scheduled every {_format_schedule(schedule)}")
+    await update.callback_query.answer(
+        f"⏱️ Scheduled every {_format_schedule(schedule)}"
+    )
     await _show_detail(update, context, routine_name)
 
 
@@ -1050,8 +1191,12 @@ async def _start_daily(
         return
 
     schedule = {"type": "daily", "daily_time": time_str}
-    instance_id = _create_scheduled_instance(context, chat_id, routine_name, draft, schedule)
-    logger.info(f"Created daily schedule {instance_id} for {routine_name}: at {time_str}")
+    instance_id = _create_scheduled_instance(
+        context, chat_id, routine_name, draft, schedule
+    )
+    logger.info(
+        f"Created daily schedule {instance_id} for {routine_name}: at {time_str}"
+    )
 
     await update.callback_query.answer(f"📅 Scheduled daily at {time_str}")
     await _show_detail(update, context, routine_name)
@@ -1062,7 +1207,9 @@ async def _start_daily(
 # =============================================================================
 
 
-async def _process_config(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+async def _process_config(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
     """Process key=value config input."""
     editing = context.user_data.get("routines_editing", {})
     routine_name = editing.get("routine")
@@ -1119,7 +1266,9 @@ async def _process_config(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         asyncio.create_task(_delete_after(msg, 3))
 
     if not updates:
-        msg = await update.message.reply_text("❌ Use: `key=value`", parse_mode="Markdown")
+        msg = await update.message.reply_text(
+            "❌ Use: `key=value`", parse_mode="Markdown"
+        )
         asyncio.create_task(_delete_after(msg, 3))
         return
 
@@ -1139,7 +1288,9 @@ async def _process_config(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         await _refresh_detail_msg(context, chat_id, msg_id, routine_name)
 
 
-async def _process_daily_time(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+async def _process_daily_time(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
     """Process custom daily time input (HH:MM)."""
     editing = context.user_data.get("routines_editing", {})
     routine_name = editing.get("routine")
@@ -1161,7 +1312,9 @@ async def _process_daily_time(update: Update, context: ContextTypes.DEFAULT_TYPE
             raise ValueError()
         time_str = f"{hour:02d}:{minute:02d}"
     except (ValueError, AttributeError):
-        msg = await update.message.reply_text(f"❌ Invalid time. Use `HH:MM` format.", parse_mode="Markdown")
+        msg = await update.message.reply_text(
+            f"❌ Invalid time. Use `HH:MM` format.", parse_mode="Markdown"
+        )
         asyncio.create_task(_delete_after(msg, 3))
         return
 
@@ -1221,7 +1374,9 @@ async def routines_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 @restricted
-async def routines_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def routines_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle callback queries."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -1317,12 +1472,16 @@ async def routines_callback_handler(update: Update, context: ContextTypes.DEFAUL
         if routine and routine.callback_handler and len(parts) >= 3:
             routine_action = parts[2]
             routine_params = parts[3:] if len(parts) > 3 else []
-            await routine.callback_handler(update, context, routine_action, routine_params)
+            await routine.callback_handler(
+                update, context, routine_action, routine_params
+            )
         else:
             await query.answer()
 
 
-async def routines_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def routines_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
     """Handle text input for config editing, daily time, or routine-specific messages."""
     state = context.user_data.get("routines_state")
 
@@ -1369,7 +1528,9 @@ async def restore_scheduled_jobs(application) -> int:
             # Check if routine still exists
             routine = get_routine(routine_name)
             if not routine:
-                logger.warning(f"Routine {routine_name} no longer exists, removing instance {instance_id}")
+                logger.warning(
+                    f"Routine {routine_name} no longer exists, removing instance {instance_id}"
+                )
                 to_remove.append(instance_id)
                 continue
 
@@ -1392,9 +1553,13 @@ async def restore_scheduled_jobs(application) -> int:
                     )
                     _continuous_tasks[instance_id] = task
                     restored += 1
-                    logger.info(f"Restored continuous routine {instance_id}: {routine_name}")
+                    logger.info(
+                        f"Restored continuous routine {instance_id}: {routine_name}"
+                    )
                 except Exception as e:
-                    logger.error(f"Failed to restore continuous routine {instance_id}: {e}")
+                    logger.error(
+                        f"Failed to restore continuous routine {instance_id}: {e}"
+                    )
                     to_remove.append(instance_id)
                 continue
 
@@ -1419,7 +1584,9 @@ async def restore_scheduled_jobs(application) -> int:
                         chat_id=chat_id,
                     )
                     restored += 1
-                    logger.info(f"Restored interval job {instance_id} for {routine_name} (every {interval}s)")
+                    logger.info(
+                        f"Restored interval job {instance_id} for {routine_name} (every {interval}s)"
+                    )
 
                 elif stype == "daily":
                     time_str = schedule.get("daily_time", "09:00")
@@ -1432,7 +1599,9 @@ async def restore_scheduled_jobs(application) -> int:
                         chat_id=chat_id,
                     )
                     restored += 1
-                    logger.info(f"Restored daily job {instance_id} for {routine_name} (at {time_str})")
+                    logger.info(
+                        f"Restored daily job {instance_id} for {routine_name} (at {time_str})"
+                    )
 
                 else:
                     to_remove.append(instance_id)
@@ -1452,4 +1621,9 @@ async def restore_scheduled_jobs(application) -> int:
     return restored
 
 
-__all__ = ["routines_command", "routines_callback_handler", "routines_message_handler", "restore_scheduled_jobs"]
+__all__ = [
+    "routines_command",
+    "routines_callback_handler",
+    "routines_message_handler",
+    "restore_scheduled_jobs",
+]

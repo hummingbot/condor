@@ -15,8 +15,8 @@ Data is automatically saved to pickle file and persists across bot restarts
 """
 
 import logging
-from typing import Dict, Any, Optional, TypedDict
 from copy import deepcopy
+from typing import Any, Dict, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +52,15 @@ DEFAULT_DEX_AMOUNT = "1.0"
 
 # Unified trade defaults
 DEFAULT_TRADE_CONNECTOR_TYPE = "dex"  # "cex" or "dex"
-DEFAULT_TRADE_CONNECTOR_NAME = "solana-mainnet-beta"  # For DEX: network ID, for CEX: connector name
+DEFAULT_TRADE_CONNECTOR_NAME = (
+    "solana-mainnet-beta"  # For DEX: network ID, for CEX: connector name
+)
 
 
 # ============================================
 # TYPE DEFINITIONS
 # ============================================
+
 
 class PortfolioPrefs(TypedDict, total=False):
     days: int
@@ -114,11 +117,13 @@ class WalletNetworkPrefs(TypedDict, total=False):
     Keys are wallet addresses, values are lists of enabled network IDs.
     Example: {"0x1234...": ["ethereum-mainnet", "base", "arbitrum"]}
     """
+
     pass  # Dynamic keys based on wallet addresses
 
 
 class GatewayPrefs(TypedDict, total=False):
     """Gateway-related preferences including wallet network settings."""
+
     wallet_networks: Dict[str, list]  # wallet_address -> list of enabled network IDs
 
 
@@ -128,6 +133,7 @@ class UnifiedTradePrefs(TypedDict, total=False):
     Tracks which connector type (CEX/DEX) and which specific connector
     was last used, so the unified /trade command can show the right UI.
     """
+
     last_connector_type: str  # "cex" or "dex"
     last_connector_name: str  # e.g., "jupiter", "binance_perpetual"
 
@@ -144,6 +150,7 @@ class UserPreferences(TypedDict, total=False):
 # ============================================
 # INTERNAL HELPERS
 # ============================================
+
 
 def _get_default_preferences() -> UserPreferences:
     """Get default preferences structure"""
@@ -261,6 +268,7 @@ def _migrate_legacy_data(user_data: Dict) -> None:
 # PUBLIC API - GET PREFERENCES
 # ============================================
 
+
 def get_preferences(user_data: Dict) -> UserPreferences:
     """Get all user preferences (read-only copy)
 
@@ -325,6 +333,7 @@ def get_general_prefs(user_data: Dict) -> GeneralPrefs:
 # PUBLIC API - PORTFOLIO
 # ============================================
 
+
 def get_portfolio_days(user_data: Dict) -> int:
     """Get portfolio graph days setting"""
     return get_portfolio_prefs(user_data).get("days", DEFAULT_PORTFOLIO_DAYS)
@@ -352,6 +361,7 @@ def set_portfolio_interval(user_data: Dict, interval: str) -> None:
 # ============================================
 # PUBLIC API - CLOB TRADING
 # ============================================
+
 
 def get_clob_account(user_data: Dict) -> str:
     """Get CLOB trading account"""
@@ -389,8 +399,12 @@ def get_clob_order_defaults(user_data: Dict) -> CLOBOrderParams:
     last_order = prefs.get("last_order", {})
 
     return {
-        "connector": last_order.get("connector", prefs.get("default_connector", DEFAULT_CLOB_CONNECTOR)),
-        "trading_pair": last_order.get("trading_pair", prefs.get("default_pair", DEFAULT_CLOB_PAIR)),
+        "connector": last_order.get(
+            "connector", prefs.get("default_connector", DEFAULT_CLOB_CONNECTOR)
+        ),
+        "trading_pair": last_order.get(
+            "trading_pair", prefs.get("default_pair", DEFAULT_CLOB_PAIR)
+        ),
         "side": last_order.get("side", DEFAULT_CLOB_SIDE),
         "order_type": last_order.get("order_type", DEFAULT_CLOB_ORDER_TYPE),
         "position_mode": last_order.get("position_mode", DEFAULT_CLOB_POSITION_MODE),
@@ -402,6 +416,7 @@ def get_clob_order_defaults(user_data: Dict) -> CLOBOrderParams:
 # ============================================
 # PUBLIC API - DEX TRADING
 # ============================================
+
 
 def get_dex_network(user_data: Dict) -> str:
     """Get default DEX network"""
@@ -478,7 +493,9 @@ def get_dex_swap_defaults(user_data: Dict) -> DEXSwapParams:
     prefs = get_dex_prefs(user_data)
     last_swap = prefs.get("last_swap", {})
 
-    network = last_swap.get("network", prefs.get("default_network", DEFAULT_DEX_NETWORK))
+    network = last_swap.get(
+        "network", prefs.get("default_network", DEFAULT_DEX_NETWORK)
+    )
 
     return {
         "connector": last_swap.get("connector", get_dex_connector(user_data, network)),
@@ -486,13 +503,16 @@ def get_dex_swap_defaults(user_data: Dict) -> DEXSwapParams:
         "trading_pair": last_swap.get("trading_pair", DEFAULT_DEX_PAIR),
         "side": DEFAULT_DEX_SIDE,
         "amount": DEFAULT_DEX_AMOUNT,
-        "slippage": last_swap.get("slippage", prefs.get("default_slippage", DEFAULT_DEX_SLIPPAGE)),
+        "slippage": last_swap.get(
+            "slippage", prefs.get("default_slippage", DEFAULT_DEX_SLIPPAGE)
+        ),
     }
 
 
 # ============================================
 # PUBLIC API - GENERAL
 # ============================================
+
 
 def get_active_server(user_data: Dict) -> Optional[str]:
     """Get active server name"""
@@ -644,6 +664,7 @@ def get_all_enabled_networks(user_data: Dict) -> set:
 # PUBLIC API - UNIFIED TRADE
 # ============================================
 
+
 def get_unified_trade_prefs(user_data: Dict) -> UnifiedTradePrefs:
     """Get unified trade preferences
 
@@ -652,10 +673,15 @@ def get_unified_trade_prefs(user_data: Dict) -> UnifiedTradePrefs:
     """
     _migrate_legacy_data(user_data)
     prefs = _ensure_preferences(user_data)
-    return deepcopy(prefs.get("unified_trade", {
-        "last_connector_type": DEFAULT_TRADE_CONNECTOR_TYPE,
-        "last_connector_name": DEFAULT_TRADE_CONNECTOR_NAME,
-    }))
+    return deepcopy(
+        prefs.get(
+            "unified_trade",
+            {
+                "last_connector_type": DEFAULT_TRADE_CONNECTOR_TYPE,
+                "last_connector_name": DEFAULT_TRADE_CONNECTOR_NAME,
+            },
+        )
+    )
 
 
 def get_last_trade_connector(user_data: Dict) -> tuple:
@@ -673,7 +699,9 @@ def get_last_trade_connector(user_data: Dict) -> tuple:
     )
 
 
-def set_last_trade_connector(user_data: Dict, connector_type: str, connector_name: str) -> None:
+def set_last_trade_connector(
+    user_data: Dict, connector_type: str, connector_name: str
+) -> None:
     """Set last used trade connector
 
     Args:
@@ -693,6 +721,7 @@ def set_last_trade_connector(user_data: Dict, connector_type: str, connector_nam
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
+
 
 def clear_preferences(user_data: Dict) -> None:
     """Clear all user preferences (reset to defaults)"""

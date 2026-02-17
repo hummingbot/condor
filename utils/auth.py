@@ -1,19 +1,21 @@
 import logging
 from functools import wraps
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config_manager import (
-    UserRole,
     ServerPermission,
+    UserRole,
     get_config_manager,
 )
 
 logger = logging.getLogger(__name__)
 
 
-async def _notify_admin_new_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str) -> None:
+async def _notify_admin_new_user(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, username: str
+) -> None:
     """Send notification to admin about new user request."""
     cm = get_config_manager()
     admin_id = cm.admin_id
@@ -29,9 +31,7 @@ async def _notify_admin_new_user(context: ContextTypes.DEFAULT_TYPE, user_id: in
             f"Use /start \\> Admin Panel to approve or reject\\."
         )
         await context.bot.send_message(
-            chat_id=admin_id,
-            text=message,
-            parse_mode="MarkdownV2"
+            chat_id=admin_id, text=message, parse_mode="MarkdownV2"
         )
     except Exception as e:
         logger.warning(f"Failed to notify admin about new user: {e}")
@@ -42,6 +42,7 @@ def restricted(func):
     Decorator that checks if user is approved.
     New users are auto-registered as pending and admin is notified.
     """
+
     @wraps(func)
     async def wrapped(
         update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
@@ -69,7 +70,9 @@ def restricted(func):
                     "You will be notified when approved."
                 )
             elif update.callback_query:
-                await update.callback_query.answer("Access pending approval", show_alert=True)
+                await update.callback_query.answer(
+                    "Access pending approval", show_alert=True
+                )
             return
 
         # Handle new users - register as pending
@@ -85,15 +88,17 @@ def restricted(func):
                     f"Your User ID: `{user_id}`\n\n"
                     "An admin will review your request\\. "
                     "You will be notified when approved\\.",
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
                 )
             elif update.callback_query:
-                await update.callback_query.answer("Access request submitted", show_alert=True)
+                await update.callback_query.answer(
+                    "Access request submitted", show_alert=True
+                )
             return
 
         # User is approved (USER or ADMIN role)
         # Store user_id in context for access control in subsequent calls
-        context.user_data['_user_id'] = user_id
+        context.user_data["_user_id"] = user_id
         return await func(update, context, *args, **kwargs)
 
     return wrapped
@@ -101,6 +106,7 @@ def restricted(func):
 
 def admin_required(func):
     """Decorator that requires admin role."""
+
     @wraps(func)
     async def wrapped(
         update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
@@ -112,7 +118,9 @@ def admin_required(func):
             if update.message:
                 await update.message.reply_text("🔐 Admin access required.")
             elif update.callback_query:
-                await update.callback_query.answer("Admin access required", show_alert=True)
+                await update.callback_query.answer(
+                    "Admin access required", show_alert=True
+                )
             return
 
         return await func(update, context, *args, **kwargs)
@@ -125,6 +133,7 @@ def server_access_required(min_permission: ServerPermission = ServerPermission.V
     Decorator factory that checks server permission.
     Server name is determined from context.user_data or per-chat default.
     """
+
     def decorator(func):
         @wraps(func)
         async def wrapped(
@@ -146,7 +155,9 @@ def server_access_required(min_permission: ServerPermission = ServerPermission.V
                 if update.message:
                     await update.message.reply_text("⚠️ No server configured.")
                 elif update.callback_query:
-                    await update.callback_query.answer("No server configured", show_alert=True)
+                    await update.callback_query.answer(
+                        "No server configured", show_alert=True
+                    )
                 return
 
             # Check permission
@@ -158,14 +169,14 @@ def server_access_required(min_permission: ServerPermission = ServerPermission.V
                     )
                 elif update.callback_query:
                     await update.callback_query.answer(
-                        f"No {perm_name} access to this server",
-                        show_alert=True
+                        f"No {perm_name} access to this server", show_alert=True
                     )
                 return
 
             return await func(update, context, *args, **kwargs)
 
         return wrapped
+
     return decorator
 
 
@@ -174,7 +185,7 @@ async def _send_service_unavailable_message(
     title: str,
     status_line: str,
     instruction: str,
-    close_callback: str = "dex:close"
+    close_callback: str = "dex:close",
 ) -> None:
     """Send a standardized service unavailable message."""
     message = f"⚠️ *{title}*\n\n"
@@ -186,15 +197,11 @@ async def _send_service_unavailable_message(
 
     if update.message:
         await update.message.reply_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
     elif update.callback_query:
         await update.callback_query.message.edit_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
 
@@ -208,37 +215,45 @@ def gateway_required(func):
         async def handle_liquidity(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ...
     """
+
     @wraps(func)
     async def wrapped(
         update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
     ):
         try:
-            from handlers.config.server_context import get_gateway_status_info, get_server_context_header
+            from handlers.config.server_context import (
+                get_gateway_status_info,
+                get_server_context_header,
+            )
 
             # Get chat_id to use per-chat server default
             chat_id = update.effective_chat.id if update.effective_chat else None
 
             # Check server status first
-            server_header, server_online = await get_server_context_header(context.user_data)
+            server_header, server_online = await get_server_context_header(
+                context.user_data
+            )
 
             if not server_online:
                 await _send_service_unavailable_message(
                     update,
                     title="Server Offline",
                     status_line="🔴 The API server is not reachable\\.",
-                    instruction="Check your server configuration in /start \\> API Servers\\."
+                    instruction="Check your server configuration in /start \\> API Servers\\.",
                 )
                 return
 
             # Check gateway status
-            _, gateway_running = await get_gateway_status_info(chat_id, context.user_data)
+            _, gateway_running = await get_gateway_status_info(
+                chat_id, context.user_data
+            )
 
             if not gateway_running:
                 await _send_service_unavailable_message(
                     update,
                     title="Gateway Not Running",
                     status_line="🔴 The Gateway is not deployed or not running on this server\\.",
-                    instruction="Deploy the Gateway in /start \\> Gateway to use this feature\\."
+                    instruction="Deploy the Gateway in /start \\> Gateway to use this feature\\.",
                 )
                 return
 
@@ -250,7 +265,7 @@ def gateway_required(func):
                 update,
                 title="Service Unavailable",
                 status_line="⚠️ Could not verify service status\\.",
-                instruction="Please try again or check /start for server status\\."
+                instruction="Please try again or check /start for server status\\.",
             )
             return
 
@@ -267,6 +282,7 @@ def hummingbot_api_required(func):
         async def handle_some_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ...
     """
+
     @wraps(func)
     async def wrapped(
         update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs
@@ -275,14 +291,16 @@ def hummingbot_api_required(func):
             from handlers.config.server_context import get_server_context_header
 
             # Check server status
-            server_header, server_online = await get_server_context_header(context.user_data)
+            server_header, server_online = await get_server_context_header(
+                context.user_data
+            )
 
             if not server_online:
                 await _send_service_unavailable_message(
                     update,
                     title="API Server Offline",
                     status_line="🔴 The Hummingbot API server is not reachable\\.",
-                    instruction="Check your server configuration in /start \\> API Servers\\."
+                    instruction="Check your server configuration in /start \\> API Servers\\.",
                 )
                 return
 
@@ -294,7 +312,7 @@ def hummingbot_api_required(func):
                 update,
                 title="Service Unavailable",
                 status_line="⚠️ Could not verify service status\\.",
-                instruction="Please try again or check /start for server status\\."
+                instruction="Please try again or check /start for server status\\.",
             )
             return
 

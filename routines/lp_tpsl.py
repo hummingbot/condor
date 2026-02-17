@@ -4,13 +4,18 @@ import asyncio
 import logging
 import re
 import time
-from typing import NamedTuple, Literal
+from typing import Literal, NamedTuple
+
 from pydantic import BaseModel, Field
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config_manager import get_client
-from utils.telegram_formatters import escape_markdown_v2, resolve_token_symbol, KNOWN_TOKENS
+from utils.telegram_formatters import (
+    KNOWN_TOKENS,
+    escape_markdown_v2,
+    resolve_token_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +30,12 @@ MESSAGE_STATES = ["tpsl_interactive"]
 # HELPER FUNCTIONS
 # =============================================================================
 
+
 async def _fetch_token_prices(client) -> dict:
     """Fetch token prices from portfolio state."""
     token_prices = {}
     try:
-        if hasattr(client, 'portfolio'):
+        if hasattr(client, "portfolio"):
             result = await client.portfolio.get_state()
             if result:
                 for account_data in result.values():
@@ -55,8 +61,10 @@ def _get_price(symbol: str, token_prices: dict, default: float = 0) -> float:
             return price
     # Wrapped variants
     variants = {
-        "sol": ["wsol"], "wsol": ["sol"],
-        "eth": ["weth"], "weth": ["eth"],
+        "sol": ["wsol"],
+        "wsol": ["sol"],
+        "eth": ["weth"],
+        "weth": ["eth"],
     }
     for variant in variants.get(symbol_lower, []):
         for key, price in token_prices.items():
@@ -65,29 +73,31 @@ def _get_price(symbol: str, token_prices: dict, default: float = 0) -> float:
     return default
 
 
-def _calculate_position_value_usd(pos: dict, token_cache: dict, token_prices: dict) -> float:
+def _calculate_position_value_usd(
+    pos: dict, token_cache: dict, token_prices: dict
+) -> float:
     """Calculate position value in USD."""
-    base_token = pos.get('base_token', pos.get('token_a', ''))
-    quote_token = pos.get('quote_token', pos.get('token_b', ''))
+    base_token = pos.get("base_token", pos.get("token_a", ""))
+    quote_token = pos.get("quote_token", pos.get("token_b", ""))
     quote_symbol = resolve_token_symbol(quote_token, token_cache)
 
     quote_price = _get_price(quote_symbol, token_prices, 1.0)
 
-    pnl_summary = pos.get('pnl_summary', {})
-    current_lp_value_quote = float(pnl_summary.get('current_lp_value_quote', 0) or 0)
+    pnl_summary = pos.get("pnl_summary", {})
+    current_lp_value_quote = float(pnl_summary.get("current_lp_value_quote", 0) or 0)
 
     return current_lp_value_quote * quote_price
 
 
 def _get_user_data(context) -> dict:
     """Get user_data from MockContext or regular context."""
-    chat_id = context._chat_id if hasattr(context, '_chat_id') else None
-    if hasattr(context, 'application') and context.application:
+    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
+    if hasattr(context, "application") and context.application:
         app_user_data = context.application.user_data
         if chat_id not in app_user_data:
             app_user_data[chat_id] = {}
         return app_user_data[chat_id]
-    return getattr(context, '_user_data', {})
+    return getattr(context, "_user_data", {})
 
 
 def _get_state(context, instance_id: str) -> dict:
@@ -122,6 +132,7 @@ async def _delete_after(msg, seconds: int):
 # COMMAND PARSING
 # =============================================================================
 
+
 class ParsedCommand(NamedTuple):
     type: Literal["select", "tp", "sl", "remove", "add", "status", "help", "unknown"]
     position_num: int | None
@@ -155,10 +166,7 @@ def parse_tpsl_command(text: str) -> ParsedCommand:
         return ParsedCommand("remove", int(remove_match.group(1)), None, None)
 
     # TP/SL with optional position: "1 tp=25%" or "tp=15%" or "sl=$50"
-    tpsl_match = re.match(
-        r"(?:(\d+)\s+)?(tp|sl)\s*=\s*(\$?)(\d+(?:\.\d+)?)(%?)",
-        text
-    )
+    tpsl_match = re.match(r"(?:(\d+)\s+)?(tp|sl)\s*=\s*(\$?)(\d+(?:\.\d+)?)(%?)", text)
     if tpsl_match:
         pos_num = int(tpsl_match.group(1)) if tpsl_match.group(1) else None
         cmd_type = tpsl_match.group(2)  # "tp" or "sl"
@@ -176,7 +184,10 @@ def parse_tpsl_command(text: str) -> ParsedCommand:
 # MESSAGE HANDLER (called from handlers/routines/__init__.py)
 # =============================================================================
 
-async def handle_tpsl_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_tpsl_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Process interactive commands while routine is running."""
     text = update.message.text.strip()
     instance_id = context.user_data.get("tpsl_active_instance")
@@ -196,13 +207,17 @@ async def handle_tpsl_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id
 
     if cmd.type == "select":
-        await _handle_position_select(context, chat_id, state, cmd.position_num, instance_id)
+        await _handle_position_select(
+            context, chat_id, state, cmd.position_num, instance_id
+        )
     elif cmd.type == "tp":
         await _handle_set_tp(context, chat_id, state, cmd, instance_id)
     elif cmd.type == "sl":
         await _handle_set_sl(context, chat_id, state, cmd, instance_id)
     elif cmd.type == "remove":
-        await _handle_remove_position(context, chat_id, state, cmd.position_num, instance_id)
+        await _handle_remove_position(
+            context, chat_id, state, cmd.position_num, instance_id
+        )
     elif cmd.type == "add":
         await _show_available_positions(context, chat_id, state, instance_id)
     elif cmd.type == "status":
@@ -213,7 +228,7 @@ async def handle_tpsl_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg = await context.bot.send_message(
             chat_id=chat_id,
             text="Unknown command\\. Send `help` for available commands\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         asyncio.create_task(_delete_after(msg, 5))
 
@@ -283,7 +298,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return True
 
 
-async def cleanup(context: ContextTypes.DEFAULT_TYPE, instance_id: str, chat_id: int) -> None:
+async def cleanup(
+    context: ContextTypes.DEFAULT_TYPE, instance_id: str, chat_id: int
+) -> None:
     """Clean up routine state when instance stops."""
     user_data = _get_user_data(context)
 
@@ -296,7 +313,9 @@ async def cleanup(context: ContextTypes.DEFAULT_TYPE, instance_id: str, chat_id:
     user_data.pop(f"lp_tpsl_{instance_id}", None)
 
 
-async def _handle_position_select(context, chat_id: int, state: dict, pos_num: int, instance_id: str):
+async def _handle_position_select(
+    context, chat_id: int, state: dict, pos_num: int, instance_id: str
+):
     """Handle position selection by number."""
     available = state.get("available_positions", [])
 
@@ -304,20 +323,20 @@ async def _handle_position_select(context, chat_id: int, state: dict, pos_num: i
         msg = await context.bot.send_message(
             chat_id=chat_id,
             text=f"Invalid position number\\. Choose 1\\-{len(available)}\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         asyncio.create_task(_delete_after(msg, 5))
         return
 
     pos = available[pos_num - 1]
-    pos_id = pos.get('id') or pos.get('position_id') or pos.get('address', '')
+    pos_id = pos.get("id") or pos.get("position_id") or pos.get("address", "")
 
     # Check if already tracked
     if pos_id in state["tracked_positions"]:
         msg = await context.bot.send_message(
             chat_id=chat_id,
             text="Position already being tracked\\!",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         asyncio.create_task(_delete_after(msg, 3))
         return
@@ -325,13 +344,13 @@ async def _handle_position_select(context, chat_id: int, state: dict, pos_num: i
     # Get position info
     token_cache = state.get("token_cache", {})
     token_prices = state.get("token_prices", {})
-    base_token = pos.get('base_token', pos.get('token_a', ''))
-    quote_token = pos.get('quote_token', pos.get('token_b', ''))
+    base_token = pos.get("base_token", pos.get("token_a", ""))
+    quote_token = pos.get("quote_token", pos.get("token_b", ""))
     base_symbol = resolve_token_symbol(base_token, token_cache)
     quote_symbol = resolve_token_symbol(quote_token, token_cache)
     pair = f"{base_symbol}-{quote_symbol}"
-    connector = pos.get('connector', 'unknown')
-    network = pos.get('network', 'solana-mainnet-beta')
+    connector = pos.get("connector", "unknown")
+    network = pos.get("network", "solana-mainnet-beta")
 
     entry_value = _calculate_position_value_usd(pos, token_cache, token_prices)
 
@@ -380,11 +399,13 @@ async def _handle_position_select(context, chat_id: int, state: dict, pos_num: i
             f"📉 SL: \\-{escape_markdown_v2(f'{sl_pct:.0f}')}% \\(${escape_markdown_v2(f'{sl_value:.2f}')}\\)\n\n"
             f"_Send another number to add more, or `status` to view all_"
         ),
-        parse_mode="MarkdownV2"
+        parse_mode="MarkdownV2",
     )
 
 
-async def _handle_set_tp(context, chat_id: int, state: dict, cmd: ParsedCommand, instance_id: str):
+async def _handle_set_tp(
+    context, chat_id: int, state: dict, cmd: ParsedCommand, instance_id: str
+):
     """Handle setting take profit."""
     tracked = state.get("tracked_positions", {})
 
@@ -392,7 +413,7 @@ async def _handle_set_tp(context, chat_id: int, state: dict, cmd: ParsedCommand,
         msg = await context.bot.send_message(
             chat_id=chat_id,
             text="No positions tracked yet\\. Add one first\\!",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         asyncio.create_task(_delete_after(msg, 5))
         return
@@ -407,7 +428,7 @@ async def _handle_set_tp(context, chat_id: int, state: dict, cmd: ParsedCommand,
             msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"Invalid position number\\. Choose 1\\-{len(pos_list)}\\.",
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
             asyncio.create_task(_delete_after(msg, 5))
             return
@@ -425,7 +446,7 @@ async def _handle_set_tp(context, chat_id: int, state: dict, cmd: ParsedCommand,
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"\\#️⃣{cmd.position_num} *{escape_markdown_v2(pos_data['pair'])}* TP updated to \\+{escape_markdown_v2(f'{pos_data['tp_pct']:.1f}')}% \\(${escape_markdown_v2(f'{tp_value:.2f}')}\\)",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
     else:
         # Update all positions
@@ -444,11 +465,13 @@ async def _handle_set_tp(context, chat_id: int, state: dict, cmd: ParsedCommand,
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"All positions TP updated to \\+{escape_markdown_v2(f'{value:.1f}')}{'%' if value_type == 'pct' else ''}",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
 
-async def _handle_set_sl(context, chat_id: int, state: dict, cmd: ParsedCommand, instance_id: str):
+async def _handle_set_sl(
+    context, chat_id: int, state: dict, cmd: ParsedCommand, instance_id: str
+):
     """Handle setting stop loss."""
     tracked = state.get("tracked_positions", {})
 
@@ -456,7 +479,7 @@ async def _handle_set_sl(context, chat_id: int, state: dict, cmd: ParsedCommand,
         msg = await context.bot.send_message(
             chat_id=chat_id,
             text="No positions tracked yet\\. Add one first\\!",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         asyncio.create_task(_delete_after(msg, 5))
         return
@@ -471,7 +494,7 @@ async def _handle_set_sl(context, chat_id: int, state: dict, cmd: ParsedCommand,
             msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"Invalid position number\\. Choose 1\\-{len(pos_list)}\\.",
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
             asyncio.create_task(_delete_after(msg, 5))
             return
@@ -489,7 +512,7 @@ async def _handle_set_sl(context, chat_id: int, state: dict, cmd: ParsedCommand,
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"\\#️⃣{cmd.position_num} *{escape_markdown_v2(pos_data['pair'])}* SL updated to \\-{escape_markdown_v2(f'{pos_data['sl_pct']:.1f}')}% \\(${escape_markdown_v2(f'{sl_value:.2f}')}\\)",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
     else:
         # Update all positions
@@ -508,19 +531,19 @@ async def _handle_set_sl(context, chat_id: int, state: dict, cmd: ParsedCommand,
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"All positions SL updated to \\-{escape_markdown_v2(f'{value:.1f}')}{'%' if value_type == 'pct' else ''}",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
 
-async def _handle_remove_position(context, chat_id: int, state: dict, pos_num: int, instance_id: str):
+async def _handle_remove_position(
+    context, chat_id: int, state: dict, pos_num: int, instance_id: str
+):
     """Handle removing a position from tracking."""
     tracked = state.get("tracked_positions", {})
 
     if not tracked:
         msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text="No positions tracked\\.",
-            parse_mode="MarkdownV2"
+            chat_id=chat_id, text="No positions tracked\\.", parse_mode="MarkdownV2"
         )
         asyncio.create_task(_delete_after(msg, 3))
         return
@@ -530,7 +553,7 @@ async def _handle_remove_position(context, chat_id: int, state: dict, pos_num: i
         msg = await context.bot.send_message(
             chat_id=chat_id,
             text=f"Invalid position number\\. Choose 1\\-{len(pos_list)}\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         asyncio.create_task(_delete_after(msg, 5))
         return
@@ -543,11 +566,13 @@ async def _handle_remove_position(context, chat_id: int, state: dict, pos_num: i
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"Removed *{escape_markdown_v2(pair)}* from tracking\\.",
-        parse_mode="MarkdownV2"
+        parse_mode="MarkdownV2",
     )
 
 
-async def _show_available_positions(context, chat_id: int, state: dict, instance_id: str):
+async def _show_available_positions(
+    context, chat_id: int, state: dict, instance_id: str
+):
     """Show available positions for adding."""
     available = state.get("available_positions", [])
     tracked = state.get("tracked_positions", {})
@@ -558,25 +583,29 @@ async def _show_available_positions(context, chat_id: int, state: dict, instance
         await context.bot.send_message(
             chat_id=chat_id,
             text="No LP positions available\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         return
 
     lines = ["📋 *Available Positions*\n"]
 
     for i, pos in enumerate(available, 1):
-        pos_id = pos.get('id') or pos.get('position_id') or pos.get('address', '')
+        pos_id = pos.get("id") or pos.get("position_id") or pos.get("address", "")
         is_tracked = pos_id in tracked
 
-        base_token = pos.get('base_token', pos.get('token_a', ''))
-        quote_token = pos.get('quote_token', pos.get('token_b', ''))
+        base_token = pos.get("base_token", pos.get("token_a", ""))
+        quote_token = pos.get("quote_token", pos.get("token_b", ""))
         base_symbol = resolve_token_symbol(base_token, token_cache)
         quote_symbol = resolve_token_symbol(quote_token, token_cache)
         pair = f"{base_symbol}-{quote_symbol}"
 
-        connector = pos.get('connector', 'unknown')[:3]
-        in_range = pos.get('in_range', '')
-        status_emoji = "🟢" if in_range == "IN_RANGE" else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
+        connector = pos.get("connector", "unknown")[:3]
+        in_range = pos.get("in_range", "")
+        status_emoji = (
+            "🟢"
+            if in_range == "IN_RANGE"
+            else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
+        )
 
         value = _calculate_position_value_usd(pos, token_cache, token_prices)
 
@@ -588,9 +617,7 @@ async def _show_available_positions(context, chat_id: int, state: dict, instance
     lines.append("_Send position number to add \\(e\\.g\\. '1'\\)_")
 
     await context.bot.send_message(
-        chat_id=chat_id,
-        text="\n".join(lines),
-        parse_mode="MarkdownV2"
+        chat_id=chat_id, text="\n".join(lines), parse_mode="MarkdownV2"
     )
 
 
@@ -602,11 +629,13 @@ async def _show_status(context, chat_id: int, state: dict, instance_id: str):
         await context.bot.send_message(
             chat_id=chat_id,
             text="No positions being tracked\\. Send a position number to add one\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         return
 
-    lines = [f"🎯 *Tracking {len(tracked)} position{'s' if len(tracked) > 1 else ''}*\n"]
+    lines = [
+        f"🎯 *Tracking {len(tracked)} position{'s' if len(tracked) > 1 else ''}*\n"
+    ]
 
     for i, (pos_id, pos_data) in enumerate(tracked.items(), 1):
         pair = pos_data.get("pair", "Unknown")
@@ -629,19 +658,25 @@ async def _show_status(context, chat_id: int, state: dict, instance_id: str):
         elif triggered == "SL":
             status = " 🚨 SL HIT"
 
-        lines.append(f"*{i}\\. {escape_markdown_v2(pair)}* \\({escape_markdown_v2(connector)}\\){status}")
-        lines.append(f"   Entry: ${escape_markdown_v2(f'{entry:.2f}')} → ${escape_markdown_v2(f'{current:.2f}')} \\({escape_markdown_v2(change_str)}\\)")
-        lines.append(f"   📈 TP: \\+{escape_markdown_v2(f'{tp_pct:.0f}')}% \\(${escape_markdown_v2(f'{tp_value:.2f}')}\\)")
-        lines.append(f"   📉 SL: \\-{escape_markdown_v2(f'{sl_pct:.0f}')}% \\(${escape_markdown_v2(f'{sl_value:.2f}')}\\)")
+        lines.append(
+            f"*{i}\\. {escape_markdown_v2(pair)}* \\({escape_markdown_v2(connector)}\\){status}"
+        )
+        lines.append(
+            f"   Entry: ${escape_markdown_v2(f'{entry:.2f}')} → ${escape_markdown_v2(f'{current:.2f}')} \\({escape_markdown_v2(change_str)}\\)"
+        )
+        lines.append(
+            f"   📈 TP: \\+{escape_markdown_v2(f'{tp_pct:.0f}')}% \\(${escape_markdown_v2(f'{tp_value:.2f}')}\\)"
+        )
+        lines.append(
+            f"   📉 SL: \\-{escape_markdown_v2(f'{sl_pct:.0f}')}% \\(${escape_markdown_v2(f'{sl_value:.2f}')}\\)"
+        )
         lines.append("")
 
     # Show commands reminder
     lines.append("_Commands: `tp=15%`, `1 sl=$50`, `remove 1`, `add`_")
 
     await context.bot.send_message(
-        chat_id=chat_id,
-        text="\n".join(lines),
-        parse_mode="MarkdownV2"
+        chat_id=chat_id, text="\n".join(lines), parse_mode="MarkdownV2"
     )
 
 
@@ -661,7 +696,7 @@ async def _show_help(context, chat_id: int):
             "`add` \\- Show available positions\n"
             "`status` \\- Show current status\n"
         ),
-        parse_mode="MarkdownV2"
+        parse_mode="MarkdownV2",
     )
 
 
@@ -669,11 +704,16 @@ async def _show_help(context, chat_id: int):
 # MAIN ROUTINE
 # =============================================================================
 
+
 class Config(BaseModel):
     """Multi-position LP TP/SL Monitor with interactive control."""
 
-    default_tp_pct: float = Field(default=10.0, description="Default take profit % (can override per position)")
-    default_sl_pct: float = Field(default=10.0, description="Default stop loss % (can override per position)")
+    default_tp_pct: float = Field(
+        default=10.0, description="Default take profit % (can override per position)"
+    )
+    default_sl_pct: float = Field(
+        default=10.0, description="Default stop loss % (can override per position)"
+    )
     interval_sec: int = Field(default=30, description="Check interval in seconds")
 
 
@@ -686,10 +726,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     - Send 'tp=15%' or 'sl=$50' to modify TP/SL
     - Alerts when TP or SL is hit
     """
-    logger.info(f"LP TP/SL starting: TP={config.default_tp_pct}%, SL={config.default_sl_pct}%")
+    logger.info(
+        f"LP TP/SL starting: TP={config.default_tp_pct}%, SL={config.default_sl_pct}%"
+    )
 
-    chat_id = context._chat_id if hasattr(context, '_chat_id') else None
-    instance_id = getattr(context, '_instance_id', 'default')
+    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
+    instance_id = getattr(context, "_instance_id", "default")
 
     if not chat_id:
         return "No chat_id available"
@@ -709,7 +751,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if not client:
         return "No server available"
 
-    if not hasattr(client, 'gateway_clmm'):
+    if not hasattr(client, "gateway_clmm"):
         return "Gateway CLMM not available"
 
     # Fetch available positions
@@ -721,7 +763,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         await context.bot.send_message(
             chat_id=chat_id,
             text="No active LP positions found\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
         return "No active positions"
 
@@ -741,15 +783,19 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             if state["tracked_positions"]:
                 try:
                     client = await get_client(chat_id, context=context)
-                    if client and hasattr(client, 'gateway_clmm'):
-                        await _check_positions(context, chat_id, state, client, instance_id)
+                    if client and hasattr(client, "gateway_clmm"):
+                        await _check_positions(
+                            context, chat_id, state, client, instance_id
+                        )
                 except Exception as e:
                     logger.error(f"Error checking positions: {e}")
 
             # Log periodically
             if state["checks"] % 20 == 0:
                 tracked_count = len(state.get("tracked_positions", {}))
-                logger.info(f"LP TP/SL check #{state['checks']}: tracking {tracked_count} positions")
+                logger.info(
+                    f"LP TP/SL check #{state['checks']}: tracking {tracked_count} positions"
+                )
 
             await asyncio.sleep(config.interval_sec)
 
@@ -762,7 +808,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         elapsed = int(time.time() - state.get("start_time", time.time()))
         mins, secs = divmod(elapsed, 60)
         tracked_count = len(state.get("tracked_positions", {}))
-        triggers = sum(1 for p in state.get("tracked_positions", {}).values() if p.get("triggered"))
+        triggers = sum(
+            1 for p in state.get("tracked_positions", {}).values() if p.get("triggered")
+        )
 
         # Clean up state
         user_data.pop(f"lp_tpsl_{instance_id}", None)
@@ -777,7 +825,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     f"Triggers: {triggers}\n"
                     f"Checks: {state.get('checks', 0)}"
                 ),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
         except Exception:
             pass
@@ -789,10 +837,7 @@ async def _refresh_available_positions(context, chat_id: int, state: dict, clien
     """Fetch available LP positions from Gateway."""
     try:
         result = await client.gateway_clmm.search_positions(
-            limit=100,
-            offset=0,
-            status="OPEN",
-            refresh=True
+            limit=100, offset=0, status="OPEN", refresh=True
         )
 
         if not result:
@@ -804,9 +849,9 @@ async def _refresh_available_positions(context, chat_id: int, state: dict, clien
         # Filter to active positions with liquidity
         active_positions = []
         for pos in positions:
-            if pos.get('status') == 'CLOSED':
+            if pos.get("status") == "CLOSED":
                 continue
-            liq = pos.get('liquidity') or pos.get('current_liquidity')
+            liq = pos.get("liquidity") or pos.get("current_liquidity")
             if liq is not None:
                 try:
                     if float(liq) <= 0:
@@ -819,15 +864,17 @@ async def _refresh_available_positions(context, chat_id: int, state: dict, clien
 
         # Build token cache
         token_cache = dict(KNOWN_TOKENS)
-        networks = list(set(pos.get('network', 'solana-mainnet-beta') for pos in active_positions))
-        if networks and hasattr(client, 'gateway'):
+        networks = list(
+            set(pos.get("network", "solana-mainnet-beta") for pos in active_positions)
+        )
+        if networks and hasattr(client, "gateway"):
             for network in networks:
                 try:
                     resp = await client.gateway.get_network_tokens(network)
-                    tokens = resp.get('tokens', []) if resp else []
+                    tokens = resp.get("tokens", []) if resp else []
                     for token in tokens:
-                        addr = token.get('address', '')
-                        symbol = token.get('symbol', '')
+                        addr = token.get("address", "")
+                        symbol = token.get("symbol", "")
                         if addr and symbol:
                             token_cache[addr] = symbol
                 except Exception:
@@ -852,19 +899,23 @@ async def _show_setup_message(context, chat_id: int, state: dict, config: Config
     lines = [
         "🎯 *LP TP/SL Monitor Started*\n",
         f"Default: TP \\+{config.default_tp_pct:.0f}% \\| SL \\-{config.default_sl_pct:.0f}%\n",
-        "📋 *Available Positions:*"
+        "📋 *Available Positions:*",
     ]
 
     for i, pos in enumerate(available, 1):
-        base_token = pos.get('base_token', pos.get('token_a', ''))
-        quote_token = pos.get('quote_token', pos.get('token_b', ''))
+        base_token = pos.get("base_token", pos.get("token_a", ""))
+        quote_token = pos.get("quote_token", pos.get("token_b", ""))
         base_symbol = resolve_token_symbol(base_token, token_cache)
         quote_symbol = resolve_token_symbol(quote_token, token_cache)
         pair = f"{base_symbol}-{quote_symbol}"
 
-        connector = pos.get('connector', 'unknown')[:3]
-        in_range = pos.get('in_range', '')
-        status_emoji = "🟢" if in_range == "IN_RANGE" else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
+        connector = pos.get("connector", "unknown")[:3]
+        in_range = pos.get("in_range", "")
+        status_emoji = (
+            "🟢"
+            if in_range == "IN_RANGE"
+            else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
+        )
 
         value = _calculate_position_value_usd(pos, token_cache, token_prices)
 
@@ -876,13 +927,13 @@ async def _show_setup_message(context, chat_id: int, state: dict, config: Config
     lines.append("_Send `help` for all commands_")
 
     await context.bot.send_message(
-        chat_id=chat_id,
-        text="\n".join(lines),
-        parse_mode="MarkdownV2"
+        chat_id=chat_id, text="\n".join(lines), parse_mode="MarkdownV2"
     )
 
 
-async def _check_positions(context, chat_id: int, state: dict, client, instance_id: str):
+async def _check_positions(
+    context, chat_id: int, state: dict, client, instance_id: str
+):
     """Check all tracked positions for TP/SL triggers."""
     tracked = state.get("tracked_positions", {})
     if not tracked:
@@ -895,14 +946,12 @@ async def _check_positions(context, chat_id: int, state: dict, client, instance_
     # Fetch current positions
     try:
         result = await client.gateway_clmm.search_positions(
-            limit=100,
-            offset=0,
-            status="OPEN",
-            refresh=True
+            limit=100, offset=0, status="OPEN", refresh=True
         )
         current_positions = {
-            (pos.get('id') or pos.get('position_id') or pos.get('address', '')): pos
-            for pos in result.get("data", []) if result
+            (pos.get("id") or pos.get("position_id") or pos.get("address", "")): pos
+            for pos in result.get("data", [])
+            if result
         }
     except Exception as e:
         logger.error(f"Error fetching positions for check: {e}")
@@ -923,16 +972,22 @@ async def _check_positions(context, chat_id: int, state: dict, client, instance_
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"Position *{escape_markdown_v2(pos_data.get('pair', 'Unknown'))}* was closed externally\\.",
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
             del tracked[pos_id]
             continue
 
         # Calculate current value
-        current_value = _calculate_position_value_usd(current_pos, token_cache, token_prices)
+        current_value = _calculate_position_value_usd(
+            current_pos, token_cache, token_prices
+        )
         pos_data["current_value_usd"] = current_value
-        pos_data["high_value_usd"] = max(pos_data.get("high_value_usd", current_value), current_value)
-        pos_data["low_value_usd"] = min(pos_data.get("low_value_usd", current_value), current_value)
+        pos_data["high_value_usd"] = max(
+            pos_data.get("high_value_usd", current_value), current_value
+        )
+        pos_data["low_value_usd"] = min(
+            pos_data.get("low_value_usd", current_value), current_value
+        )
 
         entry_value = pos_data.get("entry_value_usd", 0)
         if entry_value <= 0:
@@ -945,15 +1000,27 @@ async def _check_positions(context, chat_id: int, state: dict, client, instance_
         # Check TP
         if tp_pct > 0 and change_pct >= tp_pct:
             pos_data["triggered"] = "TP"
-            await _send_trigger_alert(context, chat_id, pos_data, "TP", instance_id, user_data, current_pos)
+            await _send_trigger_alert(
+                context, chat_id, pos_data, "TP", instance_id, user_data, current_pos
+            )
 
         # Check SL
         elif sl_pct > 0 and change_pct <= -sl_pct:
             pos_data["triggered"] = "SL"
-            await _send_trigger_alert(context, chat_id, pos_data, "SL", instance_id, user_data, current_pos)
+            await _send_trigger_alert(
+                context, chat_id, pos_data, "SL", instance_id, user_data, current_pos
+            )
 
 
-async def _send_trigger_alert(context, chat_id: int, pos_data: dict, trigger_type: str, instance_id: str, user_data: dict, current_pos: dict):
+async def _send_trigger_alert(
+    context,
+    chat_id: int,
+    pos_data: dict,
+    trigger_type: str,
+    instance_id: str,
+    user_data: dict,
+    current_pos: dict,
+):
     """Send TP/SL trigger alert with action buttons."""
     pair = pos_data.get("pair", "Unknown")
     entry = pos_data.get("entry_value_usd", 0)
@@ -979,12 +1046,23 @@ async def _send_trigger_alert(context, chat_id: int, pos_data: dict, trigger_typ
 
     change_str = f"+{change_pct:.1f}%" if change_pct >= 0 else f"{change_pct:.1f}%"
 
-    keyboard = [[
-        InlineKeyboardButton("✅ Close Position", callback_data=f"dex:pos_close:{cache_key}"),
-        InlineKeyboardButton("🔄 Continue", callback_data=f"routines:lp_tpsl:continue:{instance_id}:{pos_id[:8]}"),
-    ], [
-        InlineKeyboardButton("❌ Remove from Monitor", callback_data=f"routines:lp_tpsl:remove:{instance_id}:{pos_id[:8]}"),
-    ]]
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ Close Position", callback_data=f"dex:pos_close:{cache_key}"
+            ),
+            InlineKeyboardButton(
+                "🔄 Continue",
+                callback_data=f"routines:lp_tpsl:continue:{instance_id}:{pos_id[:8]}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ Remove from Monitor",
+                callback_data=f"routines:lp_tpsl:remove:{instance_id}:{pos_id[:8]}",
+            ),
+        ],
+    ]
 
     await context.bot.send_message(
         chat_id=chat_id,
@@ -997,5 +1075,5 @@ async def _send_trigger_alert(context, chat_id: int, pos_data: dict, trigger_typ
             f"{emoji} Target {target_str} reached\\!"
         ),
         parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )

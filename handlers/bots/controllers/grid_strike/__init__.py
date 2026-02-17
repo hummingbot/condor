@@ -13,29 +13,29 @@ import io
 from typing import Any, Dict, List, Optional, Tuple
 
 from .._base import BaseController, ControllerField
+from .chart import generate_chart, generate_preview_chart
 from .config import (
     DEFAULTS,
-    FIELDS,
-    FIELD_ORDER,
-    WIZARD_STEPS,
     EDITABLE_FIELDS,
-    SIDE_LONG,
-    SIDE_SHORT,
-    ORDER_TYPE_MARKET,
+    FIELD_ORDER,
+    FIELDS,
+    ORDER_TYPE_LABELS,
     ORDER_TYPE_LIMIT,
     ORDER_TYPE_LIMIT_MAKER,
-    ORDER_TYPE_LABELS,
-    validate_config,
+    ORDER_TYPE_MARKET,
+    SIDE_LONG,
+    SIDE_SHORT,
+    WIZARD_STEPS,
     calculate_auto_prices,
     generate_id,
+    validate_config,
 )
-from .chart import generate_chart, generate_preview_chart
 from .grid_analysis import (
     calculate_natr,
     calculate_price_stats,
-    suggest_grid_params,
-    generate_theoretical_grid,
     format_grid_summary,
+    generate_theoretical_grid,
+    suggest_grid_params,
 )
 
 
@@ -75,16 +75,14 @@ class GridStrikeController(BaseController):
         cls,
         config: Dict[str, Any],
         candles_data: List[Dict[str, Any]],
-        current_price: Optional[float] = None
+        current_price: Optional[float] = None,
     ) -> io.BytesIO:
         """Generate visualization chart."""
         return generate_chart(config, candles_data, current_price)
 
     @classmethod
     def generate_id(
-        cls,
-        config: Dict[str, Any],
-        existing_configs: List[Dict[str, Any]]
+        cls, config: Dict[str, Any], existing_configs: List[Dict[str, Any]]
     ) -> str:
         """Generate unique ID with sequence number."""
         return generate_id(config, existing_configs)

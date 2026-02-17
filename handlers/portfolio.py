@@ -5,24 +5,25 @@ Portfolio command handler using hummingbot_api_client
 import logging
 import time
 from datetime import timezone
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackQueryHandler
 
-from utils.auth import restricted, hummingbot_api_required
-from utils.telegram_formatters import (
-    format_portfolio_overview,
-    format_connector_detail,
-    format_error_message,
-    escape_markdown_v2
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackQueryHandler, ContextTypes
+
 from handlers.config import clear_config_state
 from handlers.config.user_preferences import (
-    get_portfolio_prefs,
-    set_portfolio_days,
     PORTFOLIO_DAYS_OPTIONS,
     get_all_enabled_networks,
+    get_portfolio_prefs,
+    set_portfolio_days,
 )
+from utils.auth import hummingbot_api_required, restricted
 from utils.portfolio_graphs import generate_portfolio_dashboard
+from utils.telegram_formatters import (
+    escape_markdown_v2,
+    format_connector_detail,
+    format_error_message,
+    format_portfolio_overview,
+)
 from utils.trading_data import get_portfolio_overview
 
 logger = logging.getLogger(__name__)
@@ -49,12 +50,12 @@ def _get_optimal_interval(days: int, max_points: int = 100) -> str:
 
     # Available intervals in hours
     intervals = [
-        (0.25, "15m"),   # 15 minutes
-        (1, "1h"),       # 1 hour
-        (3, "3h"),       # 3 hours
-        (6, "6h"),       # 6 hours
-        (12, "12h"),     # 12 hours
-        (24, "1d"),      # 1 day
+        (0.25, "15m"),  # 15 minutes
+        (1, "1h"),  # 1 hour
+        (3, "3h"),  # 3 hours
+        (6, "6h"),  # 6 hours
+        (12, "12h"),  # 12 hours
+        (24, "1d"),  # 1 day
     ]
 
     for interval_hours, interval_str in intervals:
@@ -77,8 +78,16 @@ def _is_gateway_network(connector_name: str) -> bool:
 
     # Known Gateway network patterns
     gateway_patterns = [
-        'solana', 'ethereum', 'base', 'arbitrum', 'polygon',
-        'optimism', 'avalanche', 'mainnet', 'devnet', 'testnet'
+        "solana",
+        "ethereum",
+        "base",
+        "arbitrum",
+        "polygon",
+        "optimism",
+        "avalanche",
+        "mainnet",
+        "devnet",
+        "testnet",
     ]
 
     # Check if connector matches any Gateway pattern
@@ -170,7 +179,9 @@ def _parse_snapshot_tokens(state: dict) -> dict:
     return tokens
 
 
-def _detect_deposit_withdrawals(parsed_points: list, threshold_pct: float = 10.0) -> list:
+def _detect_deposit_withdrawals(
+    parsed_points: list, threshold_pct: float = 10.0
+) -> list:
     """
     Detect deposits/withdrawals by analyzing changes in token units between snapshots.
 
@@ -237,13 +248,15 @@ def _detect_deposit_withdrawals(parsed_points: list, threshold_pct: float = 10.0
 
                 # Only track movements worth more than $10
                 if value_estimate > 10:
-                    movements.append({
-                        "timestamp": curr["timestamp"],
-                        "token": token,
-                        "type": "deposit" if units_change > 0 else "withdrawal",
-                        "units_change": units_change,
-                        "value_estimate": value_estimate
-                    })
+                    movements.append(
+                        {
+                            "timestamp": curr["timestamp"],
+                            "token": token,
+                            "type": "deposit" if units_change > 0 else "withdrawal",
+                            "units_change": units_change,
+                            "value_estimate": value_estimate,
+                        }
+                    )
 
     return movements
 
@@ -279,18 +292,14 @@ def _calculate_pnl_indicators(history_data: dict, current_value: float) -> dict:
         state = point.get("state", {})
 
         try:
-            ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             continue
 
         tokens = _parse_snapshot_tokens(state)
         total_value = sum(t["value"] for t in tokens.values())
 
-        parsed_points.append({
-            "timestamp": ts,
-            "value": total_value,
-            "tokens": tokens
-        })
+        parsed_points.append({"timestamp": ts, "value": total_value, "tokens": tokens})
 
     if not parsed_points:
         return result
@@ -313,7 +322,11 @@ def _calculate_pnl_indicators(history_data: dict, current_value: float) -> dict:
             cumulative -= m["value_estimate"]
         movement_adjustments[m["timestamp"]] = cumulative
 
-    now = datetime.now(parsed_points[-1]["timestamp"].tzinfo) if parsed_points[-1]["timestamp"].tzinfo else datetime.utcnow()
+    now = (
+        datetime.now(parsed_points[-1]["timestamp"].tzinfo)
+        if parsed_points[-1]["timestamp"].tzinfo
+        else datetime.utcnow()
+    )
 
     # Calculate total adjustment (all movements up to now)
     total_adjustment = cumulative
@@ -327,7 +340,7 @@ def _calculate_pnl_indicators(history_data: dict, current_value: float) -> dict:
 
     for key, target_time in targets.items():
         closest_point = None
-        min_diff = float('inf')
+        min_diff = float("inf")
 
         for point in parsed_points:
             diff = abs((point["timestamp"] - target_time).total_seconds())
@@ -350,7 +363,9 @@ def _calculate_pnl_indicators(history_data: dict, current_value: float) -> dict:
 
             # Calculate PNL percentage
             if closest_point["value"] > 0:
-                pnl_pct = ((adjusted_current - closest_point["value"]) / closest_point["value"]) * 100
+                pnl_pct = (
+                    (adjusted_current - closest_point["value"]) / closest_point["value"]
+                ) * 100
                 result[key] = pnl_pct
 
     return result
@@ -402,7 +417,8 @@ def _calculate_24h_changes(history_data: dict, current_balances: dict) -> dict:
                     value = float(h.get("value", 0))
                     if token:
                         current_detailed[account_name][connector_name][token] = {
-                            "units": units, "value": value
+                            "units": units,
+                            "value": value,
                         }
                         connector_value += value
                         # Aggregate tokens
@@ -417,12 +433,12 @@ def _calculate_24h_changes(history_data: dict, current_balances: dict) -> dict:
     target_time = now - timedelta(days=1)
 
     closest_point = None
-    min_diff = float('inf')
+    min_diff = float("inf")
 
     for point in data_points:
         timestamp_str = point.get("timestamp", "")
         try:
-            ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             continue
 
@@ -539,7 +555,9 @@ async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
 
     # Calculate optimal interval for the graph based on days
     graph_interval = _get_optimal_interval(days)
-    logger.info(f"Fetching portfolio data: days={days}, optimal_interval={graph_interval}, start_time={start_time}, refresh={refresh}")
+    logger.info(
+        f"Fetching portfolio data: days={days}, optimal_interval={graph_interval}, start_time={start_time}, refresh={refresh}"
+    )
 
     # Fetch all data in parallel
     overview_task = get_portfolio_overview(
@@ -549,20 +567,16 @@ async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
         include_perp_positions=True,
         include_lp_positions=True,
         include_active_orders=True,
-        refresh=refresh
+        refresh=refresh,
     )
 
     history_task = client.portfolio.get_history(
-        start_time=start_time,
-        limit=100,
-        interval=graph_interval
+        start_time=start_time, limit=100, interval=graph_interval
     )
 
     # Fetch 30-day history for PNL calculations (use 1d interval for efficiency)
     pnl_history_task = client.portfolio.get_history(
-        start_time=pnl_start_time,
-        limit=100,
-        interval="1d"
+        start_time=pnl_start_time, limit=100, interval="1d"
     )
 
     token_dist_task = client.portfolio.get_distribution()
@@ -574,21 +588,25 @@ async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
         token_dist_task,
         accounts_dist_task,
         pnl_history_task,
-        return_exceptions=True
+        return_exceptions=True,
     )
 
     # Handle any exceptions
     overview_data = results[0] if not isinstance(results[0], Exception) else None
     history = results[1] if not isinstance(results[1], Exception) else None
     token_distribution = results[2] if not isinstance(results[2], Exception) else None
-    accounts_distribution = results[3] if not isinstance(results[3], Exception) else None
+    accounts_distribution = (
+        results[3] if not isinstance(results[3], Exception) else None
+    )
     pnl_history = results[4] if not isinstance(results[4], Exception) else None
 
     # Log what the API returned for history
     if history and not isinstance(history, Exception):
         pagination = history.get("pagination", {})
         data_count = len(history.get("data", []))
-        logger.info(f"History API response: {data_count} data points, pagination={pagination}")
+        logger.info(
+            f"History API response: {data_count} data points, pagination={pagination}"
+        )
 
     if isinstance(results[0], Exception):
         logger.error(f"Error fetching overview: {results[0]}")
@@ -601,7 +619,14 @@ async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
     if isinstance(results[4], Exception):
         logger.error(f"Error fetching PNL history: {results[4]}")
 
-    return overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval
+    return (
+        overview_data,
+        history,
+        token_distribution,
+        accounts_distribution,
+        pnl_history,
+        graph_interval,
+    )
 
 
 def _get_connector_keys(balances: dict) -> list:
@@ -621,12 +646,15 @@ def _get_connector_keys(balances: dict) -> list:
     for account_name, account_data in balances.items():
         for connector_name, connector_balances in account_data.items():
             if connector_balances:
-                total = sum(b.get("value", 0) for b in connector_balances if b.get("value", 0) > 0)
+                total = sum(
+                    b.get("value", 0)
+                    for b in connector_balances
+                    if b.get("value", 0) > 0
+                )
                 if total > 0:
-                    connector_values.append({
-                        "key": f"{account_name}:{connector_name}",
-                        "value": total
-                    })
+                    connector_values.append(
+                        {"key": f"{account_name}:{connector_name}", "value": total}
+                    )
 
     # Sort by value descending
     connector_values.sort(key=lambda x: x["value"], reverse=True)
@@ -654,7 +682,9 @@ def build_portfolio_keyboard(connector_keys: list, days: int) -> InlineKeyboardM
             display_name = conn_key.split(":")[-1]
 
             connector_row.append(
-                InlineKeyboardButton(display_name, callback_data=f"portfolio:connector:{conn_key}")
+                InlineKeyboardButton(
+                    display_name, callback_data=f"portfolio:connector:{conn_key}"
+                )
             )
             # Use max 2 per row to fit longer names like "solana-mainnet-beta"
             if len(connector_row) == 2:
@@ -664,19 +694,29 @@ def build_portfolio_keyboard(connector_keys: list, days: int) -> InlineKeyboardM
             keyboard.append(connector_row)
 
     # Bottom row: Refresh + Settings
-    keyboard.append([
-        InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
-        InlineKeyboardButton(f"⚙️ Settings ({days}d)", callback_data="portfolio:settings")
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
+            InlineKeyboardButton(
+                f"⚙️ Settings ({days}d)", callback_data="portfolio:settings"
+            ),
+        ]
+    )
 
     return InlineKeyboardMarkup(keyboard)
 
 
 def build_connector_detail_keyboard() -> InlineKeyboardMarkup:
     """Build keyboard for connector detail view with Back button."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("⬅️ Back to Overview", callback_data="portfolio:back_overview")
-    ]])
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "⬅️ Back to Overview", callback_data="portfolio:back_overview"
+                )
+            ]
+        ]
+    )
 
 
 @restricted
@@ -696,7 +736,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     clear_config_state(context)
 
     # Get the appropriate message object for replies
-    message = update.message or (update.callback_query.message if update.callback_query else None)
+    message = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
     chat_id = update.effective_chat.id
     if not message:
         logger.error("No message object available for portfolio_command")
@@ -704,27 +746,41 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     try:
         from config_manager import get_config_manager
-        from utils.trading_data import get_lp_positions, get_perpetual_positions, get_active_orders, get_tokens_for_networks
+        from utils.trading_data import (
+            get_active_orders,
+            get_lp_positions,
+            get_perpetual_positions,
+            get_tokens_for_networks,
+        )
 
         # Get first enabled server
         servers = get_config_manager().list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        enabled_servers = [
+            name for name, cfg in servers.items() if cfg.get("enabled", True)
+        ]
 
         if not enabled_servers:
-            error_message = format_error_message("No enabled API servers. Edit servers.yml to enable a server.")
+            error_message = format_error_message(
+                "No enabled API servers. Edit servers.yml to enable a server."
+            )
             await message.reply_text(error_message, parse_mode="MarkdownV2")
             return
 
         # Use user's preferred server
         from handlers.config.user_preferences import get_active_server
+
         preferred = get_active_server(context.user_data)
-        server_name = preferred if preferred and preferred in enabled_servers else enabled_servers[0]
+        server_name = (
+            preferred
+            if preferred and preferred in enabled_servers
+            else enabled_servers[0]
+        )
 
         # Send initial loading message immediately
         text_msg = await message.reply_text(
             f"💼 *Portfolio Details* \\| _Server: {escape_markdown_v2(server_name)} ⏳_\n\n"
             f"_Loading\\.\\.\\._",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         client = await get_config_manager().get_client(server_name)
@@ -751,10 +807,20 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         perp_task = asyncio.create_task(get_perpetual_positions(client))
         lp_task = asyncio.create_task(get_lp_positions(client))
         orders_task = asyncio.create_task(get_active_orders(client))
-        history_task = asyncio.create_task(client.portfolio.get_history(start_time=start_time, limit=100, interval=graph_interval))
-        pnl_history_task = asyncio.create_task(client.portfolio.get_history(start_time=pnl_start_time, limit=100, interval="1d"))
+        history_task = asyncio.create_task(
+            client.portfolio.get_history(
+                start_time=start_time, limit=100, interval=graph_interval
+            )
+        )
+        pnl_history_task = asyncio.create_task(
+            client.portfolio.get_history(
+                start_time=pnl_start_time, limit=100, interval="1d"
+            )
+        )
         token_dist_task = asyncio.create_task(client.portfolio.get_distribution())
-        accounts_dist_task = asyncio.create_task(client.portfolio.get_accounts_distribution())
+        accounts_dist_task = asyncio.create_task(
+            client.portfolio.get_accounts_distribution()
+        )
 
         # Initialize data holders
         balances = None
@@ -784,10 +850,10 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                                     current_value += value
 
             overview_data = {
-                'balances': balances,
-                'perp_positions': perp_positions,
-                'lp_positions': lp_positions,
-                'active_orders': active_orders,
+                "balances": balances,
+                "perp_positions": perp_positions,
+                "lp_positions": lp_positions,
+                "active_orders": active_orders,
             }
             formatted_message = format_portfolio_overview(
                 overview_data,
@@ -796,7 +862,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 pnl_indicators=pnl_indicators,
                 changes_24h=changes_24h,
                 token_cache=token_cache,
-                accounts_distribution=accounts_distribution
+                accounts_distribution=accounts_distribution,
             )
             if loading_text:
                 formatted_message += f"\n_{escape_markdown_v2(loading_text)}_"
@@ -813,7 +879,9 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             # Filter balances by enabled networks from wallet preferences
             enabled_networks = get_all_enabled_networks(context.user_data)
             if enabled_networks:
-                logger.info(f"Filtering portfolio by enabled networks: {enabled_networks}")
+                logger.info(
+                    f"Filtering portfolio by enabled networks: {enabled_networks}"
+                )
                 balances = _filter_balances_by_networks(balances, enabled_networks)
             await update_ui("Loading positions & 24h data...")
         except Exception as e:
@@ -825,8 +893,11 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Gather remaining fast tasks
         try:
             results = await asyncio.gather(
-                perp_task, lp_task, orders_task, pnl_history_task,
-                return_exceptions=True
+                perp_task,
+                lp_task,
+                orders_task,
+                pnl_history_task,
+                return_exceptions=True,
             )
 
             if not isinstance(results[0], Exception):
@@ -834,10 +905,12 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             if not isinstance(results[1], Exception):
                 lp_positions = results[1]
                 # Populate token_cache from LP positions networks
-                lp_networks = list(set(
-                    pos.get('network', 'solana-mainnet-beta')
-                    for pos in lp_positions.get('positions', [])
-                ))
+                lp_networks = list(
+                    set(
+                        pos.get("network", "solana-mainnet-beta")
+                        for pos in lp_positions.get("positions", [])
+                    )
+                )
                 if lp_networks:
                     try:
                         token_cache = await get_tokens_for_networks(client, lp_networks)
@@ -865,12 +938,26 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         try:
             graph_results = await asyncio.gather(
-                history_task, token_dist_task, accounts_dist_task,
-                return_exceptions=True
+                history_task,
+                token_dist_task,
+                accounts_dist_task,
+                return_exceptions=True,
             )
-            history = graph_results[0] if not isinstance(graph_results[0], Exception) else None
-            token_distribution = graph_results[1] if not isinstance(graph_results[1], Exception) else None
-            accounts_distribution = graph_results[2] if not isinstance(graph_results[2], Exception) else None
+            history = (
+                graph_results[0]
+                if not isinstance(graph_results[0], Exception)
+                else None
+            )
+            token_distribution = (
+                graph_results[1]
+                if not isinstance(graph_results[1], Exception)
+                else None
+            )
+            accounts_distribution = (
+                graph_results[2]
+                if not isinstance(graph_results[2], Exception)
+                else None
+            )
         except Exception as e:
             logger.error(f"Error fetching graph data: {e}")
 
@@ -884,7 +971,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         dashboard_bytes = generate_portfolio_dashboard(
             history_data=history,
             token_distribution_data=token_distribution,
-            accounts_distribution_data=accounts_distribution
+            accounts_distribution_data=accounts_distribution,
         )
 
         # Build keyboard with connector buttons
@@ -895,7 +982,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         photo_msg = await message.reply_photo(
             photo=dashboard_bytes,
             caption=f"📊 Portfolio Dashboard - {server_name}",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
         )
 
         # Store message IDs and data for later updates (including data for connector detail view)
@@ -923,8 +1010,11 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # PORTFOLIO SETTINGS CALLBACK HANDLERS
 # ============================================
 
+
 @restricted
-async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def portfolio_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle inline button callbacks for portfolio operations"""
     query = update.callback_query
     await query.answer()
@@ -946,7 +1036,11 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             set_portfolio_days(context.user_data, days)
             # Calculate the new optimal interval for display
             new_interval = _get_optimal_interval(days)
-            await show_portfolio_settings(update, context, message=f"Days set to {days} (interval: {new_interval})")
+            await show_portfolio_settings(
+                update,
+                context,
+                message=f"Days set to {days} (interval: {new_interval})",
+            )
         elif action == "close":
             # Close settings menu and refresh dashboard with new settings
             try:
@@ -973,7 +1067,9 @@ async def portfolio_callback_handler(update: Update, context: ContextTypes.DEFAU
             logger.error(f"Failed to send error message: {e2}")
 
 
-async def handle_portfolio_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_portfolio_refresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle refresh button - force refresh balances from exchanges"""
     query = update.callback_query
     await query.answer("Refreshing from exchanges...")
@@ -985,7 +1081,9 @@ async def handle_portfolio_refresh(update: Update, context: ContextTypes.DEFAULT
     await refresh_portfolio_dashboard(update, context, refresh=True)
 
 
-async def handle_connector_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_key: str) -> None:
+async def handle_connector_detail(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector_key: str
+) -> None:
     """
     Handle connector inspection - show tokens for specific connector.
 
@@ -1016,7 +1114,7 @@ async def handle_connector_detail(update: Update, context: ContextTypes.DEFAULT_
             balances=balances,
             connector_key=connector_key,
             changes_24h=changes_24h,
-            total_value=total_value
+            total_value=total_value,
         )
 
         # Update text message with connector detail (no keyboard on text)
@@ -1024,7 +1122,7 @@ async def handle_connector_detail(update: Update, context: ContextTypes.DEFAULT_
             chat_id=chat_id,
             message_id=text_message_id,
             text=detail_message,
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         # Update photo message keyboard to show "Back to Overview" button
@@ -1033,7 +1131,7 @@ async def handle_connector_detail(update: Update, context: ContextTypes.DEFAULT_
                 await bot.edit_message_reply_markup(
                     chat_id=chat_id,
                     message_id=photo_message_id,
-                    reply_markup=build_connector_detail_keyboard()
+                    reply_markup=build_connector_detail_keyboard(),
                 )
             except Exception as e:
                 logger.warning(f"Failed to update photo keyboard: {e}")
@@ -1045,7 +1143,9 @@ async def handle_connector_detail(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Error showing connector detail: {e}", exc_info=True)
 
 
-async def handle_back_to_overview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_back_to_overview(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle 'Back' button - return to main portfolio overview."""
     query = update.callback_query
     await query.answer()
@@ -1073,10 +1173,10 @@ async def handle_back_to_overview(update: Update, context: ContextTypes.DEFAULT_
 
         # Build overview data
         overview_data = {
-            'balances': balances,
-            'perp_positions': {"positions": [], "total": 0},
-            'lp_positions': {"positions": [], "total": 0},
-            'active_orders': {"orders": [], "total": 0},
+            "balances": balances,
+            "perp_positions": {"positions": [], "total": 0},
+            "lp_positions": {"positions": [], "total": 0},
+            "active_orders": {"orders": [], "total": 0},
         }
 
         # Format overview message
@@ -1086,7 +1186,7 @@ async def handle_back_to_overview(update: Update, context: ContextTypes.DEFAULT_
             server_status=server_status,
             pnl_indicators=pnl_indicators,
             changes_24h=changes_24h,
-            accounts_distribution=accounts_distribution
+            accounts_distribution=accounts_distribution,
         )
 
         # Update text message with overview (no keyboard on text)
@@ -1094,7 +1194,7 @@ async def handle_back_to_overview(update: Update, context: ContextTypes.DEFAULT_
             chat_id=chat_id,
             message_id=text_message_id,
             text=overview_message,
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         # Update photo message keyboard to show connector buttons
@@ -1103,7 +1203,7 @@ async def handle_back_to_overview(update: Update, context: ContextTypes.DEFAULT_
                 await bot.edit_message_reply_markup(
                     chat_id=chat_id,
                     message_id=photo_message_id,
-                    reply_markup=build_portfolio_keyboard(connector_keys, days)
+                    reply_markup=build_portfolio_keyboard(connector_keys, days),
                 )
             except Exception as e:
                 logger.warning(f"Failed to update photo keyboard: {e}")
@@ -1115,7 +1215,9 @@ async def handle_back_to_overview(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Error returning to overview: {e}", exc_info=True)
 
 
-async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = True) -> None:
+async def refresh_portfolio_dashboard(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, refresh: bool = True
+) -> None:
     """Refresh both the text message and photo with new settings
 
     Args:
@@ -1138,21 +1240,28 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
 
         # Use user's preferred server
         servers = get_config_manager().list_servers()
-        enabled_servers = [name for name, cfg in servers.items() if cfg.get("enabled", True)]
+        enabled_servers = [
+            name for name, cfg in servers.items() if cfg.get("enabled", True)
+        ]
 
         if not enabled_servers:
             return
 
         from handlers.config.user_preferences import get_active_server
+
         preferred = get_active_server(context.user_data)
-        server_name = preferred if preferred and preferred in enabled_servers else enabled_servers[0]
+        server_name = (
+            preferred
+            if preferred and preferred in enabled_servers
+            else enabled_servers[0]
+        )
 
         # Update caption to show "Updating..." status
         try:
             await bot.edit_message_caption(
                 chat_id=chat_id,
                 message_id=photo_message_id,
-                caption="🔄 Updating graph..."
+                caption="🔄 Updating graph...",
             )
         except Exception as e:
             logger.warning(f"Failed to update caption to 'Updating': {e}")
@@ -1167,20 +1276,29 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
 
         # Fetch all data (interval is calculated based on days)
         # Pass refresh=True to force API to fetch fresh data from exchanges
-        overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval = await _fetch_dashboard_data(
-            client, days, refresh=refresh
-        )
+        (
+            overview_data,
+            history,
+            token_distribution,
+            accounts_distribution,
+            pnl_history,
+            graph_interval,
+        ) = await _fetch_dashboard_data(client, days, refresh=refresh)
 
         # Filter balances by enabled networks from wallet preferences
         enabled_networks = get_all_enabled_networks(context.user_data)
-        if enabled_networks and overview_data and overview_data.get('balances'):
-            logger.info(f"Filtering portfolio refresh by enabled networks: {enabled_networks}")
-            overview_data['balances'] = _filter_balances_by_networks(overview_data['balances'], enabled_networks)
+        if enabled_networks and overview_data and overview_data.get("balances"):
+            logger.info(
+                f"Filtering portfolio refresh by enabled networks: {enabled_networks}"
+            )
+            overview_data["balances"] = _filter_balances_by_networks(
+                overview_data["balances"], enabled_networks
+            )
 
         # Calculate current portfolio value for PNL
         current_value = 0.0
-        if overview_data and overview_data.get('balances'):
-            for account_data in overview_data['balances'].values():
+        if overview_data and overview_data.get("balances"):
+            for account_data in overview_data["balances"].values():
                 for connector_balances in account_data.values():
                     if connector_balances:
                         for balance in connector_balances:
@@ -1190,16 +1308,22 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
 
         # Calculate PNL indicators and 24h changes
         pnl_indicators = _calculate_pnl_indicators(pnl_history, current_value)
-        changes_24h = _calculate_24h_changes(pnl_history, overview_data.get('balances', {})) if pnl_history else None
+        changes_24h = (
+            _calculate_24h_changes(pnl_history, overview_data.get("balances", {}))
+            if pnl_history
+            else None
+        )
 
         # Fetch tokens for LP positions
         token_cache = {}
-        lp_positions = overview_data.get('lp_positions', {}) if overview_data else {}
-        if lp_positions and lp_positions.get('positions'):
-            lp_networks = list(set(
-                pos.get('network', 'solana-mainnet-beta')
-                for pos in lp_positions.get('positions', [])
-            ))
+        lp_positions = overview_data.get("lp_positions", {}) if overview_data else {}
+        if lp_positions and lp_positions.get("positions"):
+            lp_networks = list(
+                set(
+                    pos.get("network", "solana-mainnet-beta")
+                    for pos in lp_positions.get("positions", [])
+                )
+            )
             if lp_networks:
                 try:
                     token_cache = await get_tokens_for_networks(client, lp_networks)
@@ -1207,7 +1331,7 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
                     logger.debug(f"Failed to fetch tokens for LP networks: {e}")
 
         # Get balances for connector keys
-        balances = overview_data.get('balances') if overview_data else None
+        balances = overview_data.get("balances") if overview_data else None
         connector_keys = _get_connector_keys(balances)
 
         # Update text message if we have it
@@ -1219,14 +1343,14 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
                 pnl_indicators=pnl_indicators,
                 changes_24h=changes_24h,
                 token_cache=token_cache,
-                accounts_distribution=accounts_distribution
+                accounts_distribution=accounts_distribution,
             )
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=text_message_id,
                     text=formatted_message,
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
                 )
             except Exception as e:
                 logger.warning(f"Failed to update text message: {e}")
@@ -1235,7 +1359,7 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         dashboard_bytes = generate_portfolio_dashboard(
             history_data=history,
             token_distribution_data=token_distribution,
-            accounts_distribution_data=accounts_distribution
+            accounts_distribution_data=accounts_distribution,
         )
 
         # Build keyboard with connector buttons
@@ -1243,14 +1367,14 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
 
         # Update photo with new image
         from telegram import InputMediaPhoto
+
         await bot.edit_message_media(
             chat_id=chat_id,
             message_id=photo_message_id,
             media=InputMediaPhoto(
-                media=dashboard_bytes,
-                caption=f"📊 Portfolio Dashboard - {server_name}"
+                media=dashboard_bytes, caption=f"📊 Portfolio Dashboard - {server_name}"
             ),
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
         )
 
         # Store data for callbacks
@@ -1269,14 +1393,18 @@ async def refresh_portfolio_dashboard(update: Update, context: ContextTypes.DEFA
         logger.error(f"Failed to refresh portfolio dashboard: {e}", exc_info=True)
 
 
-async def show_portfolio_settings(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str = None) -> None:
+async def show_portfolio_settings(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, message: str = None
+) -> None:
     """Display portfolio settings menu"""
     query = update.callback_query
 
     config = get_portfolio_prefs(context.user_data)
     current_days = config.get("days", 3)
     # Get the auto-calculated interval from context or calculate it
-    current_interval = context.user_data.get("portfolio_graph_interval", _get_optimal_interval(current_days))
+    current_interval = context.user_data.get(
+        "portfolio_graph_interval", _get_optimal_interval(current_days)
+    )
 
     # Build settings message
     settings_text = "⚙️ *Portfolio Graph Settings*\n\n"
@@ -1290,13 +1418,13 @@ async def show_portfolio_settings(update: Update, context: ContextTypes.DEFAULT_
     days_buttons = []
     for days in PORTFOLIO_DAYS_OPTIONS:
         label = f"{'✓ ' if days == current_days else ''}{days}d"
-        days_buttons.append(InlineKeyboardButton(label, callback_data=f"portfolio:set_days:{days}"))
+        days_buttons.append(
+            InlineKeyboardButton(label, callback_data=f"portfolio:set_days:{days}")
+        )
 
     keyboard = [
         days_buttons,
-        [
-            InlineKeyboardButton("✅ Apply & Close", callback_data="portfolio:close")
-        ]
+        [InlineKeyboardButton("✅ Apply & Close", callback_data="portfolio:close")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1304,16 +1432,12 @@ async def show_portfolio_settings(update: Update, context: ContextTypes.DEFAULT_
     if query.message.text:
         # Edit existing text message
         await query.edit_message_text(
-            settings_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            settings_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
     else:
         # Message is a photo, send new text message for settings
         await query.message.reply_text(
-            settings_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            settings_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
 

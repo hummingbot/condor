@@ -10,12 +10,13 @@ Supports:
 """
 
 import logging
-from telegram import Update
-from telegram.ext import ContextTypes, CallbackQueryHandler, MessageHandler, filters
 
-from utils.auth import restricted, hummingbot_api_required
-from utils.telegram_formatters import format_error_message
+from telegram import Update
+from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
+
 from handlers import clear_all_input_states
+from utils.auth import hummingbot_api_required, restricted
+from utils.telegram_formatters import format_error_message
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,12 @@ def clear_cex_state(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _handle_switch_to_dex(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    network_id: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, network_id: str
 ) -> None:
     """Switch from CEX to DEX trading"""
     from handlers.config.user_preferences import (
-        set_last_trade_connector,
         get_dex_swap_defaults,
+        set_last_trade_connector,
     )
     from handlers.dex.swap import handle_swap as dex_handle_swap
 
@@ -76,7 +75,9 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     clear_all_input_states(context)
 
     # Get the appropriate message object for replies
-    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    msg = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
     if not msg:
         logger.error("No message object available for trade_command")
         return
@@ -89,33 +90,39 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 @restricted
-async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cex_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle inline button callbacks for CEX trading operations"""
     from .menu import cancel_cex_loading_task
-    from .trade import (
-        handle_trade,
-        handle_trade_refresh,
-        handle_trade_toggle_side,
-        handle_trade_toggle_type,
-        handle_trade_toggle_position,
-        handle_trade_set_connector,
-        handle_trade_connector_select,
-        handle_trade_set_pair,
-        handle_trade_set_amount,
-        handle_trade_set_price,
-        handle_trade_set_leverage,
-        handle_trade_toggle_pos_mode,
-        handle_trade_get_quote,
-        handle_trade_execute,
-        handle_trade_pair_select,
-        handle_close,
+    from .orders import (
+        handle_cancel_order,
+        handle_confirm_cancel_order,
+        handle_search_orders,
     )
-    from .orders import handle_search_orders, handle_cancel_order, handle_confirm_cancel_order
     from .positions import (
-        handle_positions,
-        handle_trade_position,
         handle_close_position,
         handle_confirm_close_position,
+        handle_positions,
+        handle_trade_position,
+    )
+    from .trade import (
+        handle_close,
+        handle_trade,
+        handle_trade_connector_select,
+        handle_trade_execute,
+        handle_trade_get_quote,
+        handle_trade_pair_select,
+        handle_trade_refresh,
+        handle_trade_set_amount,
+        handle_trade_set_connector,
+        handle_trade_set_leverage,
+        handle_trade_set_pair,
+        handle_trade_set_price,
+        handle_trade_toggle_pos_mode,
+        handle_trade_toggle_position,
+        handle_trade_toggle_side,
+        handle_trade_toggle_type,
     )
 
     query = update.callback_query
@@ -219,19 +226,23 @@ async def cex_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 @restricted
-async def cex_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cex_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle user text input for CEX trading operations"""
     from .trade import (
         process_trade,
-        process_trade_set_pair,
         process_trade_set_amount,
-        process_trade_set_price,
         process_trade_set_leverage,
+        process_trade_set_pair,
+        process_trade_set_price,
     )
 
     cex_state = context.user_data.get("cex_state")
 
-    logger.info(f"CEX message handler called. State: {cex_state}, Message: {update.message.text if update.message else 'No message'}")
+    logger.info(
+        f"CEX message handler called. State: {cex_state}, Message: {update.message.text if update.message else 'No message'}"
+    )
 
     if not cex_state:
         logger.info("No cex_state found, returning")
@@ -267,10 +278,7 @@ async def cex_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 def get_cex_callback_handler():
     """Get the callback query handler for CEX trading"""
-    return CallbackQueryHandler(
-        cex_callback_handler,
-        pattern="^cex:"
-    )
+    return CallbackQueryHandler(cex_callback_handler, pattern="^cex:")
 
 
 def get_cex_message_handler():
@@ -279,7 +287,4 @@ def get_cex_message_handler():
     Returns a tuple of (handler, group) where group=0 is higher priority.
     The handler only processes messages when cex_state is set.
     """
-    return MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        cex_message_handler
-    )
+    return MessageHandler(filters.TEXT & ~filters.COMMAND, cex_message_handler)

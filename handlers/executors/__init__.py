@@ -21,6 +21,7 @@ from telegram.ext import ContextTypes
 
 from handlers import clear_all_input_states
 from utils.auth import restricted
+
 from ._shared import clear_executors_state
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 # COMMAND HANDLER
 # ============================================
+
 
 @restricted
 async def executors_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -41,6 +43,7 @@ async def executors_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     clear_all_input_states(context)
 
     from .menu import show_executors_menu
+
     await show_executors_menu(update, context)
 
 
@@ -48,8 +51,11 @@ async def executors_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # CALLBACK ROUTER
 # ============================================
 
+
 @restricted
-async def executors_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def executors_callback_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle all executors: callback queries
 
     Routing:
@@ -81,29 +87,31 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
     action = parts[1]
 
     # Import handlers lazily to avoid circular imports
+    from .grid import handle_connector_select as grid_handle_connector_select
+    from .grid import handle_deploy as grid_handle_deploy
+    from .grid import (
+        handle_interval_select,
+    )
+    from .grid import handle_pair_input as grid_handle_pair_input
+    from .grid import (
+        show_step_2_combined,
+        start_grid_wizard,
+    )
     from .menu import (
+        handle_close,
+        handle_confirm_stop_executor,
+        handle_stop_executor,
+        show_create_menu,
+        show_executor_detail,
         show_executors_menu,
         show_running_executors,
-        show_executor_detail,
-        handle_stop_executor,
-        handle_confirm_stop_executor,
-        show_create_menu,
-        handle_close,
     )
-    from .grid import (
-        start_grid_wizard,
-        handle_connector_select as grid_handle_connector_select,
-        handle_pair_input as grid_handle_pair_input,
-        show_step_2_combined,
-        handle_interval_select,
-        handle_deploy as grid_handle_deploy,
-    )
+    from .position import handle_connector_select as pos_handle_connector_select
+    from .position import handle_deploy as pos_handle_deploy
+    from .position import handle_pair_input as pos_handle_pair_input
     from .position import (
-        start_position_wizard,
-        handle_connector_select as pos_handle_connector_select,
-        handle_pair_input as pos_handle_pair_input,
         show_step_2_config,
-        handle_deploy as pos_handle_deploy,
+        start_position_wizard,
     )
 
     # Menu actions
@@ -194,7 +202,10 @@ async def executors_callback_handler(update: Update, context: ContextTypes.DEFAU
 # MESSAGE HANDLER
 # ============================================
 
-async def executors_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+
+async def executors_message_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
     """Handle text input for executors wizard
 
     Returns:
@@ -213,10 +224,8 @@ async def executors_message_handler(update: Update, context: ContextTypes.DEFAUL
     wizard_type = context.user_data.get("executor_wizard_type", "grid")
 
     if wizard_type == "position":
-        from .position import (
-            handle_pair_input as pos_pair_input,
-            handle_config_input as pos_config_input,
-        )
+        from .position import handle_config_input as pos_config_input
+        from .position import handle_pair_input as pos_pair_input
 
         if state == "wizard_pair_input":
             await pos_pair_input(update, context, text)
@@ -225,10 +234,8 @@ async def executors_message_handler(update: Update, context: ContextTypes.DEFAUL
             await pos_config_input(update, context, text)
             return True
     else:
-        from .grid import (
-            handle_pair_input as grid_pair_input,
-            handle_config_input as grid_config_input,
-        )
+        from .grid import handle_config_input as grid_config_input
+        from .grid import handle_pair_input as grid_pair_input
 
         if state == "wizard_pair_input":
             await grid_pair_input(update, context, text)

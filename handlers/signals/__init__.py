@@ -16,12 +16,12 @@ import logging
 import time
 from datetime import time as dt_time
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes, CallbackContext
+from signals.base import discover_signals, get_latest_model_path, get_signal
+from signals.db import get_signals_db
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackContext, ContextTypes
 
 from handlers import clear_all_input_states
-from signals.base import discover_signals, get_signal, get_latest_model_path
-from signals.db import get_signals_db
 from utils.auth import restricted
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -75,7 +75,11 @@ def _get_draft(
     if key not in drafts:
         signal = get_signal(signal_name)
         if signal:
-            pipe = signal.train_pipeline if pipeline == "train" else signal.predict_pipeline
+            pipe = (
+                signal.train_pipeline
+                if pipeline == "train"
+                else signal.predict_pipeline
+            )
             if pipe:
                 drafts[key] = pipe.get_default_config().model_dump()
             else:
@@ -236,7 +240,7 @@ async def _execute_pipeline(
     # Prepare context
     context._chat_id = chat_id
     context._instance_id = instance_id
-    context._user_data = context.user_data if hasattr(context, 'user_data') else {}
+    context._user_data = context.user_data if hasattr(context, "user_data") else {}
 
     start = time.time()
     try:
@@ -260,6 +264,7 @@ async def _run_pipeline_background(
     chat_id: int,
 ) -> None:
     """Run a pipeline as a background task."""
+
     # Create a mock context
     class MockContext:
         def __init__(self):
@@ -283,7 +288,9 @@ async def _run_pipeline_background(
             instances[instance_id]["last_result"] = result
             instances[instance_id]["last_duration"] = duration
             instances[instance_id]["last_run_at"] = time.time()
-            instances[instance_id]["run_count"] = instances[instance_id].get("run_count", 0) + 1
+            instances[instance_id]["run_count"] = (
+                instances[instance_id].get("run_count", 0) + 1
+            )
 
         # Send result message
         result_preview = result[:500] if len(result) > 500 else result
@@ -331,7 +338,12 @@ def _create_background_instance(
     # Create task
     task = asyncio.create_task(
         _run_pipeline_background(
-            context.application, instance_id, signal_name, pipeline, config_dict, chat_id
+            context.application,
+            instance_id,
+            signal_name,
+            pipeline,
+            config_dict,
+            chat_id,
         )
     )
     _running_tasks[instance_id] = task
@@ -353,7 +365,9 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     pipeline = job_data["pipeline"]
     config_dict = job_data["config"]
 
-    instances = context.application.user_data.get(chat_id, {}).get("signals_instances", {})
+    instances = context.application.user_data.get(chat_id, {}).get(
+        "signals_instances", {}
+    )
     if instance_id not in instances:
         context.job.schedule_removal()
         return
@@ -468,7 +482,9 @@ async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     db = get_signals_db()
 
     # Count running instances
-    running_count = sum(1 for inst in instances.values() if inst.get("status") == "running")
+    running_count = sum(
+        1 for inst in instances.values() if inst.get("status") == "running"
+    )
 
     if not signals:
         text = (
@@ -504,7 +520,9 @@ async def _show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         footer = []
         if running_count > 0:
             footer.append(
-                InlineKeyboardButton(f"Running ({running_count})", callback_data="signals:tasks")
+                InlineKeyboardButton(
+                    f"Running ({running_count})", callback_data="signals:tasks"
+                )
             )
         footer.append(InlineKeyboardButton("🔄 Reload", callback_data="signals:reload"))
         keyboard.append(footer)
@@ -533,7 +551,9 @@ async def _show_detail(
     pred_count = db.get_count(signal_name)
     model_path = get_latest_model_path(signal_name)
     instances = _get_signal_instances(context, signal_name)
-    running = [(iid, inst) for iid, inst in instances if inst.get("status") == "running"]
+    running = [
+        (iid, inst) for iid, inst in instances if inst.get("status") == "running"
+    ]
 
     # Model info
     if model_path:
@@ -557,18 +577,35 @@ async def _show_detail(
     # Pipeline buttons
     row = []
     if signal.has_train:
-        row.append(InlineKeyboardButton("🔧 Train/Eval", callback_data=f"signals:train:{signal_name}"))
+        row.append(
+            InlineKeyboardButton(
+                "🔧 Train/Eval", callback_data=f"signals:train:{signal_name}"
+            )
+        )
     if signal.has_predict:
-        row.append(InlineKeyboardButton("📊 Predict", callback_data=f"signals:predict:{signal_name}"))
+        row.append(
+            InlineKeyboardButton(
+                "📊 Predict", callback_data=f"signals:predict:{signal_name}"
+            )
+        )
     if row:
         keyboard.append(row)
 
     # History and stop buttons
     row2 = []
     if pred_count > 0:
-        row2.append(InlineKeyboardButton("📜 History", callback_data=f"signals:history:{signal_name}"))
+        row2.append(
+            InlineKeyboardButton(
+                "📜 History", callback_data=f"signals:history:{signal_name}"
+            )
+        )
     if running:
-        row2.append(InlineKeyboardButton(f"⏹ Stop ({len(running)})", callback_data=f"signals:stopall:{signal_name}"))
+        row2.append(
+            InlineKeyboardButton(
+                f"⏹ Stop ({len(running)})",
+                callback_data=f"signals:stopall:{signal_name}",
+            )
+        )
     if row2:
         keyboard.append(row2)
 
@@ -615,23 +652,44 @@ async def _show_pipeline(
 
     if pipeline == "train":
         # Training always runs in background
-        keyboard.append([
-            InlineKeyboardButton("🚀 Start Training", callback_data=f"signals:run_train:{signal_name}")
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "🚀 Start Training",
+                    callback_data=f"signals:run_train:{signal_name}",
+                )
+            ]
+        )
     else:
         # Predict can run immediately or be scheduled
-        keyboard.append([
-            InlineKeyboardButton("▶️ Run", callback_data=f"signals:run_predict:{signal_name}"),
-            InlineKeyboardButton("🔄 Background", callback_data=f"signals:bg_predict:{signal_name}"),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("⏱️ Schedule", callback_data=f"signals:sched:{signal_name}"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "▶️ Run", callback_data=f"signals:run_predict:{signal_name}"
+                ),
+                InlineKeyboardButton(
+                    "🔄 Background", callback_data=f"signals:bg_predict:{signal_name}"
+                ),
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "⏱️ Schedule", callback_data=f"signals:sched:{signal_name}"
+                ),
+            ]
+        )
 
-    keyboard.append([
-        InlineKeyboardButton("❓ Help", callback_data=f"signals:help:{signal_name}:{pipeline}"),
-        InlineKeyboardButton("« Back", callback_data=f"signals:select:{signal_name}"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "❓ Help", callback_data=f"signals:help:{signal_name}:{pipeline}"
+            ),
+            InlineKeyboardButton(
+                "« Back", callback_data=f"signals:select:{signal_name}"
+            ),
+        ]
+    )
 
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -652,7 +710,9 @@ async def _show_schedule_menu(
     row = []
     for label, secs in SCHEDULE_PRESETS:
         row.append(
-            InlineKeyboardButton(label, callback_data=f"signals:interval:{signal_name}:{secs}")
+            InlineKeyboardButton(
+                label, callback_data=f"signals:interval:{signal_name}:{secs}"
+            )
         )
         if len(row) == 3:
             keyboard.append(row)
@@ -661,11 +721,21 @@ async def _show_schedule_menu(
         keyboard.append(row)
 
     # Daily option
-    keyboard.append([
-        InlineKeyboardButton("📅 Daily...", callback_data=f"signals:daily:{signal_name}")
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "📅 Daily...", callback_data=f"signals:daily:{signal_name}"
+            )
+        ]
+    )
 
-    keyboard.append([InlineKeyboardButton("« Cancel", callback_data=f"signals:predict:{signal_name}")])
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "« Cancel", callback_data=f"signals:predict:{signal_name}"
+            )
+        ]
+    )
 
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -681,13 +751,18 @@ async def _show_daily_menu(
     )
 
     context.user_data["signals_state"] = "daily_time"
-    context.user_data["signals_editing"] = {"signal": signal_name, "pipeline": "predict"}
+    context.user_data["signals_editing"] = {
+        "signal": signal_name,
+        "pipeline": "predict",
+    }
 
     keyboard = []
     row = []
     for time_str in DAILY_PRESETS:
         row.append(
-            InlineKeyboardButton(time_str, callback_data=f"signals:dailyat:{signal_name}:{time_str}")
+            InlineKeyboardButton(
+                time_str, callback_data=f"signals:dailyat:{signal_name}:{time_str}"
+            )
         )
         if len(row) == 3:
             keyboard.append(row)
@@ -695,7 +770,9 @@ async def _show_daily_menu(
     if row:
         keyboard.append(row)
 
-    keyboard.append([InlineKeyboardButton("« Cancel", callback_data=f"signals:sched:{signal_name}")])
+    keyboard.append(
+        [InlineKeyboardButton("« Cancel", callback_data=f"signals:sched:{signal_name}")]
+    )
 
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
@@ -724,11 +801,15 @@ async def _show_history(
         for pred in predictions:
             time_str = pred.created_at.strftime("%m/%d %H:%M")
             result_preview = pred.result[:50].replace("\n", " ")
-            lines.append(f"• `{escape_markdown_v2(time_str)}` {escape_markdown_v2(result_preview)}")
+            lines.append(
+                f"• `{escape_markdown_v2(time_str)}` {escape_markdown_v2(result_preview)}"
+            )
 
         text = "\n".join(lines)
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data=f"signals:select:{signal_name}")]]
+    keyboard = [
+        [InlineKeyboardButton("« Back", callback_data=f"signals:select:{signal_name}")]
+    ]
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -759,21 +840,27 @@ async def _show_help(
         lines.append(f"  Default: `{escape_markdown_v2(str(info['default']))}`\n")
 
     text = "\n".join(lines)
-    keyboard = [[InlineKeyboardButton("« Back", callback_data=f"signals:{pipeline}:{signal_name}")]]
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "« Back", callback_data=f"signals:{pipeline}:{signal_name}"
+            )
+        ]
+    ]
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
 async def _show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show all running tasks."""
     instances = _get_instances(context)
-    running = [(iid, inst) for iid, inst in instances.items() if inst.get("status") == "running"]
+    running = [
+        (iid, inst)
+        for iid, inst in instances.items()
+        if inst.get("status") == "running"
+    ]
 
     if not running:
-        text = (
-            "📋 *RUNNING TASKS*\n"
-            "━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "No tasks running\\."
-        )
+        text = "📋 *RUNNING TASKS*\n" "━━━━━━━━━━━━━━━━━━━━━\n\n" "No tasks running\\."
         keyboard = [[InlineKeyboardButton("« Back", callback_data="signals:menu")]]
     else:
         lines = ["📋 *RUNNING TASKS*", "━━━━━━━━━━━━━━━━━━━━━\n"]
@@ -787,14 +874,23 @@ async def _show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             run_count = inst.get("run_count", 0)
 
             lines.append(f"🟢 *{escape_markdown_v2(_display_name(name))}* `{iid}`")
-            lines.append(f"   {pipeline} \\| {escape_markdown_v2(_format_schedule(schedule))} \\| {run_count} runs")
+            lines.append(
+                f"   {pipeline} \\| {escape_markdown_v2(_format_schedule(schedule))} \\| {run_count} runs"
+            )
             lines.append("")
 
-            keyboard.append([
-                InlineKeyboardButton(f"⏹ {_display_name(name)[:12]}[{iid}]", callback_data=f"signals:stop:{iid}")
-            ])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"⏹ {_display_name(name)[:12]}[{iid}]",
+                        callback_data=f"signals:stop:{iid}",
+                    )
+                ]
+            )
 
-        keyboard.append([InlineKeyboardButton("⏹ Stop All", callback_data="signals:stopall")])
+        keyboard.append(
+            [InlineKeyboardButton("⏹ Stop All", callback_data="signals:stopall")]
+        )
         keyboard.append([InlineKeyboardButton("« Back", callback_data="signals:menu")])
         text = "\n".join(lines)
 
@@ -831,7 +927,10 @@ async def _run_train(
 
 
 async def _run_predict(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, signal_name: str, background: bool
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    signal_name: str,
+    background: bool,
 ) -> None:
     """Run prediction."""
     query = update.callback_query
@@ -845,8 +944,7 @@ async def _run_predict(
             context, chat_id, signal_name, "predict", draft
         )
         await query.message.reply_text(
-            f"🔄 *Prediction Running*\n\n"
-            f"Instance: `{instance_id}`",
+            f"🔄 *Prediction Running*\n\n" f"Instance: `{instance_id}`",
             parse_mode="MarkdownV2",
         )
     else:
@@ -867,7 +965,10 @@ async def _run_predict(
 
 
 async def _start_interval(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, signal_name: str, interval_sec: int
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    signal_name: str,
+    interval_sec: int,
 ) -> None:
     """Start interval-scheduled prediction."""
     query = update.callback_query
@@ -1155,7 +1256,9 @@ async def restore_signal_jobs(application) -> int:
             # Check if signal still exists
             signal = get_signal(signal_name)
             if not signal:
-                logger.warning(f"Signal {signal_name} no longer exists, removing instance {instance_id}")
+                logger.warning(
+                    f"Signal {signal_name} no longer exists, removing instance {instance_id}"
+                )
                 to_remove.append(instance_id)
                 continue
 
@@ -1193,7 +1296,9 @@ async def restore_signal_jobs(application) -> int:
                     chat_id=chat_id,
                 )
                 restored += 1
-                logger.info(f"Restored interval job for {signal_name}:{pipeline} [{instance_id}]")
+                logger.info(
+                    f"Restored interval job for {signal_name}:{pipeline} [{instance_id}]"
+                )
 
             elif stype == "daily":
                 time_str = schedule.get("daily_time", "09:00")
@@ -1206,7 +1311,9 @@ async def restore_signal_jobs(application) -> int:
                     chat_id=chat_id,
                 )
                 restored += 1
-                logger.info(f"Restored daily job for {signal_name}:{pipeline} [{instance_id}]")
+                logger.info(
+                    f"Restored daily job for {signal_name}:{pipeline} [{instance_id}]"
+                )
 
         # Clean up old instances
         for iid in to_remove:

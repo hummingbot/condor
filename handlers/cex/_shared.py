@@ -10,7 +10,7 @@ Contains:
 import functools
 import logging
 import time
-from typing import Optional, Dict, Any, Callable, List
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,10 @@ DEFAULT_CACHE_TTL = 60
 # CONVERSATION-LEVEL CACHE
 # ============================================
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     """Get a cached value if still valid.
 
     Args:
@@ -89,7 +92,7 @@ async def cached_call(
     fetch_func: Callable,
     ttl: int = DEFAULT_CACHE_TTL,
     *args,
-    **kwargs
+    **kwargs,
 ) -> Any:
     """Execute an async function with caching.
 
@@ -164,6 +167,7 @@ def invalidates(*groups: str):
         async def execute_order(update, context):
             ...
     """
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
@@ -172,7 +176,7 @@ def invalidates(*groups: str):
             # Find context in args (usually second arg for handlers)
             context = None
             for arg in args:
-                if hasattr(arg, 'user_data'):
+                if hasattr(arg, "user_data"):
                     context = arg
                     break
 
@@ -180,13 +184,16 @@ def invalidates(*groups: str):
                 invalidate_cache(context.user_data, *groups)
 
             return result
+
         return wrapper
+
     return decorator
 
 
 # ============================================
 # CEX CONNECTOR HELPERS
 # ============================================
+
 
 def is_cex_connector(connector_name: str) -> bool:
     """Check if a connector is a CEX (not DEX/on-chain).
@@ -199,7 +206,15 @@ def is_cex_connector(connector_name: str) -> bool:
     """
     connector_lower = connector_name.lower()
     # Filter out on-chain/DEX connectors
-    dex_prefixes = ["solana", "ethereum", "polygon", "arbitrum", "base", "optimism", "avalanche"]
+    dex_prefixes = [
+        "solana",
+        "ethereum",
+        "polygon",
+        "arbitrum",
+        "base",
+        "optimism",
+        "avalanche",
+    ]
     return not any(connector_lower.startswith(prefix) for prefix in dex_prefixes)
 
 
@@ -219,7 +234,10 @@ def get_cex_connectors(connectors: Dict[str, Any]) -> List[str]:
 # BALANCE FETCHING
 # ============================================
 
-async def fetch_cex_balances(client, account_name: str, refresh: bool = False) -> Dict[str, List[Dict[str, Any]]]:
+
+async def fetch_cex_balances(
+    client, account_name: str, refresh: bool = False
+) -> Dict[str, List[Dict[str, Any]]]:
     """Fetch balances for all CEX connectors.
 
     Args:
@@ -232,7 +250,9 @@ async def fetch_cex_balances(client, account_name: str, refresh: bool = False) -
     """
     try:
         # Get connectors with credentials configured for this account
-        configured_connectors = await client.accounts.list_account_credentials(account_name)
+        configured_connectors = await client.accounts.list_account_credentials(
+            account_name
+        )
 
         # Filter to CEX only (list_account_credentials returns List[str])
         cex_connectors = [c for c in configured_connectors if is_cex_connector(c)]
@@ -274,7 +294,7 @@ async def get_cex_balances(
     client,
     account_name: str,
     ttl: int = DEFAULT_CACHE_TTL,
-    refresh: bool = False
+    refresh: bool = False,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Get CEX balances with caching.
 
@@ -290,19 +310,14 @@ async def get_cex_balances(
     """
     cache_key = f"cex_balances_{account_name}"
     return await cached_call(
-        user_data,
-        cache_key,
-        fetch_cex_balances,
-        ttl,
-        client,
-        account_name,
-        refresh
+        user_data, cache_key, fetch_cex_balances, ttl, client, account_name, refresh
     )
 
 
 # ============================================
 # POSITIONS FETCHING
 # ============================================
+
 
 async def fetch_positions(client, connector_name: str = None) -> List[Dict[str, Any]]:
     """Fetch positions, optionally filtered by connector.
@@ -321,8 +336,7 @@ async def fetch_positions(client, connector_name: str = None) -> List[Dict[str, 
         # Filter by connector if specified
         if connector_name and positions:
             positions = [
-                p for p in positions
-                if p.get("connector_name") == connector_name
+                p for p in positions if p.get("connector_name") == connector_name
             ]
 
         return positions
@@ -333,10 +347,7 @@ async def fetch_positions(client, connector_name: str = None) -> List[Dict[str, 
 
 
 async def get_positions(
-    user_data: dict,
-    client,
-    connector_name: str = None,
-    ttl: int = DEFAULT_CACHE_TTL
+    user_data: dict, client, connector_name: str = None, ttl: int = DEFAULT_CACHE_TTL
 ) -> List[Dict[str, Any]]:
     """Get positions with caching.
 
@@ -351,18 +362,14 @@ async def get_positions(
     """
     cache_key = f"positions_{connector_name or 'all'}"
     return await cached_call(
-        user_data,
-        cache_key,
-        fetch_positions,
-        ttl,
-        client,
-        connector_name
+        user_data, cache_key, fetch_positions, ttl, client, connector_name
     )
 
 
 # ============================================
 # TRADING RULES FETCHING
 # ============================================
+
 
 async def fetch_trading_rules(client, connector_name: str) -> Dict[str, Dict[str, Any]]:
     """Fetch trading rules for a connector.
@@ -375,10 +382,14 @@ async def fetch_trading_rules(client, connector_name: str) -> Dict[str, Dict[str
         Dict of trading_pair -> rules
     """
     try:
-        result = await client.connectors.get_trading_rules(connector_name=connector_name)
+        result = await client.connectors.get_trading_rules(
+            connector_name=connector_name
+        )
         return result if result else {}
     except Exception as e:
-        logger.error(f"Error fetching trading rules for {connector_name}: {e}", exc_info=True)
+        logger.error(
+            f"Error fetching trading rules for {connector_name}: {e}", exc_info=True
+        )
         return {}
 
 
@@ -386,7 +397,7 @@ async def get_trading_rules(
     user_data: dict,
     client,
     connector_name: str,
-    ttl: int = 300  # Trading rules change less frequently, 5 min cache
+    ttl: int = 300,  # Trading rules change less frequently, 5 min cache
 ) -> Dict[str, Dict[str, Any]]:
     """Get trading rules for a connector with caching.
 
@@ -401,12 +412,7 @@ async def get_trading_rules(
     """
     cache_key = f"trading_rules_{connector_name}"
     return await cached_call(
-        user_data,
-        cache_key,
-        fetch_trading_rules,
-        ttl,
-        client,
-        connector_name
+        user_data, cache_key, fetch_trading_rules, ttl, client, connector_name
     )
 
 
@@ -414,7 +420,7 @@ def validate_order_against_rules(
     trading_rules: Dict[str, Dict[str, Any]],
     trading_pair: str,
     amount: float,
-    is_quote_amount: bool = False
+    is_quote_amount: bool = False,
 ) -> tuple[bool, Optional[str]]:
     """Validate an order amount against trading rules.
 
@@ -436,12 +442,18 @@ def validate_order_against_rules(
         # Validate against min_notional_size
         min_notional = rules.get("min_notional_size", 0)
         if amount < min_notional:
-            return False, f"Order value ${amount:.2f} is below minimum notional size ${min_notional:.2f} for {trading_pair}"
+            return (
+                False,
+                f"Order value ${amount:.2f} is below minimum notional size ${min_notional:.2f} for {trading_pair}",
+            )
     else:
         # Validate against min_order_size
         min_order = rules.get("min_order_size", 0)
         if amount < min_order:
-            return False, f"Order size {amount} is below minimum order size {min_order} for {trading_pair}"
+            return (
+                False,
+                f"Order size {amount} is below minimum order size {min_order} for {trading_pair}",
+            )
 
         # Also check min_notional if we can estimate (need price)
         # This would be done at order execution time when we have the price
@@ -452,7 +464,7 @@ def validate_order_against_rules(
 def format_trading_rules_info(
     trading_rules: Dict[str, Dict[str, Any]],
     trading_pair: str,
-    current_price: float = None
+    current_price: float = None,
 ) -> str:
     """Format trading rules for display.
 
@@ -464,12 +476,13 @@ def format_trading_rules_info(
     Returns:
         Formatted string with rule info
     """
+
     def fmt_num(n):
         """Format number, removing unnecessary trailing zeros"""
         if n == int(n):
             return str(int(n))
         # Format with enough precision, then strip trailing zeros
-        s = f"{n:.8f}".rstrip('0').rstrip('.')
+        s = f"{n:.8f}".rstrip("0").rstrip(".")
         return s
 
     def fmt_price(p):
@@ -477,9 +490,9 @@ def format_trading_rules_info(
         if p >= 1000:
             return f"${p:,.2f}"
         elif p >= 1:
-            return f"${p:.4f}".rstrip('0').rstrip('.')
+            return f"${p:.4f}".rstrip("0").rstrip(".")
         else:
-            return f"${p:.6f}".rstrip('0').rstrip('.')
+            return f"${p:.6f}".rstrip("0").rstrip(".")
 
     items = []
 
@@ -523,7 +536,10 @@ def format_trading_rules_info(
 # AVAILABLE CONNECTORS FETCHING
 # ============================================
 
-async def fetch_available_cex_connectors(client, account_name: str = "master_account") -> List[str]:
+
+async def fetch_available_cex_connectors(
+    client, account_name: str = "master_account"
+) -> List[str]:
     """Fetch list of available CEX connectors with credentials configured.
 
     Args:
@@ -535,7 +551,9 @@ async def fetch_available_cex_connectors(client, account_name: str = "master_acc
     """
     try:
         # Get connectors with credentials configured for this account
-        configured_connectors = await client.accounts.list_account_credentials(account_name)
+        configured_connectors = await client.accounts.list_account_credentials(
+            account_name
+        )
         # Filter to CEX only
         return [c for c in configured_connectors if is_cex_connector(c)]
     except Exception as e:
@@ -548,7 +566,7 @@ async def get_available_cex_connectors(
     client,
     account_name: str = "master_account",
     ttl: int = 300,  # 5 min cache
-    server_name: str = "default"
+    server_name: str = "default",
 ) -> List[str]:
     """Get available CEX connectors with caching.
 
@@ -564,18 +582,14 @@ async def get_available_cex_connectors(
     """
     cache_key = f"available_cex_connectors_{server_name}_{account_name}"
     return await cached_call(
-        user_data,
-        cache_key,
-        fetch_available_cex_connectors,
-        ttl,
-        client,
-        account_name
+        user_data, cache_key, fetch_available_cex_connectors, ttl, client, account_name
     )
 
 
 # ============================================
 # STATE HELPERS
 # ============================================
+
 
 def clear_cex_state(context) -> None:
     """Clear all CEX-related state from user context
@@ -593,6 +607,7 @@ def clear_cex_state(context) -> None:
 # ============================================
 # TRADING PAIR VALIDATION
 # ============================================
+
 
 def _calculate_similarity(s1: str, s2: str) -> float:
     """Calculate similarity ratio between two strings using Levenshtein-like approach.
@@ -643,9 +658,9 @@ def _levenshtein_ratio(s1: str, s2: str) -> float:
         for j in range(1, len2 + 1):
             cost = 0 if s1[i - 1] == s2[j - 1] else 1
             dp[i][j] = min(
-                dp[i - 1][j] + 1,       # deletion
-                dp[i][j - 1] + 1,       # insertion
-                dp[i - 1][j - 1] + cost  # substitution
+                dp[i - 1][j] + 1,  # deletion
+                dp[i][j - 1] + 1,  # insertion
+                dp[i - 1][j - 1] + cost,  # substitution
             )
 
     distance = dp[len1][len2]
@@ -657,7 +672,7 @@ def find_similar_trading_pairs(
     input_pair: str,
     available_pairs: List[str],
     limit: int = 4,
-    min_similarity: float = 0.3
+    min_similarity: float = 0.3,
 ) -> List[str]:
     """Find trading pairs similar to the input.
 
@@ -686,11 +701,7 @@ def find_similar_trading_pairs(
 
 
 async def validate_trading_pair(
-    user_data: dict,
-    client,
-    connector_name: str,
-    trading_pair: str,
-    ttl: int = 300
+    user_data: dict, client, connector_name: str, trading_pair: str, ttl: int = 300
 ) -> tuple[bool, Optional[str], List[str]]:
     """Validate that a trading pair exists on a connector.
 
@@ -715,7 +726,9 @@ async def validate_trading_pair(
 
     if not trading_rules:
         # No rules available, can't validate - allow through
-        logger.warning(f"No trading rules available for {connector_name}, skipping validation")
+        logger.warning(
+            f"No trading rules available for {connector_name}, skipping validation"
+        )
         return True, None, []
 
     # Get all available pairs
@@ -736,8 +749,7 @@ async def validate_trading_pair(
 
 
 def get_correct_pair_format(
-    trading_rules: Dict[str, Dict[str, Any]],
-    input_pair: str
+    trading_rules: Dict[str, Dict[str, Any]], input_pair: str
 ) -> Optional[str]:
     """Get the correctly formatted trading pair from trading rules.
 

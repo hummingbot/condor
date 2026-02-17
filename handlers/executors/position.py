@@ -799,9 +799,9 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             ]
 
             pair_display = config.get("trading_pair", "")
-            side_val = config.get("side", 1)
-            side_emoji = "🟢" if side_val == 1 else "🔴"
-            side_label = "LONG" if side_val == 1 else "SHORT"
+            side_val = config.get("side", SIDE_LONG)
+            side_emoji = "🟢" if side_val == SIDE_LONG else "🔴"
+            side_label = "LONG" if side_val == SIDE_LONG else "SHORT"
             leverage = config.get("leverage", 1)
 
             await context.bot.edit_message_text(

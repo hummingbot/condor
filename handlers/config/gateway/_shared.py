@@ -3,7 +3,7 @@ Shared utilities and imports for gateway modules
 """
 
 import logging
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -22,7 +22,9 @@ def extract_network_id(network_item: Any) -> str:
         Network ID as string
     """
     if isinstance(network_item, dict):
-        return network_item.get('network_id', network_item.get('name', str(network_item)))
+        return network_item.get(
+            "network_id", network_item.get("name", str(network_item))
+        )
     return str(network_item)
 
 
@@ -37,13 +39,18 @@ def filter_pool_connectors(connectors: List[Dict[str, Any]]) -> List[Dict[str, A
         List of connectors with 'amm' or 'clmm' trading types
     """
     return [
-        c for c in connectors
-        if any(trading_type in ['amm', 'clmm']
-               for trading_type in c.get('trading_types', []))
+        c
+        for c in connectors
+        if any(
+            trading_type in ["amm", "clmm"]
+            for trading_type in c.get("trading_types", [])
+        )
     ]
 
 
-def get_connector_networks(connector_name: str, connectors_data: Dict[str, Dict[str, Any]]) -> List[str]:
+def get_connector_networks(
+    connector_name: str, connectors_data: Dict[str, Dict[str, Any]]
+) -> List[str]:
     """
     Get list of networks supported by a specific connector.
 
@@ -55,4 +62,4 @@ def get_connector_networks(connector_name: str, connectors_data: Dict[str, Dict[
         List of network IDs supported by the connector
     """
     connector_info = connectors_data.get(connector_name, {})
-    return connector_info.get('networks', [])
+    return connector_info.get("networks", [])

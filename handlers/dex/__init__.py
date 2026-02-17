@@ -26,8 +26,10 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from utils.auth import restricted
 from handlers import clear_all_input_states
+from utils.auth import restricted
+
+from .liquidity import handle_liquidity
 
 # Import router components
 from .router import (
@@ -39,7 +41,6 @@ from .router import (
 
 # Import command handlers
 from .swap import handle_swap
-from .liquidity import handle_liquidity
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 # MAIN DEX COMMANDS
 # ============================================
+
 
 @restricted
 async def swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -60,7 +62,9 @@ async def swap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     clear_all_input_states(context)
 
     # Get the appropriate message object for replies
-    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    msg = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
     if not msg:
         logger.error("No message object available for swap_command")
         return
@@ -81,7 +85,9 @@ async def lp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     clear_all_input_states(context)
 
     # Get the appropriate message object for replies
-    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    msg = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
     if not msg:
         logger.error("No message object available for lp_command")
         return
@@ -96,12 +102,12 @@ async def lp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 __all__ = [
     # Commands
-    'swap_command',
-    'lp_command',
+    "swap_command",
+    "lp_command",
     # Handlers
-    'dex_callback_handler',
-    'dex_message_handler',
+    "dex_callback_handler",
+    "dex_message_handler",
     # Handler factories
-    'get_dex_callback_handler',
-    'get_dex_message_handler',
+    "get_dex_callback_handler",
+    "get_dex_message_handler",
 ]

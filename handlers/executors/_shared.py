@@ -10,7 +10,7 @@ Contains:
 
 import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ def get_executor_type(executor: Dict[str, Any]) -> str:
 # STATE MANAGEMENT
 # ============================================
 
+
 def clear_executors_state(context) -> None:
     """Clear all executors-related state from user context
 
@@ -145,7 +146,10 @@ def init_new_executor_config(context, executor_type: str = "grid") -> Dict[str, 
 # API WRAPPERS
 # ============================================
 
-async def get_executors_client(chat_id: Optional[int] = None, user_data: Optional[Dict] = None) -> Tuple[Any, str]:
+
+async def get_executors_client(
+    chat_id: Optional[int] = None, user_data: Optional[Dict] = None
+) -> Tuple[Any, str]:
     """Get the API client for executor operations
 
     Uses the same logic as bots client - gets user's preferred server.
@@ -161,13 +165,12 @@ async def get_executors_client(chat_id: Optional[int] = None, user_data: Optiona
         ValueError: If no accessible servers are available
     """
     from handlers.bots._shared import get_bots_client
+
     return await get_bots_client(chat_id, user_data)
 
 
 async def search_running_executors(
-    client,
-    status: str = "RUNNING",
-    limit: int = 50
+    client, status: str = "RUNNING", limit: int = 50
 ) -> List[Dict[str, Any]]:
     """Search for executors with a specific status
 
@@ -180,32 +183,43 @@ async def search_running_executors(
         List of executor dicts
     """
     try:
-        result = await client.executors.search_executors(
-            status=status,
-            limit=limit
+        result = await client.executors.search_executors(status=status, limit=limit)
+        logger.info(
+            f"search_executors response type={type(result).__name__}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}, len={len(result) if isinstance(result, (list, dict)) else 'N/A'}"
         )
-        logger.info(f"search_executors response type={type(result).__name__}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}, len={len(result) if isinstance(result, (list, dict)) else 'N/A'}")
         if isinstance(result, dict):
             # Try known keys in order of likelihood
             for key in ("executors", "data", "results", "items"):
                 if key in result and isinstance(result[key], list):
-                    logger.info(f"search_executors found {len(result[key])} executors under key '{key}'")
+                    logger.info(
+                        f"search_executors found {len(result[key])} executors under key '{key}'"
+                    )
                     executors = result[key]
                     for ex in executors:
                         if isinstance(ex, dict):
                             ex_t = get_executor_type(ex)
-                            numeric = {k: v for k, v in ex.items() if isinstance(v, (int, float))}
-                            logger.info(f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}")
+                            numeric = {
+                                k: v
+                                for k, v in ex.items()
+                                if isinstance(v, (int, float))
+                            }
+                            logger.info(
+                                f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}"
+                            )
                     return executors
             # If dict has no recognized list key, log and return empty
-            logger.warning(f"search_executors: no recognized list key in response: {list(result.keys())}")
+            logger.warning(
+                f"search_executors: no recognized list key in response: {list(result.keys())}"
+            )
             return []
         executors = result if isinstance(result, list) else []
         for ex in executors:
             if isinstance(ex, dict):
                 ex_t = get_executor_type(ex)
                 numeric = {k: v for k, v in ex.items() if isinstance(v, (int, float))}
-                logger.info(f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}")
+                logger.info(
+                    f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}"
+                )
         return executors
     except Exception as e:
         logger.error(f"Error searching executors: {e}", exc_info=True)
@@ -213,9 +227,7 @@ async def search_running_executors(
 
 
 async def create_executor(
-    client,
-    config: Dict[str, Any],
-    account_name: str = "master_account"
+    client, config: Dict[str, Any], account_name: str = "master_account"
 ) -> Dict[str, Any]:
     """Create a new executor
 
@@ -229,8 +241,7 @@ async def create_executor(
     """
     try:
         result = await client.executors.create_executor(
-            executor_config=config,
-            account_name=account_name
+            executor_config=config, account_name=account_name
         )
         return result
     except Exception as e:
@@ -239,9 +250,7 @@ async def create_executor(
 
 
 async def stop_executor(
-    client,
-    executor_id: str,
-    keep_position: bool = False
+    client, executor_id: str, keep_position: bool = False
 ) -> Dict[str, Any]:
     """Stop a running executor
 
@@ -255,29 +264,34 @@ async def stop_executor(
     """
     try:
         result = await client.executors.stop_executor(
-            executor_id=executor_id,
-            keep_position=keep_position
+            executor_id=executor_id, keep_position=keep_position
         )
         return result
     except Exception as e:
         logger.error(f"Error stopping executor: {e}", exc_info=True)
-        
+
         # Handle specific error cases
         error_str = str(e)
         if "404" in error_str and "not found" in error_str.lower():
-            return {"status": "error", "message": "Executor not found (may have already stopped or expired)"}
+            return {
+                "status": "error",
+                "message": "Executor not found (may have already stopped or expired)",
+            }
         elif "403" in error_str:
-            return {"status": "error", "message": "Permission denied - cannot stop this executor"}
+            return {
+                "status": "error",
+                "message": "Permission denied - cannot stop this executor",
+            }
         elif "400" in error_str:
-            return {"status": "error", "message": "Bad request - executor may be in invalid state"}
+            return {
+                "status": "error",
+                "message": "Bad request - executor may be in invalid state",
+            }
         else:
             return {"status": "error", "message": str(e)}
 
 
-async def get_executor_detail(
-    client,
-    executor_id: str
-) -> Optional[Dict[str, Any]]:
+async def get_executor_detail(client, executor_id: str) -> Optional[Dict[str, Any]]:
     """Get details for a specific executor
 
     Args:
@@ -299,13 +313,21 @@ async def get_executor_detail(
 # FORMATTERS
 # ============================================
 
+
 def get_executor_pnl(executor: Dict[str, Any]) -> float:
     """Extract PnL from an executor response.
 
     Checks multiple field names since the API response structure varies.
     """
-    pnl_keys = ("net_pnl_quote", "pnl_quote", "unrealized_pnl_quote", "realized_pnl_quote",
-                 "net_pnl", "pnl", "close_pnl")
+    pnl_keys = (
+        "net_pnl_quote",
+        "pnl_quote",
+        "unrealized_pnl_quote",
+        "realized_pnl_quote",
+        "net_pnl",
+        "pnl",
+        "close_pnl",
+    )
     for key in pnl_keys:
         val = executor.get(key)
         if val is not None and val != 0:
@@ -314,8 +336,11 @@ def get_executor_pnl(executor: Dict[str, Any]) -> float:
     # Log available keys when PnL is 0 to help debug
     ex_type = get_executor_type(executor)
     if ex_type == "position":
-        available = {k: v for k, v in executor.items()
-                     if isinstance(v, (int, float)) and k != "timestamp"}
+        available = {
+            k: v
+            for k, v in executor.items()
+            if isinstance(v, (int, float)) and k != "timestamp"
+        }
         logger.debug(f"Position executor PnL=0, numeric fields: {available}")
 
     return 0.0
@@ -435,7 +460,10 @@ def format_executor_summary(executor: Dict[str, Any]) -> str:
 # CACHE UTILITIES
 # ============================================
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     """Get a cached value if still valid."""
     cache = user_data.get("_executors_cache", {})
     entry = cache.get(key)
@@ -471,12 +499,7 @@ def invalidate_cache(user_data: dict, *keys: str) -> None:
 
 
 async def cached_call(
-    user_data: dict,
-    key: str,
-    fetch_func,
-    ttl: int = DEFAULT_CACHE_TTL,
-    *args,
-    **kwargs
+    user_data: dict, key: str, fetch_func, ttl: int = DEFAULT_CACHE_TTL, *args, **kwargs
 ) -> Any:
     """Execute an async function with caching."""
     cached = get_cached(user_data, key, ttl)
@@ -494,12 +517,14 @@ async def cached_call(
 # MARKET DATA HELPERS
 # ============================================
 
-async def fetch_current_price(client, connector_name: str, trading_pair: str) -> Optional[float]:
+
+async def fetch_current_price(
+    client, connector_name: str, trading_pair: str
+) -> Optional[float]:
     """Fetch current price for a trading pair."""
     try:
         prices = await client.market_data.get_prices(
-            connector_name=connector_name,
-            trading_pairs=trading_pair
+            connector_name=connector_name, trading_pairs=trading_pair
         )
         return prices.get("prices", {}).get(trading_pair)
     except Exception as e:
@@ -512,7 +537,7 @@ async def fetch_candles(
     connector_name: str,
     trading_pair: str,
     interval: str = "1m",
-    max_records: int = 420
+    max_records: int = 420,
 ) -> Optional[Dict[str, Any]]:
     """Fetch candles data for a trading pair."""
     try:
@@ -520,14 +545,16 @@ async def fetch_candles(
             connector_name=connector_name,
             trading_pair=trading_pair,
             interval=interval,
-            max_records=max_records
+            max_records=max_records,
         )
         # Validate that candles actually contain data
         if not candles:
             return None
         data = candles if isinstance(candles, list) else candles.get("data", [])
         if not data:
-            logger.debug(f"No candle data available for {trading_pair} on {connector_name}")
+            logger.debug(
+                f"No candle data available for {trading_pair} on {connector_name}"
+            )
             return None
         return candles
     except Exception as e:

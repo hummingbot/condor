@@ -6,6 +6,7 @@ Provides consistent server information display across all config modules.
 
 import logging
 from typing import Tuple
+
 from utils.telegram_formatters import escape_markdown_v2
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ async def get_server_context_header(user_data: dict = None) -> Tuple[str, bool]:
         default_server = None
         if user_data:
             from handlers.config.user_preferences import get_active_server
+
             default_server = get_active_server(user_data)
         if not default_server:
             default_server = get_config_manager().get_default_server()
@@ -79,7 +81,9 @@ async def get_server_context_header(user_data: dict = None) -> Tuple[str, bool]:
         return f"⚠️ _Error loading server info: {escape_markdown_v2(str(e))}_\n", False
 
 
-async def get_gateway_status_info(chat_id: int = None, user_data: dict = None) -> Tuple[str, bool]:
+async def get_gateway_status_info(
+    chat_id: int = None, user_data: dict = None
+) -> Tuple[str, bool]:
     """
     Get gateway status information for the current server.
 
@@ -96,14 +100,17 @@ async def get_gateway_status_info(chat_id: int = None, user_data: dict = None) -
         preferred = None
         if user_data:
             from handlers.config.user_preferences import get_active_server
+
             preferred = get_active_server(user_data)
-        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=preferred)
+        client = await get_config_manager().get_client_for_chat(
+            chat_id, preferred_server=preferred
+        )
 
         # Check gateway status
         try:
             status_response = await client.gateway.get_status()
             # The API returns "running": true/false, not "status": "running"
-            is_running = status_response.get('running', False)
+            is_running = status_response.get("running", False)
 
             if is_running:
                 status_icon = "🟢"
@@ -132,7 +139,7 @@ async def build_config_message_header(
     title: str,
     include_gateway: bool = False,
     chat_id: int = None,
-    user_data: dict = None
+    user_data: dict = None,
 ) -> Tuple[str, bool, bool]:
     """Build a standardized header for configuration messages."""
     title_escaped = escape_markdown_v2(title)
@@ -143,7 +150,9 @@ async def build_config_message_header(
 
     gateway_running = False
     if include_gateway and server_online:
-        gateway_info, gateway_running = await get_gateway_status_info(chat_id, user_data)
+        gateway_info, gateway_running = await get_gateway_status_info(
+            chat_id, user_data
+        )
         header += gateway_info
     elif include_gateway:
         header += f"*Gateway:* ⚪️ {escape_markdown_v2('N/A')}\n"
