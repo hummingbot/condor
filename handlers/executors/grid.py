@@ -9,32 +9,38 @@ Uses the existing chart generation from grid_strike controller.
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import escape_markdown_v2, format_error_message
 from handlers.bots._shared import (
-    get_available_cex_connectors,
-    fetch_current_price,
     fetch_candles,
+    fetch_current_price,
+    get_available_cex_connectors,
 )
+from handlers.bots.controllers.grid_strike.chart import generate_chart
 from handlers.bots.controllers.grid_strike.config import (
     SIDE_LONG,
     SIDE_SHORT,
     calculate_auto_prices,
 )
-from handlers.bots.controllers.grid_strike.chart import generate_chart
-from handlers.cex._shared import get_cex_balances, get_trading_rules, validate_trading_pair, get_correct_pair_format
+from handlers.cex._shared import (
+    get_cex_balances,
+    get_correct_pair_format,
+    get_trading_rules,
+    validate_trading_pair,
+)
+from utils.telegram_formatters import escape_markdown_v2, format_error_message
+
 from ._shared import (
-    get_executors_client,
-    set_executor_config,
-    get_executor_config,
-    init_new_executor_config,
     clear_executors_state,
     create_executor,
+    get_executor_config,
+    get_executors_client,
+    init_new_executor_config,
     invalidate_cache,
+    set_executor_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +69,7 @@ EDITABLE_PARAMS = {
 # ============================================
 # HELPERS
 # ============================================
+
 
 def _is_perpetual(connector: str) -> bool:
     """Check if connector is a perpetual/futures market."""
@@ -118,8 +125,14 @@ def _build_step_2_caption(
     if balances and "-" in pair:
         base, quote = pair.split("-", 1)
         connector_bals = balances.get(connector, [])
-        base_bal = next((b for b in connector_bals if b.get("token", "").upper() == base.upper()), None)
-        quote_bal = next((b for b in connector_bals if b.get("token", "").upper() == quote.upper()), None)
+        base_bal = next(
+            (b for b in connector_bals if b.get("token", "").upper() == base.upper()),
+            None,
+        )
+        quote_bal = next(
+            (b for b in connector_bals if b.get("token", "").upper() == quote.upper()),
+            None,
+        )
         base_units = base_bal.get("units", 0) if base_bal else 0
         quote_units = quote_bal.get("units", 0) if quote_bal else 0
         lines.append(
@@ -161,17 +174,23 @@ def _build_step_2_keyboard(interval: str = "1h") -> InlineKeyboardMarkup:
     interval_row = []
     for intv in CHART_INTERVALS:
         label = f"[{intv}]" if interval == intv else intv
-        interval_row.append(InlineKeyboardButton(label, callback_data=f"executors:grid_interval:{intv}"))
+        interval_row.append(
+            InlineKeyboardButton(label, callback_data=f"executors:grid_interval:{intv}")
+        )
     keyboard.append(interval_row)
 
     # Deploy
-    keyboard.append([InlineKeyboardButton("🚀 Deploy", callback_data="executors:grid_deploy")])
+    keyboard.append(
+        [InlineKeyboardButton("🚀 Deploy", callback_data="executors:grid_deploy")]
+    )
 
     # Navigation
-    keyboard.append([
-        InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid"),
-        InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid"),
+            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+        ]
+    )
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -179,6 +198,7 @@ def _build_step_2_keyboard(interval: str = "1h") -> InlineKeyboardMarkup:
 # ============================================
 # WIZARD ENTRY
 # ============================================
+
 
 async def start_grid_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Start the grid executor wizard."""
@@ -200,7 +220,10 @@ async def start_grid_wizard(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # STEP 1: CONNECTOR & PAIR
 # ============================================
 
-async def show_step_1_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def show_step_1_connector(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Show step 1 - connector selection."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -213,15 +236,32 @@ async def show_step_1_connector(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
         if not connectors:
-            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")]]
-            await query.message.edit_text(
+            keyboard = [
+                [InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")]
+            ]
+            no_connectors_text = (
                 "📐 *Grid Executor \\- Step 1/2*\n"
                 "─────────────────────────\n\n"
                 "_No CEX connectors configured\\._\n\n"
-                "Add API keys via /keys first\\.",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                "Add API keys via /keys first\\."
             )
+            try:
+                await query.message.edit_text(
+                    no_connectors_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception:
+                # If edit_text fails (e.g., message is a photo), delete and send new message
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await query.message.chat.send_message(
+                    no_connectors_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
             return
 
         # Build connector buttons (2 per row)
@@ -229,14 +269,20 @@ async def show_step_1_connector(update: Update, context: ContextTypes.DEFAULT_TY
         row = []
         for conn in connectors[:8]:
             display = conn[:20]
-            row.append(InlineKeyboardButton(f"🏦 {display}", callback_data=f"executors:grid_conn:{conn}"))
+            row.append(
+                InlineKeyboardButton(
+                    f"🏦 {display}", callback_data=f"executors:grid_conn:{conn}"
+                )
+            )
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
         if row:
             keyboard.append(row)
 
-        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="executors:menu")])
+        keyboard.append(
+            [InlineKeyboardButton("❌ Cancel", callback_data="executors:menu")]
+        )
 
         lines = [
             "📐 *Grid Executor \\- Step 1/2*",
@@ -245,23 +291,51 @@ async def show_step_1_connector(update: Update, context: ContextTypes.DEFAULT_TY
             "🏦 *Select Exchange*",
         ]
 
-        await query.message.edit_text(
-            "\n".join(lines),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        # Handle message editing - if it's a photo, delete and send new message
+        try:
+            await query.message.edit_text(
+                "\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            # If edit_text fails (e.g., message is a photo), delete and send new message
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.message.chat.send_message(
+                "\n".join(lines),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
 
     except Exception as e:
         logger.error(f"Error in step 1: {e}", exc_info=True)
         keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")]]
-        await query.message.edit_text(
-            format_error_message(f"Error: {str(e)[:100]}"),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        error_text = format_error_message(f"Error: {str(e)[:100]}")
+        try:
+            await query.message.edit_text(
+                error_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            # If edit_text fails (e.g., message is a photo), delete and send new message
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await query.message.chat.send_message(
+                error_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
 
 
-async def handle_connector_select(update: Update, context: ContextTypes.DEFAULT_TYPE, connector: str) -> None:
+async def handle_connector_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector: str
+) -> None:
     """Handle connector selection, show pair input."""
     query = update.callback_query
 
@@ -292,26 +366,32 @@ async def handle_connector_select(update: Update, context: ContextTypes.DEFAULT_
     if executor_pairs:
         row = []
         for pair in executor_pairs[:4]:
-            row.append(InlineKeyboardButton(pair, callback_data=f"executors:grid_pair:{pair}"))
+            row.append(
+                InlineKeyboardButton(pair, callback_data=f"executors:grid_pair:{pair}")
+            )
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
         if row:
             keyboard.append(row)
 
-    keyboard.append([
-        InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid"),
-        InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid"),
+            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+        ]
+    )
 
     await query.message.edit_text(
         "\n".join(lines),
         parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def handle_pair_input(update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str) -> None:
+async def handle_pair_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str
+) -> None:
     """Handle trading pair input (from button or text)."""
     pair = pair.upper().strip()
     if "/" in pair:
@@ -337,7 +417,9 @@ async def handle_pair_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         )
 
         if not is_valid:
-            await _show_pair_suggestions(update, context, pair, error_msg, suggestions, connector)
+            await _show_pair_suggestions(
+                update, context, pair, error_msg, suggestions, connector
+            )
             return
 
         # Get correctly formatted pair from trading rules
@@ -359,7 +441,9 @@ async def handle_pair_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     loading_text = "⏳ Loading chart\\.\\.\\."
     if update.callback_query:
         try:
-            await update.callback_query.message.edit_text(loading_text, parse_mode="MarkdownV2")
+            await update.callback_query.message.edit_text(
+                loading_text, parse_mode="MarkdownV2"
+            )
         except Exception:
             pass
     else:
@@ -367,8 +451,10 @@ async def handle_pair_input(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if msg_id:
             try:
                 await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id,
-                    text=loading_text, parse_mode="MarkdownV2"
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=loading_text,
+                    parse_mode="MarkdownV2",
                 )
             except Exception:
                 pass
@@ -399,31 +485,37 @@ async def _show_pair_suggestions(
 
     keyboard = []
     for pair in suggestions:
-        keyboard.append([InlineKeyboardButton(
-            f"📈 {pair}",
-            callback_data=f"executors:grid_pair_select:{pair}"
-        )])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"📈 {pair}", callback_data=f"executors:grid_pair_select:{pair}"
+                )
+            ]
+        )
 
-    keyboard.append([
-        InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid"),
-        InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid"),
+            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+        ]
+    )
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
         try:
             await update.callback_query.message.edit_text(
-                help_text, parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         except Exception as e:
             logger.debug(f"Could not update wizard message: {e}")
     elif msg_id:
         try:
             await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=msg_id,
-                text=help_text, parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
             )
         except Exception as e:
             logger.debug(f"Could not update wizard message: {e}")
@@ -433,7 +525,10 @@ async def _show_pair_suggestions(
 # STEP 2: COMBINED CONFIG + CHART + DEPLOY
 # ============================================
 
-async def show_step_2_combined(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def show_step_2_combined(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Show step 2 - chart + key=value config editor + deploy."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -454,7 +549,9 @@ async def show_step_2_combined(update: Update, context: ContextTypes.DEFAULT_TYP
         current_price = await fetch_current_price(client, connector, pair)
 
         if not current_price:
-            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid")]]
+            keyboard = [
+                [InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid")]
+            ]
             msg_text = (
                 f"📐 *Grid Executor \\- Step 2/2*\n"
                 f"─────────────────────────\n\n"
@@ -463,15 +560,18 @@ async def show_step_2_combined(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             if query:
                 await query.message.edit_text(
-                    msg_text, parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    msg_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             else:
                 msg_id = context.user_data.get("executor_wizard_msg_id")
                 await context.bot.edit_message_text(
-                    chat_id=chat_id, message_id=msg_id,
-                    text=msg_text, parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=msg_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             return
 
@@ -483,25 +583,33 @@ async def show_step_2_combined(update: Update, context: ContextTypes.DEFAULT_TYP
             config["limit_price"] = limit
             set_executor_config(context, config)
 
-        context.user_data.setdefault("executor_wizard_data", {})["current_price"] = current_price
+        context.user_data.setdefault("executor_wizard_data", {})[
+            "current_price"
+        ] = current_price
 
         # Fetch balances and trading rules
         balances = None
         trading_rules = None
         try:
-            balances = await get_cex_balances(context.user_data, client, "master_account")
+            balances = await get_cex_balances(
+                context.user_data, client, "master_account"
+            )
             context.user_data["executor_wizard_data"]["balances"] = balances
         except Exception as e:
             logger.warning(f"Could not fetch balances: {e}")
 
         try:
-            trading_rules = await get_trading_rules(context.user_data, client, connector)
+            trading_rules = await get_trading_rules(
+                context.user_data, client, connector
+            )
             context.user_data["executor_wizard_data"]["trading_rules"] = trading_rules
         except Exception as e:
             logger.warning(f"Could not fetch trading rules: {e}")
 
         # Fetch candles for chart
-        candles = await fetch_candles(client, connector, pair, interval=interval, max_records=420)
+        candles = await fetch_candles(
+            client, connector, pair, interval=interval, max_records=420
+        )
 
         # Generate chart
         chart_bytes = None
@@ -519,20 +627,24 @@ async def show_step_2_combined(update: Update, context: ContextTypes.DEFAULT_TYP
 
     except Exception as e:
         logger.error(f"Error in step 2: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid")]]
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid")]
+        ]
         error_text = format_error_message(f"Error: {str(e)[:100]}")
         try:
             if query:
-                if getattr(query.message, 'photo', None):
+                if getattr(query.message, "photo", None):
                     await query.message.delete()
                     await query.message.chat.send_message(
-                        error_text, parse_mode="MarkdownV2",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
+                        error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
                     )
                 else:
                     await query.message.edit_text(
-                        error_text, parse_mode="MarkdownV2",
-                        reply_markup=InlineKeyboardMarkup(keyboard)
+                        error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
                     )
             else:
                 msg_id = context.user_data.get("executor_wizard_msg_id")
@@ -541,17 +653,21 @@ async def show_step_2_combined(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception:
                     pass
                 await context.bot.send_message(
-                    chat_id=chat_id, text=error_text, parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    chat_id=chat_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
         except Exception:
             pass
 
 
 async def _send_step_2_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE,
-    caption: str, reply_markup: InlineKeyboardMarkup,
-    chart_bytes=None
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup,
+    chart_bytes=None,
 ) -> None:
     """Send or replace the step 2 message."""
     query = update.callback_query if update.callback_query else None
@@ -578,20 +694,22 @@ async def _send_step_2_message(
             photo=chart_bytes,
             caption=caption,
             parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
         )
     else:
         sent = await context.bot.send_message(
             chat_id=chat_id,
             text=caption,
             parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
         )
 
     context.user_data["executor_wizard_msg_id"] = sent.message_id
 
 
-async def _refresh_step_2(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: int) -> None:
+async def _refresh_step_2(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: int
+) -> None:
     """Refresh step 2 after config text input."""
     config = get_executor_config(context)
     connector = config.get("connector_name", "")
@@ -600,15 +718,21 @@ async def _refresh_step_2(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_
 
     try:
         client, _ = await get_executors_client(chat_id, context.user_data)
-        current_price = context.user_data.get("executor_wizard_data", {}).get("current_price")
+        current_price = context.user_data.get("executor_wizard_data", {}).get(
+            "current_price"
+        )
 
         if not current_price:
             current_price = await fetch_current_price(client, connector, pair)
             if current_price:
-                context.user_data.setdefault("executor_wizard_data", {})["current_price"] = current_price
+                context.user_data.setdefault("executor_wizard_data", {})[
+                    "current_price"
+                ] = current_price
 
         # Fetch candles for chart
-        candles = await fetch_candles(client, connector, pair, interval=interval, max_records=420)
+        candles = await fetch_candles(
+            client, connector, pair, interval=interval, max_records=420
+        )
 
         chart_bytes = None
         if candles:
@@ -633,15 +757,18 @@ async def _refresh_step_2(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_
 
         if chart_bytes:
             sent = await context.bot.send_photo(
-                chat_id=chat_id, photo=chart_bytes,
-                caption=caption, parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                chat_id=chat_id,
+                photo=chart_bytes,
+                caption=caption,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
             )
         else:
             sent = await context.bot.send_message(
-                chat_id=chat_id, text=caption,
+                chat_id=chat_id,
+                text=caption,
                 parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
 
         context.user_data["executor_wizard_msg_id"] = sent.message_id
@@ -654,7 +781,10 @@ async def _refresh_step_2(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_
 # CONFIG INPUT HANDLER
 # ============================================
 
-async def handle_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+
+async def handle_config_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
     """Handle key=value config input from user.
 
     Accepts all editable params. For side, accepts:
@@ -702,11 +832,15 @@ async def handle_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         pass
 
     if errors:
-        await context.bot.send_message(chat_id=chat_id, text=f"Errors: {', '.join(errors)}")
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"Errors: {', '.join(errors)}"
+        )
         return
 
     if not updates:
-        await context.bot.send_message(chat_id=chat_id, text="No valid updates. Send key=value")
+        await context.bot.send_message(
+            chat_id=chat_id, text="No valid updates. Send key=value"
+        )
         return
 
     # Check if side changed for auto price recalculation
@@ -717,7 +851,9 @@ async def handle_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     new_side = config.get("side", SIDE_LONG)
     if "side" in updates and new_side != old_side:
-        current_price = context.user_data.get("executor_wizard_data", {}).get("current_price")
+        current_price = context.user_data.get("executor_wizard_data", {}).get(
+            "current_price"
+        )
         if current_price:
             start, end, limit = calculate_auto_prices(current_price, new_side)
             config["start_price"] = start
@@ -733,7 +869,10 @@ async def handle_config_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 # INTERVAL
 # ============================================
 
-async def handle_interval_select(update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str) -> None:
+
+async def handle_interval_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str
+) -> None:
     """Handle chart interval selection."""
     context.user_data["executor_chart_interval"] = interval
     await show_step_2_combined(update, context)
@@ -742,6 +881,7 @@ async def handle_interval_select(update: Update, context: ContextTypes.DEFAULT_T
 # ============================================
 # DEPLOY
 # ============================================
+
 
 async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle deploy button - create the executor."""
@@ -752,7 +892,9 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Validate required fields before deploying
     if not config.get("connector_name") or not config.get("trading_pair"):
-        keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid")]]
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Back", callback_data="executors:create_grid")]
+        ]
         try:
             await query.message.delete()
         except Exception:
@@ -761,11 +903,13 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             chat_id=chat_id,
             text="*❌ Missing Config*\n\nConnector or trading pair not set\\. Please start over\\.",
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
 
-    logger.info(f"Deploying executor: connector={config.get('connector_name')}, pair={config.get('trading_pair')}, side={config.get('side')}")
+    logger.info(
+        f"Deploying executor: connector={config.get('connector_name')}, pair={config.get('trading_pair')}, side={config.get('side')}"
+    )
 
     # Build executor config for API
     executor_config = {
@@ -798,7 +942,7 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     loading_msg = await context.bot.send_message(
         chat_id=chat_id,
         text="🚀 _Deploying executor\\.\\.\\._",
-        parse_mode="MarkdownV2"
+        parse_mode="MarkdownV2",
     )
 
     try:
@@ -810,10 +954,10 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.user_data.pop("running_executors", None)
 
         is_success = (
-            result.get("status") == "success" or
-            "created" in str(result).lower() or
-            result.get("executor_id") is not None or
-            result.get("id") is not None
+            result.get("status") == "success"
+            or "created" in str(result).lower()
+            or result.get("executor_id") is not None
+            or result.get("id") is not None
         )
 
         if is_success:
@@ -828,27 +972,31 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 deployed.insert(0, deployed_pair)
                 context.user_data["executor_deployed_pairs"] = deployed[:8]
 
-            keyboard = [[
-                InlineKeyboardButton("📋 View Executors", callback_data="executors:list"),
-                InlineKeyboardButton("❌ Close", callback_data="executors:close"),
-            ]]
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "📋 View Executors", callback_data="executors:list"
+                    ),
+                    InlineKeyboardButton("❌ Close", callback_data="executors:close"),
+                ]
+            ]
 
             pair_display = config.get("trading_pair", "")
-            side_val = config.get("side", 1)
-            side_emoji = "🟢" if side_val == 1 else "🔴"
-            side_label = "LONG" if side_val == 1 else "SHORT"
+            side_val = config.get("side", SIDE_LONG)
+            side_emoji = "🟢" if side_val == SIDE_LONG else "🔴"
+            side_label = "LONG" if side_val == SIDE_LONG else "SHORT"
             leverage = config.get("leverage", 1)
 
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=loading_msg.message_id,
                 text=f"✅ *Executor Deployed*\n"
-                     f"─────────────────────────\n\n"
-                     f"{side_emoji} *{escape_markdown_v2(pair_display)}* \\| {escape_markdown_v2(side_label)} {leverage}x\n"
-                     f"🆔 `{escape_markdown_v2(str(executor_id)[:30])}`\n\n"
-                     f"_The executor is now running\\._",
+                f"─────────────────────────\n\n"
+                f"{side_emoji} *{escape_markdown_v2(pair_display)}* \\| {escape_markdown_v2(side_label)} {leverage}x\n"
+                f"🆔 `{escape_markdown_v2(str(executor_id)[:30])}`\n\n"
+                f"_The executor is now running\\._",
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
             clear_executors_state(context)
@@ -856,28 +1004,36 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else:
             error_msg = result.get("message", result.get("error", str(result)))
 
-            keyboard = [[
-                InlineKeyboardButton("🔄 Try Again", callback_data="executors:grid_step2"),
-                InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-            ]]
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🔄 Try Again", callback_data="executors:grid_step2"
+                    ),
+                    InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+                ]
+            ]
 
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=loading_msg.message_id,
                 text=f"❌ *Deploy Failed*\n"
-                     f"─────────────────────────\n\n"
-                     f"{escape_markdown_v2(str(error_msg)[:300])}",
+                f"─────────────────────────\n\n"
+                f"{escape_markdown_v2(str(error_msg)[:300])}",
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
     except Exception as e:
         logger.error(f"Error deploying executor: {e}", exc_info=True)
 
-        keyboard = [[
-            InlineKeyboardButton("🔄 Try Again", callback_data="executors:grid_step2"),
-            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-        ]]
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🔄 Try Again", callback_data="executors:grid_step2"
+                ),
+                InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+            ]
+        ]
 
         try:
             await context.bot.edit_message_text(
@@ -885,7 +1041,7 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 message_id=loading_msg.message_id,
                 text=f"*❌ Error*\n\n{escape_markdown_v2(str(e)[:300])}",
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         except Exception:
             pass
