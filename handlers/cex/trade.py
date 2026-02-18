@@ -1677,17 +1677,21 @@ async def process_trade_set_pair(
         client = await get_client(chat_id, context=context)
 
         # Validate trading pair exists on the connector
-        is_valid, error_msg, suggestions = await validate_trading_pair(
+        is_valid, error_msg, suggestions, correct_pair = await validate_trading_pair(
             context.user_data, client, connector, pair_input
         )
 
         if is_valid:
-            # Get correctly formatted pair from trading rules
-            trading_rules = await get_trading_rules(
-                context.user_data, client, connector
-            )
-            correct_pair = get_correct_pair_format(trading_rules, pair_input)
-            params["trading_pair"] = correct_pair if correct_pair else pair_input
+            # Use the correct pair format returned by validation
+            if correct_pair:
+                params["trading_pair"] = correct_pair
+            else:
+                # Fallback: Get correctly formatted pair from trading rules
+                trading_rules = await get_trading_rules(
+                    context.user_data, client, connector
+                )
+                fallback_pair = get_correct_pair_format(trading_rules, pair_input)
+                params["trading_pair"] = fallback_pair if fallback_pair else pair_input
 
             _invalidate_trade_cache(context.user_data)
             context.user_data["cex_state"] = "trade"

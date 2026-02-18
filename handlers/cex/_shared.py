@@ -691,7 +691,43 @@ def find_similar_trading_pairs(
     scored_pairs = []
     for pair in available_pairs:
         pair_normalized = pair.upper().replace("_", "-")
+
+        # Standard similarity check
         score = _calculate_similarity(input_normalized, pair_normalized)
+
+        # Enhanced matching for HIP3 markets (issuer:symbol-quote format)
+        if (
+            ":" in pair and score < 0.8
+        ):  # Only boost if standard score isn't already high
+            try:
+                # Split issuer:symbol-quote format
+                issuer_symbol, quote = pair.rsplit("-", 1)
+                if ":" in issuer_symbol:
+                    issuer, symbol = issuer_symbol.split(":", 1)
+
+                    # Check similarity with just the symbol part
+                    symbol_score = _calculate_similarity(
+                        input_normalized, symbol.upper()
+                    )
+
+                    # Also check similarity with issuer:symbol part (colon replaced with dash)
+                    issuer_symbol_normalized = issuer_symbol.upper().replace(":", "-")
+                    issuer_symbol_score = _calculate_similarity(
+                        input_normalized, issuer_symbol_normalized
+                    )
+
+                    # Use the best score, with a bonus for exact symbol matches
+                    if symbol.upper() == input_normalized:
+                        score = 0.95  # High score for exact symbol match
+                    elif issuer_symbol_normalized == input_normalized:
+                        score = 0.90  # High score for exact issuer:symbol match
+                    else:
+                        score = max(
+                            score, symbol_score * 0.8, issuer_symbol_score * 0.7
+                        )
+            except (ValueError, IndexError):
+                pass  # Keep original score if parsing fails
+
         if score >= min_similarity:
             scored_pairs.append((pair, score))
 
@@ -702,7 +738,7 @@ def find_similar_trading_pairs(
 
 async def validate_trading_pair(
     user_data: dict, client, connector_name: str, trading_pair: str, ttl: int = 300
-) -> tuple[bool, Optional[str], List[str]]:
+) -> tuple[bool, Optional[str], List[str], Optional[str]]:
     """Validate that a trading pair exists on a connector.
 
     Args:
@@ -713,10 +749,11 @@ async def validate_trading_pair(
         ttl: Cache TTL for trading rules
 
     Returns:
-        Tuple of (is_valid, error_message, suggestions)
+        Tuple of (is_valid, error_message, suggestions, correct_pair)
         - is_valid: True if the pair exists
         - error_message: Error message if invalid, None if valid
         - suggestions: List of similar trading pairs if invalid, empty if valid
+        - correct_pair: Correctly formatted pair if found, None if not found
     """
     # Normalize input
     pair_normalized = trading_pair.upper().replace("_", "-").replace("/", "-")
@@ -729,7 +766,7 @@ async def validate_trading_pair(
         logger.warning(
             f"No trading rules available for {connector_name}, skipping validation"
         )
-        return True, None, []
+        return True, None, [], None
 
     # Get all available pairs
     available_pairs = list(trading_rules.keys())
@@ -738,14 +775,56 @@ async def validate_trading_pair(
     available_normalized = {p.upper().replace("_", "-"): p for p in available_pairs}
     if pair_normalized in available_normalized:
         # Return the correctly formatted pair from the exchange
-        return True, None, []
+        correct_pair = available_normalized[pair_normalized]
+        return True, None, [], correct_pair
+
+    # Special handling for Hyperliquid HIP3 markets (issuer:symbol format)
+    if "hyperliquid" in connector_name.lower():
+        logger.info(f"Hyperliquid HIP3 handling for input '{pair_normalized}', available pairs count: {len(available_pairs)}")
+        # Log a few sample pairs to debug
+        sample_pairs = available_pairs[:5] if available_pairs else []
+        logger.info(f"Sample pairs: {sample_pairs}")
+        
+        # For input like "XYZ", look for pairs like "ISSUER:XYZ-USDC" or "ISSUER:XYZ-USD"
+        hip3_matches = []
+        for pair in available_pairs:
+            if ":" in pair:
+                # Split issuer:symbol-quote format
+                try:
+                    issuer_symbol, quote = pair.rsplit(
+                        "-", 1
+                    )  # Split from right to handle complex symbols
+                    if ":" in issuer_symbol:
+                        issuer, symbol = issuer_symbol.split(":", 1)
+                        logger.debug(f"Checking pair '{pair}': issuer='{issuer}', symbol='{symbol}', quote='{quote}' vs input='{pair_normalized}'")
+                        # Check if the input matches the symbol part
+                        if symbol.upper() == pair_normalized.upper():
+                            logger.info(f"Found HIP3 symbol match: '{pair}' matches input '{pair_normalized}'")
+                            hip3_matches.append(pair)
+                        # Also check if input matches the full issuer:symbol part
+                        elif (
+                            issuer_symbol.upper().replace(":", "-")
+                            == pair_normalized.upper()
+                        ):
+                            logger.info(f"Found HIP3 issuer:symbol match: '{pair}' matches input '{pair_normalized}'")
+                            hip3_matches.append(pair)
+                except ValueError as e:
+                    logger.debug(f"Failed to parse HIP3 pair '{pair}': {e}")
+                    continue
+
+        if hip3_matches:
+            # Found HIP3 matches - return success with the first match as correct format
+            logger.info(f"Returning HIP3 match: '{hip3_matches[0]}' for input '{pair_normalized}'")
+            return True, None, [], hip3_matches[0]
+        else:
+            logger.warning(f"No HIP3 matches found for input '{pair_normalized}' on {connector_name}")
 
     # Pair not found - find suggestions
     suggestions = find_similar_trading_pairs(pair_normalized, available_pairs, limit=4)
 
     error_msg = f"Trading pair '{trading_pair}' not found on {connector_name}"
 
-    return False, error_msg, suggestions
+    return False, error_msg, suggestions, None
 
 
 def get_correct_pair_format(
@@ -765,8 +844,29 @@ def get_correct_pair_format(
 
     pair_normalized = input_pair.upper().replace("_", "-").replace("/", "-")
 
+    # Standard exact match
     for pair in trading_rules.keys():
         if pair.upper().replace("_", "-") == pair_normalized:
             return pair
+
+    # Enhanced matching for HIP3 markets (issuer:symbol-quote format)
+    for pair in trading_rules.keys():
+        if ":" in pair:
+            try:
+                # Split issuer:symbol-quote format
+                issuer_symbol, quote = pair.rsplit("-", 1)
+                if ":" in issuer_symbol:
+                    issuer, symbol = issuer_symbol.split(":", 1)
+
+                    # Check if the input matches the symbol part
+                    if symbol.upper() == pair_normalized:
+                        return pair
+
+                    # Check if input matches the issuer:symbol part (colon replaced with dash)
+                    issuer_symbol_normalized = issuer_symbol.upper().replace(":", "-")
+                    if issuer_symbol_normalized == pair_normalized:
+                        return pair
+            except (ValueError, IndexError):
+                continue
 
     return None
