@@ -21,6 +21,16 @@ DEFAULT_CACHE_TTL = 60
 SIDE_LONG = 1
 SIDE_SHORT = 2
 
+
+def normalize_side(side_val) -> int:
+    """Normalize side value to numeric constant.
+
+    The API may return side as a string ("BUY"/"SELL") or numeric (1/2).
+    """
+    if isinstance(side_val, str):
+        return SIDE_SHORT if side_val.upper() in ("SELL", "SHORT", "S") else SIDE_LONG
+    return side_val
+
 # Grid executor defaults
 GRID_EXECUTOR_DEFAULTS = {
     "type": "grid_executor",
@@ -33,12 +43,12 @@ GRID_EXECUTOR_DEFAULTS = {
     "end_price": 0.0,
     "limit_price": 0.0,
     "min_spread_between_orders": 0.0001,
-    "min_order_amount_quote": 6,
+    "min_order_amount_quote": 10,
     "max_open_orders": 5,
     "max_orders_per_batch": 2,
     "order_frequency": 1,
     "take_profit": 0.0002,
-    "activation_bounds": 0.001,
+    "activation_bounds": 0.05,
 }
 
 # Position executor defaults
@@ -48,13 +58,19 @@ POSITION_EXECUTOR_DEFAULTS = {
     "trading_pair": "",
     "side": SIDE_LONG,
     "leverage": 10,
+    "total_amount_quote": 0.0,
     "amount": 0.0,
-    "entry_price": 0.0,
-    "stop_loss": 0.03,
-    "take_profit": 0.02,
-    "time_limit": 0,
-    "trailing_stop_activation": 0.0,
-    "trailing_stop_delta": 0.0,
+    "entry_price": 0.0,           # 0 = market order
+    "stop_loss": 0.03,            # -1 = disabled
+    "take_profit": 0.02,          # -1 = disabled
+    "time_limit": -1,             # -1 = disabled, positive int = seconds
+    "trailing_stop_activation_price": -1,  # -1 = disabled
+    "trailing_stop_trailing_delta": -1,    # -1 = disabled
+    "open_order_type": 2,         # LIMIT=2
+    "take_profit_order_type": 1,  # MARKET=1
+    "stop_loss_order_type": 1,    # MARKET=1
+    "time_limit_order_type": 1,   # MARKET=1
+    "activation_bounds": -1,      # -1 = disabled, float = value
 }
 
 
@@ -377,7 +393,7 @@ def format_executor_status_line(executor: Dict[str, Any]) -> str:
     """
     config = executor.get("config", executor)
     pair = config.get("trading_pair", "UNKNOWN")
-    side = config.get("side", SIDE_LONG)
+    side = normalize_side(config.get("side", SIDE_LONG))
     leverage = config.get("leverage", 1)
 
     side_str = "L" if side == SIDE_LONG else "S"
@@ -421,7 +437,7 @@ def format_executor_summary(executor: Dict[str, Any]) -> str:
 
     pair = config.get("trading_pair", "UNKNOWN")
     connector = config.get("connector_name", "unknown")
-    side = config.get("side", SIDE_LONG)
+    side = normalize_side(config.get("side", SIDE_LONG))
     leverage = config.get("leverage", 1)
     amount = config.get("total_amount_quote", 0)
 

@@ -1,13 +1,13 @@
 """
-Executors menu - Main menu and executor list display
+Executors menu - Main menu and executor detail display
 
 Provides:
 - Main executors menu with running executors summary
-- Paginated list of running executors
 - Executor detail view with config and performance
 """
 
 import logging
+import time
 from typing import Any, Dict, List
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -27,14 +27,12 @@ from ._shared import (
     get_executor_volume,
     get_executors_client,
     invalidate_cache,
+    normalize_side,
     search_running_executors,
     stop_executor,
 )
 
 logger = logging.getLogger(__name__)
-
-# Pagination
-EXECUTORS_PER_PAGE = 8
 
 
 # ============================================
@@ -64,8 +62,22 @@ async def show_executors_menu(
     try:
         client, server_name = await get_executors_client(chat_id, context.user_data)
 
-        # Fetch running executors
-        executors = await search_running_executors(client, status="RUNNING", limit=50)
+        # Check if we're returning from detail view - preserve cached data if recent
+        coming_from_detail = query and query.data and "detail:" in str(query.data)
+        cached_executors = (
+            context.user_data.get("running_executors") if coming_from_detail else None
+        )
+
+        if cached_executors and coming_from_detail:
+            executors = cached_executors
+            logger.debug(
+                f"Using cached executors for menu return (count: {len(executors)})"
+            )
+        else:
+            # Fetch running executors
+            executors = await search_running_executors(
+                client, status="RUNNING", limit=50
+            )
 
         # Calculate totals
         total_pnl = 0.0
@@ -77,6 +89,7 @@ async def show_executors_menu(
         # Store for later use
         context.user_data["running_executors"] = executors
         context.user_data["current_server_name"] = server_name
+        context.user_data["executor_menu_last_refresh"] = time.time()
 
         # Build message
         lines = [
@@ -98,7 +111,7 @@ async def show_executors_menu(
                 ex_type = get_executor_type(ex)
                 config = ex.get("config", ex)
                 pair = config.get("trading_pair", "???")
-                side_val = config.get("side", SIDE_LONG)
+                side_val = normalize_side(config.get("side", SIDE_LONG))
                 leverage = config.get("leverage", 1)
                 side_display = f"{'L' if side_val == SIDE_LONG else 'S'} {leverage}x"
                 type_col = {"grid": "Grid", "position": "Pos"}.get(ex_type, "Ord")
@@ -161,7 +174,7 @@ async def show_executors_menu(
                 executor_id = ex.get("id", ex.get("executor_id", ""))
                 config = ex.get("config", ex)
                 pair = config.get("trading_pair", "???")[:10]
-                side_val = config.get("side", SIDE_LONG)
+                side_val = normalize_side(config.get("side", SIDE_LONG))
                 side_label = "L" if side_val == SIDE_LONG else "S"
                 type_icon = "📐" if ex_type == "grid" else "🎯"
 
@@ -178,16 +191,6 @@ async def show_executors_menu(
 
             if row:
                 keyboard.append(row)
-
-            if len(executors) > max_shown:
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            f"📋 View All ({len(executors)})",
-                            callback_data="executors:list",
-                        ),
-                    ]
-                )
 
         keyboard.append(
             [
@@ -260,157 +263,6 @@ async def show_executors_menu(
 
 
 # ============================================
-# RUNNING EXECUTORS LIST
-# ============================================
-
-
-async def show_running_executors(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Display paginated list of running executors
-
-    Args:
-        update: Telegram update
-        context: Telegram context
-    """
-    query = update.callback_query
-    chat_id = update.effective_chat.id
-
-    # Get page from context or default to 0
-    page = context.user_data.get("executor_list_page", 0)
-
-    try:
-        # Fetch fresh data
-        client, server_name = await get_executors_client(chat_id, context.user_data)
-        executors = await search_running_executors(client, status="RUNNING", limit=100)
-
-        context.user_data["running_executors"] = executors
-
-        if not executors:
-            keyboard = [
-                [InlineKeyboardButton("⬅️ Back", callback_data="executors:menu")]
-            ]
-            await query.message.edit_text(
-                "📋 *Running Executors*\n\n_No executors running\\._",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-            return
-
-        # Calculate pagination
-        total_pages = (len(executors) + EXECUTORS_PER_PAGE - 1) // EXECUTORS_PER_PAGE
-        page = min(page, total_pages - 1)
-        page = max(page, 0)
-        context.user_data["executor_list_page"] = page
-
-        start_idx = page * EXECUTORS_PER_PAGE
-        end_idx = min(start_idx + EXECUTORS_PER_PAGE, len(executors))
-        page_executors = executors[start_idx:end_idx]
-
-        # Store executor list for index-based selection
-        context.user_data["page_executor_ids"] = [
-            ex.get("id", ex.get("executor_id", "")) for ex in page_executors
-        ]
-
-        # Build message
-        lines = [
-            f"📋 *Running Executors* \\({len(executors)}\\)",
-            f"_Page {page + 1}/{total_pages}_",
-            "",
-        ]
-
-        for ex in page_executors:
-            executor_id = ex.get("id", ex.get("executor_id", "unknown"))
-            config = ex.get("config", ex)
-            pair = config.get("trading_pair", "???")
-            side_val = config.get("side", SIDE_LONG)
-            leverage = config.get("leverage", 1)
-            side_emoji = "🟢" if side_val == SIDE_LONG else "🔴"
-            side_str = "L" if side_val == SIDE_LONG else "S"
-
-            pnl = get_executor_pnl(ex)
-            volume = get_executor_volume(ex)
-            pnl_sign = "\\+" if pnl >= 0 else ""
-
-            short_id = executor_id[:8] if len(executor_id) > 8 else executor_id
-
-            line = f"{side_emoji} *{escape_markdown_v2(pair)}* {escape_markdown_v2(side_str)} {leverage}x"
-            line += f" \\| `{pnl_sign}{escape_markdown_v2(f'{pnl:.2f}')}`"
-            if volume:
-                vol_str = f"{volume/1000:.1f}k" if volume >= 1000 else f"{volume:.0f}"
-                line += f" \\| V: `{escape_markdown_v2(vol_str)}`"
-            lines.append(line)
-
-        # Build keyboard with executor buttons
-        keyboard = []
-
-        # Executor selection buttons (2 per row)
-        row = []
-        for ex in page_executors:
-            executor_id = ex.get("id", ex.get("executor_id", ""))
-            config = ex.get("config", ex)
-            pair = config.get("trading_pair", "???")[:10]
-            side_val = config.get("side", SIDE_LONG)
-            side_label = "L" if side_val == SIDE_LONG else "S"
-
-            row.append(
-                InlineKeyboardButton(
-                    f"{'🟢' if side_val == SIDE_LONG else '🔴'} {pair} {side_label}",
-                    callback_data=f"executors:detail:{executor_id[:20]}",
-                )
-            )
-
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-
-        if row:
-            keyboard.append(row)
-
-        # Pagination buttons
-        nav_row = []
-        if page > 0:
-            nav_row.append(
-                InlineKeyboardButton("◀️ Prev", callback_data="executors:list_prev")
-            )
-        if page < total_pages - 1:
-            nav_row.append(
-                InlineKeyboardButton("Next ▶️", callback_data="executors:list_next")
-            )
-        if nav_row:
-            keyboard.append(nav_row)
-
-        keyboard.append(
-            [
-                InlineKeyboardButton("🔄 Refresh", callback_data="executors:list"),
-                InlineKeyboardButton("⬅️ Back", callback_data="executors:menu"),
-            ]
-        )
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        message_text = "\n".join(lines)
-
-        try:
-            await query.message.edit_text(
-                message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-            )
-        except BadRequest as e:
-            if "Message is not modified" in str(e):
-                await query.answer("✅ Already up to date")
-            else:
-                raise
-
-    except Exception as e:
-        logger.error(f"Error showing executors list: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("Back", callback_data="executors:menu")]]
-        await query.message.edit_text(
-            format_error_message(f"Error: {str(e)[:100]}"),
-            parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-
-# ============================================
 # EXECUTOR DETAIL VIEW
 # ============================================
 
@@ -455,7 +307,7 @@ async def show_executor_detail(
 
         if not executor:
             await query.answer("Executor not found", show_alert=True)
-            await show_running_executors(update, context)
+            await show_executors_menu(update, context)
             return
 
         # Store current executor
@@ -468,7 +320,7 @@ async def show_executor_detail(
         ex_type = get_executor_type(executor)
         pair = config.get("trading_pair", "UNKNOWN")
         connector = config.get("connector_name", "unknown")
-        side = config.get("side", SIDE_LONG)
+        side = normalize_side(config.get("side", SIDE_LONG))
         leverage = config.get("leverage", 1)
 
         side_str = "LONG" if side == SIDE_LONG else "SHORT"
@@ -477,6 +329,14 @@ async def show_executor_detail(
         volume = get_executor_volume(executor)
         fees = get_executor_fees(executor)
         status = executor.get("status", "unknown")
+
+        # Additional performance fields from API
+        net_pnl_pct = executor.get("net_pnl_pct", 0) or 0
+        realized_pnl = executor.get("realized_pnl_quote", 0) or 0
+        unrealized_pnl = executor.get("unrealized_pnl_quote", 0) or 0
+        break_even = executor.get("break_even_price", 0) or 0
+        position_size = executor.get("filled_amount_quote", 0) or 0
+        created_at = executor.get("timestamp", 0) or 0
 
         # Build message
         side_emoji = "🟢" if side == SIDE_LONG else "🔴"
@@ -539,6 +399,13 @@ async def show_executor_detail(
             end_price = config.get("end_price", 0)
             limit_price = config.get("limit_price", 0)
             max_orders = config.get("max_open_orders", 3)
+            max_batch = config.get("max_orders_per_batch", 2)
+            order_freq = config.get("order_frequency", 1)
+            min_spread = config.get("min_spread_between_orders", 0.0001)
+            min_order_quote = config.get("min_order_amount_quote", 10)
+            activation_bounds = config.get("activation_bounds", 0)
+            coerce_tp = config.get("coerce_tp_to_step", False)
+            keep_position = config.get("keep_position", True)
             # Take profit may be nested under triple_barrier_config for grid executors too
             tbc = config.get("triple_barrier_config", {})
             take_profit = (
@@ -552,13 +419,57 @@ async def show_executor_detail(
             lines.append(f"  End: `{escape_markdown_v2(f'{end_price:.6g}')}`")
             lines.append(f"  Limit: `{escape_markdown_v2(f'{limit_price:.6g}')}`")
             lines.append(
-                f"  Max Orders: `{max_orders}` \\| TP: `{escape_markdown_v2(f'{take_profit:.4%}')}`"
+                f"  TP: `{escape_markdown_v2(f'{take_profit:.4%}')}` \\| Spread: `{escape_markdown_v2(f'{min_spread:.4%}')}`"
             )
+            lines.append(
+                f"  Orders: `{max_orders}` max \\| `{max_batch}`/batch \\| `{order_freq}s` freq"
+            )
+            if activation_bounds:
+                lines.append(
+                    f"  Bounds: `{escape_markdown_v2(f'{activation_bounds:.2%}')}` \\| Min Order: `${escape_markdown_v2(f'{min_order_quote:.0f}')}`"
+                )
+            keep_label = "Hold" if keep_position else "Close"
+            lines.append(f"  On Stop: `{keep_label}` position")
+
+            # Compute grid metrics from config (mirrors _generate_grid_levels logic)
+            if start_price and end_price and amount:
+                mid_price = (start_price + end_price) / 2
+                grid_range = (end_price - start_price) / start_price
+                min_step = max(min_spread, 0)
+                max_levels_by_amount = int(amount / min_order_quote) if min_order_quote else 1
+                max_levels_by_step = int(grid_range / min_step) if min_step > 0 else max_levels_by_amount
+                n_levels = max(1, min(max_levels_by_amount, max_levels_by_step))
+                amount_per_level = amount / n_levels
+                step = grid_range / max(n_levels - 1, 1)
+                eff_tp = max(step, take_profit) if coerce_tp else take_profit
+
+                lines.append("")
+                lines.append(f"📏 *Grid Metrics*")
+                lines.append(f"  Levels: `{n_levels}` \\| Step: `{escape_markdown_v2(f'{step:.4%}')}`")
+                lines.append(f"  Per Level: `${escape_markdown_v2(f'{amount_per_level:,.2f}')}`")
+                if coerce_tp and eff_tp != take_profit:
+                    lines.append(f"  Eff\\. TP: `{escape_markdown_v2(f'{eff_tp:.4%}')}` \\(coerced to step\\)")
 
         lines.append("")
         lines.append(f"📊 *Performance*")
-        lines.append(f"  {pnl_emoji} PnL: `{escape_markdown_v2(f'${pnl:+,.2f}')}`")
 
+        # PnL with percentage
+        pnl_str = f"${pnl:+,.2f}"
+        if net_pnl_pct:
+            pnl_str += f" ({net_pnl_pct:+.2f}%)"
+        lines.append(f"  {pnl_emoji} PnL: `{escape_markdown_v2(pnl_str)}`")
+
+        # Realized / Unrealized breakdown (only if there's data)
+        if realized_pnl or unrealized_pnl:
+            lines.append(
+                f"  Real: `{escape_markdown_v2(f'${realized_pnl:+,.2f}')}` \\| Unreal: `{escape_markdown_v2(f'${unrealized_pnl:+,.2f}')}`"
+            )
+
+        if break_even:
+            lines.append(f"  BE: `{escape_markdown_v2(f'{break_even:,.2f}')}`")
+
+        if position_size:
+            lines.append(f"  📈 Size: `${escape_markdown_v2(f'{position_size:,.2f}')}`")
         if volume:
             lines.append(f"  📈 Volume: `${escape_markdown_v2(f'{volume:,.2f}')}`")
         if fees:
@@ -567,6 +478,17 @@ async def show_executor_detail(
         lines.append("")
         status_emoji = "▶️" if status.upper() == "RUNNING" else "⏹"
         lines.append(f"{status_emoji} Status: `{escape_markdown_v2(status)}`")
+
+        # Created timestamp
+        if created_at:
+            from datetime import datetime, timezone
+            try:
+                dt = datetime.fromtimestamp(created_at, tz=timezone.utc)
+                created_str = dt.strftime("%m/%d %H:%M UTC")
+                lines.append(f"🕐 Created: `{escape_markdown_v2(created_str)}`")
+            except (ValueError, OSError):
+                pass
+
         lines.append(f"🆔 `{escape_markdown_v2(full_id[:30])}`")
 
         # Build keyboard
@@ -580,7 +502,7 @@ async def show_executor_detail(
                 InlineKeyboardButton(
                     "🔄 Refresh", callback_data=f"executors:detail:{full_id[:20]}"
                 ),
-                InlineKeyboardButton("⬅️ Back", callback_data="executors:list"),
+                InlineKeyboardButton("⬅️ Back", callback_data="executors:menu"),
             ],
         ]
 
@@ -609,7 +531,7 @@ async def show_executor_detail(
 
     except Exception as e:
         logger.error(f"Error showing executor detail: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("Back", callback_data="executors:list")]]
+        keyboard = [[InlineKeyboardButton("Back", callback_data="executors:menu")]]
         try:
             await query.message.edit_text(
                 format_error_message(f"Error: {str(e)[:100]}"),
@@ -642,7 +564,7 @@ async def handle_stop_executor(
     config = executor.get("config", executor)
     pair = config.get("trading_pair", "UNKNOWN")
 
-    side = config.get("side", SIDE_LONG)
+    side = normalize_side(config.get("side", SIDE_LONG))
     side_emoji = "🟢" if side == SIDE_LONG else "🔴"
 
     keyboard = [
@@ -717,10 +639,15 @@ async def handle_confirm_stop_executor(
                         break
         result = await stop_executor(client, full_id, keep_position=False)
 
-        # Invalidate cache
+        # Invalidate cache selectively - preserve menu cache for better UX
         invalidate_cache(context.user_data, "all")
-        context.user_data.pop("running_executors", None)
         context.user_data.pop("current_executor", None)
+        # Only clear running_executors if successful stop
+        if (
+            result.get("status") in ("success", "stopping", "stopped")
+            or "stop" in str(result).lower()
+        ):
+            context.user_data.pop("running_executors", None)
 
         if (
             result.get("status") in ("success", "stopping", "stopped")
@@ -729,7 +656,7 @@ async def handle_confirm_stop_executor(
             keyboard = [
                 [
                     InlineKeyboardButton(
-                        "📋 Back to List", callback_data="executors:list"
+                        "📋 Back to List", callback_data="executors:menu"
                     )
                 ]
             ]
@@ -746,7 +673,7 @@ async def handle_confirm_stop_executor(
                 keyboard = [
                     [
                         InlineKeyboardButton(
-                            "🔄 Refresh List", callback_data="executors:list"
+                            "🔄 Refresh List", callback_data="executors:menu"
                         ),
                         InlineKeyboardButton(
                             "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
@@ -770,7 +697,7 @@ async def handle_confirm_stop_executor(
 
     except Exception as e:
         logger.error(f"Error stopping executor: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("Back", callback_data="executors:list")]]
+        keyboard = [[InlineKeyboardButton("Back", callback_data="executors:menu")]]
         await query.message.edit_text(
             f"*Error*\n\n{escape_markdown_v2(str(e)[:200])}",
             parse_mode="MarkdownV2",

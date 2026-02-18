@@ -40,6 +40,7 @@ from ._shared import (
     get_executors_client,
     init_new_executor_config,
     invalidate_cache,
+    normalize_side,
     set_executor_config,
 )
 
@@ -58,6 +59,7 @@ EDITABLE_PARAMS = {
     "limit_price": float,
     "min_spread_between_orders": float,
     "take_profit": float,
+    "coerce_tp_to_step": bool,
     "max_open_orders": int,
     "max_orders_per_batch": int,
     "order_frequency": int,
@@ -78,8 +80,10 @@ def _is_perpetual(connector: str) -> bool:
 
 def _format_config_block(config: Dict[str, Any]) -> str:
     """Format config as key=value block for display inside a code block."""
-    side = config.get("side", SIDE_LONG)
+    side = normalize_side(config.get("side", SIDE_LONG))
     side_label = "LONG" if side == SIDE_LONG else "SHORT"
+
+    coerce_tp = config.get("coerce_tp_to_step", False)
 
     lines = [
         f"side={side_label}",
@@ -90,6 +94,7 @@ def _format_config_block(config: Dict[str, Any]) -> str:
         f"limit_price={config.get('limit_price', 0):.6g}",
         f"min_spread_between_orders={config.get('min_spread_between_orders', 0.0001)}",
         f"take_profit={config.get('take_profit', 0.0002)}",
+        f"coerce_tp_to_step={str(coerce_tp).lower()}",
         f"max_open_orders={config.get('max_open_orders', 5)}",
         f"max_orders_per_batch={config.get('max_orders_per_batch', 2)}",
         f"order_frequency={config.get('order_frequency', 1)}",
@@ -412,7 +417,7 @@ async def handle_pair_input(
 
     try:
         client, _ = await get_executors_client(chat_id, context.user_data)
-        is_valid, error_msg, suggestions = await validate_trading_pair(
+        is_valid, error_msg, suggestions, correct_pair = await validate_trading_pair(
             context.user_data, client, connector, pair
         )
 
@@ -422,10 +427,15 @@ async def handle_pair_input(
             )
             return
 
-        # Get correctly formatted pair from trading rules
-        trading_rules = await get_trading_rules(context.user_data, client, connector)
-        correct_pair = get_correct_pair_format(trading_rules, pair)
-        pair = correct_pair if correct_pair else pair
+        # Use the correct pair format returned by validation
+        if correct_pair:
+            pair = correct_pair
+        else:
+            # Fallback: Get correctly formatted pair from trading rules
+            trading_rules = await get_trading_rules(context.user_data, client, connector)
+            fallback_pair = get_correct_pair_format(trading_rules, pair)
+            if fallback_pair:
+                pair = fallback_pair
 
     except Exception as e:
         logger.warning(f"Could not validate trading pair: {e}")
@@ -820,6 +830,11 @@ async def handle_config_input(
                 errors.append("side: use long/short or 1/2")
             continue
 
+        # Handle booleans
+        if EDITABLE_PARAMS[key] is bool:
+            updates[key] = value.lower() in ("true", "1", "yes", "on")
+            continue
+
         try:
             updates[key] = EDITABLE_PARAMS[key](value)
         except ValueError:
@@ -928,6 +943,7 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "max_orders_per_batch": config.get("max_orders_per_batch", 2),
         "order_frequency": config.get("order_frequency", 1),
         "activation_bounds": config.get("activation_bounds", 0.001),
+        "coerce_tp_to_step": config.get("coerce_tp_to_step", False),
         "triple_barrier_config": {
             "take_profit": config.get("take_profit", 0.0002),
         },
@@ -975,14 +991,14 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             keyboard = [
                 [
                     InlineKeyboardButton(
-                        "📋 View Executors", callback_data="executors:list"
+                        "📋 View Executors", callback_data="executors:menu"
                     ),
                     InlineKeyboardButton("❌ Close", callback_data="executors:close"),
                 ]
             ]
 
             pair_display = config.get("trading_pair", "")
-            side_val = config.get("side", SIDE_LONG)
+            side_val = normalize_side(config.get("side", SIDE_LONG))
             side_emoji = "🟢" if side_val == SIDE_LONG else "🔴"
             side_label = "LONG" if side_val == SIDE_LONG else "SHORT"
             leverage = config.get("leverage", 1)

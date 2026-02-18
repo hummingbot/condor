@@ -60,9 +60,7 @@ async def executors_callback_handler(
 
     Routing:
         executors:menu           -> show_executors_menu()
-        executors:list           -> show_running_executors()
-        executors:list_prev      -> previous page
-        executors:list_next      -> next page
+        executors:list           -> show_executors_menu() (alias)
         executors:detail:{id}    -> show_executor_detail()
         executors:stop:{id}      -> handle_stop_executor()
         executors:confirm_stop:{id} -> handle_confirm_stop_executor()
@@ -104,7 +102,6 @@ async def executors_callback_handler(
         show_create_menu,
         show_executor_detail,
         show_executors_menu,
-        show_running_executors,
     )
     from .position import handle_connector_select as pos_handle_connector_select
     from .position import handle_deploy as pos_handle_deploy
@@ -119,17 +116,7 @@ async def executors_callback_handler(
         await show_executors_menu(update, context)
 
     elif action == "list":
-        await show_running_executors(update, context)
-
-    elif action == "list_prev":
-        page = context.user_data.get("executor_list_page", 0)
-        context.user_data["executor_list_page"] = max(0, page - 1)
-        await show_running_executors(update, context)
-
-    elif action == "list_next":
-        page = context.user_data.get("executor_list_page", 0)
-        context.user_data["executor_list_page"] = page + 1
-        await show_running_executors(update, context)
+        await show_executors_menu(update, context)
 
     elif action == "detail" and len(parts) >= 3:
         executor_id = parts[2]
@@ -161,11 +148,11 @@ async def executors_callback_handler(
         await grid_handle_connector_select(update, context, connector)
 
     elif action == "grid_pair" and len(parts) >= 3:
-        pair = parts[2]
+        pair = ":".join(parts[2:])  # Rejoin for HIP3 pairs with colons
         await grid_handle_pair_input(update, context, pair)
 
     elif action == "grid_pair_select" and len(parts) >= 3:
-        pair = parts[2]
+        pair = ":".join(parts[2:])  # Rejoin for HIP3 pairs with colons
         await grid_handle_pair_input(update, context, pair)
 
     elif action == "grid_step2":
@@ -184,11 +171,11 @@ async def executors_callback_handler(
         await pos_handle_connector_select(update, context, connector)
 
     elif action == "pos_pair" and len(parts) >= 3:
-        pair = parts[2]
+        pair = ":".join(parts[2:])  # Rejoin for HIP3 pairs with colons
         await pos_handle_pair_input(update, context, pair)
 
     elif action == "pos_pair_select" and len(parts) >= 3:
-        pair = parts[2]
+        pair = ":".join(parts[2:])  # Rejoin for HIP3 pairs with colons
         await pos_handle_pair_input(update, context, pair)
 
     elif action == "pos_step2":

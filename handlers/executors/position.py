@@ -36,22 +36,37 @@ from ._shared import (
     get_executors_client,
     init_new_executor_config,
     invalidate_cache,
+    normalize_side,
     set_executor_config,
 )
 
 logger = logging.getLogger(__name__)
 
+# Order type mapping
+ORDER_TYPE_MAP = {
+    "MARKET": 1, "LIMIT": 2, "LIMIT_MAKER": 3,
+    "1": 1, "2": 2, "3": 3,
+}
+ORDER_TYPE_LABELS = {1: "MARKET", 2: "LIMIT", 3: "LIMIT_MAKER"}
+
 # Editable parameters with their types
+# Note: "amount" accepts both base (e.g. 0.5) and quote with $ prefix (e.g. $100)
+# "total_amount_quote" is internal only, not user-editable
 EDITABLE_PARAMS = {
     "side": int,
     "leverage": int,
-    "amount": float,
+    "amount": str,  # special: parsed manually to support $-prefix
     "entry_price": float,
     "stop_loss": float,
     "take_profit": float,
     "time_limit": int,
-    "trailing_stop_activation": float,
-    "trailing_stop_delta": float,
+    "trailing_stop_activation_price": float,
+    "trailing_stop_trailing_delta": float,
+    "open_order_type": int,
+    "take_profit_order_type": int,
+    "stop_loss_order_type": int,
+    "time_limit_order_type": int,
+    "activation_bounds": float,
 }
 
 
@@ -65,35 +80,62 @@ def _is_perpetual(connector: str) -> bool:
     return "_perpetual" in connector.lower()
 
 
-def _format_config_block(config: Dict[str, Any]) -> str:
+def _format_config_block(config: Dict[str, Any], current_price: Optional[float] = None) -> str:
     """Format config as key=value block for display inside a code block."""
-    side = config.get("side", SIDE_LONG)
+    side = normalize_side(config.get("side", SIDE_LONG))
     side_label = "LONG" if side == SIDE_LONG else "SHORT"
 
     entry_price = config.get("entry_price", 0.0)
     entry_display = "MARKET" if entry_price == 0 else f"{entry_price:.6g}"
 
+    total_quote = config.get("total_amount_quote", 0.0)
+    amount = config.get("amount", 0.0)
+
+    # Unified amount display: $-prefix means quote, plain means base
+    if total_quote > 0:
+        amount_display = f"amount=${total_quote:.2f}"
+        if current_price and current_price > 0:
+            computed = total_quote / current_price
+            amount_display += f" (~{computed:.6g} base)"
+    elif amount > 0:
+        amount_display = f"amount={amount:.6g}"
+        if current_price and current_price > 0:
+            notional = amount * current_price
+            amount_display += f" (~${notional:.2f})"
+    else:
+        amount_display = "amount=0 (use $100 for quote or 0.5 for base)"
+
     stop_loss = config.get("stop_loss", 0.0)
     take_profit = config.get("take_profit", 0.0)
-    time_limit = config.get("time_limit", 0)
-    trailing_activation = config.get("trailing_stop_activation", 0.0)
-    trailing_delta = config.get("trailing_stop_delta", 0.0)
+    time_limit = config.get("time_limit", -1)
+    trailing_activation = config.get("trailing_stop_activation_price", -1)
+    trailing_delta = config.get("trailing_stop_trailing_delta", -1)
+    activation_bounds = config.get("activation_bounds", -1)
 
-    # Format trailing stop as single display line
-    if trailing_activation > 0 and trailing_delta > 0:
-        trailing_display = f"{trailing_activation:.4%} / {trailing_delta:.4%}"
-    else:
-        trailing_display = "OFF"
+    def _fmt_pct(val, disabled_sentinel=-1):
+        """Format a percentage field, showing OFF when disabled."""
+        if val == disabled_sentinel:
+            return "OFF"
+        return f"{val:.4%}"
+
+    def _fmt_order_type(val):
+        return ORDER_TYPE_LABELS.get(val, str(val))
 
     lines = [
         f"side={side_label}",
         f"leverage={config.get('leverage', 10)}",
-        f"amount={config.get('amount', 0.0):.6g}",
+        amount_display,
         f"entry_price={entry_display}",
-        f"stop_loss={stop_loss:.4%}" if stop_loss > 0 else "stop_loss=OFF",
-        f"take_profit={take_profit:.4%}" if take_profit > 0 else "take_profit=OFF",
+        f"stop_loss={_fmt_pct(stop_loss)}",
+        f"take_profit={_fmt_pct(take_profit)}",
         f"time_limit={time_limit}s" if time_limit > 0 else "time_limit=OFF",
-        f"trailing_stop={trailing_display}",
+        f"trailing_stop_activation_price={_fmt_pct(trailing_activation)}",
+        f"trailing_stop_trailing_delta={_fmt_pct(trailing_delta)}",
+        f"open_order_type={_fmt_order_type(config.get('open_order_type', 2))}",
+        f"take_profit_order_type={_fmt_order_type(config.get('take_profit_order_type', 1))}",
+        f"stop_loss_order_type={_fmt_order_type(config.get('stop_loss_order_type', 1))}",
+        f"time_limit_order_type={_fmt_order_type(config.get('time_limit_order_type', 1))}",
+        f"activation_bounds={'OFF' if activation_bounds == -1 else f'{activation_bounds:.4%}'}",
     ]
     return "\n".join(lines)
 
@@ -108,7 +150,7 @@ def _build_step_2_text(
     connector = config.get("connector_name", "unknown")
     pair = config.get("trading_pair", "UNKNOWN")
 
-    config_block = _format_config_block(config)
+    config_block = _format_config_block(config, current_price)
 
     lines = [
         "🎯 *Position Executor \\- Step 2/2*",
@@ -160,7 +202,11 @@ def _build_step_2_text(
     lines.append("")
     lines.append(f"```\n{config_block}\n```")
     lines.append("")
-    lines.append("_Send `key\\=value` to edit \\(e\\.g\\. `amount\\=1\\.5`\\)_")
+    lines.append(
+        "_Send `key\\=value` to edit \\(e\\.g\\. `amount\\=$100` or `amount\\=0\\.5`\\)_\n"
+        "_Use \\-1 to disable optional fields \\(e\\.g\\. `stop\\_loss\\=\\-1`\\)_\n"
+        "_Order types: MARKET, LIMIT, LIMIT\\_MAKER_"
+    )
 
     return "\n".join(lines)
 
@@ -355,7 +401,7 @@ async def handle_pair_input(
 
     try:
         client, _ = await get_executors_client(chat_id, context.user_data)
-        is_valid, error_msg, suggestions = await validate_trading_pair(
+        is_valid, error_msg, suggestions, correct_pair = await validate_trading_pair(
             context.user_data, client, connector, pair
         )
 
@@ -365,10 +411,17 @@ async def handle_pair_input(
             )
             return
 
-        # Get correctly formatted pair from trading rules
-        trading_rules = await get_trading_rules(context.user_data, client, connector)
-        correct_pair = get_correct_pair_format(trading_rules, pair)
-        pair = correct_pair if correct_pair else pair
+        # Use the correct pair format returned by validation
+        if correct_pair:
+            pair = correct_pair
+        else:
+            # Fallback: Get correctly formatted pair from trading rules
+            trading_rules = await get_trading_rules(
+                context.user_data, client, connector
+            )
+            fallback_pair = get_correct_pair_format(trading_rules, pair)
+            if fallback_pair:
+                pair = fallback_pair
 
     except Exception as e:
         logger.warning(f"Could not validate trading pair: {e}")
@@ -641,6 +694,32 @@ async def handle_config_input(
                 errors.append("side: use long/short or 1/2")
             continue
 
+        # Handle amount: $-prefix means quote currency, plain means base
+        if key == "amount":
+            if value.startswith("$"):
+                try:
+                    quote_val = float(value[1:])
+                    updates["total_amount_quote"] = quote_val
+                    updates["amount"] = 0.0  # will be computed at deploy
+                except ValueError:
+                    errors.append("amount: invalid number after $")
+            else:
+                try:
+                    updates["amount"] = float(value)
+                    updates["total_amount_quote"] = 0.0
+                except ValueError:
+                    errors.append("amount: invalid number")
+            continue
+
+        # Handle order type fields: accept MARKET/LIMIT/LIMIT_MAKER or 1/2/3
+        if key in ("open_order_type", "take_profit_order_type", "stop_loss_order_type", "time_limit_order_type"):
+            mapped = ORDER_TYPE_MAP.get(value.upper())
+            if mapped:
+                updates[key] = mapped
+            else:
+                errors.append(f"{key}: use MARKET/LIMIT/LIMIT_MAKER or 1/2/3")
+            continue
+
         try:
             updates[key] = EDITABLE_PARAMS[key](value)
         except ValueError:
@@ -691,19 +770,43 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    # Validate amount > 0
+    # Resolve amount: if total_amount_quote is set, recalculate from fresh price
+    total_quote = config.get("total_amount_quote", 0.0)
     amount = config.get("amount", 0.0)
+
+    if total_quote > 0:
+        # Fetch fresh price for accurate conversion at deploy time
+        try:
+            client, _ = await get_executors_client(chat_id, context.user_data)
+            current_price = await fetch_current_price(
+                client, config["connector_name"], config["trading_pair"]
+            )
+            if current_price and current_price > 0:
+                amount = total_quote / current_price
+                config["amount"] = amount
+                set_executor_config(context, config)
+            else:
+                await query.answer(
+                    "Could not fetch price to convert total_amount_quote", show_alert=True
+                )
+                return
+        except Exception as e:
+            await query.answer(f"Price fetch failed: {str(e)[:80]}", show_alert=True)
+            return
+
     if amount <= 0:
-        await query.answer("Set amount first (e.g. amount=1.5)", show_alert=True)
+        await query.answer(
+            "Set total_amount_quote=100 or amount=1.5 first", show_alert=True
+        )
         return
 
-    # Validate at least one exit condition
-    has_stop_loss = config.get("stop_loss", 0) > 0
-    has_take_profit = config.get("take_profit", 0) > 0
-    has_time_limit = config.get("time_limit", 0) > 0
+    # Validate at least one exit condition (-1 means disabled)
+    has_stop_loss = config.get("stop_loss", -1) > 0
+    has_take_profit = config.get("take_profit", -1) > 0
+    has_time_limit = config.get("time_limit", -1) > 0
     has_trailing = (
-        config.get("trailing_stop_activation", 0) > 0
-        and config.get("trailing_stop_delta", 0) > 0
+        config.get("trailing_stop_activation_price", -1) > 0
+        and config.get("trailing_stop_trailing_delta", -1) > 0
     )
     if not (has_stop_loss or has_take_profit or has_time_limit or has_trailing):
         await query.answer(
@@ -712,45 +815,51 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    logger.info(
-        f"Deploying position executor: connector={config.get('connector_name')}, pair={config.get('trading_pair')}, side={config.get('side')}"
-    )
-
-    # Build executor config for API
+    # Build executor config matching PositionExecutorConfig model
     executor_config = {
         "type": "position_executor",
-        "connector_name": config.get("connector_name"),
-        "trading_pair": config.get("trading_pair"),
+        "connector_name": config["connector_name"],
+        "trading_pair": config["trading_pair"],
         "side": config.get("side", SIDE_LONG),
         "leverage": config.get("leverage", 10),
-        "amount": config.get("amount"),
+        "amount": amount,
     }
 
-    # Entry price: omit if 0 (market order)
+    # Entry price: omit if 0 (market order) — model default is None
     entry_price = config.get("entry_price", 0.0)
     if entry_price > 0:
         executor_config["entry_price"] = entry_price
 
-    # Build triple barrier config (always include with proper schema)
-    triple_barrier = {
-        "stop_loss": str(config["stop_loss"]) if has_stop_loss else None,
-        "take_profit": str(config["take_profit"]) if has_take_profit else None,
-        "time_limit": config["time_limit"] if has_time_limit else None,
-        "trailing_stop": (
-            {
-                "activation_price": config["trailing_stop_activation"],
-                "trailing_delta": config["trailing_stop_delta"],
-            }
-            if has_trailing
-            else None
-        ),
-        "open_order_type": 3,  # LIMIT order type
-        "take_profit_order_type": 3,  # LIMIT order type
-        "stop_loss_order_type": 1,  # MARKET order type
-        "time_limit_order_type": 1,  # MARKET order type
-    }
+    # Activation bounds: -1 = disabled, otherwise wrap in list
+    activation_bounds = config.get("activation_bounds", -1)
+    if activation_bounds != -1:
+        executor_config["activation_bounds"] = [activation_bounds]
+
+    # Build triple barrier config - only include fields that are actually set
+    # -1 values are omitted so the server uses TripleBarrierConfig defaults
+    triple_barrier = {}
+
+    if has_stop_loss:
+        triple_barrier["stop_loss"] = config["stop_loss"]
+    if has_take_profit:
+        triple_barrier["take_profit"] = config["take_profit"]
+    if has_time_limit:
+        triple_barrier["time_limit"] = config["time_limit"]
+    if has_trailing:
+        triple_barrier["trailing_stop"] = {
+            "activation_price": config["trailing_stop_activation_price"],
+            "trailing_delta": config["trailing_stop_trailing_delta"],
+        }
+
+    # Order type fields always included
+    triple_barrier["open_order_type"] = config.get("open_order_type", 2)
+    triple_barrier["take_profit_order_type"] = config.get("take_profit_order_type", 1)
+    triple_barrier["stop_loss_order_type"] = config.get("stop_loss_order_type", 1)
+    triple_barrier["time_limit_order_type"] = config.get("time_limit_order_type", 1)
 
     executor_config["triple_barrier_config"] = triple_barrier
+
+    logger.info(f"Deploying position executor config: {executor_config}")
 
     # Send loading message
     try:
@@ -792,17 +901,22 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             keyboard = [
                 [
                     InlineKeyboardButton(
-                        "📋 View Executors", callback_data="executors:list"
+                        "📋 View Executors", callback_data="executors:menu"
                     ),
                     InlineKeyboardButton("❌ Close", callback_data="executors:close"),
                 ]
             ]
 
             pair_display = config.get("trading_pair", "")
-            side_val = config.get("side", SIDE_LONG)
+            side_val = normalize_side(config.get("side", SIDE_LONG))
             side_emoji = "🟢" if side_val == SIDE_LONG else "🔴"
             side_label = "LONG" if side_val == SIDE_LONG else "SHORT"
             leverage = config.get("leverage", 1)
+
+            # Build amount display with notional
+            amount_str = f"{amount:.6g}"
+            if total_quote > 0:
+                amount_str += f" (~${total_quote:.2f})"
 
             await context.bot.edit_message_text(
                 chat_id=chat_id,
@@ -810,7 +924,7 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 text=f"✅ *Position Executor Deployed*\n"
                 f"─────────────────────────\n\n"
                 f"{side_emoji} *{escape_markdown_v2(pair_display)}* \\| {escape_markdown_v2(side_label)} {leverage}x\n"
-                f"💰 Amount: `{escape_markdown_v2(f'{amount:.6g}')}`\n"
+                f"💰 Amount: `{escape_markdown_v2(amount_str)}`\n"
                 f"🆔 `{escape_markdown_v2(str(executor_id)[:30])}`\n\n"
                 f"_The executor is now running\\._",
                 parse_mode="MarkdownV2",
