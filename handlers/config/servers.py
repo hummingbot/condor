@@ -969,7 +969,21 @@ async def confirm_add_server(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
         if success:
-            await query.answer(f"✅ Added server '{server_data['name']}'")
+            # Auto-set as default if this is the user's only accessible server
+            cm = get_config_manager()
+            accessible = cm.get_accessible_servers(user_id)
+            if accessible and len(accessible) == 1:
+                chat_id = query.message.chat_id
+                cm.set_chat_default_server(chat_id, server_data["name"])
+                auto_default = True
+            else:
+                auto_default = False
+
+            success_msg = f"✅ Added server '{server_data['name']}'"
+            if auto_default:
+                success_msg += " (set as default)"
+            
+            await query.answer(success_msg)
             context.user_data.pop("adding_server", None)
             context.user_data.pop("awaiting_add_server_input", None)
             await show_api_servers(query, context)
