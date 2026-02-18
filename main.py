@@ -383,11 +383,11 @@ def get_persistence() -> PicklePersistence:
     """
     Build a persistence object that works both locally and in Docker.
     - Uses an env var override if provided.
-    - Defaults to <project_root>/condor_bot_data.pickle.
+    - Defaults to <project_root>/data/condor_bot_data.pickle.
     - Ensures the parent directory exists, but does NOT create the file.
     """
     base_dir = Path(__file__).parent
-    default_path = base_dir / "condor_bot_data.pickle"
+    default_path = base_dir / "data" / "condor_bot_data.pickle"
 
     persistence_path = Path(os.getenv("CONDOR_PERSISTENCE_FILE", default_path))
 
