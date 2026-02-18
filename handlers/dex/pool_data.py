@@ -8,11 +8,12 @@ Provides unified data fetching for DEX pools:
 """
 
 import logging
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from geckoterminal_py import GeckoTerminalAsyncClient
 
 from config_manager import get_client
+
 from ._shared import get_cached, set_cached
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ async def fetch_ohlcv(
     network: str,
     timeframe: str = "1h",
     currency: str = "usd",
-    user_data: dict = None
+    user_data: dict = None,
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
 
@@ -154,7 +155,7 @@ async def fetch_ohlcv(
             timeframe,
             currency=currency,
             token="base",
-            limit=100
+            limit=100,
         )
 
         # Parse response - handle different formats
@@ -162,6 +163,7 @@ async def fetch_ohlcv(
 
         try:
             import pandas as pd
+
             if isinstance(result, pd.DataFrame):
                 if not result.empty:
                     # Convert DataFrame to list format
@@ -189,8 +191,10 @@ async def fetch_ohlcv(
             try:
                 closes = [float(c[4]) for c in ohlcv_list if len(c) > 4 and c[4]]
                 if closes:
-                    logger.info(f"OHLCV {pool_address[:8]}... {timeframe} currency={currency}: "
-                               f"{len(ohlcv_list)} candles, price range [{min(closes):.6f} - {max(closes):.6f}]")
+                    logger.info(
+                        f"OHLCV {pool_address[:8]}... {timeframe} currency={currency}: "
+                        f"{len(ohlcv_list)} candles, price range [{min(closes):.6f} - {max(closes):.6f}]"
+                    )
             except Exception as e:
                 logger.debug(f"Could not log OHLCV price range: {e}")
 
@@ -210,7 +214,7 @@ async def fetch_liquidity_bins(
     connector: str = "meteora",
     network: str = "solana-mainnet-beta",
     user_data: dict = None,
-    chat_id: int = None
+    chat_id: int = None,
 ) -> Tuple[Optional[List], Optional[Dict], Optional[str]]:
     """Fetch liquidity bin data for CLMM pools via gateway
 
@@ -236,7 +240,7 @@ async def fetch_liquidity_bins(
         if user_data is not None:
             cached = get_cached(user_data, cache_key, ttl=BINS_CACHE_TTL)
             if cached is not None:
-                return cached.get('bins'), cached, None
+                return cached.get("bins"), cached, None
 
         client = await get_client(chat_id, context=context)
         if not client:
@@ -247,37 +251,47 @@ async def fetch_liquidity_bins(
         # First try get_pool_info (works for pools known to gateway)
         try:
             pool_info = await client.gateway_clmm.get_pool_info(
-                connector=connector,
-                network=network,
-                pool_address=pool_address
+                connector=connector, network=network, pool_address=pool_address
             )
         except Exception as e:
             # If get_pool_info fails (e.g., pool not in gateway config or not a DLMM pool),
             # try finding the pool via get_pools search
             error_str = str(e)
             if "validation error" in error_str.lower() or "Field required" in error_str:
-                logger.info(f"Pool {pool_address[:12]}... not found via get_pool_info, trying get_pools search")
+                logger.info(
+                    f"Pool {pool_address[:12]}... not found via get_pool_info, trying get_pools search"
+                )
                 try:
                     # Search for pool by address using get_pools
                     search_result = await client.gateway_clmm.get_pools(
-                        connector=connector,
-                        search_term=pool_address,
-                        limit=1
+                        connector=connector, search_term=pool_address, limit=1
                     )
                     pools = search_result.get("pools", [])
                     if pools:
                         # Found the pool, but get_pools doesn't include bins
                         # Return pool info without bins - caller can handle this
                         pool_info = pools[0]
-                        pool_info['address'] = pool_address
-                        logger.info(f"Found pool via get_pools: {pool_info.get('trading_pair', 'Unknown')}")
+                        pool_info["address"] = pool_address
+                        logger.info(
+                            f"Found pool via get_pools: {pool_info.get('trading_pair', 'Unknown')}"
+                        )
                     else:
                         # Pool not found in DLMM pools - might be an AMM pool or non-existent
-                        logger.info(f"Pool {pool_address[:12]}... not found in {connector} DLMM pools")
-                        return None, None, f"Pool not found in {connector} DLMM pools. This may be an AMM pool or not a {connector} pool."
+                        logger.info(
+                            f"Pool {pool_address[:12]}... not found in {connector} DLMM pools"
+                        )
+                        return (
+                            None,
+                            None,
+                            f"Pool not found in {connector} DLMM pools. This may be an AMM pool or not a {connector} pool.",
+                        )
                 except Exception as search_e:
                     logger.warning(f"get_pools search also failed: {search_e}")
-                    return None, None, f"Could not fetch pool info. Pool may not be a {connector} DLMM pool."
+                    return (
+                        None,
+                        None,
+                        f"Could not fetch pool info. Pool may not be a {connector} DLMM pool.",
+                    )
 
             if pool_info is None:
                 # Re-raise with a cleaner message for non-validation errors
@@ -286,7 +300,7 @@ async def fetch_liquidity_bins(
         if not pool_info:
             return None, None, "Pool not found"
 
-        bins = pool_info.get('bins', [])
+        bins = pool_info.get("bins", [])
 
         # Cache result
         if user_data is not None:
@@ -299,10 +313,7 @@ async def fetch_liquidity_bins(
         return None, None, f"Failed to fetch liquidity: {str(e)}"
 
 
-def normalize_pool_data(
-    pool: dict,
-    source: str = "gecko"
-) -> Dict[str, Any]:
+def normalize_pool_data(pool: dict, source: str = "gecko") -> Dict[str, Any]:
     """Normalize pool data from different sources to a common format
 
     Args:
@@ -329,9 +340,15 @@ def normalize_pool_data(
             "volume_24h": _get_nested_float(attrs, "volume_usd", "h24"),
             "volume_6h": _get_nested_float(attrs, "volume_usd", "h6"),
             "volume_1h": _get_nested_float(attrs, "volume_usd", "h1"),
-            "price_change_24h": _get_nested_float(attrs, "price_change_percentage", "h24"),
-            "price_change_6h": _get_nested_float(attrs, "price_change_percentage", "h6"),
-            "price_change_1h": _get_nested_float(attrs, "price_change_percentage", "h1"),
+            "price_change_24h": _get_nested_float(
+                attrs, "price_change_percentage", "h24"
+            ),
+            "price_change_6h": _get_nested_float(
+                attrs, "price_change_percentage", "h6"
+            ),
+            "price_change_1h": _get_nested_float(
+                attrs, "price_change_percentage", "h1"
+            ),
             "fdv_usd": attrs.get("fdv_usd"),
             "market_cap_usd": attrs.get("market_cap_usd"),
             "pool_created_at": attrs.get("pool_created_at"),

@@ -7,20 +7,21 @@ Uses portfolio connectors (ones with API keys configured).
 """
 
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from utils.auth import restricted, hummingbot_api_required
-from utils.telegram_formatters import escape_markdown_v2
 from handlers import clear_all_input_states, is_gateway_network
+from handlers.cex.trade import handle_trade as cex_handle_trade
 from handlers.config.user_preferences import (
-    get_last_trade_connector,
-    set_last_trade_connector,
     get_clob_order_defaults,
     get_dex_swap_defaults,
+    get_last_trade_connector,
+    set_last_trade_connector,
 )
-from handlers.cex.trade import handle_trade as cex_handle_trade
 from handlers.dex.swap import handle_swap as dex_handle_swap
+from utils.auth import hummingbot_api_required, restricted
+from utils.telegram_formatters import escape_markdown_v2
 
 logger = logging.getLogger(__name__)
 
@@ -107,12 +108,15 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await handle_unified_connector_select(update, context)
 
 
-async def handle_unified_connector_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_unified_connector_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Show all connectors (CEX + DEX networks) from portfolio for selection"""
     chat_id = update.effective_chat.id
 
     try:
         from config_manager import get_client
+
         client = await get_client(chat_id, context=context)
 
         # Fetch connectors from portfolio (ones with API keys/wallets configured)
@@ -123,13 +127,16 @@ async def handle_unified_connector_select(update: Update, context: ContextTypes.
 
         # CEX section - connector names (binance, bybit_perpetual, etc.)
         if cex_connectors:
-            keyboard.append([InlineKeyboardButton("━━ CEX ━━", callback_data="trade:noop")])
+            keyboard.append(
+                [InlineKeyboardButton("━━ CEX ━━", callback_data="trade:noop")]
+            )
             row = []
             for connector in cex_connectors:
-                row.append(InlineKeyboardButton(
-                    connector,
-                    callback_data=f"trade:select_cex:{connector}"
-                ))
+                row.append(
+                    InlineKeyboardButton(
+                        connector, callback_data=f"trade:select_cex:{connector}"
+                    )
+                )
                 if len(row) == 2:
                     keyboard.append(row)
                     row = []
@@ -138,14 +145,17 @@ async def handle_unified_connector_select(update: Update, context: ContextTypes.
 
         # DEX section - network names (solana-mainnet-beta, ethereum-mainnet, etc.)
         if gateway_networks:
-            keyboard.append([InlineKeyboardButton("━━ DEX ━━", callback_data="trade:noop")])
+            keyboard.append(
+                [InlineKeyboardButton("━━ DEX ━━", callback_data="trade:noop")]
+            )
             row = []
             for network in gateway_networks:
                 display = _format_network_display(network)
-                row.append(InlineKeyboardButton(
-                    display,
-                    callback_data=f"trade:select_dex:{network}"
-                ))
+                row.append(
+                    InlineKeyboardButton(
+                        display, callback_data=f"trade:select_dex:{network}"
+                    )
+                )
                 if len(row) == 2:
                     keyboard.append(row)
                     row = []
@@ -159,33 +169,35 @@ async def handle_unified_connector_select(update: Update, context: ContextTypes.
                 "Add API keys via /config to get started."
             )
         else:
-            help_text = r"🔄 *Select Connector*" + "\n\n" + r"Choose a trading connector:"
+            help_text = (
+                r"🔄 *Select Connector*" + "\n\n" + r"Choose a trading connector:"
+            )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if update.callback_query:
             await update.callback_query.message.edit_text(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         else:
             await update.message.reply_text(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
 
     except Exception as e:
         logger.error(f"Error showing connector selector: {e}", exc_info=True)
         error_text = escape_markdown_v2(f"Error loading connectors: {str(e)}")
         if update.callback_query:
-            await update.callback_query.message.edit_text(error_text, parse_mode="MarkdownV2")
+            await update.callback_query.message.edit_text(
+                error_text, parse_mode="MarkdownV2"
+            )
         else:
             await update.message.reply_text(error_text, parse_mode="MarkdownV2")
 
 
-async def handle_select_cex_connector(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
+async def handle_select_cex_connector(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str
+) -> None:
     """Handle CEX connector selection from unified selector"""
     # Save preference
     set_last_trade_connector(context.user_data, "cex", connector_name)
@@ -198,7 +210,9 @@ async def handle_select_cex_connector(update: Update, context: ContextTypes.DEFA
     await cex_handle_trade(update, context)
 
 
-async def handle_select_dex_network(update: Update, context: ContextTypes.DEFAULT_TYPE, network: str) -> None:
+async def handle_select_dex_network(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, network: str
+) -> None:
     """Handle DEX network selection from unified selector"""
     # Save preference - for DEX we store the network (e.g., solana-mainnet-beta)
     set_last_trade_connector(context.user_data, "dex", network)

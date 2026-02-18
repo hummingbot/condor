@@ -15,7 +15,6 @@ from ._base import BaseController, ControllerField
 from .grid_strike import GridStrikeController
 from .pmm_mister import PmmMisterController
 
-
 # Registry of controller types
 _CONTROLLER_REGISTRY: Dict[str, Type[BaseController]] = {
     "grid_strike": GridStrikeController,
@@ -73,12 +72,15 @@ SUPPORTED_CONTROLLERS = {
         "name": ctrl.display_name,
         "description": ctrl.description,
         "defaults": ctrl.get_defaults(),
-        "fields": {name: {
-            "label": field.label,
-            "type": field.type,
-            "required": field.required,
-            "hint": field.hint,
-        } for name, field in ctrl.get_fields().items()},
+        "fields": {
+            name: {
+                "label": field.label,
+                "type": field.type,
+                "required": field.required,
+                "hint": field.hint,
+            }
+            for name, field in ctrl.get_fields().items()
+        },
         "field_order": ctrl.get_field_order(),
     }
     for ctrl_type, ctrl in _CONTROLLER_REGISTRY.items()

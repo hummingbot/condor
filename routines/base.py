@@ -10,7 +10,7 @@ Routine Types:
 import importlib
 import logging
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
@@ -129,7 +129,9 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 message_states=message_states,
                 cleanup_fn=cleanup_fn,
             )
-            logger.debug(f"Discovered routine: {file_path.stem} (continuous={is_continuous})")
+            logger.debug(
+                f"Discovered routine: {file_path.stem} (continuous={is_continuous})"
+            )
 
         except Exception as e:
             logger.error(f"Failed to load routine {file_path.stem}: {e}")

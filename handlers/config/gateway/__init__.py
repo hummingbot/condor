@@ -22,6 +22,7 @@ async def gateway_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle /gateway command - show Gateway configuration directly."""
     from handlers import clear_all_input_states
     from utils.telegram_helpers import create_mock_query_from_message
+
     from .menu import show_gateway_menu
 
     clear_all_input_states(context)
@@ -32,25 +33,36 @@ async def gateway_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await show_gateway_menu(mock_query, context)
 
 
+from .connectors import (
+    handle_connector_action,
+    handle_connector_config_input,
+    show_connectors_menu,
+)
+
 # Import all submodule handlers
 from .deployment import (
-    start_deploy_gateway,
     deploy_gateway_with_image,
+    handle_deployment_input,
     prompt_custom_image,
-    stop_gateway,
     restart_gateway,
     show_gateway_logs,
-    handle_deployment_input,
+    start_deploy_gateway,
+    stop_gateway,
 )
-from .wallets import show_wallets_menu, handle_wallet_action, handle_wallet_input
-from .connectors import show_connectors_menu, handle_connector_action, handle_connector_config_input
-from .networks import show_networks_menu, handle_network_action, handle_network_config_input
-from .pools import show_pools_menu, handle_pool_action, handle_pool_input
-from .tokens import show_tokens_menu, handle_token_action, handle_token_input
-from .menu import show_gateway_menu, show_server_selection, handle_server_selection
+from .menu import handle_server_selection, show_gateway_menu, show_server_selection
+from .networks import (
+    handle_network_action,
+    handle_network_config_input,
+    show_networks_menu,
+)
+from .pools import handle_pool_action, handle_pool_input, show_pools_menu
+from .tokens import handle_token_action, handle_token_input, show_tokens_menu
+from .wallets import handle_wallet_action, handle_wallet_input, show_wallets_menu
 
 
-async def handle_gateway_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_gateway_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Main router for gateway-related callbacks"""
     query = update.callback_query
 
@@ -98,25 +110,27 @@ async def handle_gateway_callback(update: Update, context: ContextTypes.DEFAULT_
         await handle_token_action(query, context)
 
 
-async def handle_gateway_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_gateway_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Route text input to the appropriate gateway module"""
     # Check which type of input we're awaiting
-    if context.user_data.get('awaiting_gateway_input'):
+    if context.user_data.get("awaiting_gateway_input"):
         await handle_deployment_input(update, context)
-    elif context.user_data.get('awaiting_wallet_input'):
+    elif context.user_data.get("awaiting_wallet_input"):
         await handle_wallet_input(update, context)
-    elif context.user_data.get('awaiting_token_input'):
+    elif context.user_data.get("awaiting_token_input"):
         await handle_token_input(update, context)
-    elif context.user_data.get('awaiting_pool_input'):
+    elif context.user_data.get("awaiting_pool_input"):
         await handle_pool_input(update, context)
-    elif context.user_data.get('awaiting_network_input'):
+    elif context.user_data.get("awaiting_network_input"):
         await handle_network_config_input(update, context)
-    elif context.user_data.get('awaiting_connector_config'):
+    elif context.user_data.get("awaiting_connector_config"):
         await handle_connector_config_input(update, context)
 
 
 __all__ = [
-    'gateway_command',
-    'handle_gateway_callback',
-    'handle_gateway_input',
+    "gateway_command",
+    "handle_gateway_callback",
+    "handle_gateway_input",
 ]

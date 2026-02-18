@@ -19,8 +19,16 @@ def is_gateway_network(connector_name: str) -> bool:
 
     # Known Gateway network patterns
     gateway_patterns = [
-        'solana', 'ethereum', 'base', 'arbitrum', 'polygon',
-        'optimism', 'avalanche', 'mainnet', 'devnet', 'testnet'
+        "solana",
+        "ethereum",
+        "base",
+        "arbitrum",
+        "polygon",
+        "optimism",
+        "avalanche",
+        "mainnet",
+        "devnet",
+        "testnet",
     ]
 
     for pattern in gateway_patterns:

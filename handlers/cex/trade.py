@@ -10,30 +10,32 @@ Provides:
 
 import asyncio
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import escape_markdown_v2, format_error_message
+from config_manager import get_client
 from handlers.config.user_preferences import (
+    get_all_enabled_networks,
     get_clob_account,
     get_clob_order_defaults,
     set_clob_last_order,
     set_last_trade_connector,
-    get_all_enabled_networks,
-)
-from config_manager import get_client
-from ._shared import (
-    get_cached,
-    set_cached,
-    invalidate_cache,
-    get_cex_balances,
-    get_positions,
-    get_trading_rules,
-    get_available_cex_connectors,
-    validate_trading_pair,
-    get_correct_pair_format,
 )
 from handlers.dex._shared import format_relative_time
+from utils.telegram_formatters import escape_markdown_v2, format_error_message
+
+from ._shared import (
+    get_available_cex_connectors,
+    get_cached,
+    get_cex_balances,
+    get_correct_pair_format,
+    get_positions,
+    get_trading_rules,
+    invalidate_cache,
+    set_cached,
+    validate_trading_pair,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ DEFAULT_LEVERAGE = 5
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
+
 
 def _format_number(value, decimals: int = 2) -> str:
     """Format number with K/M suffix for readability"""
@@ -73,11 +76,11 @@ def _format_price(price: float) -> str:
     elif price >= 1000:
         return f"${price:,.2f}"
     elif price >= 1:
-        return f"${price:.4f}".rstrip('0').rstrip('.')
+        return f"${price:.4f}".rstrip("0").rstrip(".")
     elif price >= 0.0001:
-        return f"${price:.6f}".rstrip('0').rstrip('.')
+        return f"${price:.6f}".rstrip("0").rstrip(".")
     else:
-        return f"${price:.8f}".rstrip('0').rstrip('.')
+        return f"${price:.8f}".rstrip("0").rstrip(".")
 
 
 def _is_perpetual_connector(connector_name: str) -> bool:
@@ -110,16 +113,20 @@ def _format_compact_order_line(order: dict) -> str:
 
     Returns: "✅ BTC-USDT BUY @95000 0.01  1d bin"
     """
-    pair = order.get('trading_pair', 'N/A')
-    side = order.get('trade_type', order.get('side', '?'))
-    status = order.get('status', 'UNKNOWN')
-    amount = order.get('amount', 0)
-    price = order.get('price', 0)
-    connector = order.get('connector_name', '')[:3]
-    timestamp = order.get('creation_timestamp') or order.get('timestamp', '')
+    pair = order.get("trading_pair", "N/A")
+    side = order.get("trade_type", order.get("side", "?"))
+    status = order.get("status", "UNKNOWN")
+    amount = order.get("amount", 0)
+    price = order.get("price", 0)
+    connector = order.get("connector_name", "")[:3]
+    timestamp = order.get("creation_timestamp") or order.get("timestamp", "")
 
     # Status emoji
-    status_char = "✅" if status == "FILLED" else "🟢" if status == "OPEN" else "⏳" if status == "PENDING" else "❌"
+    status_char = (
+        "✅"
+        if status == "FILLED"
+        else "🟢" if status == "OPEN" else "⏳" if status == "PENDING" else "❌"
+    )
 
     # Format price
     price_str = f"@{_format_number(price, 4)}" if price else "@MKT"
@@ -146,17 +153,17 @@ def _format_compact_position_line(pos: dict) -> str:
 
     Returns: "🟢 binance_perpetual SOL-USDT LONG @144.50 0.5 PnL:+$1.23"
     """
-    connector = pos.get('connector_name', '')
-    pair = pos.get('trading_pair', 'N/A')
-    side = pos.get('position_side') or pos.get('side') or pos.get('trade_type', '?')
-    amount = pos.get('amount', 0)
-    entry_price = pos.get('entry_price', 0)
-    pnl = pos.get('unrealized_pnl', 0)
+    connector = pos.get("connector_name", "")
+    pair = pos.get("trading_pair", "N/A")
+    side = pos.get("position_side") or pos.get("side") or pos.get("trade_type", "?")
+    amount = pos.get("amount", 0)
+    entry_price = pos.get("entry_price", 0)
+    pnl = pos.get("unrealized_pnl", 0)
 
     # Side display
     side_upper = str(side).upper()
-    side_emoji = "🟢" if side_upper in ('LONG', 'BUY') else "🔴"
-    side_display = "LONG" if side_upper in ('LONG', 'BUY') else "SHORT"
+    side_emoji = "🟢" if side_upper in ("LONG", "BUY") else "🔴"
+    side_display = "LONG" if side_upper in ("LONG", "BUY") else "SHORT"
 
     # PnL with sign
     try:
@@ -174,6 +181,7 @@ def _format_compact_position_line(pos: dict) -> str:
 # MENU DISPLAY
 # ============================================
 
+
 async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle trade - unified menu for place order and view"""
     if "trade_params" not in context.user_data:
@@ -185,7 +193,9 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await show_trade_menu(update, context)
 
 
-async def handle_trade_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_refresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Handle trade refresh - clear cache and reload"""
     query = update.callback_query
     if query:
@@ -197,8 +207,12 @@ async def handle_trade_refresh(update: Update, context: ContextTypes.DEFAULT_TYP
     await handle_trade(update, context)
 
 
-def _build_trade_keyboard(params: dict, is_perpetual: bool = False,
-                          leverage: int = None, position_mode: str = None) -> list:
+def _build_trade_keyboard(
+    params: dict,
+    is_perpetual: bool = False,
+    leverage: int = None,
+    position_mode: str = None,
+) -> list:
     """Build the trade menu keyboard
 
     Layout:
@@ -210,51 +224,51 @@ def _build_trade_keyboard(params: dict, is_perpetual: bool = False,
     - Row 5 (spot): quote | execute
     - Row 6: orders | positions | close
     """
-    connector = params.get('connector', 'binance_perpetual')
+    connector = params.get("connector", "binance_perpetual")
 
     keyboard = [
         # Row 1: Connector (full width)
         [
             InlineKeyboardButton(
-                f"🔌 {connector}",
-                callback_data="cex:trade_set_connector"
+                f"🔌 {connector}", callback_data="cex:trade_set_connector"
             )
         ],
         # Row 2: Trading Pair | Side | Order Type
         [
             InlineKeyboardButton(
                 f"💱 {params.get('trading_pair', 'BTC-USDT')}",
-                callback_data="cex:trade_set_pair"
+                callback_data="cex:trade_set_pair",
             ),
             InlineKeyboardButton(
-                f"📈 {params.get('side', 'BUY')}",
-                callback_data="cex:trade_toggle_side"
+                f"📈 {params.get('side', 'BUY')}", callback_data="cex:trade_toggle_side"
             ),
             InlineKeyboardButton(
                 f"📋 {params.get('order_type', 'MARKET')}",
-                callback_data="cex:trade_toggle_type"
-            )
+                callback_data="cex:trade_toggle_type",
+            ),
         ],
     ]
 
     # Row 3: Amount | Position Action (perpetual only) | Price (LIMIT only)
     row3 = [
         InlineKeyboardButton(
-            f"💰 {params.get('amount', '0.5')}",
-            callback_data="cex:trade_set_amount"
+            f"💰 {params.get('amount', '0.5')}", callback_data="cex:trade_set_amount"
         ),
     ]
     # Only show position action for perpetual exchanges
     if is_perpetual:
-        row3.append(InlineKeyboardButton(
-            f"🎯 {params.get('position_mode', 'OPEN')}",
-            callback_data="cex:trade_toggle_position"
-        ))
-    if params.get('order_type') in ['LIMIT', 'LIMIT_MAKER']:
-        row3.append(InlineKeyboardButton(
-            f"💵 {params.get('price', '—')}",
-            callback_data="cex:trade_set_price"
-        ))
+        row3.append(
+            InlineKeyboardButton(
+                f"🎯 {params.get('position_mode', 'OPEN')}",
+                callback_data="cex:trade_toggle_position",
+            )
+        )
+    if params.get("order_type") in ["LIMIT", "LIMIT_MAKER"]:
+        row3.append(
+            InlineKeyboardButton(
+                f"💵 {params.get('price', '—')}", callback_data="cex:trade_set_price"
+            )
+        )
     keyboard.append(row3)
 
     # Row 5 (perpetual): Leverage | Pos Mode
@@ -262,49 +276,73 @@ def _build_trade_keyboard(params: dict, is_perpetual: bool = False,
     if is_perpetual:
         lev_display = f"{leverage}x" if leverage else f"{DEFAULT_LEVERAGE}x"
         mode_display = position_mode or "HEDGE"
-        keyboard.append([
-            InlineKeyboardButton(f"⚡ {lev_display}", callback_data="cex:trade_set_leverage"),
-            InlineKeyboardButton(f"🔄 {mode_display}", callback_data="cex:trade_toggle_pos_mode"),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("📊 Quote", callback_data="cex:trade_get_quote"),
-            InlineKeyboardButton("✅ Execute", callback_data="cex:trade_execute")
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"⚡ {lev_display}", callback_data="cex:trade_set_leverage"
+                ),
+                InlineKeyboardButton(
+                    f"🔄 {mode_display}", callback_data="cex:trade_toggle_pos_mode"
+                ),
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton("📊 Quote", callback_data="cex:trade_get_quote"),
+                InlineKeyboardButton("✅ Execute", callback_data="cex:trade_execute"),
+            ]
+        )
     else:
         # Row 5 (spot): Quote | Execute
-        keyboard.append([
-            InlineKeyboardButton("📊 Quote", callback_data="cex:trade_get_quote"),
-            InlineKeyboardButton("✅ Execute", callback_data="cex:trade_execute")
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton("📊 Quote", callback_data="cex:trade_get_quote"),
+                InlineKeyboardButton("✅ Execute", callback_data="cex:trade_execute"),
+            ]
+        )
 
     # Row 6: Navigation
-    keyboard.append([
-        InlineKeyboardButton("📋 Orders", callback_data="cex:search_orders"),
-        InlineKeyboardButton("📊 Positions", callback_data="cex:positions"),
-        InlineKeyboardButton("❌ Close", callback_data="cex:close")
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton("📋 Orders", callback_data="cex:search_orders"),
+            InlineKeyboardButton("📊 Positions", callback_data="cex:positions"),
+            InlineKeyboardButton("❌ Close", callback_data="cex:close"),
+        ]
+    )
 
     return keyboard
 
 
-def _build_trade_menu_text(user_data: dict, params: dict,
-                           balances: dict = None, positions: list = None,
-                           orders: list = None, trading_rules: dict = None,
-                           current_price: float = None, quote_data: dict = None,
-                           server_name: str = None, server_status: str = "online") -> str:
+def _build_trade_menu_text(
+    user_data: dict,
+    params: dict,
+    balances: dict = None,
+    positions: list = None,
+    orders: list = None,
+    trading_rules: dict = None,
+    current_price: float = None,
+    quote_data: dict = None,
+    server_name: str = None,
+    server_status: str = "online",
+) -> str:
     """Build the trade menu text content (swap.py style)"""
-    connector = params.get('connector', 'binance_perpetual')
-    trading_pair = params.get('trading_pair', 'BTC-USDT')
+    connector = params.get("connector", "binance_perpetual")
+    trading_pair = params.get("trading_pair", "BTC-USDT")
 
     # Parse trading pair
-    if '-' in trading_pair:
-        base_token, quote_token = trading_pair.split('-', 1)
+    if "-" in trading_pair:
+        base_token, quote_token = trading_pair.split("-", 1)
     else:
-        base_token, quote_token = trading_pair, 'USDT'
+        base_token, quote_token = trading_pair, "USDT"
 
     # Build header with server indicator
     if server_name:
-        status_emoji = {"online": "🟢", "offline": "🔴", "auth_error": "🟠", "error": "⚠️"}.get(server_status, "🟢")
+        status_emoji = {
+            "online": "🟢",
+            "offline": "🔴",
+            "auth_error": "🟠",
+            "error": "⚠️",
+        }.get(server_status, "🟢")
         help_text = f"📝 *Trade* \\| _Server: {escape_markdown_v2(server_name)} {status_emoji}_\n\n"
     else:
         help_text = r"📝 *Trade*" + "\n\n"
@@ -321,18 +359,26 @@ def _build_trade_menu_text(user_data: dict, params: dict,
             units = float(bal.get("units", 0))
             value = float(bal.get("value", 0))
             if token == base_token.upper() and (units > 0 or value > 0):
-                balances_found["base"] = {"units": units, "value": value, "token": token}
+                balances_found["base"] = {
+                    "units": units,
+                    "value": value,
+                    "token": token,
+                }
             elif token == quote_token.upper() and (units > 0 or value > 0):
-                balances_found["quote"] = {"units": units, "value": value, "token": token}
+                balances_found["quote"] = {
+                    "units": units,
+                    "value": value,
+                    "token": token,
+                }
 
         if balances_found:
             if "base" in balances_found:
                 b = balances_found["base"]
-                val_str = f"(${_format_number(b['value'])})" if b['value'] > 0 else ""
+                val_str = f"(${_format_number(b['value'])})" if b["value"] > 0 else ""
                 help_text += f"💰 `{escape_markdown_v2(b['token'])}`: `{escape_markdown_v2(_format_number(b['units']))}` {escape_markdown_v2(val_str)}\n"
             if "quote" in balances_found:
                 q = balances_found["quote"]
-                val_str = f"(${_format_number(q['value'])})" if q['value'] > 0 else ""
+                val_str = f"(${_format_number(q['value'])})" if q["value"] > 0 else ""
                 help_text += f"💵 `{escape_markdown_v2(q['token'])}`: `{escape_markdown_v2(_format_number(q['units']))}` {escape_markdown_v2(val_str)}\n"
         else:
             help_text += "_No balance found_\n".replace(".", "\\.")
@@ -372,7 +418,9 @@ def _build_trade_menu_text(user_data: dict, params: dict,
         if min_notional > 0:
             rules_line.append(f"Min notional: `${_format_number(min_notional)}`")
         if rules_line:
-            help_text += escape_markdown_v2(" | ".join(rules_line)).replace("\\`", "`") + "\n"
+            help_text += (
+                escape_markdown_v2(" | ".join(rules_line)).replace("\\`", "`") + "\n"
+            )
 
     # Quote data (buy/sell lines)
     if quote_data:
@@ -405,7 +453,7 @@ def _build_trade_menu_text(user_data: dict, params: dict,
 
     # Show positions (for perpetual)
     if positions and _is_perpetual_connector(connector):
-        conn_positions = [p for p in positions if p.get('connector_name') == connector]
+        conn_positions = [p for p in positions if p.get("connector_name") == connector]
         if conn_positions:
             help_text += r"━━━ Positions ━━━" + "\n"
             for pos in conn_positions[:3]:
@@ -425,7 +473,9 @@ def _build_trade_menu_text(user_data: dict, params: dict,
     else:
         help_text += r"⌨️ `pair side amt [type] [price]`" + "\n"
         help_text += f"Market: `{escape_markdown_v2(trading_pair)} BUY 0\\.5`\n"
-        help_text += f"Limit: `{escape_markdown_v2(trading_pair)} SELL 0\\.5 LIMIT 150`\n\n"
+        help_text += (
+            f"Limit: `{escape_markdown_v2(trading_pair)} SELL 0\\.5 LIMIT 150`\n\n"
+        )
 
     # Show recent orders (swap.py style)
     if orders:
@@ -437,9 +487,13 @@ def _build_trade_menu_text(user_data: dict, params: dict,
     return help_text
 
 
-async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                          send_new: bool = False, auto_fetch: bool = True,
-                          quote_data: dict = None) -> None:
+async def show_trade_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    send_new: bool = False,
+    auto_fetch: bool = True,
+    quote_data: dict = None,
+) -> None:
     """Display the unified trade menu with balances and data"""
     from config_manager import get_config_manager
     from handlers.config.user_preferences import get_active_server
@@ -452,21 +506,31 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Get current server name and status - with proper access control
     cm = get_config_manager()
-    user_id = context.user_data.get('_user_id')
+    user_id = context.user_data.get("_user_id")
 
     # Only use servers the user has access to
     if user_id:
         accessible_servers = cm.get_accessible_servers(user_id)
         all_servers = cm.list_servers()
-        enabled_accessible = [s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)]
+        enabled_accessible = [
+            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
+        ]
     else:
-        logger.warning("show_trade_menu called without user_id - cannot verify server access")
+        logger.warning(
+            "show_trade_menu called without user_id - cannot verify server access"
+        )
         all_servers = cm.list_servers()
-        enabled_accessible = [name for name, cfg in all_servers.items() if cfg.get("enabled", True)]
+        enabled_accessible = [
+            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
+        ]
 
     preferred = get_active_server(context.user_data)
     # Only use preferred if user has access to it
-    server_name = preferred if preferred and preferred in enabled_accessible else (enabled_accessible[0] if enabled_accessible else None)
+    server_name = (
+        preferred
+        if preferred and preferred in enabled_accessible
+        else (enabled_accessible[0] if enabled_accessible else None)
+    )
     server_status = "online"
     if server_name:
         try:
@@ -477,7 +541,11 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Try to get cached data
     balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
-    positions = get_cached(context.user_data, f"positions_{connector}", ttl=60) if is_perpetual else None
+    positions = (
+        get_cached(context.user_data, f"positions_{connector}", ttl=60)
+        if is_perpetual
+        else None
+    )
     orders = get_cached(context.user_data, "recent_orders", ttl=60)
     trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
     current_price = context.user_data.get("current_market_price")
@@ -490,13 +558,25 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     leverage = None
     position_mode = None
     if is_perpetual:
-        leverage = context.user_data.get(_get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE)
-        position_mode = context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE")
+        leverage = context.user_data.get(
+            _get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE
+        )
+        position_mode = context.user_data.get(
+            _get_position_mode_cache_key(connector), "HEDGE"
+        )
 
     # Build text and keyboard
     help_text = _build_trade_menu_text(
-        context.user_data, params, balances, positions, orders, trading_rules, current_price, quote_data,
-        server_name=server_name, server_status=server_status
+        context.user_data,
+        params,
+        balances,
+        positions,
+        orders,
+        trading_rules,
+        current_price,
+        quote_data,
+        server_name=server_name,
+        server_status=server_status,
     )
     keyboard = _build_trade_keyboard(params, is_perpetual, leverage, position_mode)
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -506,22 +586,16 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if send_new or not update.callback_query:
         if update.message:
             message = await update.message.reply_text(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         elif update.callback_query:
             message = await update.callback_query.message.reply_text(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
     else:
         try:
             await update.callback_query.message.edit_text(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
             message = update.callback_query.message
         except Exception as e:
@@ -538,7 +612,9 @@ async def show_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # Launch background data fetch if needed (when any key data is missing)
     needs_fetch = balances is None or quote_data is None or current_price is None
     if auto_fetch and message and needs_fetch:
-        asyncio.create_task(_fetch_trade_data_background(context, message, params, chat_id))
+        asyncio.create_task(
+            _fetch_trade_data_background(context, message, params, chat_id)
+        )
 
 
 async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> None:
@@ -554,26 +630,45 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
 
     # Get all cached data
     balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
-    positions = get_cached(context.user_data, f"positions_{connector}", ttl=60) if is_perpetual else None
+    positions = (
+        get_cached(context.user_data, f"positions_{connector}", ttl=60)
+        if is_perpetual
+        else None
+    )
     orders = get_cached(context.user_data, "recent_orders", ttl=60)
     trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
     current_price = context.user_data.get("current_market_price")
     quote_data = get_cached(context.user_data, "trade_quote", ttl=30)
 
-    leverage = context.user_data.get(_get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE) if is_perpetual else None
-    position_mode = context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE") if is_perpetual else None
+    leverage = (
+        context.user_data.get(
+            _get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE
+        )
+        if is_perpetual
+        else None
+    )
+    position_mode = (
+        context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE")
+        if is_perpetual
+        else None
+    )
 
     help_text = _build_trade_menu_text(
-        context.user_data, params, balances, positions, orders, trading_rules, current_price, quote_data
+        context.user_data,
+        params,
+        balances,
+        positions,
+        orders,
+        trading_rules,
+        current_price,
+        quote_data,
     )
     keyboard = _build_trade_keyboard(params, is_perpetual, leverage, position_mode)
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
         await message.edit_text(
-            help_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
     except Exception as e:
         if "not modified" not in str(e).lower():
@@ -581,10 +676,7 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
 
 
 async def _fetch_trade_data_background(
-    context: ContextTypes.DEFAULT_TYPE,
-    message,
-    params: dict,
-    chat_id: int = None
+    context: ContextTypes.DEFAULT_TYPE, message, params: dict, chat_id: int = None
 ) -> None:
     """Fetch trade data in background and update message when done (like swap.py)"""
     logger.info(f"Starting background fetch for trade data...")
@@ -604,7 +696,9 @@ async def _fetch_trade_data_background(
         try:
             # Check if force refresh is needed (e.g., after trade execution)
             force_refresh = context.user_data.pop("_force_cex_balance_refresh", False)
-            return await get_cex_balances(context.user_data, client, account, refresh=force_refresh)
+            return await get_cex_balances(
+                context.user_data, client, account, refresh=force_refresh
+            )
         except Exception as e:
             logger.warning(f"Could not fetch balances: {e}")
             # Cache empty dict so display shows "No balance found" instead of "Loading..."
@@ -614,8 +708,7 @@ async def _fetch_trade_data_background(
     async def fetch_price_safe():
         try:
             prices = await client.market_data.get_prices(
-                connector_name=connector,
-                trading_pairs=trading_pair
+                connector_name=connector, trading_pairs=trading_pair
             )
             price = prices["prices"].get(trading_pair)
             if price:
@@ -649,8 +742,7 @@ async def _fetch_trade_data_background(
             # If amount is in USD, convert to base token volume
             if "$" in str(amount):
                 prices = await client.market_data.get_prices(
-                    connector_name=connector,
-                    trading_pairs=trading_pair
+                    connector_name=connector, trading_pairs=trading_pair
                 )
                 current_price = prices["prices"].get(trading_pair, 1)
                 volume = volume / current_price
@@ -662,15 +754,15 @@ async def _fetch_trade_data_background(
                         connector_name=connector,
                         trading_pair=trading_pair,
                         volume=volume,
-                        is_buy=is_buy
+                        is_buy=is_buy,
                     )
                     if isinstance(result, dict):
                         price = (
-                            result.get("result_price") or
-                            result.get("price") or
-                            result.get("average_price") or
-                            result.get("data", {}).get("price") or
-                            result.get("data", {}).get("result_price")
+                            result.get("result_price")
+                            or result.get("price")
+                            or result.get("average_price")
+                            or result.get("data", {}).get("price")
+                            or result.get("data", {}).get("result_price")
                         )
                         return float(price) if price else None
                     return None
@@ -678,16 +770,14 @@ async def _fetch_trade_data_background(
                     return None
 
             buy_price, sell_price = await asyncio.gather(
-                get_quote(True),
-                get_quote(False)
+                get_quote(True), get_quote(False)
             )
 
             # Fallback to mid price if quotes failed
             if buy_price is None and sell_price is None:
                 try:
                     prices = await client.market_data.get_prices(
-                        connector_name=connector,
-                        trading_pairs=trading_pair
+                        connector_name=connector, trading_pairs=trading_pair
                     )
                     mid_price = prices["prices"].get(trading_pair)
                     if mid_price:
@@ -719,8 +809,7 @@ async def _fetch_trade_data_background(
     async def fetch_perpetual_settings_safe():
         try:
             mode_result = await client.trading.get_position_mode(
-                account_name=account,
-                connector_name=connector
+                account_name=account, connector_name=connector
             )
             position_mode = mode_result.get("position_mode", "HEDGE")
             context.user_data[_get_position_mode_cache_key(connector)] = position_mode
@@ -752,10 +841,12 @@ async def _fetch_trade_data_background(
     ]
 
     if is_perpetual:
-        tasks.extend([
-            fetch_positions_safe(),
-            fetch_perpetual_settings_safe(),
-        ])
+        tasks.extend(
+            [
+                fetch_positions_safe(),
+                fetch_perpetual_settings_safe(),
+            ]
+        )
 
     # Wait for all to complete
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -769,7 +860,10 @@ async def _fetch_trade_data_background(
 # QUOTE HANDLER
 # ============================================
 
-async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_trade_get_quote(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Get BUY/SELL quotes using get_price_for_volume"""
     params = context.user_data.get("trade_params", {})
     connector = params.get("connector")
@@ -778,7 +872,9 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
 
     if not all([connector, trading_pair]):
         error_message = format_error_message("Missing connector or trading pair")
-        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(
+            error_message, parse_mode="MarkdownV2"
+        )
         return
 
     # Show loading immediately with current menu data
@@ -796,8 +892,7 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
         # If amount is in USD, we need to convert to base token volume
         if "$" in str(amount):
             prices = await client.market_data.get_prices(
-                connector_name=connector,
-                trading_pairs=trading_pair
+                connector_name=connector, trading_pairs=trading_pair
             )
             current_price = prices["prices"].get(trading_pair, 1)
             volume = volume / current_price
@@ -809,16 +904,18 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
                     connector_name=connector,
                     trading_pair=trading_pair,
                     volume=volume,
-                    is_buy=is_buy
+                    is_buy=is_buy,
                 )
-                logger.debug(f"Quote result for {'BUY' if is_buy else 'SELL'}: {result}")
+                logger.debug(
+                    f"Quote result for {'BUY' if is_buy else 'SELL'}: {result}"
+                )
                 if isinstance(result, dict):
                     price = (
-                        result.get("result_price") or
-                        result.get("price") or
-                        result.get("average_price") or
-                        result.get("data", {}).get("price") or
-                        result.get("data", {}).get("result_price")
+                        result.get("result_price")
+                        or result.get("price")
+                        or result.get("average_price")
+                        or result.get("data", {}).get("price")
+                        or result.get("data", {}).get("result_price")
                     )
                     return float(price) if price else None
                 return None
@@ -827,8 +924,7 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
                 return None
 
         buy_price, sell_price = await asyncio.gather(
-            get_quote_safe(True),
-            get_quote_safe(False)
+            get_quote_safe(True), get_quote_safe(False)
         )
 
         # If quotes failed, try using get_prices as fallback
@@ -836,8 +932,7 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
             logger.info("get_price_for_volume failed, trying get_prices fallback")
             try:
                 prices = await client.market_data.get_prices(
-                    connector_name=connector,
-                    trading_pairs=trading_pair
+                    connector_name=connector, trading_pairs=trading_pair
                 )
                 mid_price = prices["prices"].get(trading_pair)
                 if mid_price:
@@ -873,6 +968,7 @@ async def handle_trade_get_quote(update: Update, context: ContextTypes.DEFAULT_T
 # PARAMETER HANDLERS
 # ============================================
 
+
 def _invalidate_trade_cache(user_data: dict) -> None:
     """Invalidate cached price/quote when params change"""
     user_data.pop("current_market_price", None)
@@ -882,7 +978,9 @@ def _invalidate_trade_cache(user_data: dict) -> None:
         del cache["trade_quote"]
 
 
-async def handle_trade_toggle_side(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_toggle_side(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Toggle between BUY and SELL"""
     params = context.user_data.get("trade_params", {})
     current_side = params.get("side", "BUY")
@@ -890,7 +988,9 @@ async def handle_trade_toggle_side(update: Update, context: ContextTypes.DEFAULT
     await show_trade_menu(update, context, auto_fetch=False)
 
 
-async def handle_trade_toggle_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_toggle_type(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Toggle between MARKET, LIMIT, LIMIT_MAKER"""
     params = context.user_data.get("trade_params", {})
     current_type = params.get("order_type", "MARKET")
@@ -911,7 +1011,9 @@ async def handle_trade_toggle_type(update: Update, context: ContextTypes.DEFAULT
     await show_trade_menu(update, context, auto_fetch=False)
 
 
-async def handle_trade_toggle_position(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_toggle_position(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Toggle between OPEN and CLOSE"""
     params = context.user_data.get("trade_params", {})
     current_mode = params.get("position_mode", "OPEN")
@@ -919,7 +1021,9 @@ async def handle_trade_toggle_position(update: Update, context: ContextTypes.DEF
     await show_trade_menu(update, context, auto_fetch=False)
 
 
-async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_set_connector(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Show available CEX connectors and DEX networks for selection"""
     from config_manager import get_config_manager
     from handlers.config.user_preferences import get_active_server
@@ -929,19 +1033,27 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
 
     # Get server name for cache keying - with proper access control
     cm = get_config_manager()
-    user_id = context.user_data.get('_user_id')
+    user_id = context.user_data.get("_user_id")
 
     # Only use servers the user has access to
     if user_id:
         accessible_servers = cm.get_accessible_servers(user_id)
         all_servers = cm.list_servers()
-        enabled_accessible = [s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)]
+        enabled_accessible = [
+            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
+        ]
     else:
         all_servers = cm.list_servers()
-        enabled_accessible = [name for name, cfg in all_servers.items() if cfg.get("enabled", True)]
+        enabled_accessible = [
+            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
+        ]
 
     preferred = get_active_server(context.user_data)
-    server_name = preferred if preferred and preferred in enabled_accessible else (enabled_accessible[0] if enabled_accessible else "default")
+    server_name = (
+        preferred
+        if preferred and preferred in enabled_accessible
+        else (enabled_accessible[0] if enabled_accessible else "default")
+    )
 
     try:
         client = await get_client(chat_id, context=context)
@@ -951,7 +1063,9 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
 
         async def get_cex_connectors_list():
             try:
-                return await get_available_cex_connectors(context.user_data, client, server_name=server_name)
+                return await get_available_cex_connectors(
+                    context.user_data, client, server_name=server_name
+                )
             except Exception as e:
                 logger.warning(f"Could not fetch CEX connectors: {e}")
                 return []
@@ -959,7 +1073,7 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
         async def get_dex_networks():
             try:
                 response = await client.gateway.list_networks()
-                all_networks = response.get('networks', [])
+                all_networks = response.get("networks", [])
 
                 # Filter to only show networks enabled in user's wallet configurations
                 enabled_networks = get_all_enabled_networks(context.user_data)
@@ -971,7 +1085,11 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
                 filtered = []
                 for network_item in all_networks:
                     if isinstance(network_item, dict):
-                        network_id = network_item.get('network_id') or network_item.get('id') or str(network_item)
+                        network_id = (
+                            network_item.get("network_id")
+                            or network_item.get("id")
+                            or str(network_item)
+                        )
                     else:
                         network_id = str(network_item)
 
@@ -984,19 +1102,21 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
                 return []
 
         cex_connectors, dex_networks = await asyncio.gather(
-            get_cex_connectors_list(),
-            get_dex_networks()
+            get_cex_connectors_list(), get_dex_networks()
         )
 
         # CEX section
         if cex_connectors:
-            keyboard.append([InlineKeyboardButton("━━ CEX ━━", callback_data="cex:noop")])
+            keyboard.append(
+                [InlineKeyboardButton("━━ CEX ━━", callback_data="cex:noop")]
+            )
             row = []
             for connector in cex_connectors:
-                row.append(InlineKeyboardButton(
-                    connector,
-                    callback_data=f"cex:trade_connector_{connector}"
-                ))
+                row.append(
+                    InlineKeyboardButton(
+                        connector, callback_data=f"cex:trade_connector_{connector}"
+                    )
+                )
                 if len(row) == 2:
                     keyboard.append(row)
                     row = []
@@ -1005,17 +1125,24 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
 
         # DEX section
         if dex_networks:
-            keyboard.append([InlineKeyboardButton("━━ DEX ━━", callback_data="cex:noop")])
+            keyboard.append(
+                [InlineKeyboardButton("━━ DEX ━━", callback_data="cex:noop")]
+            )
             row = []
             for network_item in dex_networks:
                 if isinstance(network_item, dict):
-                    network_id = network_item.get('network_id') or network_item.get('id') or str(network_item)
+                    network_id = (
+                        network_item.get("network_id")
+                        or network_item.get("id")
+                        or str(network_item)
+                    )
                 else:
                     network_id = str(network_item)
-                row.append(InlineKeyboardButton(
-                    network_id,
-                    callback_data=f"cex:switch_dex_{network_id}"
-                ))
+                row.append(
+                    InlineKeyboardButton(
+                        network_id, callback_data=f"cex:switch_dex_{network_id}"
+                    )
+                )
                 if len(row) == 2:
                     keyboard.append(row)
                     row = []
@@ -1023,7 +1150,9 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
                 keyboard.append(row)
 
         if not cex_connectors and not dex_networks:
-            help_text = r"🔄 *Select Connector*" + "\n\n" + r"_No connectors available\._"
+            help_text = (
+                r"🔄 *Select Connector*" + "\n\n" + r"_No connectors available\._"
+            )
         else:
             help_text = r"🔄 *Select Connector*"
 
@@ -1035,13 +1164,13 @@ async def handle_trade_set_connector(update: Update, context: ContextTypes.DEFAU
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.callback_query.message.edit_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_trade_connector_select(update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str) -> None:
+async def handle_trade_connector_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector_name: str
+) -> None:
     """Handle connector selection"""
     params = context.user_data.get("trade_params", {})
     params["connector"] = connector_name
@@ -1056,7 +1185,9 @@ async def handle_trade_connector_select(update: Update, context: ContextTypes.DE
     await show_trade_menu(update, context)
 
 
-async def handle_trade_set_pair(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_set_pair(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt for trading pair input - edits message"""
     params = context.user_data.get("trade_params", {})
     help_text = (
@@ -1074,13 +1205,13 @@ async def handle_trade_set_pair(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["cex_state"] = "trade_set_pair"
 
     await update.callback_query.message.edit_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_trade_set_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_set_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt for amount input - edits message"""
     help_text = (
         r"💰 *Set Amount*" + "\n\n"
@@ -1096,13 +1227,13 @@ async def handle_trade_set_amount(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["cex_state"] = "trade_set_amount"
 
     await update.callback_query.message.edit_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_trade_set_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_set_price(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt for price input - edits message"""
     help_text = (
         r"💵 *Set Price*" + "\n\n"
@@ -1118,9 +1249,7 @@ async def handle_trade_set_price(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["cex_state"] = "trade_set_price"
 
     await update.callback_query.message.edit_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
@@ -1128,13 +1257,18 @@ async def handle_trade_set_price(update: Update, context: ContextTypes.DEFAULT_T
 # LEVERAGE & POSITION MODE (PERPETUAL ONLY)
 # ============================================
 
-async def handle_trade_set_leverage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_trade_set_leverage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Prompt for leverage input - edits message"""
     params = context.user_data.get("trade_params", {})
     connector = params.get("connector", "binance_perpetual")
     trading_pair = params.get("trading_pair", "BTC-USDT")
 
-    current_lev = context.user_data.get(_get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE)
+    current_lev = context.user_data.get(
+        _get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE
+    )
 
     help_text = (
         r"⚡ *Set Leverage*" + "\n\n"
@@ -1152,13 +1286,13 @@ async def handle_trade_set_leverage(update: Update, context: ContextTypes.DEFAUL
     context.user_data["cex_state"] = "trade_set_leverage"
 
     await update.callback_query.message.edit_text(
-        help_text,
-        parse_mode="MarkdownV2",
-        reply_markup=reply_markup
+        help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
 
 
-async def handle_trade_toggle_pos_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_trade_toggle_pos_mode(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Toggle position mode between HEDGE and ONEWAY directly"""
     params = context.user_data.get("trade_params", {})
     connector = params.get("connector", "binance_perpetual")
@@ -1169,14 +1303,14 @@ async def handle_trade_toggle_pos_mode(update: Update, context: ContextTypes.DEF
         client = await get_client(chat_id, context=context)
 
         # Get current mode
-        current_mode = context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE")
+        current_mode = context.user_data.get(
+            _get_position_mode_cache_key(connector), "HEDGE"
+        )
         new_mode = "ONEWAY" if current_mode == "HEDGE" else "HEDGE"
 
         # Set new mode on exchange
         await client.trading.set_position_mode(
-            account_name=account,
-            connector_name=connector,
-            position_mode=new_mode
+            account_name=account, connector_name=connector, position_mode=new_mode
         )
 
         # Update cache
@@ -1188,14 +1322,19 @@ async def handle_trade_toggle_pos_mode(update: Update, context: ContextTypes.DEF
     except Exception as e:
         logger.error(f"Error toggling position mode: {e}", exc_info=True)
         error_message = format_error_message(f"Failed: {str(e)}")
-        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(
+            error_message, parse_mode="MarkdownV2"
+        )
 
 
 # ============================================
 # EXECUTE
 # ============================================
 
-async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_trade_execute(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Execute the trade with current parameters"""
     try:
         params = context.user_data.get("trade_params", {})
@@ -1223,8 +1362,7 @@ async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         if is_quote_amount:
             usd_value = float(str(amount).replace("$", ""))
             prices = await client.market_data.get_prices(
-                connector_name=connector,
-                trading_pairs=trading_pair
+                connector_name=connector, trading_pairs=trading_pair
             )
             current_price = prices["prices"][trading_pair]
             amount_float = usd_value / current_price
@@ -1238,7 +1376,11 @@ async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYP
             trade_type=side,
             amount=amount_float,
             order_type=order_type,
-            price=float(price) if price and order_type in ["LIMIT", "LIMIT_MAKER"] else None,
+            price=(
+                float(price)
+                if price and order_type in ["LIMIT", "LIMIT_MAKER"]
+                else None
+            ),
             position_action=position_action,
         )
 
@@ -1247,15 +1389,18 @@ async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["_force_cex_balance_refresh"] = True
 
         # Save for quick repeat
-        set_clob_last_order(context.user_data, {
-            "connector": connector,
-            "trading_pair": trading_pair,
-            "side": side,
-            "order_type": order_type,
-            "position_mode": position_action,
-            "amount": amount,
-            "price": price if price else "—",
-        })
+        set_clob_last_order(
+            context.user_data,
+            {
+                "connector": connector,
+                "trading_pair": trading_pair,
+                "side": side,
+                "order_type": order_type,
+                "position_mode": position_action,
+                "amount": amount,
+                "price": price if price else "—",
+            },
+        )
 
         order_info = escape_markdown_v2(
             f"✅ Order placed!\n\n"
@@ -1271,26 +1416,31 @@ async def handle_trade_execute(update: Update, context: ContextTypes.DEFAULT_TYP
         if "order_id" in result:
             order_info += escape_markdown_v2(f"\nOrder ID: {result['order_id']}")
 
-        keyboard = [[InlineKeyboardButton("« Back to Trade", callback_data="cex:trade")]]
+        keyboard = [
+            [InlineKeyboardButton("« Back to Trade", callback_data="cex:trade")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
-            order_info,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            order_info, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
     except Exception as e:
         logger.error(f"Error executing trade: {e}", exc_info=True)
         error_message = format_error_message(f"Failed: {str(e)}")
-        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(
+            error_message, parse_mode="MarkdownV2"
+        )
 
 
 # ============================================
 # TEXT INPUT PROCESSORS
 # ============================================
 
-async def _update_trade_menu_after_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def _update_trade_menu_after_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Update the trade menu message after text input"""
     # Delete user's input message
     try:
@@ -1311,20 +1461,37 @@ async def _update_trade_menu_after_input(update: Update, context: ContextTypes.D
 
         # Get cached data
         balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
-        positions = get_cached(context.user_data, f"positions_{connector}", ttl=60) if is_perpetual else None
+        positions = (
+            get_cached(context.user_data, f"positions_{connector}", ttl=60)
+            if is_perpetual
+            else None
+        )
         orders = get_cached(context.user_data, "recent_orders", ttl=60)
-        trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
+        trading_rules = get_cached(
+            context.user_data, f"trading_rules_{connector}", ttl=300
+        )
         current_price = context.user_data.get("current_market_price")
         quote_data = get_cached(context.user_data, "trade_quote", ttl=30)
 
         leverage = None
         position_mode = None
         if is_perpetual:
-            leverage = context.user_data.get(_get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE)
-            position_mode = context.user_data.get(_get_position_mode_cache_key(connector), "HEDGE")
+            leverage = context.user_data.get(
+                _get_leverage_cache_key(connector, trading_pair), DEFAULT_LEVERAGE
+            )
+            position_mode = context.user_data.get(
+                _get_position_mode_cache_key(connector), "HEDGE"
+            )
 
         help_text = _build_trade_menu_text(
-            context.user_data, params, balances, positions, orders, trading_rules, current_price, quote_data
+            context.user_data,
+            params,
+            balances,
+            positions,
+            orders,
+            trading_rules,
+            current_price,
+            quote_data,
         )
         keyboard = _build_trade_keyboard(params, is_perpetual, leverage, position_mode)
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1335,7 +1502,7 @@ async def _update_trade_menu_after_input(update: Update, context: ContextTypes.D
                 message_id=msg_id,
                 text=help_text,
                 parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
         except Exception as e:
             logger.debug(f"Could not update trade menu: {e}")
@@ -1346,9 +1513,7 @@ async def _update_trade_menu_after_input(update: Update, context: ContextTypes.D
 
 
 async def process_trade(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process trade from text input: pair side amount [type] [price] [position]
 
@@ -1376,7 +1541,9 @@ async def process_trade(
         if side not in ("BUY", "SELL"):
             raise ValueError(f"Invalid side: {side}. Use BUY or SELL")
         if order_type not in ("MARKET", "LIMIT", "LIMIT_MAKER"):
-            raise ValueError(f"Invalid type: {order_type}. Use MARKET, LIMIT, or LIMIT_MAKER")
+            raise ValueError(
+                f"Invalid type: {order_type}. Use MARKET, LIMIT, or LIMIT_MAKER"
+            )
         if order_type in ("LIMIT", "LIMIT_MAKER") and not price:
             raise ValueError("Price required for LIMIT orders")
 
@@ -1394,8 +1561,7 @@ async def process_trade(
         if is_quote_amount:
             usd_value = float(str(amount).replace("$", ""))
             prices = await client.market_data.get_prices(
-                connector_name=connector,
-                trading_pairs=trading_pair
+                connector_name=connector, trading_pairs=trading_pair
             )
             current_price = prices["prices"][trading_pair]
             amount_float = usd_value / current_price
@@ -1410,7 +1576,11 @@ async def process_trade(
             trade_type=side,
             amount=amount_float,
             order_type=order_type,
-            price=float(price) if price and order_type in ["LIMIT", "LIMIT_MAKER"] else None,
+            price=(
+                float(price)
+                if price and order_type in ["LIMIT", "LIMIT_MAKER"]
+                else None
+            ),
             position_action=position_action,
         )
 
@@ -1430,15 +1600,18 @@ async def process_trade(
         }
 
         # Save for quick repeat
-        set_clob_last_order(context.user_data, {
-            "connector": connector,
-            "trading_pair": trading_pair,
-            "side": side,
-            "order_type": order_type,
-            "position_mode": position_action,
-            "amount": amount,
-            "price": price if price else "—",
-        })
+        set_clob_last_order(
+            context.user_data,
+            {
+                "connector": connector,
+                "trading_pair": trading_pair,
+                "side": side,
+                "order_type": order_type,
+                "position_mode": position_action,
+                "amount": amount,
+                "price": price if price else "—",
+            },
+        )
 
         # Build success message
         order_info = escape_markdown_v2(
@@ -1455,7 +1628,9 @@ async def process_trade(
         if "order_id" in result:
             order_info += escape_markdown_v2(f"\nOrder ID: {result['order_id']}")
 
-        keyboard = [[InlineKeyboardButton("« Back to Trade", callback_data="cex:trade")]]
+        keyboard = [
+            [InlineKeyboardButton("« Back to Trade", callback_data="cex:trade")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Update the trade menu message with success
@@ -1469,20 +1644,16 @@ async def process_trade(
                     message_id=msg_id,
                     text=order_info,
                     parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    reply_markup=reply_markup,
                 )
             except Exception as e:
                 logger.debug(f"Could not update trade menu: {e}")
                 await update.effective_chat.send_message(
-                    order_info,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    order_info, parse_mode="MarkdownV2", reply_markup=reply_markup
                 )
         else:
             await update.effective_chat.send_message(
-                order_info,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                order_info, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
 
         context.user_data["cex_state"] = "trade"
@@ -1494,9 +1665,7 @@ async def process_trade(
 
 
 async def process_trade_set_pair(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process trading pair input with validation against available markets"""
     try:
@@ -1508,15 +1677,21 @@ async def process_trade_set_pair(
         client = await get_client(chat_id, context=context)
 
         # Validate trading pair exists on the connector
-        is_valid, error_msg, suggestions = await validate_trading_pair(
+        is_valid, error_msg, suggestions, correct_pair = await validate_trading_pair(
             context.user_data, client, connector, pair_input
         )
 
         if is_valid:
-            # Get correctly formatted pair from trading rules
-            trading_rules = await get_trading_rules(context.user_data, client, connector)
-            correct_pair = get_correct_pair_format(trading_rules, pair_input)
-            params["trading_pair"] = correct_pair if correct_pair else pair_input
+            # Use the correct pair format returned by validation
+            if correct_pair:
+                params["trading_pair"] = correct_pair
+            else:
+                # Fallback: Get correctly formatted pair from trading rules
+                trading_rules = await get_trading_rules(
+                    context.user_data, client, connector
+                )
+                fallback_pair = get_correct_pair_format(trading_rules, pair_input)
+                params["trading_pair"] = fallback_pair if fallback_pair else pair_input
 
             _invalidate_trade_cache(context.user_data)
             context.user_data["cex_state"] = "trade"
@@ -1524,7 +1699,9 @@ async def process_trade_set_pair(
             await _update_trade_menu_after_input(update, context)
         else:
             # Show error with suggestions
-            await _show_pair_suggestions(update, context, pair_input, error_msg, suggestions)
+            await _show_pair_suggestions(
+                update, context, pair_input, error_msg, suggestions
+            )
 
     except Exception as e:
         logger.error(f"Error processing trading pair: {e}", exc_info=True)
@@ -1537,7 +1714,7 @@ async def _show_pair_suggestions(
     context: ContextTypes.DEFAULT_TYPE,
     input_pair: str,
     error_msg: str,
-    suggestions: list
+    suggestions: list,
 ) -> None:
     """Show trading pair suggestions when validation fails"""
     # Delete user's input message
@@ -1557,10 +1734,13 @@ async def _show_pair_suggestions(
     # Build keyboard with suggestions
     keyboard = []
     for pair in suggestions:
-        keyboard.append([InlineKeyboardButton(
-            f"📈 {pair}",
-            callback_data=f"cex:trade_pair_select_{pair}"
-        )])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"📈 {pair}", callback_data=f"cex:trade_pair_select_{pair}"
+                )
+            ]
+        )
 
     keyboard.append([InlineKeyboardButton("« Back", callback_data="cex:trade")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1576,27 +1756,21 @@ async def _show_pair_suggestions(
                 message_id=msg_id,
                 text=help_text,
                 parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
             )
         except Exception as e:
             logger.debug(f"Could not update trade menu: {e}")
             await update.effective_chat.send_message(
-                help_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
     else:
         await update.effective_chat.send_message(
-            help_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
 
 async def handle_trade_pair_select(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    trading_pair: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str
 ) -> None:
     """Handle selection of a suggested trading pair"""
     params = context.user_data.get("trade_params", {})
@@ -1609,9 +1783,7 @@ async def handle_trade_pair_select(
 
 
 async def process_trade_set_amount(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process amount input"""
     try:
@@ -1629,9 +1801,7 @@ async def process_trade_set_amount(
 
 
 async def process_trade_set_price(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process price input"""
     try:
@@ -1648,13 +1818,11 @@ async def process_trade_set_price(
 
 
 async def process_trade_set_leverage(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    user_input: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
     """Process leverage input - just a number"""
     try:
-        leverage = int(user_input.strip().replace('x', '').replace('X', ''))
+        leverage = int(user_input.strip().replace("x", "").replace("X", ""))
 
         if leverage <= 0:
             raise ValueError("Leverage must be positive")
@@ -1692,6 +1860,7 @@ async def process_trade_set_leverage(
 # ============================================
 # CLOSE HANDLER
 # ============================================
+
 
 async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Close the trade interface"""

@@ -3,16 +3,19 @@ CEX Trading - Orders search functionality
 """
 
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import format_error_message, escape_markdown_v2
 from handlers.config.user_preferences import get_clob_account
+from utils.telegram_formatters import escape_markdown_v2, format_error_message
 
 logger = logging.getLogger(__name__)
 
 
-async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, status: str = "ALL") -> None:
+async def handle_search_orders(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, status: str = "ALL"
+) -> None:
     """Handle search orders operation
 
     Status options:
@@ -21,8 +24,9 @@ async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     - CANCELLED: Only cancelled orders
     """
     try:
-        from config_manager import get_client
         import asyncio
+
+        from config_manager import get_client
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
@@ -54,15 +58,14 @@ async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYP
 
             # Build set of truly open order IDs for status correction
             open_order_ids = {
-                o.get('client_order_id') or o.get('order_id')
-                for o in open_orders
+                o.get("client_order_id") or o.get("order_id") for o in open_orders
             }
 
             # Correct stale "OPEN" status in all_orders based on actual open orders
             for order in all_orders:
-                order_id = order.get('client_order_id') or order.get('order_id')
-                if order.get('status') == 'OPEN' and order_id not in open_order_ids:
-                    order['status'] = 'FILLED'  # Most likely filled
+                order_id = order.get("client_order_id") or order.get("order_id")
+                if order.get("status") == "OPEN" and order_id not in open_order_ids:
+                    order["status"] = "FILLED"  # Most likely filled
 
             # Build message with sections
             sections = []
@@ -70,23 +73,35 @@ async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             # Open orders section with cancel buttons
             if open_orders:
                 from utils.telegram_formatters import format_orders_table
+
                 open_table = format_orders_table(open_orders[:10])
-                sections.append(f"*🟢 Open Orders* \\({len(open_orders)}\\)\n```\n{open_table}\n```")
+                sections.append(
+                    f"*🟢 Open Orders* \\({len(open_orders)}\\)\n```\n{open_table}\n```"
+                )
 
                 # Cancel buttons for open orders
                 for i, order in enumerate(open_orders[:3]):
-                    pair = order.get('trading_pair', 'N/A')
-                    side = order.get('trade_type', order.get('side', 'N/A'))
+                    pair = order.get("trading_pair", "N/A")
+                    side = order.get("trade_type", order.get("side", "N/A"))
                     button_label = f"❌ Cancel {pair} {side}"
-                    keyboard.append([InlineKeyboardButton(button_label, callback_data=f"cex:cancel_order:{i}")])
+                    keyboard.append(
+                        [
+                            InlineKeyboardButton(
+                                button_label, callback_data=f"cex:cancel_order:{i}"
+                            )
+                        ]
+                    )
             else:
                 sections.append("*🟢 Open Orders*\n_No open orders_")
 
             # All orders section
             if all_orders:
                 from utils.telegram_formatters import format_orders_table
+
                 all_table = format_orders_table(all_orders)
-                sections.append(f"\n*📋 All Orders* \\({len(all_orders)}\\)\n```\n{all_table}\n```")
+                sections.append(
+                    f"\n*📋 All Orders* \\({len(all_orders)}\\)\n```\n{all_table}\n```"
+                )
 
             message = "\n".join(sections)
 
@@ -96,61 +111,76 @@ async def handle_search_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             orders = result.get("data", [])
             context.user_data["current_orders"] = []
             status_label = f"{status.title()} Orders"
-            emoji = "✅" if status == "FILLED" else "❌" if status == "CANCELLED" else "📋"
+            emoji = (
+                "✅" if status == "FILLED" else "❌" if status == "CANCELLED" else "📋"
+            )
 
             if not orders:
-                message = f"{emoji} *{escape_markdown_v2(status_label)}*\n\n_No orders found_"
+                message = (
+                    f"{emoji} *{escape_markdown_v2(status_label)}*\n\n_No orders found_"
+                )
             else:
                 from utils.telegram_formatters import format_orders_table
+
                 orders_table = format_orders_table(orders)
                 message = f"{emoji} *{escape_markdown_v2(status_label)}* \\({len(orders)}\\)\n\n```\n{orders_table}\n```"
 
         # Filter buttons - highlight current filter
         def btn(label, action, current):
             prefix = "• " if current else ""
-            return InlineKeyboardButton(f"{prefix}{label}", callback_data=f"cex:{action}")
+            return InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"cex:{action}"
+            )
 
-        keyboard.append([
-            btn("All", "search_orders", status == "ALL"),
-            btn("Filled", "search_filled", status == "FILLED"),
-            btn("Cancelled", "search_cancelled", status == "CANCELLED"),
-        ])
+        keyboard.append(
+            [
+                btn("All", "search_orders", status == "ALL"),
+                btn("Filled", "search_filled", status == "FILLED"),
+                btn("Cancelled", "search_cancelled", status == "CANCELLED"),
+            ]
+        )
         keyboard.append([InlineKeyboardButton("« Back", callback_data="cex:trade")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
-            message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
     except Exception as e:
         logger.error(f"Error searching orders: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to search orders: {str(e)}")
-        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(
+            error_message, parse_mode="MarkdownV2"
+        )
 
 
-async def handle_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE, order_index: int) -> None:
+async def handle_cancel_order(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, order_index: int
+) -> None:
     """Handle cancel order confirmation"""
     try:
         orders = context.user_data.get("current_orders", [])
 
         if order_index >= len(orders):
-            error_message = format_error_message("Order not found. Please refresh orders.")
-            await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+            error_message = format_error_message(
+                "Order not found. Please refresh orders."
+            )
+            await update.callback_query.message.edit_text(
+                error_message, parse_mode="MarkdownV2"
+            )
             return
 
         order = orders[order_index]
 
         # Extract order details
-        connector_name = order.get('connector_name', 'N/A')
-        trading_pair = order.get('trading_pair', 'N/A')
-        client_order_id = order.get('client_order_id') or order.get('order_id', 'N/A')
-        side = order.get('trade_type', order.get('side', 'N/A'))
-        order_type = order.get('order_type', 'N/A')
-        amount = order.get('amount', 'N/A')
-        price = order.get('price', 'N/A')
+        connector_name = order.get("connector_name", "N/A")
+        trading_pair = order.get("trading_pair", "N/A")
+        client_order_id = order.get("client_order_id") or order.get("order_id", "N/A")
+        side = order.get("trade_type", order.get("side", "N/A"))
+        order_type = order.get("order_type", "N/A")
+        amount = order.get("amount", "N/A")
+        price = order.get("price", "N/A")
 
         confirm_message = (
             r"⚠️ *Confirm Cancel Order*" + "\n\n"
@@ -166,25 +196,30 @@ async def handle_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         keyboard = [
             [
-                InlineKeyboardButton("✅ Confirm Cancel", callback_data=f"cex:confirm_cancel:{order_index}"),
-                InlineKeyboardButton("❌ Back", callback_data="cex:search_orders")
+                InlineKeyboardButton(
+                    "✅ Confirm Cancel",
+                    callback_data=f"cex:confirm_cancel:{order_index}",
+                ),
+                InlineKeyboardButton("❌ Back", callback_data="cex:search_orders"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
-            confirm_message,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            confirm_message, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
     except Exception as e:
         logger.error(f"Error preparing to cancel order: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to cancel order: {str(e)}")
-        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(
+            error_message, parse_mode="MarkdownV2"
+        )
 
 
-async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE, order_index: int) -> None:
+async def handle_confirm_cancel_order(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, order_index: int
+) -> None:
     """Confirm and execute order cancellation"""
     from ._shared import invalidate_cache
 
@@ -192,17 +227,21 @@ async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFA
         orders = context.user_data.get("current_orders", [])
 
         if order_index >= len(orders):
-            error_message = format_error_message("Order not found. Please refresh orders.")
-            await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+            error_message = format_error_message(
+                "Order not found. Please refresh orders."
+            )
+            await update.callback_query.message.edit_text(
+                error_message, parse_mode="MarkdownV2"
+            )
             return
 
         order = orders[order_index]
         account = get_clob_account(context.user_data)
 
         # Extract order details
-        connector_name = order.get('connector_name', 'N/A')
-        trading_pair = order.get('trading_pair', 'N/A')
-        client_order_id = order.get('client_order_id') or order.get('order_id')
+        connector_name = order.get("connector_name", "N/A")
+        trading_pair = order.get("trading_pair", "N/A")
+        client_order_id = order.get("client_order_id") or order.get("order_id")
 
         if not client_order_id:
             raise ValueError("Order ID not found")
@@ -231,19 +270,21 @@ async def handle_confirm_cancel_order(update: Update, context: ContextTypes.DEFA
 
         keyboard = [
             [
-                InlineKeyboardButton("🔍 View Orders", callback_data="cex:search_orders"),
-                InlineKeyboardButton("« Back", callback_data="cex:trade")
+                InlineKeyboardButton(
+                    "🔍 View Orders", callback_data="cex:search_orders"
+                ),
+                InlineKeyboardButton("« Back", callback_data="cex:trade"),
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.callback_query.message.edit_text(
-            success_msg,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            success_msg, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
     except Exception as e:
         logger.error(f"Error cancelling order: {e}", exc_info=True)
         error_message = format_error_message(f"Failed to cancel order: {str(e)}")
-        await update.callback_query.message.edit_text(error_message, parse_mode="MarkdownV2")
+        await update.callback_query.message.edit_text(
+            error_message, parse_mode="MarkdownV2"
+        )

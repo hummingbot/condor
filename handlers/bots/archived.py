@@ -10,13 +10,18 @@ Provides:
 """
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import format_error_message, escape_markdown_v2, format_number
+from utils.telegram_formatters import (
+    escape_markdown_v2,
+    format_error_message,
+    format_number,
+)
+
 from ._shared import get_bots_client, get_cached, set_cached
 
 logger = logging.getLogger(__name__)
@@ -32,6 +37,7 @@ BOTS_PER_PAGE = 5
 # STATE MANAGEMENT
 # ============================================
 
+
 def clear_archived_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Clear archived-related state from context."""
     context.user_data.pop("archived_databases", None)
@@ -41,7 +47,9 @@ def clear_archived_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("archived_total_count", None)
 
 
-def _get_db_path_by_index(context: ContextTypes.DEFAULT_TYPE, index: int) -> Optional[str]:
+def _get_db_path_by_index(
+    context: ContextTypes.DEFAULT_TYPE, index: int
+) -> Optional[str]:
     """Get db_path from stored databases list by index."""
     databases = context.user_data.get("archived_databases", [])
     if 0 <= index < len(databases):
@@ -52,6 +60,7 @@ def _get_db_path_by_index(context: ContextTypes.DEFAULT_TYPE, index: int) -> Opt
 # ============================================
 # DATA FETCHING
 # ============================================
+
 
 async def fetch_archived_databases(client) -> List[str]:
     """Fetch list of archived bot database paths."""
@@ -132,10 +141,14 @@ async def fetch_database_performance(client, db_path: str) -> Optional[Dict[str,
         return None
 
 
-async def fetch_database_trades(client, db_path: str, limit: int = 500, offset: int = 0) -> Optional[Dict[str, Any]]:
+async def fetch_database_trades(
+    client, db_path: str, limit: int = 500, offset: int = 0
+) -> Optional[Dict[str, Any]]:
     """Fetch trades for a specific archived database (single page)."""
     try:
-        return await client.archived_bots.get_database_trades(db_path, limit=limit, offset=offset)
+        return await client.archived_bots.get_database_trades(
+            db_path, limit=limit, offset=offset
+        )
     except Exception as e:
         logger.error(f"Error fetching trades for {db_path}: {e}", exc_info=True)
         return None
@@ -148,7 +161,9 @@ async def fetch_all_trades(client, db_path: str) -> List[Dict[str, Any]]:
     limit = 500
 
     while True:
-        response = await fetch_database_trades(client, db_path, limit=limit, offset=offset)
+        response = await fetch_database_trades(
+            client, db_path, limit=limit, offset=offset
+        )
         if not response:
             break
 
@@ -167,17 +182,23 @@ async def fetch_all_trades(client, db_path: str) -> List[Dict[str, Any]]:
 
         # Safety limit to avoid infinite loops
         if len(all_trades) > 50000:
-            logger.warning(f"Trade limit reached for {db_path}, stopping at {len(all_trades)}")
+            logger.warning(
+                f"Trade limit reached for {db_path}, stopping at {len(all_trades)}"
+            )
             break
 
     logger.debug(f"Fetched {len(all_trades)} total trades for {db_path}")
     return all_trades
 
 
-async def fetch_database_orders(client, db_path: str, limit: int = 1000, offset: int = 0) -> Optional[Dict[str, Any]]:
+async def fetch_database_orders(
+    client, db_path: str, limit: int = 1000, offset: int = 0
+) -> Optional[Dict[str, Any]]:
     """Fetch orders for a specific archived database."""
     try:
-        return await client.archived_bots.get_database_orders(db_path, limit=limit, offset=offset)
+        return await client.archived_bots.get_database_orders(
+            db_path, limit=limit, offset=offset
+        )
     except Exception as e:
         logger.error(f"Error fetching orders for {db_path}: {e}", exc_info=True)
         return None
@@ -196,6 +217,7 @@ async def fetch_database_executors(client, db_path: str) -> Optional[Dict[str, A
 # FORMATTING HELPERS
 # ============================================
 
+
 def _format_pnl(pnl: float) -> str:
     """Format PnL with color indicator."""
     if pnl >= 0:
@@ -212,6 +234,7 @@ def _format_datetime(dt) -> str:
         # Parse ISO format and format nicely
         try:
             from datetime import datetime
+
             if "T" in dt:
                 parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
             else:
@@ -272,6 +295,7 @@ def _extract_bot_name(db_path: str) -> str:
     """Extract readable bot name from database path."""
     # db_path might be like "/path/to/bot_name.db" or just "bot_name.db"
     import os
+
     name = os.path.basename(db_path)
     if name.endswith(".db"):
         name = name[:-3]
@@ -282,7 +306,10 @@ def _extract_bot_name(db_path: str) -> str:
 # MENU DISPLAY
 # ============================================
 
-async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
+
+async def show_archived_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0
+) -> None:
     """Display the archived bots menu with pagination."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -298,7 +325,9 @@ async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
             # Filter to only healthy databases to avoid 500 errors
             databases = await get_healthy_databases(client, all_databases)
             set_cached(context.user_data, cache_key, databases)
-            logger.info(f"Found {len(databases)} healthy databases out of {len(all_databases)} total")
+            logger.info(
+                f"Found {len(databases)} healthy databases out of {len(all_databases)} total"
+            )
             # Store total count for message
             context.user_data["archived_total_count"] = len(all_databases)
 
@@ -309,22 +338,30 @@ async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
         if not databases:
             total_count = context.user_data.get("archived_total_count", 0)
             if total_count > 0:
-                message = escape_markdown_v2(f"📜 No readable archived bots found.\n\n{total_count} databases exist but may be corrupted or incomplete.")
+                message = escape_markdown_v2(
+                    f"📜 No readable archived bots found.\n\n{total_count} databases exist but may be corrupted or incomplete."
+                )
             else:
-                message = escape_markdown_v2("📜 No archived bots found.\n\nArchived bots will appear here after you stop a running bot.")
-            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="bots:main_menu")]]
+                message = escape_markdown_v2(
+                    "📜 No archived bots found.\n\nArchived bots will appear here after you stop a running bot."
+                )
+            keyboard = [
+                [InlineKeyboardButton("🔙 Back", callback_data="bots:main_menu")]
+            ]
 
             if query:
                 await query.message.edit_text(
                     message,
                     parse_mode="MarkdownV2",
-                    reply_markup=InlineKeyboardMarkup(keyboard)
+                    reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             return
 
         # Fetch summaries for current page (with caching)
         summaries_cache_key = "archived_summaries"
-        all_summaries = get_cached(context.user_data, summaries_cache_key, ARCHIVED_CACHE_TTL)
+        all_summaries = get_cached(
+            context.user_data, summaries_cache_key, ARCHIVED_CACHE_TTL
+        )
         if all_summaries is None:
             all_summaries = {}
             for db_path in databases:
@@ -353,7 +390,9 @@ async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
             # Format time range
             if start_time and end_time:
-                time_range = f"{_format_datetime(start_time)} → {_format_datetime(end_time)}"
+                time_range = (
+                    f"{_format_datetime(start_time)} → {_format_datetime(end_time)}"
+                )
             else:
                 time_range = "Time unknown"
 
@@ -372,37 +411,60 @@ async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
             summary = all_summaries.get(db_path, {})
             bot_name = summary.get("bot_name") or _extract_bot_name(db_path)
             display_name = bot_name[:25] + "..." if len(bot_name) > 25 else bot_name
-            keyboard.append([
-                InlineKeyboardButton(f"📊 {display_name}", callback_data=f"bots:archived_select:{global_idx}")
-            ])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"📊 {display_name}",
+                        callback_data=f"bots:archived_select:{global_idx}",
+                    )
+                ]
+            )
 
         # Pagination row
         if total_pages > 1:
             nav_row = []
             if page > 0:
-                nav_row.append(InlineKeyboardButton("◀️", callback_data=f"bots:archived_page:{page-1}"))
-            nav_row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="bots:noop"))
+                nav_row.append(
+                    InlineKeyboardButton(
+                        "◀️", callback_data=f"bots:archived_page:{page-1}"
+                    )
+                )
+            nav_row.append(
+                InlineKeyboardButton(
+                    f"{page+1}/{total_pages}", callback_data="bots:noop"
+                )
+            )
             if page < total_pages - 1:
-                nav_row.append(InlineKeyboardButton("▶️", callback_data=f"bots:archived_page:{page+1}"))
+                nav_row.append(
+                    InlineKeyboardButton(
+                        "▶️", callback_data=f"bots:archived_page:{page+1}"
+                    )
+                )
             keyboard.append(nav_row)
 
         # Action buttons
-        keyboard.append([
-            InlineKeyboardButton("📊 Timeline", callback_data="bots:archived_timeline"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="bots:archived_refresh"),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("🔙 Back", callback_data="bots:main_menu"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📊 Timeline", callback_data="bots:archived_timeline"
+                ),
+                InlineKeyboardButton(
+                    "🔄 Refresh", callback_data="bots:archived_refresh"
+                ),
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton("🔙 Back", callback_data="bots:main_menu"),
+            ]
+        )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if query:
             try:
                 await query.message.edit_text(
-                    message,
-                    parse_mode="MarkdownV2",
-                    reply_markup=reply_markup
+                    message, parse_mode="MarkdownV2", reply_markup=reply_markup
                 )
             except BadRequest as e:
                 if "no text in the message" in str(e).lower():
@@ -411,15 +473,13 @@ async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         chat_id=query.message.chat_id,
                         text=message,
                         parse_mode="MarkdownV2",
-                        reply_markup=reply_markup
+                        reply_markup=reply_markup,
                     )
                 elif "Message is not modified" not in str(e):
                     raise
         else:
             await update.message.reply_text(
-                message,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
 
     except Exception as e:
@@ -431,11 +491,13 @@ async def show_archived_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await query.message.edit_text(
                 error_msg,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
 
 
-async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, db_index: int) -> None:
+async def show_archived_detail(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, db_index: int
+) -> None:
     """Show detailed view for a specific archived bot."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -456,11 +518,13 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if not summary:
             error_msg = format_error_message("Could not fetch bot data")
-            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="bots:archived")]]
+            keyboard = [
+                [InlineKeyboardButton("🔙 Back", callback_data="bots:archived")]
+            ]
             await query.message.edit_text(
                 error_msg,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
 
@@ -473,11 +537,16 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Fetch trades to calculate PnL and time range
         # Only fetch first page initially for quick display
-        trades_response = await fetch_database_trades(client, db_path, limit=500, offset=0)
+        trades_response = await fetch_database_trades(
+            client, db_path, limit=500, offset=0
+        )
         trades = trades_response.get("trades", []) if trades_response else []
 
         # Calculate PnL and time range from trades
-        from .archived_chart import calculate_pnl_from_trades, get_time_range_from_trades
+        from .archived_chart import (
+            calculate_pnl_from_trades,
+            get_time_range_from_trades,
+        )
 
         # For detail view, use first page of trades for quick PnL estimate
         pnl_data = calculate_pnl_from_trades(trades)
@@ -502,17 +571,23 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         # Time info
         if start_time and end_time:
             duration = _format_duration(start_time, end_time)
-            lines.append(f"⏱ {escape_markdown_v2(_format_datetime(start_time))} → {escape_markdown_v2(_format_datetime(end_time))}")
+            lines.append(
+                f"⏱ {escape_markdown_v2(_format_datetime(start_time))} → {escape_markdown_v2(_format_datetime(end_time))}"
+            )
             lines.append(f"   Duration: {escape_markdown_v2(duration)}")
             lines.append("")
 
         # PnL - highlight color
         pnl_emoji = "📈" if total_pnl >= 0 else "📉"
-        lines.append(f"{pnl_emoji} *PnL:* `{escape_markdown_v2(_format_pnl(total_pnl))}`{escape_markdown_v2(pnl_note)}")
+        lines.append(
+            f"{pnl_emoji} *PnL:* `{escape_markdown_v2(_format_pnl(total_pnl))}`{escape_markdown_v2(pnl_note)}"
+        )
 
         # Other metrics
         if total_volume:
-            lines.append(f"📊 *Volume:* ${escape_markdown_v2(format_number(total_volume))}")
+            lines.append(
+                f"📊 *Volume:* ${escape_markdown_v2(format_number(total_volume))}"
+            )
         if total_fees:
             lines.append(f"💰 *Fees:* ${escape_markdown_v2(format_number(total_fees))}")
 
@@ -520,17 +595,25 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         lines.append(f"📝 *Trades:* {total_trades} • *Orders:* {total_orders}")
 
         if trading_pairs:
-            lines.append(f"📈 *Pairs:* {escape_markdown_v2(', '.join(trading_pairs[:5]))}")
+            lines.append(
+                f"📈 *Pairs:* {escape_markdown_v2(', '.join(trading_pairs[:5]))}"
+            )
         if exchanges:
-            lines.append(f"🏦 *Exchanges:* {escape_markdown_v2(', '.join(exchanges[:3]))}")
+            lines.append(
+                f"🏦 *Exchanges:* {escape_markdown_v2(', '.join(exchanges[:3]))}"
+            )
 
         message = "\n".join(lines)
 
         # Build keyboard - use index for callbacks
         keyboard = [
             [
-                InlineKeyboardButton("📈 Chart", callback_data=f"bots:archived_chart:{db_index}"),
-                InlineKeyboardButton("💾 Report", callback_data=f"bots:archived_report:{db_index}"),
+                InlineKeyboardButton(
+                    "📈 Chart", callback_data=f"bots:archived_chart:{db_index}"
+                ),
+                InlineKeyboardButton(
+                    "💾 Report", callback_data=f"bots:archived_report:{db_index}"
+                ),
             ],
             [
                 InlineKeyboardButton("🔙 Back", callback_data="bots:archived"),
@@ -540,7 +623,7 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.edit_text(
             message,
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     except Exception as e:
@@ -550,7 +633,7 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.edit_text(
             error_msg,
             parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
 
@@ -558,7 +641,10 @@ async def show_archived_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 # CHART HANDLERS
 # ============================================
 
-async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def show_timeline_chart(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Generate and show timeline chart for all archived bots."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -566,8 +652,10 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         # Show loading message
         loading_msg = await query.message.reply_text(
-            escape_markdown_v2("⏳ Generating timeline... Fetching trade data for all bots."),
-            parse_mode="MarkdownV2"
+            escape_markdown_v2(
+                "⏳ Generating timeline... Fetching trade data for all bots."
+            ),
+            parse_mode="MarkdownV2",
         )
 
         # Get cached data or fetch
@@ -582,7 +670,7 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
             if not databases:
                 await loading_msg.edit_text(
                     escape_markdown_v2("No healthy archived bots to display."),
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
                 )
                 return
 
@@ -593,7 +681,9 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
         from .archived_chart import calculate_pnl_from_trades
 
         for db_path in databases:
-            summary = summaries.get(db_path) or await fetch_database_summary(client, db_path)
+            summary = summaries.get(db_path) or await fetch_database_summary(
+                client, db_path
+            )
 
             if summary:
                 # Fetch all trades for this bot to calculate accurate PnL
@@ -602,17 +692,19 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
                 # Calculate PnL from trades
                 pnl_data = calculate_pnl_from_trades(trades)
 
-                bots_data.append({
-                    "db_path": db_path,
-                    "summary": summary,
-                    "trades": trades,
-                    "pnl_data": pnl_data,
-                })
+                bots_data.append(
+                    {
+                        "db_path": db_path,
+                        "summary": summary,
+                        "trades": trades,
+                        "pnl_data": pnl_data,
+                    }
+                )
 
         if not bots_data:
             await loading_msg.edit_text(
                 escape_markdown_v2("No data available for timeline chart."),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
             return
 
@@ -623,14 +715,18 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if chart_bytes:
             # Calculate total PnL from all bots
-            total_pnl = sum(b.get("pnl_data", {}).get("total_pnl", 0) for b in bots_data)
+            total_pnl = sum(
+                b.get("pnl_data", {}).get("total_pnl", 0) for b in bots_data
+            )
 
             caption = (
                 f"📊 *Archived Bots Timeline*\n"
                 f"Total: {len(bots_data)} bots • PnL: `{escape_markdown_v2(_format_pnl(total_pnl))}`"
             )
 
-            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="bots:archived")]]
+            keyboard = [
+                [InlineKeyboardButton("🔙 Back", callback_data="bots:archived")]
+            ]
 
             # Delete loading message and send chart
             await loading_msg.delete()
@@ -640,12 +736,12 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
                 photo=chart_bytes,
                 caption=caption,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
             await loading_msg.edit_text(
                 escape_markdown_v2("Failed to generate timeline chart."),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
 
     except Exception as e:
@@ -654,7 +750,9 @@ async def show_timeline_chart(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text(error_msg, parse_mode="MarkdownV2")
 
 
-async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_index: int) -> None:
+async def show_bot_chart(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, db_index: int
+) -> None:
     """Generate and show performance chart for a specific bot."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -668,7 +766,7 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
         # Show loading message
         loading_msg = await query.message.reply_text(
             escape_markdown_v2("⏳ Generating chart... Fetching all trade data."),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         client, _ = await get_bots_client(chat_id, context.user_data)
@@ -680,12 +778,15 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
         if not summary:
             await loading_msg.edit_text(
                 escape_markdown_v2("Could not fetch bot data for chart."),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
             return
 
         # Import chart generation
-        from .archived_chart import generate_performance_chart, calculate_pnl_from_trades
+        from .archived_chart import (
+            calculate_pnl_from_trades,
+            generate_performance_chart,
+        )
 
         # Calculate PnL from trades
         pnl_data = calculate_pnl_from_trades(trades)
@@ -703,10 +804,16 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
                 f"Trades: {len(trades)}"
             )
 
-            keyboard = [[
-                InlineKeyboardButton("💾 Report", callback_data=f"bots:archived_report:{db_index}"),
-                InlineKeyboardButton("🔙 Back", callback_data=f"bots:archived_select:{db_index}"),
-            ]]
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "💾 Report", callback_data=f"bots:archived_report:{db_index}"
+                    ),
+                    InlineKeyboardButton(
+                        "🔙 Back", callback_data=f"bots:archived_select:{db_index}"
+                    ),
+                ]
+            ]
 
             # Delete loading message and send chart
             await loading_msg.delete()
@@ -716,12 +823,12 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
                 photo=chart_bytes,
                 caption=caption,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
             await loading_msg.edit_text(
                 escape_markdown_v2("Failed to generate performance chart."),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
 
     except Exception as e:
@@ -734,7 +841,10 @@ async def show_bot_chart(update: Update, context: ContextTypes.DEFAULT_TYPE, db_
 # REPORT GENERATION
 # ============================================
 
-async def handle_generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE, db_index: int) -> None:
+
+async def handle_generate_report(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, db_index: int
+) -> None:
     """Generate and save a full report for a specific bot."""
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -748,7 +858,7 @@ async def handle_generate_report(update: Update, context: ContextTypes.DEFAULT_T
         # Show progress message
         progress_msg = await query.message.reply_text(
             escape_markdown_v2("⏳ Generating report... This may take a moment."),
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         # Import report generation
@@ -769,17 +879,23 @@ async def handle_generate_report(update: Update, context: ContextTypes.DEFAULT_T
 
             message = "\n".join(lines)
 
-            keyboard = [[InlineKeyboardButton("🔙 Back", callback_data=f"bots:archived_select:{db_index}")]]
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🔙 Back", callback_data=f"bots:archived_select:{db_index}"
+                    )
+                ]
+            ]
 
             await progress_msg.edit_text(
                 message,
                 parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
             await progress_msg.edit_text(
                 escape_markdown_v2("❌ Failed to generate report."),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
 
     except Exception as e:
@@ -792,7 +908,10 @@ async def handle_generate_report(update: Update, context: ContextTypes.DEFAULT_T
 # REFRESH HANDLER
 # ============================================
 
-async def handle_archived_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+
+async def handle_archived_refresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Refresh archived bots data."""
     # Clear cache
     context.user_data.pop("_bots_cache", None)

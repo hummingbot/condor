@@ -8,8 +8,8 @@ Provides:
 - PMM metrics calculation and summary formatting
 """
 
-from typing import Any, Dict, List, Optional
 import logging
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,7 @@ def calculate_natr(candles: List[Dict[str, Any]], period: int = 14) -> Optional[
             continue
 
         # True Range = max(high - low, |high - prev_close|, |low - prev_close|)
-        tr = max(
-            high - low,
-            abs(high - prev_close),
-            abs(low - prev_close)
-        )
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
         true_ranges.append(tr)
 
     if len(true_ranges) < period:
@@ -63,7 +59,9 @@ def calculate_natr(candles: List[Dict[str, Any]], period: int = 14) -> Optional[
     return natr
 
 
-def calculate_price_stats(candles: List[Dict[str, Any]], lookback: int = 100) -> Dict[str, float]:
+def calculate_price_stats(
+    candles: List[Dict[str, Any]], lookback: int = 100
+) -> Dict[str, float]:
     """
     Calculate price statistics from candles.
 
@@ -253,7 +251,9 @@ def generate_theoretical_levels(
     for i, spread in enumerate(buy_spreads):
         price = current_price * (1 - spread)
         pct = buy_amounts_pct[i] if i < len(buy_amounts_pct) else 1.0
-        amount = (allocated_amount / 2) * (pct / total_buy_pct) if total_buy_pct > 0 else 0
+        amount = (
+            (allocated_amount / 2) * (pct / total_buy_pct) if total_buy_pct > 0 else 0
+        )
         total_buy_amount += amount
 
         level = {
@@ -274,7 +274,9 @@ def generate_theoretical_levels(
     for i, spread in enumerate(sell_spreads):
         price = current_price * (1 + spread)
         pct = sell_amounts_pct[i] if i < len(sell_amounts_pct) else 1.0
-        amount = (allocated_amount / 2) * (pct / total_sell_pct) if total_sell_pct > 0 else 0
+        amount = (
+            (allocated_amount / 2) * (pct / total_sell_pct) if total_sell_pct > 0 else 0
+        )
         total_sell_amount += amount
 
         level = {
@@ -291,9 +293,13 @@ def generate_theoretical_levels(
 
     # Validate take profit vs spread
     if buy_spreads and take_profit >= min(buy_spreads):
-        warnings.append(f"TP {take_profit*100:.2f}% >= min spread {min(buy_spreads)*100:.2f}%")
+        warnings.append(
+            f"TP {take_profit*100:.2f}% >= min spread {min(buy_spreads)*100:.2f}%"
+        )
     if sell_spreads and take_profit >= min(sell_spreads):
-        warnings.append(f"TP {take_profit*100:.2f}% >= min spread {min(sell_spreads)*100:.2f}%")
+        warnings.append(
+            f"TP {take_profit*100:.2f}% >= min spread {min(sell_spreads)*100:.2f}%"
+        )
 
     return {
         "buy_levels": buy_levels,
@@ -328,13 +334,17 @@ def format_pmm_summary(
 
     # Buy levels
     lines.append(f"Buy Levels: {levels.get('num_buy_levels', 0)}")
-    for lvl in levels.get('buy_levels', []):
-        lines.append(f"  L{lvl['level']}: {lvl['price']:,.4f} (-{lvl['spread_pct']:.2f}%) ${lvl['amount_quote']:.0f}")
+    for lvl in levels.get("buy_levels", []):
+        lines.append(
+            f"  L{lvl['level']}: {lvl['price']:,.4f} (-{lvl['spread_pct']:.2f}%) ${lvl['amount_quote']:.0f}"
+        )
 
     # Sell levels
     lines.append(f"Sell Levels: {levels.get('num_sell_levels', 0)}")
-    for lvl in levels.get('sell_levels', []):
-        lines.append(f"  L{lvl['level']}: {lvl['price']:,.4f} (+{lvl['spread_pct']:.2f}%) ${lvl['amount_quote']:.0f}")
+    for lvl in levels.get("sell_levels", []):
+        lines.append(
+            f"  L{lvl['level']}: {lvl['price']:,.4f} (+{lvl['spread_pct']:.2f}%) ${lvl['amount_quote']:.0f}"
+        )
 
     lines.append(f"Total Buy: ${levels.get('total_buy_amount', 0):,.2f}")
     lines.append(f"Total Sell: ${levels.get('total_sell_amount', 0):,.2f}")
@@ -378,14 +388,18 @@ def calculate_effective_spread(
     # Calculate weighted buy spread
     total_buy_pct = sum(buy_amounts_pct) if buy_amounts_pct else 0
     if total_buy_pct > 0 and buy_spreads:
-        weighted_buy = sum(s * p for s, p in zip(buy_spreads, buy_amounts_pct)) / total_buy_pct
+        weighted_buy = (
+            sum(s * p for s, p in zip(buy_spreads, buy_amounts_pct)) / total_buy_pct
+        )
     else:
         weighted_buy = buy_spreads[0] if buy_spreads else 0
 
     # Calculate weighted sell spread
     total_sell_pct = sum(sell_amounts_pct) if sell_amounts_pct else 0
     if total_sell_pct > 0 and sell_spreads:
-        weighted_sell = sum(s * p for s, p in zip(sell_spreads, sell_amounts_pct)) / total_sell_pct
+        weighted_sell = (
+            sum(s * p for s, p in zip(sell_spreads, sell_amounts_pct)) / total_sell_pct
+        )
     else:
         weighted_sell = sell_spreads[0] if sell_spreads else 0
 

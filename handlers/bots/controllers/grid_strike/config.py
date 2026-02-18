@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .._base import ControllerField
 
-
 # Side value mapping
 SIDE_LONG = 1
 SIDE_SHORT = 2  # Backend expects 2 for SHORT (not -1)
@@ -62,35 +61,31 @@ FIELDS: Dict[str, ControllerField] = {
         label="Config ID",
         type="str",
         required=True,
-        hint="Auto-generated with sequence number"
+        hint="Auto-generated with sequence number",
     ),
     "connector_name": ControllerField(
         name="connector_name",
         label="Connector",
         type="str",
         required=True,
-        hint="Select from available exchanges"
+        hint="Select from available exchanges",
     ),
     "trading_pair": ControllerField(
         name="trading_pair",
         label="Trading Pair",
         type="str",
         required=True,
-        hint="e.g. SOL-FDUSD, BTC-USDT"
+        hint="e.g. SOL-FDUSD, BTC-USDT",
     ),
     "side": ControllerField(
-        name="side",
-        label="Side",
-        type="int",
-        required=True,
-        hint="LONG or SHORT"
+        name="side", label="Side", type="int", required=True, hint="LONG or SHORT"
     ),
     "leverage": ControllerField(
         name="leverage",
         label="Leverage",
         type="int",
         required=True,
-        hint="e.g. 1, 5, 10"
+        hint="e.g. 1, 5, 10",
     ),
     "position_mode": ControllerField(
         name="position_mode",
@@ -98,35 +93,35 @@ FIELDS: Dict[str, ControllerField] = {
         type="str",
         required=False,
         hint="HEDGE or ONEWAY",
-        default="ONEWAY"
+        default="ONEWAY",
     ),
     "total_amount_quote": ControllerField(
         name="total_amount_quote",
         label="Total Amount (Quote)",
         type="float",
         required=True,
-        hint="e.g. 1000 USDT"
+        hint="e.g. 1000 USDT",
     ),
     "start_price": ControllerField(
         name="start_price",
         label="Start Price",
         type="float",
         required=True,
-        hint="Auto: -2% LONG, -6% SHORT"
+        hint="Auto: -2% LONG, -6% SHORT",
     ),
     "end_price": ControllerField(
         name="end_price",
         label="End Price",
         type="float",
         required=True,
-        hint="Auto: +6% LONG, +2% SHORT"
+        hint="Auto: +6% LONG, +2% SHORT",
     ),
     "limit_price": ControllerField(
         name="limit_price",
         label="Limit Price",
         type="float",
         required=True,
-        hint="Auto: -3% LONG, +3% SHORT"
+        hint="Auto: -3% LONG, +3% SHORT",
     ),
     "max_open_orders": ControllerField(
         name="max_open_orders",
@@ -134,7 +129,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="int",
         required=False,
         hint="Default: 3",
-        default=3
+        default=3,
     ),
     "max_orders_per_batch": ControllerField(
         name="max_orders_per_batch",
@@ -142,7 +137,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="int",
         required=False,
         hint="Default: 1",
-        default=1
+        default=1,
     ),
     "min_order_amount_quote": ControllerField(
         name="min_order_amount_quote",
@@ -150,7 +145,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="float",
         required=False,
         hint="Default: 6",
-        default=6
+        default=6,
     ),
     "min_spread_between_orders": ControllerField(
         name="min_spread_between_orders",
@@ -158,7 +153,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="float",
         required=False,
         hint="Default: 0.0001",
-        default=0.0001
+        default=0.0001,
     ),
     "order_frequency": ControllerField(
         name="order_frequency",
@@ -166,7 +161,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="int",
         required=False,
         hint="Seconds between order placement (default: 3)",
-        default=3
+        default=3,
     ),
     "take_profit": ControllerField(
         name="take_profit",
@@ -174,7 +169,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="float",
         required=False,
         hint="Default: 0.0005",
-        default=0.0005
+        default=0.0005,
     ),
     "keep_position": ControllerField(
         name="keep_position",
@@ -182,7 +177,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="bool",
         required=False,
         hint="Keep position open after grid completion",
-        default=True
+        default=True,
     ),
     "activation_bounds": ControllerField(
         name="activation_bounds",
@@ -190,7 +185,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="float",
         required=False,
         hint="Price distance to activate (default: 0.01 = 1%)",
-        default=0.01
+        default=0.01,
     ),
     "open_order_type": ControllerField(
         name="open_order_type",
@@ -198,7 +193,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="int",
         required=False,
         hint="Order type for opening positions",
-        default=ORDER_TYPE_LIMIT_MAKER
+        default=ORDER_TYPE_LIMIT_MAKER,
     ),
     "take_profit_order_type": ControllerField(
         name="take_profit_order_type",
@@ -206,7 +201,7 @@ FIELDS: Dict[str, ControllerField] = {
         type="int",
         required=False,
         hint="Order type for take profit",
-        default=ORDER_TYPE_LIMIT_MAKER
+        default=ORDER_TYPE_LIMIT_MAKER,
     ),
     "coerce_tp_to_step": ControllerField(
         name="coerce_tp_to_step",
@@ -214,19 +209,34 @@ FIELDS: Dict[str, ControllerField] = {
         type="bool",
         required=False,
         hint="Set TP to step size if TP is smaller than step",
-        default=False
+        default=False,
     ),
 }
 
 
 # Field display order
 FIELD_ORDER: List[str] = [
-    "id", "connector_name", "trading_pair", "side", "leverage", "position_mode",
-    "total_amount_quote", "start_price", "end_price", "limit_price",
-    "max_open_orders", "max_orders_per_batch", "order_frequency",
-    "min_order_amount_quote", "min_spread_between_orders", "take_profit",
-    "open_order_type", "take_profit_order_type", "coerce_tp_to_step",
-    "keep_position", "activation_bounds"
+    "id",
+    "connector_name",
+    "trading_pair",
+    "side",
+    "leverage",
+    "position_mode",
+    "total_amount_quote",
+    "start_price",
+    "end_price",
+    "limit_price",
+    "max_open_orders",
+    "max_orders_per_batch",
+    "order_frequency",
+    "min_order_amount_quote",
+    "min_spread_between_orders",
+    "take_profit",
+    "open_order_type",
+    "take_profit_order_type",
+    "coerce_tp_to_step",
+    "keep_position",
+    "activation_bounds",
 ]
 
 
@@ -275,7 +285,13 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         Tuple of (is_valid, error_message)
     """
     # Check required fields
-    required = ["connector_name", "trading_pair", "start_price", "end_price", "limit_price"]
+    required = [
+        "connector_name",
+        "trading_pair",
+        "start_price",
+        "end_price",
+        "limit_price",
+    ]
     for field in required:
         if not config.get(field):
             return False, f"Missing required field: {field}"
@@ -305,10 +321,7 @@ def validate_config(config: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 
 
 def calculate_auto_prices(
-    current_price: float,
-    side: int,
-    base_pct: float = 0.02,
-    limit_pct: float = 0.03
+    current_price: float, side: int, base_pct: float = 0.02, limit_pct: float = 0.03
 ) -> Tuple[float, float, float]:
     """
     Calculate start, end, and limit prices based on current price and side.
@@ -339,17 +352,10 @@ def calculate_auto_prices(
         end_price = current_price * (1 + base_pct)
         limit_price = current_price * (1 + limit_pct)
 
-    return (
-        round(start_price, 6),
-        round(end_price, 6),
-        round(limit_price, 6)
-    )
+    return (round(start_price, 6), round(end_price, 6), round(limit_price, 6))
 
 
-def generate_id(
-    config: Dict[str, Any],
-    existing_configs: List[Dict[str, Any]]
-) -> str:
+def generate_id(config: Dict[str, Any], existing_configs: List[Dict[str, Any]]) -> str:
     """
     Generate a unique config ID with sequential numbering.
 

@@ -1,6 +1,7 @@
 """Check for CEX/DEX arbitrage opportunities."""
 
 from decimal import Decimal
+
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
@@ -10,7 +11,9 @@ from config_manager import get_client
 class Config(BaseModel):
     """Check CEX vs DEX price arbitrage opportunities."""
 
-    trading_pair: str = Field(default="SOL-USDC", description="Trading pair (e.g. SOL-USDC)")
+    trading_pair: str = Field(
+        default="SOL-USDC", description="Trading pair (e.g. SOL-USDC)"
+    )
     amount: float = Field(default=1.0, description="Amount to quote")
     cex_connector: str = Field(default="binance", description="CEX connector")
     dex_connector: str = Field(default="jupiter", description="DEX connector")
@@ -19,7 +22,7 @@ class Config(BaseModel):
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Check arbitrage between CEX and DEX."""
-    chat_id = context._chat_id if hasattr(context, '_chat_id') else None
+    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
     client = await get_client(chat_id, context=context)
 
     if not client:
@@ -38,22 +41,22 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     connector_name=config.cex_connector,
                     trading_pair=config.trading_pair,
                     volume=config.amount,
-                    is_buy=is_buy
+                    is_buy=is_buy,
                 )
                 if isinstance(result, dict):
                     return (
-                        result.get("result_price") or
-                        result.get("price") or
-                        result.get("average_price")
+                        result.get("result_price")
+                        or result.get("price")
+                        or result.get("average_price")
                     )
                 return None
             except Exception as e:
                 return None
 
         import asyncio
+
         cex_buy, cex_sell = await asyncio.gather(
-            get_cex_quote(True),
-            get_cex_quote(False)
+            get_cex_quote(True), get_cex_quote(False)
         )
 
         if cex_buy:
@@ -69,7 +72,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # --- DEX Quotes ---
     try:
-        if hasattr(client, 'gateway_swap'):
+        if hasattr(client, "gateway_swap"):
+
             async def get_dex_quote(side: str):
                 try:
                     result = await client.gateway_swap.get_swap_quote(
@@ -78,7 +82,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         trading_pair=config.trading_pair,
                         side=side,
                         amount=Decimal(str(config.amount)),
-                        slippage_pct=Decimal("1.0")
+                        slippage_pct=Decimal("1.0"),
                     )
                     if isinstance(result, dict):
                         return result.get("price")
@@ -87,8 +91,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     return None
 
             dex_buy, dex_sell = await asyncio.gather(
-                get_dex_quote("BUY"),
-                get_dex_quote("SELL")
+                get_dex_quote("BUY"), get_dex_quote("SELL")
             )
 
             if dex_buy:
@@ -119,7 +122,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         spread_pct = ((dex_sell_f - cex_buy_f) / cex_buy_f) * 100
         profit = (dex_sell_f - cex_buy_f) * config.amount
         if spread_pct > 0:
-            opportunities.append(f"BUY CEX -> SELL DEX: +{spread_pct:.2f}% (${profit:.2f})")
+            opportunities.append(
+                f"BUY CEX -> SELL DEX: +{spread_pct:.2f}% (${profit:.2f})"
+            )
         else:
             results.append(f"BUY CEX -> SELL DEX: {spread_pct:.2f}%")
 
@@ -130,7 +135,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         spread_pct = ((cex_sell_f - dex_buy_f) / dex_buy_f) * 100
         profit = (cex_sell_f - dex_buy_f) * config.amount
         if spread_pct > 0:
-            opportunities.append(f"BUY DEX -> SELL CEX: +{spread_pct:.2f}% (${profit:.2f})")
+            opportunities.append(
+                f"BUY DEX -> SELL CEX: +{spread_pct:.2f}% (${profit:.2f})"
+            )
         else:
             results.append(f"BUY DEX -> SELL CEX: {spread_pct:.2f}%")
 

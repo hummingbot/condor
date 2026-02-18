@@ -14,14 +14,15 @@ Uses the unified candlestick chart function from visualizations module.
 import io
 from typing import Any, Dict, List, Optional
 
-from handlers.dex.visualizations import generate_candlestick_chart, DARK_THEME
+from handlers.dex.visualizations import DARK_THEME, generate_candlestick_chart
+
 from .config import SIDE_LONG
 
 
 def generate_chart(
     config: Dict[str, Any],
     candles_data: List[Dict[str, Any]],
-    current_price: Optional[float] = None
+    current_price: Optional[float] = None,
 ) -> io.BytesIO:
     """
     Generate a candlestick chart with grid strike zone overlay.
@@ -49,7 +50,9 @@ def generate_chart(
     side = config.get("side", SIDE_LONG)
 
     # Handle both list and dict input
-    data = candles_data if isinstance(candles_data, list) else candles_data.get("data", [])
+    data = (
+        candles_data if isinstance(candles_data, list) else candles_data.get("data", [])
+    )
 
     # Build title with side indicator
     side_str = "LONG" if side == SIDE_LONG else "SHORT"
@@ -59,42 +62,50 @@ def generate_chart(
     hlines = []
 
     if start_price:
-        hlines.append({
-            "y": start_price,
-            "color": DARK_THEME["line_color"],
-            "dash": "dash",
-            "label": f"Start: {start_price:,.4f}",
-            "label_position": "right",
-        })
+        hlines.append(
+            {
+                "y": start_price,
+                "color": DARK_THEME["line_color"],
+                "dash": "dash",
+                "label": f"Start: {start_price:,.4f}",
+                "label_position": "right",
+            }
+        )
 
     if end_price:
-        hlines.append({
-            "y": end_price,
-            "color": DARK_THEME["line_color"],
-            "dash": "dash",
-            "label": f"End: {end_price:,.4f}",
-            "label_position": "right",
-        })
+        hlines.append(
+            {
+                "y": end_price,
+                "color": DARK_THEME["line_color"],
+                "dash": "dash",
+                "label": f"End: {end_price:,.4f}",
+                "label_position": "right",
+            }
+        )
 
     if limit_price:
-        hlines.append({
-            "y": limit_price,
-            "color": DARK_THEME["down_color"],
-            "dash": "dot",
-            "label": f"Limit: {limit_price:,.4f}",
-            "label_position": "right",
-        })
+        hlines.append(
+            {
+                "y": limit_price,
+                "color": DARK_THEME["down_color"],
+                "dash": "dot",
+                "label": f"Limit: {limit_price:,.4f}",
+                "label_position": "right",
+            }
+        )
 
     # Build horizontal rectangles for grid zone
     hrects = []
 
     if start_price and end_price:
-        hrects.append({
-            "y0": min(start_price, end_price),
-            "y1": max(start_price, end_price),
-            "color": "rgba(59, 130, 246, 0.15)",  # Light blue
-            "label": "Grid Zone",
-        })
+        hrects.append(
+            {
+                "y0": min(start_price, end_price),
+                "y1": max(start_price, end_price),
+                "color": "rgba(59, 130, 246, 0.15)",  # Light blue
+                "label": "Grid Zone",
+            }
+        )
 
     # Use the unified candlestick chart function
     result = generate_candlestick_chart(
@@ -116,13 +127,16 @@ def generate_chart(
         fig = go.Figure()
         fig.add_annotation(
             text="No candle data available",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5, showarrow=False,
+            xref="paper",
+            yref="paper",
+            x=0.5,
+            y=0.5,
+            showarrow=False,
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=16,
-                color=DARK_THEME["font_color"]
-            )
+                color=DARK_THEME["font_color"],
+            ),
         )
         fig.update_layout(
             paper_bgcolor=DARK_THEME["paper_bgcolor"],
@@ -132,7 +146,7 @@ def generate_chart(
         )
 
         img_bytes = io.BytesIO()
-        fig.write_image(img_bytes, format='png', scale=2)
+        fig.write_image(img_bytes, format="png", scale=2)
         img_bytes.seek(0)
         return img_bytes
 
@@ -142,7 +156,7 @@ def generate_chart(
 def generate_preview_chart(
     config: Dict[str, Any],
     candles_data: List[Dict[str, Any]],
-    current_price: Optional[float] = None
+    current_price: Optional[float] = None,
 ) -> io.BytesIO:
     """
     Generate a smaller preview chart for config viewing.

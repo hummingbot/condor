@@ -4,9 +4,10 @@ Portfolio graph generation using Plotly
 
 import io
 import logging
-from typing import Dict, Any
-import plotly.graph_objects as go
 from datetime import datetime
+from typing import Any, Dict
+
+import plotly.graph_objects as go
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,12 @@ DARK_THEME = {
     "gradient_colors": [
         ["rgba(59, 130, 246, 0.8)", "rgba(59, 130, 246, 0.1)"],  # Blue gradient
         ["rgba(16, 185, 129, 0.8)", "rgba(16, 185, 129, 0.1)"],  # Emerald gradient
-    ]
+    ],
 }
 
 
 def generate_distribution_graph(
-    distribution_data: Dict[str, Any],
-    by_account: bool = False
+    distribution_data: Dict[str, Any], by_account: bool = False
 ) -> io.BytesIO:
     """
     Generate a pie chart showing portfolio distribution
@@ -59,14 +59,18 @@ def generate_distribution_graph(
         accounts_dict = distribution_data.get("accounts", {})
         accounts_list = distribution_data.get("distribution", [])
 
-        logger.info(f"Accounts dict: {accounts_dict}, Accounts list length: {len(accounts_list)}")
+        logger.info(
+            f"Accounts dict: {accounts_dict}, Accounts list length: {len(accounts_list)}"
+        )
         labels = []
         values = []
 
         # If we have a list format (from API)
         if accounts_list:
             for account_data in accounts_list:
-                account_name = account_data.get("account", account_data.get("name", "Unknown"))
+                account_name = account_data.get(
+                    "account", account_data.get("name", "Unknown")
+                )
                 total_value = account_data.get("total_value", 0)
 
                 # Convert value to float if it's a string
@@ -74,7 +78,9 @@ def generate_distribution_graph(
                     try:
                         total_value = float(total_value)
                     except (ValueError, TypeError):
-                        logger.warning(f"Invalid value format for account {account_name}: {total_value}")
+                        logger.warning(
+                            f"Invalid value format for account {account_name}: {total_value}"
+                        )
                         total_value = 0
 
                 if total_value > 0:
@@ -91,7 +97,9 @@ def generate_distribution_graph(
                     try:
                         total_value = float(total_value)
                     except (ValueError, TypeError):
-                        logger.warning(f"Invalid value format for account {account_name}: {total_value}")
+                        logger.warning(
+                            f"Invalid value format for account {account_name}: {total_value}"
+                        )
                         total_value = 0
 
                 if total_value > 0:
@@ -102,7 +110,9 @@ def generate_distribution_graph(
         tokens_dict = distribution_data.get("tokens", {})
         tokens_list = distribution_data.get("distribution", [])
 
-        logger.info(f"Tokens dict: {tokens_dict}, Tokens list length: {len(tokens_list)}")
+        logger.info(
+            f"Tokens dict: {tokens_dict}, Tokens list length: {len(tokens_list)}"
+        )
         labels = []
         values = []
 
@@ -110,9 +120,7 @@ def generate_distribution_graph(
         if tokens_list:
             # Sort by total_value and take top 10
             sorted_tokens = sorted(
-                tokens_list,
-                key=lambda x: x.get("total_value", 0),
-                reverse=True
+                tokens_list, key=lambda x: x.get("total_value", 0), reverse=True
             )[:10]
 
             for token_data in sorted_tokens:
@@ -124,7 +132,9 @@ def generate_distribution_graph(
                     try:
                         value = float(value)
                     except (ValueError, TypeError):
-                        logger.warning(f"Invalid value format for token {token}: {value}")
+                        logger.warning(
+                            f"Invalid value format for token {token}: {value}"
+                        )
                         value = 0
 
                 if value > 0:
@@ -134,9 +144,7 @@ def generate_distribution_graph(
         # Else use dict format (legacy)
         elif tokens_dict:
             sorted_tokens = sorted(
-                tokens_dict.items(),
-                key=lambda x: x[1].get("value", 0),
-                reverse=True
+                tokens_dict.items(), key=lambda x: x[1].get("value", 0), reverse=True
             )[:10]
 
             for token, data in sorted_tokens:
@@ -147,7 +155,9 @@ def generate_distribution_graph(
                     try:
                         value = float(value)
                     except (ValueError, TypeError):
-                        logger.warning(f"Invalid value format for token {token}: {value}")
+                        logger.warning(
+                            f"Invalid value format for token {token}: {value}"
+                        )
                         value = 0
 
                 if value > 0:
@@ -170,63 +180,65 @@ def generate_distribution_graph(
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=16,
-                color=DARK_THEME["font_color"]
-            )
+                color=DARK_THEME["font_color"],
+            ),
         )
     else:
         # Create pie chart
-        fig = go.Figure(data=[go.Pie(
-            labels=labels,
-            values=values,
-            hole=0.4,  # Donut chart
-            marker=dict(
-                colors=DARK_THEME["line_colors"],
-                line=dict(color=DARK_THEME["grid_color"], width=2)
-            ),
-            textfont=dict(
-                family=DARK_THEME["font_family"],
-                size=12,
-                color=DARK_THEME["font_color"]
-            ),
-            textposition='auto',
-            texttemplate='%{label}<br>%{percent}',
-            hovertemplate='<b>%{label}</b><br>Value: $%{value:,.2f}<br>Percentage: %{percent}<extra></extra>'
-        )])
+        fig = go.Figure(
+            data=[
+                go.Pie(
+                    labels=labels,
+                    values=values,
+                    hole=0.4,  # Donut chart
+                    marker=dict(
+                        colors=DARK_THEME["line_colors"],
+                        line=dict(color=DARK_THEME["grid_color"], width=2),
+                    ),
+                    textfont=dict(
+                        family=DARK_THEME["font_family"],
+                        size=12,
+                        color=DARK_THEME["font_color"],
+                    ),
+                    textposition="auto",
+                    texttemplate="%{label}<br>%{percent}",
+                    hovertemplate="<b>%{label}</b><br>Value: $%{value:,.2f}<br>Percentage: %{percent}<extra></extra>",
+                )
+            ]
+        )
 
     # Update layout with dark theme
-    title_text = "Portfolio Distribution by Account" if by_account else "Portfolio Distribution by Token"
+    title_text = (
+        "Portfolio Distribution by Account"
+        if by_account
+        else "Portfolio Distribution by Token"
+    )
     fig.update_layout(
         title=dict(
             text=title_text,
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=20,
-                color=DARK_THEME["font_color"]
-            )
+                color=DARK_THEME["font_color"],
+            ),
         ),
         paper_bgcolor=DARK_THEME["paper_bgcolor"],
         plot_bgcolor=DARK_THEME["plot_bgcolor"],
-        font=dict(
-            family=DARK_THEME["font_family"],
-            color=DARK_THEME["font_color"]
-        ),
+        font=dict(family=DARK_THEME["font_family"], color=DARK_THEME["font_color"]),
         showlegend=True,
         legend=dict(
             bgcolor=DARK_THEME["bgcolor"],
             bordercolor=DARK_THEME["grid_color"],
             borderwidth=1,
-            font=dict(
-                family=DARK_THEME["font_family"],
-                size=11
-            )
+            font=dict(family=DARK_THEME["font_family"], size=11),
         ),
         width=800,
-        height=600
+        height=600,
     )
 
     # Convert to PNG bytes
     img_bytes = io.BytesIO()
-    fig.write_image(img_bytes, format='png')
+    fig.write_image(img_bytes, format="png")
     img_bytes.seek(0)
 
     return img_bytes
@@ -265,8 +277,8 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=16,
-                color=DARK_THEME["font_color"]
-            )
+                color=DARK_THEME["font_color"],
+            ),
         )
     else:
         # First pass: collect all data
@@ -281,7 +293,9 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
             # Parse ISO timestamp string
             if isinstance(timestamp_str, str):
                 try:
-                    timestamp_dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    timestamp_dt = datetime.fromisoformat(
+                        timestamp_str.replace("Z", "+00:00")
+                    )
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Invalid timestamp format: {timestamp_str} - {e}")
                     continue
@@ -324,7 +338,9 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
 
                             # Aggregate by token
                             if token:
-                                token_values[token] = token_values.get(token, 0) + value_float
+                                token_values[token] = (
+                                    token_values.get(token, 0) + value_float
+                                )
 
             all_timestamps.append(timestamp_dt)
             all_total_values.append(total_value)
@@ -338,10 +354,14 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
         token_avg_values = {}
         for token in all_tokens:
             values_list = [snapshot.get(token, 0) for snapshot in all_token_snapshots]
-            token_avg_values[token] = sum(values_list) / len(values_list) if values_list else 0
+            token_avg_values[token] = (
+                sum(values_list) / len(values_list) if values_list else 0
+            )
 
         # Get top 10 tokens
-        top_tokens = sorted(token_avg_values.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_tokens = sorted(token_avg_values.items(), key=lambda x: x[1], reverse=True)[
+            :10
+        ]
         top_token_names = [token for token, _ in top_tokens]
 
         logger.info(f"Top 10 tokens for stacked chart: {top_token_names}")
@@ -359,11 +379,12 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
 
         # Create subplots: 2 rows
         fig = make_subplots(
-            rows=2, cols=1,
+            rows=2,
+            cols=1,
             row_heights=[0.5, 0.5],
             subplot_titles=("Portfolio Value Evolution", "Token Allocation Over Time"),
             vertical_spacing=0.12,
-            specs=[[{"type": "scatter"}], [{"type": "scatter"}]]
+            specs=[[{"type": "scatter"}], [{"type": "scatter"}]],
         )
 
         # Top chart: Portfolio value line chart
@@ -371,46 +392,49 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
             go.Scatter(
                 x=timestamps,
                 y=values,
-                mode='lines+markers',
-                name='Portfolio Value',
-                line=dict(
-                    color=DARK_THEME["line_colors"][0],
-                    width=3
-                ),
+                mode="lines+markers",
+                name="Portfolio Value",
+                line=dict(color=DARK_THEME["line_colors"][0], width=3),
                 marker=dict(
                     size=4,
                     color=DARK_THEME["line_colors"][1],
-                    line=dict(
-                        color=DARK_THEME["font_color"],
-                        width=1
-                    )
+                    line=dict(color=DARK_THEME["font_color"], width=1),
                 ),
-                fill='tozeroy',
-                fillcolor='rgba(88, 166, 255, 0.1)',
-                hovertemplate='<b>%{x|%Y-%m-%d %H:%M}</b><br>Value: $%{y:,.2f}<extra></extra>',
-                showlegend=False
+                fill="tozeroy",
+                fillcolor="rgba(88, 166, 255, 0.1)",
+                hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>Value: $%{y:,.2f}<extra></extra>",
+                showlegend=False,
             ),
-            row=1, col=1
+            row=1,
+            col=1,
         )
 
         # Bottom chart: Stacked area chart for token proportions
         for idx, token in enumerate(top_token_names):
             token_vals = token_values_over_time.get(token, [])
 
-            logger.info(f"Adding token {token} to stacked chart with {len(token_vals)} values")
+            logger.info(
+                f"Adding token {token} to stacked chart with {len(token_vals)} values"
+            )
 
             fig.add_trace(
                 go.Scatter(
                     x=timestamps,
                     y=token_vals,
-                    mode='lines',
+                    mode="lines",
                     name=token,
-                    line=dict(width=0.5, color=DARK_THEME["line_colors"][idx % len(DARK_THEME["line_colors"])]),
-                    stackgroup='one',
-                    groupnorm='percent',  # Normalize to 100%
-                    hovertemplate=f'<b>{token}</b><br>Value: $%{{y:,.2f}}<br>%{{x|%Y-%m-%d %H:%M}}<extra></extra>'
+                    line=dict(
+                        width=0.5,
+                        color=DARK_THEME["line_colors"][
+                            idx % len(DARK_THEME["line_colors"])
+                        ],
+                    ),
+                    stackgroup="one",
+                    groupnorm="percent",  # Normalize to 100%
+                    hovertemplate=f"<b>{token}</b><br>Value: $%{{y:,.2f}}<br>%{{x|%Y-%m-%d %H:%M}}<extra></extra>",
                 ),
-                row=2, col=1
+                row=2,
+                col=1,
             )
 
         # Update layout for top chart
@@ -419,8 +443,9 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
             gridcolor=DARK_THEME["grid_color"],
             showgrid=True,
             zeroline=False,
-            tickformat='%b %d',  # Show date as "Nov 20"
-            row=1, col=1
+            tickformat="%b %d",  # Show date as "Nov 20"
+            row=1,
+            col=1,
         )
         fig.update_yaxes(
             title_text="Value (USD)",
@@ -428,8 +453,9 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
             gridcolor=DARK_THEME["grid_color"],
             showgrid=True,
             zeroline=False,
-            tickformat='$,.0f',
-            row=1, col=1
+            tickformat="$,.0f",
+            row=1,
+            col=1,
         )
 
         # Update layout for bottom chart
@@ -439,8 +465,9 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
             gridcolor=DARK_THEME["grid_color"],
             showgrid=True,
             zeroline=False,
-            tickformat='%b %d',  # Show date as "Nov 20"
-            row=2, col=1
+            tickformat="%b %d",  # Show date as "Nov 20"
+            row=2,
+            col=1,
         )
         fig.update_yaxes(
             title_text="Proportion (%)",
@@ -448,8 +475,9 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
             gridcolor=DARK_THEME["grid_color"],
             showgrid=True,
             zeroline=False,
-            ticksuffix='%',
-            row=2, col=1
+            ticksuffix="%",
+            row=2,
+            col=1,
         )
 
     # Update overall layout with dark theme
@@ -457,50 +485,42 @@ def generate_evolution_graph(history_data: Dict[str, Any]) -> io.BytesIO:
         paper_bgcolor=DARK_THEME["paper_bgcolor"],
         plot_bgcolor=DARK_THEME["plot_bgcolor"],
         font=dict(
-            family=DARK_THEME["font_family"],
-            color=DARK_THEME["font_color"],
-            size=11
+            family=DARK_THEME["font_family"], color=DARK_THEME["font_color"], size=11
         ),
-        hovermode='x unified',
+        hovermode="x unified",
         showlegend=True,
         legend=dict(
             bgcolor=DARK_THEME["bgcolor"],
             bordercolor=DARK_THEME["grid_color"],
             borderwidth=1,
-            font=dict(
-                family=DARK_THEME["font_family"],
-                size=10
-            ),
+            font=dict(family=DARK_THEME["font_family"], size=10),
             orientation="v",
             yanchor="middle",
             y=0.25,
             xanchor="left",
-            x=1.02
+            x=1.02,
         ),
         width=1000,
         height=900,
-        margin=dict(l=80, r=150, t=80, b=60)
+        margin=dict(l=80, r=150, t=80, b=60),
     )
 
     # Update subplot titles
-    for annotation in fig['layout']['annotations']:
-        annotation['font'] = dict(
-            family=DARK_THEME["font_family"],
-            size=16,
-            color=DARK_THEME["font_color"]
+    for annotation in fig["layout"]["annotations"]:
+        annotation["font"] = dict(
+            family=DARK_THEME["font_family"], size=16, color=DARK_THEME["font_color"]
         )
 
     # Convert to PNG bytes
     img_bytes = io.BytesIO()
-    fig.write_image(img_bytes, format='png')
+    fig.write_image(img_bytes, format="png")
     img_bytes.seek(0)
 
     return img_bytes
 
 
 def generate_token_breakdown_graph(
-    distribution_data: Dict[str, Any],
-    top_n: int = 10
+    distribution_data: Dict[str, Any], top_n: int = 10
 ) -> io.BytesIO:
     """
     Generate a horizontal bar chart showing token values
@@ -516,9 +536,7 @@ def generate_token_breakdown_graph(
 
     # Sort by value
     sorted_tokens = sorted(
-        tokens.items(),
-        key=lambda x: x[1].get("value", 0),
-        reverse=True
+        tokens.items(), key=lambda x: x[1].get("value", 0), reverse=True
     )[:top_n]
 
     labels = [token for token, _ in sorted_tokens]
@@ -526,25 +544,26 @@ def generate_token_breakdown_graph(
     percentages = [data.get("percentage", 0) for _, data in sorted_tokens]
 
     # Create horizontal bar chart
-    fig = go.Figure(data=[go.Bar(
-        y=labels[::-1],  # Reverse to show highest at top
-        x=values[::-1],
-        orientation='h',
-        marker=dict(
-            color=DARK_THEME["line_colors"][0],
-            line=dict(
-                color=DARK_THEME["grid_color"],
-                width=1
+    fig = go.Figure(
+        data=[
+            go.Bar(
+                y=labels[::-1],  # Reverse to show highest at top
+                x=values[::-1],
+                orientation="h",
+                marker=dict(
+                    color=DARK_THEME["line_colors"][0],
+                    line=dict(color=DARK_THEME["grid_color"], width=1),
+                ),
+                text=[
+                    f"${v:,.2f} ({p:.1f}%)"
+                    for v, p in zip(values[::-1], percentages[::-1])
+                ],
+                textposition="auto",
+                textfont=dict(family=DARK_THEME["font_family"], size=11),
+                hovertemplate="<b>%{y}</b><br>Value: $%{x:,.2f}<extra></extra>",
             )
-        ),
-        text=[f'${v:,.2f} ({p:.1f}%)' for v, p in zip(values[::-1], percentages[::-1])],
-        textposition='auto',
-        textfont=dict(
-            family=DARK_THEME["font_family"],
-            size=11
-        ),
-        hovertemplate='<b>%{y}</b><br>Value: $%{x:,.2f}<extra></extra>'
-    )])
+        ]
+    )
 
     # Update layout
     fig.update_layout(
@@ -553,49 +572,37 @@ def generate_token_breakdown_graph(
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=20,
-                color=DARK_THEME["font_color"]
-            )
+                color=DARK_THEME["font_color"],
+            ),
         ),
         xaxis=dict(
             title=dict(
-                text="Value (USD)",
-                font=dict(
-                    family=DARK_THEME["font_family"],
-                    size=14
-                )
+                text="Value (USD)", font=dict(family=DARK_THEME["font_family"], size=14)
             ),
             color=DARK_THEME["font_color"],
             gridcolor=DARK_THEME["grid_color"],
             showgrid=True,
             zeroline=False,
-            tickformat='$,.0f'
+            tickformat="$,.0f",
         ),
         yaxis=dict(
-            title=dict(
-                font=dict(
-                    family=DARK_THEME["font_family"],
-                    size=14
-                )
-            ),
+            title=dict(font=dict(family=DARK_THEME["font_family"], size=14)),
             color=DARK_THEME["font_color"],
             gridcolor=DARK_THEME["grid_color"],
-            showgrid=False
+            showgrid=False,
         ),
         paper_bgcolor=DARK_THEME["paper_bgcolor"],
         plot_bgcolor=DARK_THEME["plot_bgcolor"],
-        font=dict(
-            family=DARK_THEME["font_family"],
-            color=DARK_THEME["font_color"]
-        ),
+        font=dict(family=DARK_THEME["font_family"], color=DARK_THEME["font_color"]),
         showlegend=False,
         width=900,
         height=600,
-        margin=dict(l=120, r=40, t=80, b=60)
+        margin=dict(l=120, r=40, t=80, b=60),
     )
 
     # Convert to PNG bytes
     img_bytes = io.BytesIO()
-    fig.write_image(img_bytes, format='png')
+    fig.write_image(img_bytes, format="png")
     img_bytes.seek(0)
 
     return img_bytes
@@ -604,7 +611,7 @@ def generate_token_breakdown_graph(
 def generate_portfolio_dashboard(
     history_data: Dict[str, Any],
     token_distribution_data: Dict[str, Any],
-    accounts_distribution_data: Dict[str, Any]
+    accounts_distribution_data: Dict[str, Any],
 ) -> io.BytesIO:
     """
     Generate a comprehensive portfolio dashboard with professional styling and layout.
@@ -629,17 +636,22 @@ def generate_portfolio_dashboard(
     # Row 1: Portfolio Value Evolution (scatter) | Token Distribution (pie)
     # Row 2: Token Allocation Over Time (scatter) | Account Distribution (bar)
     fig = make_subplots(
-        rows=2, cols=2,
+        rows=2,
+        cols=2,
         row_heights=[0.48, 0.48],
         column_widths=[0.62, 0.35],
-        subplot_titles=("Portfolio Value Evolution", "Token Distribution",
-                        "Token Allocation Over Time", "Account Distribution"),
+        subplot_titles=(
+            "Portfolio Value Evolution",
+            "Token Distribution",
+            "Token Allocation Over Time",
+            "Account Distribution",
+        ),
         specs=[
             [{"type": "xy"}, {"type": "domain"}],  # xy for scatter, domain for pie
-            [{"type": "xy"}, {"type": "xy"}]       # xy for both scatter and bar
+            [{"type": "xy"}, {"type": "xy"}],  # xy for both scatter and bar
         ],
         vertical_spacing=0.12,
-        horizontal_spacing=0.08
+        horizontal_spacing=0.08,
     )
 
     # === LEFT COLUMN: EVOLUTION DATA ===
@@ -663,7 +675,9 @@ def generate_portfolio_dashboard(
             if isinstance(timestamp_str, str):
                 try:
                     # Parse ISO format and remove timezone info for plotly
-                    timestamp_dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    timestamp_dt = datetime.fromisoformat(
+                        timestamp_str.replace("Z", "+00:00")
+                    )
                     # Convert to naive datetime (remove timezone) for better plotly compatibility
                     timestamp_dt = timestamp_dt.replace(tzinfo=None)
                 except (ValueError, TypeError) as e:
@@ -682,18 +696,26 @@ def generate_portfolio_dashboard(
                 logger.info(f"First state structure: {list(state.keys())}")
                 if state:
                     first_account = list(state.keys())[0]
-                    logger.info(f"First account '{first_account}' type: {type(state[first_account])}")
+                    logger.info(
+                        f"First account '{first_account}' type: {type(state[first_account])}"
+                    )
                     if isinstance(state[first_account], dict):
-                        logger.info(f"First account connectors: {list(state[first_account].keys())}")
+                        logger.info(
+                            f"First account connectors: {list(state[first_account].keys())}"
+                        )
 
             for account_name, connectors in state.items():
                 if not isinstance(connectors, dict):
-                    logger.warning(f"Account '{account_name}' connectors is not a dict: {type(connectors)}")
+                    logger.warning(
+                        f"Account '{account_name}' connectors is not a dict: {type(connectors)}"
+                    )
                     continue
 
                 for connector_name, holdings in connectors.items():
                     if not isinstance(holdings, list):
-                        logger.warning(f"Holdings for {account_name}.{connector_name} is not a list: {type(holdings)}")
+                        logger.warning(
+                            f"Holdings for {account_name}.{connector_name} is not a list: {type(holdings)}"
+                        )
                         continue
 
                     for holding in holdings:
@@ -707,7 +729,9 @@ def generate_portfolio_dashboard(
                                 try:
                                     value_float = float(value)
                                 except (ValueError, TypeError):
-                                    logger.warning(f"Failed to convert value '{value}' to float")
+                                    logger.warning(
+                                        f"Failed to convert value '{value}' to float"
+                                    )
                                     value_float = 0
                             else:
                                 value_float = 0
@@ -715,7 +739,9 @@ def generate_portfolio_dashboard(
                             total_value += value_float
 
                             if token:
-                                token_values[token] = token_values.get(token, 0) + value_float
+                                token_values[token] = (
+                                    token_values.get(token, 0) + value_float
+                                )
 
             all_timestamps.append(timestamp_dt)
             all_total_values.append(total_value)
@@ -727,24 +753,42 @@ def generate_portfolio_dashboard(
             logger.info(f"Last timestamp: {all_timestamps[-1]}")
             logger.info(f"Sample timestamps: {all_timestamps[:3]}")
         if all_total_values:
-            logger.info(f"Value range: ${min(all_total_values):,.2f} - ${max(all_total_values):,.2f}")
-            logger.info(f"Sample values: {[f'${v:,.2f}' for v in all_total_values[:5]]}")
+            logger.info(
+                f"Value range: ${min(all_total_values):,.2f} - ${max(all_total_values):,.2f}"
+            )
+            logger.info(
+                f"Sample values: {[f'${v:,.2f}' for v in all_total_values[:5]]}"
+            )
 
         # Sort data chronologically (oldest first) since API returns newest first
         if all_timestamps:
             # Combine all three lists and sort by timestamp
-            sorted_data = sorted(zip(all_timestamps, all_total_values, all_token_snapshots))
+            sorted_data = sorted(
+                zip(all_timestamps, all_total_values, all_token_snapshots)
+            )
             all_timestamps, all_total_values, all_token_snapshots = zip(*sorted_data)
             all_timestamps = list(all_timestamps)
             all_total_values = list(all_total_values)
             all_token_snapshots = list(all_token_snapshots)
-            logger.info(f"After sorting - First: {all_timestamps[0]}, Last: {all_timestamps[-1]}")
-            logger.info(f"After sorting - Value range: ${min(all_total_values):,.2f} - ${max(all_total_values):,.2f}")
+            logger.info(
+                f"After sorting - First: {all_timestamps[0]}, Last: {all_timestamps[-1]}"
+            )
+            logger.info(
+                f"After sorting - Value range: ${min(all_total_values):,.2f} - ${max(all_total_values):,.2f}"
+            )
 
         # Calculate percentage change for additional context
         pct_change = 0
         if all_timestamps and len(all_total_values) > 1:
-            pct_change = ((all_total_values[-1] - all_total_values[0]) / all_total_values[0] * 100) if all_total_values[0] != 0 else 0
+            pct_change = (
+                (
+                    (all_total_values[-1] - all_total_values[0])
+                    / all_total_values[0]
+                    * 100
+                )
+                if all_total_values[0] != 0
+                else 0
+            )
 
         # Top left: Portfolio value evolution with enhanced styling
         if all_timestamps and all_total_values:
@@ -760,30 +804,27 @@ def generate_portfolio_dashboard(
             y_min = max(0, min_val - padding)
             y_max = max_val + padding
 
-            logger.info(f"Y-axis range: ${y_min:,.2f} - ${y_max:,.2f} (padding: ${padding:,.2f})")
+            logger.info(
+                f"Y-axis range: ${y_min:,.2f} - ${y_max:,.2f} (padding: ${padding:,.2f})"
+            )
 
             fig.add_trace(
                 go.Scatter(
                     x=all_timestamps,
                     y=all_total_values,
-                    mode='lines+markers',
-                    name='Portfolio Value',
-                    line=dict(
-                        color=DARK_THEME["line_colors"][0],
-                        width=2
-                    ),
-                    marker=dict(
-                        size=4,
-                        color=DARK_THEME["line_colors"][0]
-                    ),
-                    fill='tonexty',
-                    fillcolor='rgba(59, 130, 246, 0.15)',
-                    hovertemplate='<b>%{x|%b %d, %H:%M}</b><br>' +
-                                  '<span style="font-size: 14px">$%{y:,.2f}</span>' +
-                                  '<extra></extra>',
-                    showlegend=False
+                    mode="lines+markers",
+                    name="Portfolio Value",
+                    line=dict(color=DARK_THEME["line_colors"][0], width=2),
+                    marker=dict(size=4, color=DARK_THEME["line_colors"][0]),
+                    fill="tonexty",
+                    fillcolor="rgba(59, 130, 246, 0.15)",
+                    hovertemplate="<b>%{x|%b %d, %H:%M}</b><br>"
+                    + '<span style="font-size: 14px">$%{y:,.2f}</span>'
+                    + "<extra></extra>",
+                    showlegend=False,
                 ),
-                row=1, col=1
+                row=1,
+                col=1,
             )
 
             # Add a baseline trace at y_min for the fill effect
@@ -791,12 +832,13 @@ def generate_portfolio_dashboard(
                 go.Scatter(
                     x=all_timestamps,
                     y=[y_min] * len(all_timestamps),
-                    mode='lines',
+                    mode="lines",
                     line=dict(width=0),
                     showlegend=False,
-                    hoverinfo='skip'
+                    hoverinfo="skip",
                 ),
-                row=1, col=1
+                row=1,
+                col=1,
             )
         else:
             logger.warning("No data for evolution chart!")
@@ -810,10 +852,14 @@ def generate_portfolio_dashboard(
         token_avg_values = {}
         for token in all_tokens:
             values_list = [snapshot.get(token, 0) for snapshot in all_token_snapshots]
-            token_avg_values[token] = sum(values_list) / len(values_list) if values_list else 0
+            token_avg_values[token] = (
+                sum(values_list) / len(values_list) if values_list else 0
+            )
 
         # Get top 8 tokens (reduced for better visibility)
-        top_tokens = sorted(token_avg_values.items(), key=lambda x: x[1], reverse=True)[:8]
+        top_tokens = sorted(token_avg_values.items(), key=lambda x: x[1], reverse=True)[
+            :8
+        ]
         top_token_names = [token for token, _ in top_tokens]
 
         # Build aligned arrays for each top token with enhanced styling
@@ -826,17 +872,18 @@ def generate_portfolio_dashboard(
                 go.Scatter(
                     x=all_timestamps,
                     y=token_vals,
-                    mode='lines',
+                    mode="lines",
                     name=token,
                     line=dict(width=0, color=color),
-                    stackgroup='one',
-                    groupnorm='percent',
+                    stackgroup="one",
+                    groupnorm="percent",
                     fillcolor=color,
-                    hovertemplate=f'<b>{token}</b><br>' +
-                                  'Percentage: %{y:.1f}%<br>' +
-                                  '<extra></extra>'
+                    hovertemplate=f"<b>{token}</b><br>"
+                    + "Percentage: %{y:.1f}%<br>"
+                    + "<extra></extra>",
                 ),
-                row=2, col=1
+                row=2,
+                col=1,
             )
 
     # === RIGHT COLUMN TOP: TOKEN DISTRIBUTION PIE CHART ===
@@ -847,7 +894,9 @@ def generate_portfolio_dashboard(
     token_values = []
 
     if tokens_list:
-        sorted_tokens = sorted(tokens_list, key=lambda x: x.get("total_value", 0), reverse=True)[:10]
+        sorted_tokens = sorted(
+            tokens_list, key=lambda x: x.get("total_value", 0), reverse=True
+        )[:10]
         for token_data in sorted_tokens:
             token = token_data.get("token", "")
             value = token_data.get("total_value", 0)
@@ -860,7 +909,9 @@ def generate_portfolio_dashboard(
                 token_labels.append(token)
                 token_values.append(value)
     elif tokens_dict:
-        sorted_tokens = sorted(tokens_dict.items(), key=lambda x: x[1].get("value", 0), reverse=True)[:10]
+        sorted_tokens = sorted(
+            tokens_dict.items(), key=lambda x: x[1].get("value", 0), reverse=True
+        )[:10]
         for token, data in sorted_tokens:
             value = data.get("value", 0)
             if isinstance(value, str):
@@ -883,25 +934,26 @@ def generate_portfolio_dashboard(
                 hole=0.5,  # Larger hole for donut effect
                 marker=dict(
                     colors=DARK_THEME["line_colors"],
-                    line=dict(color=DARK_THEME["bgcolor"], width=3)
+                    line=dict(color=DARK_THEME["bgcolor"], width=3),
                 ),
                 textfont=dict(
                     family=DARK_THEME["font_family"],
                     size=11,
-                    color=DARK_THEME["font_color"]
+                    color=DARK_THEME["font_color"],
                 ),
-                textposition='outside',
-                texttemplate='%{label}<br>%{percent}',
-                insidetextorientation='radial',
-                hovertemplate='<b>%{label}</b><br>' +
-                              'Value: $%{value:,.2f}<br>' +
-                              'Share: %{percent}' +
-                              '<extra></extra>',
+                textposition="outside",
+                texttemplate="%{label}<br>%{percent}",
+                insidetextorientation="radial",
+                hovertemplate="<b>%{label}</b><br>"
+                + "Value: $%{value:,.2f}<br>"
+                + "Share: %{percent}"
+                + "<extra></extra>",
                 showlegend=False,
-                direction='clockwise',
-                sort=True
+                direction="clockwise",
+                sort=True,
             ),
-            row=1, col=2
+            row=1,
+            col=2,
         )
 
     # === RIGHT COLUMN BOTTOM: ACCOUNT DISTRIBUTION STACKED BAR ===
@@ -913,7 +965,9 @@ def generate_portfolio_dashboard(
 
     if accounts_list:
         for account_info in accounts_list:
-            account_name = account_info.get("account", account_info.get("name", "Unknown"))
+            account_name = account_info.get(
+                "account", account_info.get("name", "Unknown")
+            )
             connectors = account_info.get("connectors", {})
 
             if not account_data.get(account_name):
@@ -975,24 +1029,23 @@ def generate_portfolio_dashboard(
                 x=exchange_values,
                 y=account_names,
                 name=exchange,
-                orientation='h',
+                orientation="h",
                 marker=dict(
-                    color=DARK_THEME["line_colors"][idx % len(DARK_THEME["line_colors"])],
-                    line=dict(color=DARK_THEME["bgcolor"], width=2)
+                    color=DARK_THEME["line_colors"][
+                        idx % len(DARK_THEME["line_colors"])
+                    ],
+                    line=dict(color=DARK_THEME["bgcolor"], width=2),
                 ),
-                text=[f'${v:,.0f}' if v > 0 else '' for v in exchange_values],
-                textposition='inside',
-                textfont=dict(
-                    family=DARK_THEME["font_family"],
-                    size=10,
-                    color='white'
-                ),
-                hovertemplate=f'<b>{exchange}</b><br>' +
-                              '%{y}<br>' +
-                              'Value: $%{x:,.2f}' +
-                              '<extra></extra>'
+                text=[f"${v:,.0f}" if v > 0 else "" for v in exchange_values],
+                textposition="inside",
+                textfont=dict(family=DARK_THEME["font_family"], size=10, color="white"),
+                hovertemplate=f"<b>{exchange}</b><br>"
+                + "%{y}<br>"
+                + "Value: $%{x:,.2f}"
+                + "<extra></extra>",
             ),
-            row=2, col=2
+            row=2,
+            col=2,
         )
 
     # Update axes for evolution chart (top left - row 1, col 1)
@@ -1000,23 +1053,25 @@ def generate_portfolio_dashboard(
     if all_timestamps and len(all_timestamps) > 1:
         time_range = (all_timestamps[-1] - all_timestamps[0]).total_seconds()
         days_range = time_range / 86400
-        logger.info(f"Time range: {days_range:.2f} days, {len(all_timestamps)} data points")
+        logger.info(
+            f"Time range: {days_range:.2f} days, {len(all_timestamps)} data points"
+        )
 
         # Choose tick format based on range
         if days_range <= 1:
-            tick_format = '%H:%M'
+            tick_format = "%H:%M"
             dtick_val = 3600000 * 4  # 4 hours
         elif days_range <= 3:
-            tick_format = '%b %d %H:%M'
+            tick_format = "%b %d %H:%M"
             dtick_val = 3600000 * 12  # 12 hours
         elif days_range <= 7:
-            tick_format = '%b %d'
+            tick_format = "%b %d"
             dtick_val = 86400000  # 1 day
         else:
-            tick_format = '%b %d'
+            tick_format = "%b %d"
             dtick_val = 86400000 * 2  # 2 days
     else:
-        tick_format = '%b %d'
+        tick_format = "%b %d"
         dtick_val = 86400000
 
     fig.update_xaxes(
@@ -1031,7 +1086,8 @@ def generate_portfolio_dashboard(
         linecolor=DARK_THEME["grid_color"],
         zeroline=False,
         dtick=dtick_val,
-        row=1, col=1
+        row=1,
+        col=1,
     )
     # Set Y-axis range for portfolio value chart (use calculated y_min, y_max if available)
     y_axis_range = [y_min, y_max] if y_min is not None and y_max is not None else None
@@ -1039,20 +1095,25 @@ def generate_portfolio_dashboard(
     fig.update_yaxes(
         title=dict(
             text="Portfolio Value",
-            font=dict(size=12, family=DARK_THEME["font_family"], color=DARK_THEME["font_color"])
+            font=dict(
+                size=12,
+                family=DARK_THEME["font_family"],
+                color=DARK_THEME["font_color"],
+            ),
         ),
         showgrid=True,
         gridcolor=DARK_THEME["grid_color"],
         gridwidth=1,
         color=DARK_THEME["axis_color"],
-        tickformat='$,.0f',
+        tickformat="$,.0f",
         tickfont=dict(size=11, family=DARK_THEME["font_family"]),
         showline=True,
         linewidth=1,
         linecolor=DARK_THEME["grid_color"],
         zeroline=False,
         range=y_axis_range,
-        row=1, col=1
+        row=1,
+        col=1,
     )
 
     # Update axes for token allocation chart (bottom left - row 2, col 1)
@@ -1068,24 +1129,30 @@ def generate_portfolio_dashboard(
         linecolor=DARK_THEME["grid_color"],
         zeroline=False,
         dtick=dtick_val,
-        row=2, col=1
+        row=2,
+        col=1,
     )
     fig.update_yaxes(
         title=dict(
             text="Allocation",
-            font=dict(size=12, family=DARK_THEME["font_family"], color=DARK_THEME["font_color"])
+            font=dict(
+                size=12,
+                family=DARK_THEME["font_family"],
+                color=DARK_THEME["font_color"],
+            ),
         ),
         showgrid=True,
         gridcolor=DARK_THEME["grid_color"],
         gridwidth=1,
         color=DARK_THEME["axis_color"],
-        ticksuffix='%',
+        ticksuffix="%",
         tickfont=dict(size=11, family=DARK_THEME["font_family"]),
         showline=True,
         linewidth=1,
         linecolor=DARK_THEME["grid_color"],
         zeroline=False,
-        row=2, col=1
+        row=2,
+        col=1,
     )
 
     # Update axes for account bar chart (bottom right - row 2, col 2)
@@ -1094,13 +1161,14 @@ def generate_portfolio_dashboard(
         gridcolor=DARK_THEME["grid_color"],
         gridwidth=1,
         color=DARK_THEME["axis_color"],
-        tickformat='$,.0f',
+        tickformat="$,.0f",
         tickfont=dict(size=10, family=DARK_THEME["font_family"]),
         showline=True,
         linewidth=1,
         linecolor=DARK_THEME["grid_color"],
         zeroline=False,
-        row=2, col=2
+        row=2,
+        col=2,
     )
     fig.update_yaxes(
         showgrid=False,
@@ -1109,7 +1177,8 @@ def generate_portfolio_dashboard(
         showline=True,
         linewidth=1,
         linecolor=DARK_THEME["grid_color"],
-        row=2, col=2
+        row=2,
+        col=2,
     )
 
     # Overall layout with professional styling
@@ -1119,65 +1188,61 @@ def generate_portfolio_dashboard(
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=28,
-                color=DARK_THEME["font_color"]
+                color=DARK_THEME["font_color"],
             ),
             x=0.5,
-            xanchor='center',
+            xanchor="center",
             y=0.98,
-            yanchor='top'
+            yanchor="top",
         ),
         paper_bgcolor=DARK_THEME["paper_bgcolor"],
         plot_bgcolor=DARK_THEME["plot_bgcolor"],
         font=dict(
-            family=DARK_THEME["font_family"],
-            color=DARK_THEME["font_color"],
-            size=11
+            family=DARK_THEME["font_family"], color=DARK_THEME["font_color"], size=11
         ),
-        hovermode='x unified',
+        hovermode="x unified",
         hoverlabel=dict(
             bgcolor=DARK_THEME["card_bgcolor"],
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=12,
-                color=DARK_THEME["font_color"]
+                color=DARK_THEME["font_color"],
             ),
-            bordercolor=DARK_THEME["grid_color"]
+            bordercolor=DARK_THEME["grid_color"],
         ),
         showlegend=True,
         legend=dict(
-            bgcolor='rgba(26, 31, 46, 0.9)',
+            bgcolor="rgba(26, 31, 46, 0.9)",
             bordercolor=DARK_THEME["grid_color"],
             borderwidth=1,
             font=dict(
                 family=DARK_THEME["font_family"],
                 size=10,
-                color=DARK_THEME["font_color"]
+                color=DARK_THEME["font_color"],
             ),
             orientation="v",
             yanchor="top",
             y=0.98,
             xanchor="left",
             x=1.01,
-            itemsizing='constant',
-            itemwidth=30
+            itemsizing="constant",
+            itemwidth=30,
         ),
-        barmode='stack',
+        barmode="stack",
         width=1920,
         height=1080,
-        margin=dict(l=70, r=200, t=100, b=50)
+        margin=dict(l=70, r=200, t=100, b=50),
     )
 
     # Style the subplot titles
-    for annotation in fig['layout']['annotations']:
-        annotation['font'] = dict(
-            family=DARK_THEME["font_family"],
-            size=14,
-            color=DARK_THEME["font_color"]
+    for annotation in fig["layout"]["annotations"]:
+        annotation["font"] = dict(
+            family=DARK_THEME["font_family"], size=14, color=DARK_THEME["font_color"]
         )
 
     # Convert to PNG bytes
     img_bytes = io.BytesIO()
-    fig.write_image(img_bytes, format='png')
+    fig.write_image(img_bytes, format="png")
     img_bytes.seek(0)
 
     return img_bytes

@@ -11,9 +11,7 @@ class MockMessage:
 
     async def edit_text(self, text, parse_mode=None, reply_markup=None):
         return await self._msg.edit_text(
-            text,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup
+            text, parse_mode=parse_mode, reply_markup=reply_markup
         )
 
     async def delete(self):

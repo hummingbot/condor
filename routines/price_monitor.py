@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
@@ -31,8 +32,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     This is a continuous routine - runs forever until cancelled.
     Sends alert messages when threshold is crossed.
     """
-    chat_id = context._chat_id if hasattr(context, '_chat_id') else None
-    instance_id = getattr(context, '_instance_id', 'default')
+    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
+    instance_id = getattr(context, "_instance_id", "default")
 
     client = await get_client(chat_id, context=context)
     if not client:
@@ -55,7 +56,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"🟢 *Price Monitor Started*\n{pair_esc} @ {escape_markdown_v2(config.connector)}",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
     except Exception as e:
         logger.error(f"Failed to send start message: {e}")
@@ -66,8 +67,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             try:
                 # Get current price
                 prices = await client.market_data.get_prices(
-                    connector_name=config.connector,
-                    trading_pairs=config.trading_pair
+                    connector_name=config.connector, trading_pairs=config.trading_pair
                 )
                 current_price = prices["prices"].get(config.trading_pair)
 
@@ -88,7 +88,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 state["updates"] += 1
 
                 # Calculate changes
-                change_from_last = ((current_price - state["last_price"]) / state["last_price"]) * 100
+                change_from_last = (
+                    (current_price - state["last_price"]) / state["last_price"]
+                ) * 100
 
                 # Check threshold for alert
                 if abs(change_from_last) >= config.threshold_pct:
@@ -105,7 +107,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                                 f"Price: `{price_esc}`\n"
                                 f"Change: `{change_esc}`"
                             ),
-                            parse_mode="MarkdownV2"
+                            parse_mode="MarkdownV2",
                         )
                         state["alerts_sent"] += 1
                     except Exception:
@@ -135,7 +137,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     f"{escape_markdown_v2(config.trading_pair)}\n"
                     f"Duration: {mins}m {secs}s \\| Updates: {state['updates']} \\| Alerts: {state['alerts_sent']}"
                 ),
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
         except Exception:
             pass

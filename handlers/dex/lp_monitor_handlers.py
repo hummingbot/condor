@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # POSITION FORMATTING HELPERS
 # ============================================
 
+
 def _format_price(value: float | str, decimals: int | None = None) -> str:
     """Format a price value with appropriate decimal places."""
     try:
@@ -37,8 +38,8 @@ def _format_price(value: float | str, decimals: int | None = None) -> str:
 
 def _get_position_tokens(pos: dict, token_cache: dict) -> tuple[str, str, str]:
     """Extract and resolve token symbols from position data."""
-    base_token = pos.get('base_token', pos.get('token_a', ''))
-    quote_token = pos.get('quote_token', pos.get('token_b', ''))
+    base_token = pos.get("base_token", pos.get("token_a", ""))
+    quote_token = pos.get("quote_token", pos.get("token_b", ""))
     base_symbol = resolve_token_symbol(base_token, token_cache)
     quote_symbol = resolve_token_symbol(quote_token, token_cache)
     pair = f"{base_symbol}-{quote_symbol}"
@@ -63,11 +64,9 @@ def _get_positions_for_instance(positions_cache: dict, instance_id: str) -> list
 # NAVIGATION HANDLERS
 # ============================================
 
+
 async def handle_lpm_navigation(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    instance_id: str,
-    new_index: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, instance_id: str, new_index: int
 ) -> None:
     """Handle navigation in LP monitor alert message."""
     query = update.callback_query
@@ -85,12 +84,12 @@ async def handle_lpm_navigation(
 
     # Get token info
     base_symbol, quote_symbol, pair = _get_position_tokens(pos, token_cache)
-    connector = pos.get('connector', 'unknown')
+    connector = pos.get("connector", "unknown")
 
     # Price info
-    lower = pos.get('lower_price', pos.get('price_lower', ''))
-    upper = pos.get('upper_price', pos.get('price_upper', ''))
-    current = pos.get('current_price', '')
+    lower = pos.get("lower_price", pos.get("price_lower", ""))
+    upper = pos.get("upper_price", pos.get("price_upper", ""))
+    current = pos.get("current_price", "")
 
     # Format range
     range_str = ""
@@ -121,8 +120,8 @@ async def handle_lpm_navigation(
             current_str = f"Current: {current}"
 
     # Format value
-    pnl_summary = pos.get('pnl_summary', {})
-    value = pnl_summary.get('current_lp_value_quote', 0)
+    pnl_summary = pos.get("pnl_summary", {})
+    value = pnl_summary.get("current_lp_value_quote", 0)
     value_str = ""
     if value:
         try:
@@ -132,8 +131,16 @@ async def handle_lpm_navigation(
 
     # Build message
     total = len(positions)
-    header = f"🚨 *Out of Range* \\({new_index + 1}/{total}\\)" if total > 1 else "🚨 *Position Out of Range*"
-    lines = [header, "", f"*{escape_markdown_v2(pair)}* \\({escape_markdown_v2(connector)}\\)"]
+    header = (
+        f"🚨 *Out of Range* \\({new_index + 1}/{total}\\)"
+        if total > 1
+        else "🚨 *Position Out of Range*"
+    )
+    lines = [
+        header,
+        "",
+        f"*{escape_markdown_v2(pair)}* \\({escape_markdown_v2(connector)}\\)",
+    ]
 
     if direction:
         lines.append(f"_{escape_markdown_v2(direction)}_")
@@ -153,30 +160,49 @@ async def handle_lpm_navigation(
     if total > 1:
         nav_row = []
         if new_index > 0:
-            nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"dex:lpm_nav:{instance_id}:{new_index - 1}"))
-        nav_row.append(InlineKeyboardButton(f"{new_index + 1}/{total}", callback_data="dex:lpm_noop"))
+            nav_row.append(
+                InlineKeyboardButton(
+                    "◀️ Prev",
+                    callback_data=f"dex:lpm_nav:{instance_id}:{new_index - 1}",
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                f"{new_index + 1}/{total}", callback_data="dex:lpm_noop"
+            )
+        )
         if new_index < total - 1:
-            nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"dex:lpm_nav:{instance_id}:{new_index + 1}"))
+            nav_row.append(
+                InlineKeyboardButton(
+                    "Next ▶️",
+                    callback_data=f"dex:lpm_nav:{instance_id}:{new_index + 1}",
+                )
+            )
         keyboard.append(nav_row)
 
-    keyboard.append([
-        InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{cache_key}"),
-        InlineKeyboardButton("⏭ Skip", callback_data=f"dex:lpm_skip:{cache_key}"),
-        InlineKeyboardButton("✅ Dismiss", callback_data=f"dex:lpm_dismiss:{instance_id}"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "❌ Close", callback_data=f"dex:pos_close:{cache_key}"
+            ),
+            InlineKeyboardButton("⏭ Skip", callback_data=f"dex:lpm_skip:{cache_key}"),
+            InlineKeyboardButton(
+                "✅ Dismiss", callback_data=f"dex:lpm_dismiss:{instance_id}"
+            ),
+        ]
+    )
 
     try:
-        await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.edit_text(
+            text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     except Exception as e:
         if "not modified" not in str(e).lower():
             logger.warning(f"Failed to update LPM navigation: {e}")
 
 
 async def handle_lpm_oor_navigation(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    instance_id: str,
-    index: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, instance_id: str, index: int
 ) -> None:
     """Navigate only out-of-range positions."""
     from routines.lp_monitor import format_position_detail_view
@@ -197,7 +223,11 @@ async def handle_lpm_oor_navigation(
         else:
             break
 
-    oor_positions = [(orig_idx, pos) for orig_idx, pos in all_positions if pos.get('in_range') == 'OUT_OF_RANGE']
+    oor_positions = [
+        (orig_idx, pos)
+        for orig_idx, pos in all_positions
+        if pos.get("in_range") == "OUT_OF_RANGE"
+    ]
 
     if not oor_positions:
         await query.answer("No out-of-range positions")
@@ -217,26 +247,54 @@ async def handle_lpm_oor_navigation(
 
     nav_row = []
     if index > 0:
-        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"dex:lpm_oor:{instance_id}:{index - 1}"))
-    nav_row.append(InlineKeyboardButton(f"⚠️ {index + 1}/{len(oor_positions)}", callback_data="dex:noop"))
+        nav_row.append(
+            InlineKeyboardButton(
+                "◀️ Prev", callback_data=f"dex:lpm_oor:{instance_id}:{index - 1}"
+            )
+        )
+    nav_row.append(
+        InlineKeyboardButton(
+            f"⚠️ {index + 1}/{len(oor_positions)}", callback_data="dex:noop"
+        )
+    )
     if index < len(oor_positions) - 1:
-        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"dex:lpm_oor:{instance_id}:{index + 1}"))
+        nav_row.append(
+            InlineKeyboardButton(
+                "Next ▶️", callback_data=f"dex:lpm_oor:{instance_id}:{index + 1}"
+            )
+        )
     if nav_row:
         keyboard.append(nav_row)
 
-    keyboard.append([
-        InlineKeyboardButton("💰 Collect Fees", callback_data=f"dex:lpm_collect:{cache_key}"),
-        InlineKeyboardButton("❌ Close", callback_data=f"dex:pos_close:{cache_key}"),
-    ])
-    keyboard.append([
-        InlineKeyboardButton("🔄 Rebalance", callback_data=f"dex:lpm_rebalance:{cache_key}"),
-    ])
-    keyboard.append([
-        InlineKeyboardButton("« Back to List", callback_data=f"dex:lpm_dismiss:{instance_id}"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "💰 Collect Fees", callback_data=f"dex:lpm_collect:{cache_key}"
+            ),
+            InlineKeyboardButton(
+                "❌ Close", callback_data=f"dex:pos_close:{cache_key}"
+            ),
+        ]
+    )
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "🔄 Rebalance", callback_data=f"dex:lpm_rebalance:{cache_key}"
+            ),
+        ]
+    )
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "« Back to List", callback_data=f"dex:lpm_dismiss:{instance_id}"
+            ),
+        ]
+    )
 
     try:
-        await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.edit_text(
+            text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     except Exception as e:
         if "not modified" not in str(e).lower():
             logger.warning(f"Failed to update OOR navigation: {e}")
@@ -246,11 +304,9 @@ async def handle_lpm_oor_navigation(
 # DETAIL VIEW HANDLER
 # ============================================
 
+
 async def handle_lpm_detail(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    instance_id: str,
-    index: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, instance_id: str, index: int
 ) -> None:
     """Handle position detail view with actions."""
     from routines.lp_monitor import format_position_detail_view
@@ -274,7 +330,9 @@ async def handle_lpm_detail(
     )
 
     try:
-        await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+        await query.message.edit_text(
+            text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
     except Exception as e:
         if "not modified" not in str(e).lower():
             logger.warning(f"Failed to update position detail: {e}")
@@ -284,10 +342,9 @@ async def handle_lpm_detail(
 # FEE COLLECTION HANDLER
 # ============================================
 
+
 async def handle_lpm_collect_fees(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    cache_key: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, cache_key: str
 ) -> None:
     """Collect fees for a position."""
     query = update.callback_query
@@ -303,27 +360,28 @@ async def handle_lpm_collect_fees(
 
     try:
         from config_manager import get_client
+
         client = await get_client(chat_id, context=context)
-        if not client or not hasattr(client, 'gateway_clmm'):
+        if not client or not hasattr(client, "gateway_clmm"):
             await query.message.reply_text("❌ Gateway not available")
             return
 
         # Get position details
-        position_address = pos.get('position_address', pos.get('nft_id', pos.get('address', '')))
-        connector = pos.get('connector', 'meteora')
-        network = pos.get('network', 'solana-mainnet-beta')
+        position_address = pos.get(
+            "position_address", pos.get("nft_id", pos.get("address", ""))
+        )
+        connector = pos.get("connector", "meteora")
+        network = pos.get("network", "solana-mainnet-beta")
 
         result = await client.gateway_clmm.collect_fees(
-            connector=connector,
-            network=network,
-            position_address=position_address
+            connector=connector, network=network, position_address=position_address
         )
 
         if result:
-            tx_hash = (result.get('tx_hash', '') or 'N/A')[:16]
+            tx_hash = (result.get("tx_hash", "") or "N/A")[:16]
             await query.message.reply_text(
                 f"✅ *Fees collected*\nTx: `{escape_markdown_v2(tx_hash)}...`",
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
         else:
             await query.message.reply_text("❌ Failed: No response from gateway")
@@ -337,10 +395,9 @@ async def handle_lpm_collect_fees(
 # REBALANCE HANDLERS
 # ============================================
 
+
 async def handle_lpm_rebalance(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    cache_key: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, cache_key: str
 ) -> None:
     """Start rebalance flow: show confirmation before close + reopen."""
     query = update.callback_query
@@ -358,8 +415,8 @@ async def handle_lpm_rebalance(
 
     # Get position details for confirmation
     _, _, pair = _get_position_tokens(pos, token_cache)
-    lower = pos.get('lower_price', pos.get('price_lower', 0))
-    upper = pos.get('upper_price', pos.get('price_upper', 0))
+    lower = pos.get("lower_price", pos.get("price_lower", 0))
+    upper = pos.get("upper_price", pos.get("price_upper", 0))
 
     text = (
         f"🔄 *Rebalance Position*\n"
@@ -375,21 +432,26 @@ async def handle_lpm_rebalance(
 
     keyboard = [
         [
-            InlineKeyboardButton("✅ Confirm Rebalance", callback_data=f"dex:lpm_rebalance_confirm:{cache_key}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"dex:lpm_dismiss:{cache_key.split('_')[1]}"),
+            InlineKeyboardButton(
+                "✅ Confirm Rebalance",
+                callback_data=f"dex:lpm_rebalance_confirm:{cache_key}",
+            ),
+            InlineKeyboardButton(
+                "❌ Cancel", callback_data=f"dex:lpm_dismiss:{cache_key.split('_')[1]}"
+            ),
         ]
     ]
 
     try:
-        await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.message.edit_text(
+            text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     except Exception as e:
         logger.warning(f"Failed to show rebalance confirmation: {e}")
 
 
 async def handle_lpm_rebalance_execute(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    cache_key: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, cache_key: str
 ) -> None:
     """Execute the rebalance: close position and open new one with same range."""
     query = update.callback_query
@@ -407,33 +469,36 @@ async def handle_lpm_rebalance_execute(
     # Update message to show progress
     await query.message.edit_text(
         "🔄 *Rebalancing\\.\\.\\.*\n\nStep 1/3: Closing position\\.\\.\\.",
-        parse_mode="MarkdownV2"
+        parse_mode="MarkdownV2",
     )
 
     try:
         from config_manager import get_client
+
         client = await get_client(chat_id, context=context)
-        if not client or not hasattr(client, 'gateway_clmm'):
+        if not client or not hasattr(client, "gateway_clmm"):
             await query.message.edit_text("❌ Gateway not available")
             return
 
         # Get position details
-        position_address = pos.get('position_address', pos.get('nft_id', pos.get('address', '')))
-        connector = pos.get('connector', 'meteora')
-        network = pos.get('network', 'solana-mainnet-beta')
-        pool_address = pos.get('pool_id', pos.get('pool_address', ''))
-        lower_price = pos.get('lower_price', pos.get('price_lower', 0))
-        upper_price = pos.get('upper_price', pos.get('price_upper', 0))
+        position_address = pos.get(
+            "position_address", pos.get("nft_id", pos.get("address", ""))
+        )
+        connector = pos.get("connector", "meteora")
+        network = pos.get("network", "solana-mainnet-beta")
+        pool_address = pos.get("pool_id", pos.get("pool_address", ""))
+        lower_price = pos.get("lower_price", pos.get("price_lower", 0))
+        upper_price = pos.get("upper_price", pos.get("price_upper", 0))
 
         # Step 1: Close the position
         close_result = await client.gateway_clmm.close_position(
-            connector=connector,
-            network=network,
-            position_address=position_address
+            connector=connector, network=network, position_address=position_address
         )
 
         if not close_result:
-            await query.message.edit_text("❌ Failed to close position: No response from gateway")
+            await query.message.edit_text(
+                "❌ Failed to close position: No response from gateway"
+            )
             return
 
         logger.info(f"Close position result: {close_result}")
@@ -441,9 +506,15 @@ async def handle_lpm_rebalance_execute(
         # Extract tx hash from various possible field names
         close_tx = None
         if isinstance(close_result, dict):
-            close_tx = close_result.get('tx_hash') or close_result.get('txHash') or \
-                       close_result.get('signature') or close_result.get('txSignature')
-        close_tx_display = f"`{escape_markdown_v2(close_tx[:20])}...`" if close_tx else "_pending_"
+            close_tx = (
+                close_result.get("tx_hash")
+                or close_result.get("txHash")
+                or close_result.get("signature")
+                or close_result.get("txSignature")
+            )
+        close_tx_display = (
+            f"`{escape_markdown_v2(close_tx[:20])}...`" if close_tx else "_pending_"
+        )
 
         # Update progress
         await query.message.edit_text(
@@ -451,18 +522,22 @@ async def handle_lpm_rebalance_execute(
             f"✅ Step 1/3: Position closed\n"
             f"   Tx: {close_tx_display}\n\n"
             f"Step 2/3: Getting withdrawn amounts\\.\\.\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         # Get the withdrawn amounts from the close result
-        base_withdrawn = close_result.get('base_amount', close_result.get('amount_base', 0))
-        quote_withdrawn = close_result.get('quote_amount', close_result.get('amount_quote', 0))
+        base_withdrawn = close_result.get(
+            "base_amount", close_result.get("amount_base", 0)
+        )
+        quote_withdrawn = close_result.get(
+            "quote_amount", close_result.get("amount_quote", 0)
+        )
 
         # Fallback to original position amounts if not in close result
         if not base_withdrawn:
-            base_withdrawn = pos.get('base_token_amount', pos.get('amount_a', 0))
+            base_withdrawn = pos.get("base_token_amount", pos.get("amount_a", 0))
         if not quote_withdrawn:
-            quote_withdrawn = pos.get('quote_token_amount', pos.get('amount_b', 0))
+            quote_withdrawn = pos.get("quote_token_amount", pos.get("amount_b", 0))
 
         # Update progress
         await query.message.edit_text(
@@ -470,7 +545,7 @@ async def handle_lpm_rebalance_execute(
             f"✅ Step 1/3: Position closed\n"
             f"✅ Step 2/3: Amounts ready\n\n"
             f"Step 3/3: Opening new position\\.\\.\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         # Step 3: Open new position with same range using bid-ask strategy (type 2)
@@ -484,7 +559,7 @@ async def handle_lpm_rebalance_execute(
             upper_price=Decimal(str(upper_price)),
             base_token_amount=float(base_withdrawn) if base_withdrawn else 0,
             quote_token_amount=float(quote_withdrawn) if quote_withdrawn else 0,
-            extra_params=extra_params
+            extra_params=extra_params,
         )
 
         if not open_result:
@@ -493,7 +568,7 @@ async def handle_lpm_rebalance_execute(
                 f"✅ Position closed\n"
                 f"❌ Failed to open new position: No response from gateway\n\n"
                 f"Your funds are in your wallet\\.",
-                parse_mode="MarkdownV2"
+                parse_mode="MarkdownV2",
             )
             return
 
@@ -502,9 +577,15 @@ async def handle_lpm_rebalance_execute(
         # Extract tx hash
         open_tx = None
         if isinstance(open_result, dict):
-            open_tx = open_result.get('tx_hash') or open_result.get('txHash') or \
-                      open_result.get('signature') or open_result.get('txSignature')
-        open_tx_display = f"`{escape_markdown_v2(open_tx[:20])}...`" if open_tx else "_pending_"
+            open_tx = (
+                open_result.get("tx_hash")
+                or open_result.get("txHash")
+                or open_result.get("signature")
+                or open_result.get("txSignature")
+            )
+        open_tx_display = (
+            f"`{escape_markdown_v2(open_tx[:20])}...`" if open_tx else "_pending_"
+        )
 
         # Get token symbols for display
         _, quote_symbol, pair = _get_position_tokens(pos, token_cache)
@@ -540,10 +621,7 @@ async def handle_lpm_rebalance_execute(
             if open_tx:
                 lines.append(f"Open Tx: {open_tx_display}")
 
-        await query.message.edit_text(
-            "\n".join(lines),
-            parse_mode="MarkdownV2"
-        )
+        await query.message.edit_text("\n".join(lines), parse_mode="MarkdownV2")
 
     except Exception as e:
         logger.error(f"Failed to rebalance position: {e}", exc_info=True)
@@ -554,10 +632,9 @@ async def handle_lpm_rebalance_execute(
 # SKIP AND DISMISS HANDLERS
 # ============================================
 
+
 async def handle_lpm_skip(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    cache_key: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, cache_key: str
 ) -> None:
     """Skip a position alert (remove from cache and dismiss)."""
     query = update.callback_query
@@ -569,15 +646,14 @@ async def handle_lpm_skip(
         del positions_cache[cache_key]
 
     try:
-        await query.message.edit_text(
-            "⏭ _Position skipped_",
-            parse_mode="MarkdownV2"
-        )
+        await query.message.edit_text("⏭ _Position skipped_", parse_mode="MarkdownV2")
     except Exception:
         pass
 
 
-async def handle_lpm_dismiss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_lpm_dismiss(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
     """Dismiss the LP monitor alert message."""
     query = update.callback_query
     await query.answer("Dismissed")
@@ -587,8 +663,7 @@ async def handle_lpm_dismiss(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception:
         try:
             await query.message.edit_text(
-                "✅ _Alert dismissed_",
-                parse_mode="MarkdownV2"
+                "✅ _Alert dismissed_", parse_mode="MarkdownV2"
             )
         except Exception:
             pass
@@ -598,11 +673,9 @@ async def handle_lpm_dismiss(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # COUNTDOWN HANDLERS
 # ============================================
 
+
 async def handle_lpm_cancel_countdown(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    instance_id: str,
-    pos_id: str
+    update: Update, context: ContextTypes.DEFAULT_TYPE, instance_id: str, pos_id: str
 ) -> None:
     """Cancel an active auto-close countdown."""
     query = update.callback_query
@@ -616,7 +689,7 @@ async def handle_lpm_cancel_countdown(
     try:
         await query.message.edit_text(
             "⏹ *Auto\\-close cancelled*\n\nPosition will remain open\\.",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
     except Exception as e:
         logger.warning(f"Could not update countdown message: {e}")

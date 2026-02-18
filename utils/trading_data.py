@@ -1,8 +1,9 @@
 """
 Trading data utilities for fetching positions and orders
 """
+
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,16 +20,16 @@ async def get_network_tokens(client, network_id: str) -> Dict[str, str]:
         Dictionary mapping token address to symbol {address: symbol}
     """
     try:
-        if not hasattr(client, 'gateway'):
+        if not hasattr(client, "gateway"):
             return {}
 
         tokens = []
 
         # Try get_network_tokens first
         try:
-            if hasattr(client.gateway, 'get_network_tokens'):
+            if hasattr(client.gateway, "get_network_tokens"):
                 response = await client.gateway.get_network_tokens(network_id)
-                tokens = response.get('tokens', []) if response else []
+                tokens = response.get("tokens", []) if response else []
         except Exception as e:
             logger.debug(f"get_network_tokens failed for {network_id}: {e}")
 
@@ -36,15 +37,15 @@ async def get_network_tokens(client, network_id: str) -> Dict[str, str]:
         if not tokens:
             try:
                 config = await client.gateway.get_network_config(network_id)
-                tokens = config.get('tokens', []) if config else []
+                tokens = config.get("tokens", []) if config else []
             except Exception as e:
                 logger.debug(f"get_network_config failed for {network_id}: {e}")
 
         # Build address -> symbol mapping
         token_map = {}
         for token in tokens:
-            address = token.get('address', '')
-            symbol = token.get('symbol', '')
+            address = token.get("address", "")
+            symbol = token.get("symbol", "")
             if address and symbol:
                 token_map[address] = symbol
 
@@ -76,7 +77,7 @@ async def get_tokens_for_networks(client, networks: List[str]) -> Dict[str, str]
     unique_networks = list(set(networks))
     results = await asyncio.gather(
         *[get_network_tokens(client, net) for net in unique_networks],
-        return_exceptions=True
+        return_exceptions=True,
     )
 
     # Combine all token maps
@@ -88,7 +89,9 @@ async def get_tokens_for_networks(client, networks: List[str]) -> Dict[str, str]
     return combined
 
 
-async def get_perpetual_positions(client, account_names: Optional[List[str]] = None) -> Dict[str, Any]:
+async def get_perpetual_positions(
+    client, account_names: Optional[List[str]] = None
+) -> Dict[str, Any]:
     """
     Get all perpetual positions across accounts
 
@@ -111,15 +114,14 @@ async def get_perpetual_positions(client, account_names: Optional[List[str]] = N
             positions = positions_data
         elif isinstance(positions_data, dict):
             # Try 'data' key first (CLOB API format), then 'positions' key
-            positions = positions_data.get('data', positions_data.get('positions', []))
+            positions = positions_data.get("data", positions_data.get("positions", []))
         else:
             positions = []
 
         # Filter by account names if specified
         if account_names and positions:
             positions = [
-                pos for pos in positions
-                if pos.get('account_name') in account_names
+                pos for pos in positions if pos.get("account_name") in account_names
             ]
 
         return {"positions": positions, "total": len(positions)}
@@ -129,7 +131,9 @@ async def get_perpetual_positions(client, account_names: Optional[List[str]] = N
         return {"positions": [], "total": 0}
 
 
-async def get_active_orders(client, account_names: Optional[List[str]] = None) -> Dict[str, Any]:
+async def get_active_orders(
+    client, account_names: Optional[List[str]] = None
+) -> Dict[str, Any]:
     """
     Get all active (open) orders across accounts
 
@@ -159,15 +163,16 @@ async def get_active_orders(client, account_names: Optional[List[str]] = None) -
         # Filter by account names if specified and not already filtered
         if account_names and isinstance(orders_data, list):
             orders_data = [
-                order for order in orders_data
-                if order.get('account_name') in account_names
+                order
+                for order in orders_data
+                if order.get("account_name") in account_names
             ]
 
         # Handle both list and dict responses
         if isinstance(orders_data, list):
             return {"orders": orders_data, "total": len(orders_data)}
         elif isinstance(orders_data, dict):
-            orders = orders_data.get('orders', [])
+            orders = orders_data.get("orders", [])
             return {"orders": orders, "total": len(orders)}
 
         return {"orders": [], "total": 0}
@@ -191,11 +196,11 @@ def _is_position_active(pos: Dict[str, Any]) -> bool:
         True if position appears to be active (has liquidity)
     """
     # Must not have CLOSED status
-    if pos.get('status') == 'CLOSED':
+    if pos.get("status") == "CLOSED":
         return False
 
     # Check liquidity field (exact field name may vary)
-    liquidity = pos.get('liquidity') or pos.get('current_liquidity') or pos.get('liq')
+    liquidity = pos.get("liquidity") or pos.get("current_liquidity") or pos.get("liq")
     if liquidity is not None:
         try:
             return float(liquidity) > 0
@@ -205,12 +210,16 @@ def _is_position_active(pos: Dict[str, Any]) -> bool:
     # Check if position has any token amounts remaining
     # Use the same field names as the /lp command (liquidity.py)
     base_amount = (
-        pos.get('base_token_amount') or pos.get('base_amount') or
-        pos.get('amount_base') or pos.get('token_a_amount')
+        pos.get("base_token_amount")
+        or pos.get("base_amount")
+        or pos.get("amount_base")
+        or pos.get("token_a_amount")
     )
     quote_amount = (
-        pos.get('quote_token_amount') or pos.get('quote_amount') or
-        pos.get('amount_quote') or pos.get('token_b_amount')
+        pos.get("quote_token_amount")
+        or pos.get("quote_amount")
+        or pos.get("amount_quote")
+        or pos.get("token_b_amount")
     )
 
     # If we have token amount data, check if at least one is > 0
@@ -225,7 +234,9 @@ def _is_position_active(pos: Dict[str, Any]) -> bool:
     return False
 
 
-async def get_lp_positions(client, account_names: Optional[List[str]] = None) -> Dict[str, Any]:
+async def get_lp_positions(
+    client, account_names: Optional[List[str]] = None
+) -> Dict[str, Any]:
     """
     Get all LP (CLMM) positions from the database.
 
@@ -238,8 +249,10 @@ async def get_lp_positions(client, account_names: Optional[List[str]] = None) ->
     """
     try:
         # Check if client has gateway_clmm capability
-        if not hasattr(client, 'gateway_clmm'):
-            logger.debug("Client doesn't have gateway_clmm - LP positions not available")
+        if not hasattr(client, "gateway_clmm"):
+            logger.debug(
+                "Client doesn't have gateway_clmm - LP positions not available"
+            )
             return {"positions": [], "total": 0}
 
         try:
@@ -261,12 +274,11 @@ async def get_lp_positions(client, account_names: Optional[List[str]] = None) ->
         active_positions = [p for p in positions if _is_position_active(p)]
 
         if len(active_positions) < len(positions):
-            logger.info(f"Filtered {len(positions) - len(active_positions)} closed positions (0 liquidity)")
+            logger.info(
+                f"Filtered {len(positions) - len(active_positions)} closed positions (0 liquidity)"
+            )
 
-        return {
-            "positions": active_positions,
-            "total": len(active_positions)
-        }
+        return {"positions": active_positions, "total": len(active_positions)}
 
     except Exception as e:
         logger.error(f"Error getting LP positions: {e}", exc_info=True)
@@ -310,16 +322,16 @@ async def get_portfolio_overview(
         tasks = {}
 
         if include_balances:
-            tasks['balances'] = client.portfolio.get_state(refresh=refresh)
+            tasks["balances"] = client.portfolio.get_state(refresh=refresh)
 
         if include_perp_positions:
-            tasks['perp_positions'] = get_perpetual_positions(client, account_names)
+            tasks["perp_positions"] = get_perpetual_positions(client, account_names)
 
         if include_lp_positions:
-            tasks['lp_positions'] = get_lp_positions(client, account_names)
+            tasks["lp_positions"] = get_lp_positions(client, account_names)
 
         if include_active_orders:
-            tasks['active_orders'] = get_active_orders(client, account_names)
+            tasks["active_orders"] = get_active_orders(client, account_names)
 
         # Execute all tasks in parallel
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -331,18 +343,22 @@ async def get_portfolio_overview(
             if isinstance(result, Exception):
                 logger.error(f"Error fetching {key}: {result}")
                 # Set default empty values on error
-                if key == 'balances':
+                if key == "balances":
                     data[key] = None
                 else:
-                    data[key] = {"positions": [], "total": 0} if "positions" in key else {"orders": [], "total": 0}
+                    data[key] = (
+                        {"positions": [], "total": 0}
+                        if "positions" in key
+                        else {"orders": [], "total": 0}
+                    )
             else:
                 data[key] = result
 
         return {
-            'balances': data.get('balances'),
-            'perp_positions': data.get('perp_positions', {"positions": [], "total": 0}),
-            'lp_positions': data.get('lp_positions', {"positions": [], "total": 0}),
-            'active_orders': data.get('active_orders', {"orders": [], "total": 0}),
+            "balances": data.get("balances"),
+            "perp_positions": data.get("perp_positions", {"positions": [], "total": 0}),
+            "lp_positions": data.get("lp_positions", {"positions": [], "total": 0}),
+            "active_orders": data.get("active_orders", {"orders": [], "total": 0}),
         }
 
     except Exception as e:

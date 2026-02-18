@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes
 
 from ..server_context import build_config_message_header
 from ..user_preferences import get_active_server
-from ._shared import logger, escape_markdown_v2
+from ._shared import escape_markdown_v2, logger
 
 
 async def start_deploy_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -18,36 +18,46 @@ async def start_deploy_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> Non
             "🚀 Deploy Gateway",
             include_gateway=False,
             chat_id=chat_id,
-            user_data=context.user_data
+            user_data=context.user_data,
         )
 
         if not server_online:
-            message_text = (
-                header +
-                "⚠️ _Server is offline\\. Cannot deploy Gateway\\._"
-            )
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="config_gateway")]]
+            message_text = header + "⚠️ _Server is offline\\. Cannot deploy Gateway\\._"
+            keyboard = [
+                [InlineKeyboardButton("« Back", callback_data="config_gateway")]
+            ]
         else:
             message_text = (
-                header +
-                "*Select Docker Image:*\n\n"
+                header + "*Select Docker Image:*\n\n"
                 "Choose which Gateway image to deploy\\.\n"
                 "The latest stable version is recommended\\."
             )
 
             keyboard = [
-                [InlineKeyboardButton("hummingbot/gateway:latest (recommended)", callback_data="gateway_deploy_image_latest")],
-                [InlineKeyboardButton("hummingbot/gateway:development", callback_data="gateway_deploy_image_development")],
-                [InlineKeyboardButton("✏️ Custom Image", callback_data="gateway_deploy_custom")],
+                [
+                    InlineKeyboardButton(
+                        "hummingbot/gateway:latest (recommended)",
+                        callback_data="gateway_deploy_image_latest",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "hummingbot/gateway:development",
+                        callback_data="gateway_deploy_image_development",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "✏️ Custom Image", callback_data="gateway_deploy_custom"
+                    )
+                ],
                 [InlineKeyboardButton("« Back", callback_data="config_gateway")],
             ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
         await query.answer()
 
@@ -64,7 +74,7 @@ async def deploy_gateway_with_image(query, context: ContextTypes.DEFAULT_TYPE) -
         docker_image = f"hummingbot/gateway:{image_tag}"
 
         # Store image and prompt for passphrase
-        context.user_data['gateway_deploy_image'] = docker_image
+        context.user_data["gateway_deploy_image"] = docker_image
         await prompt_passphrase(query, context)
 
     except Exception as e:
@@ -80,19 +90,20 @@ async def prompt_passphrase(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             "🔐 Gateway Passphrase",
             include_gateway=False,
             chat_id=chat_id,
-            user_data=context.user_data
+            user_data=context.user_data,
         )
 
-        docker_image = context.user_data.get('gateway_deploy_image', 'hummingbot/gateway:latest')
+        docker_image = context.user_data.get(
+            "gateway_deploy_image", "hummingbot/gateway:latest"
+        )
         image_escaped = escape_markdown_v2(docker_image)
 
-        context.user_data['awaiting_gateway_input'] = 'passphrase'
-        context.user_data['gateway_message_id'] = query.message.message_id
-        context.user_data['gateway_chat_id'] = query.message.chat_id
+        context.user_data["awaiting_gateway_input"] = "passphrase"
+        context.user_data["gateway_message_id"] = query.message.message_id
+        context.user_data["gateway_chat_id"] = query.message.chat_id
 
         message_text = (
-            header +
-            f"*Image:* `{image_escaped}`\n\n"
+            header + f"*Image:* `{image_escaped}`\n\n"
             "*Enter Gateway Passphrase:*\n\n"
             "This passphrase is used by Gateway to encrypt stored wallet keys\\.\n\n"
             "_Please send your passphrase as a message\\._"
@@ -102,9 +113,7 @@ async def prompt_passphrase(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
         await query.answer()
 
@@ -113,13 +122,22 @@ async def prompt_passphrase(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer(f"❌ Error: {str(e)[:100]}")
 
 
-async def execute_gateway_deploy(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int, docker_image: str, passphrase: str) -> None:
+async def execute_gateway_deploy(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    docker_image: str,
+    passphrase: str,
+) -> None:
     """Execute the actual Gateway deployment with provided config"""
     from config_manager import get_config_manager
+
     from .menu import show_gateway_menu
 
     try:
-        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
+        client = await get_config_manager().get_client_for_chat(
+            chat_id, preferred_server=get_active_server(context.user_data)
+        )
 
         # Gateway configuration
         config = {
@@ -134,27 +152,34 @@ async def execute_gateway_deploy(context: ContextTypes.DEFAULT_TYPE, chat_id: in
             chat_id=chat_id,
             message_id=message_id,
             text="🚀 *Deploying Gateway\\.\\.\\.*\n\n_Please wait, this may take a moment\\._",
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         response = await client.gateway.start(config)
 
-        success = response.get('status') == 'success' or response.get('status') == 'running'
+        success = (
+            response.get("status") == "success" or response.get("status") == "running"
+        )
 
         if success:
-            result_text = "✅ *Gateway Deployed Successfully*\n\n_Returning to menu\\.\\.\\._"
+            result_text = (
+                "✅ *Gateway Deployed Successfully*\n\n_Returning to menu\\.\\.\\._"
+            )
         else:
-            result_text = "⚠️ *Gateway Deployment Completed*\n\n_Verifying status\\.\\.\\._"
+            result_text = (
+                "⚠️ *Gateway Deployment Completed*\n\n_Verifying status\\.\\.\\._"
+            )
 
         await context.bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=result_text,
-            parse_mode="MarkdownV2"
+            parse_mode="MarkdownV2",
         )
 
         # Brief pause then show menu
         import asyncio
+
         await asyncio.sleep(1)
 
         # Create a mock query object for show_gateway_menu
@@ -176,7 +201,7 @@ async def execute_gateway_deploy(context: ContextTypes.DEFAULT_TYPE, chat_id: in
                     chat_id=self.chat_id,
                     message_id=self.message_id,
                     text=text,
-                    **kwargs
+                    **kwargs,
                 )
 
         mock_message = MockMessage(chat_id, message_id, context.bot)
@@ -193,7 +218,7 @@ async def execute_gateway_deploy(context: ContextTypes.DEFAULT_TYPE, chat_id: in
             message_id=message_id,
             text=error_text,
             parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
         )
 
 
@@ -205,16 +230,15 @@ async def prompt_custom_image(query, context: ContextTypes.DEFAULT_TYPE) -> None
             "✏️ Custom Gateway Image",
             include_gateway=False,
             chat_id=chat_id,
-            user_data=context.user_data
+            user_data=context.user_data,
         )
 
-        context.user_data['awaiting_gateway_input'] = 'custom_image'
-        context.user_data['gateway_message_id'] = query.message.message_id
-        context.user_data['gateway_chat_id'] = query.message.chat_id
+        context.user_data["awaiting_gateway_input"] = "custom_image"
+        context.user_data["gateway_message_id"] = query.message.message_id
+        context.user_data["gateway_chat_id"] = query.message.chat_id
 
         message_text = (
-            header +
-            "*Enter Custom Docker Image:*\n\n"
+            header + "*Enter Custom Docker Image:*\n\n"
             "Please send the full Docker image name and tag\\.\n\n"
             "*Examples:*\n"
             "`hummingbot/gateway:1\\.0\\.0`\n"
@@ -225,9 +249,7 @@ async def prompt_custom_image(query, context: ContextTypes.DEFAULT_TYPE) -> None
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=reply_markup
+            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
         await query.answer()
 
@@ -240,15 +262,18 @@ async def stop_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Stop Gateway container on the current server"""
     try:
         from config_manager import get_config_manager
+
         from .menu import show_gateway_menu
 
         await query.answer("⏹ Stopping Gateway...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
+        client = await get_config_manager().get_client_for_chat(
+            chat_id, preferred_server=get_active_server(context.user_data)
+        )
         response = await client.gateway.stop()
 
-        if response.get('status') == 'success' or response.get('status') == 'stopped':
+        if response.get("status") == "success" or response.get("status") == "stopped":
             await query.answer("✅ Gateway stopped successfully")
         else:
             await query.answer("⚠️ Gateway stop may need verification")
@@ -260,15 +285,18 @@ async def stop_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Error stopping gateway: {e}", exc_info=True)
         await query.answer(f"❌ Stop failed: {str(e)[:100]}")
         from .menu import show_gateway_menu
+
         await show_gateway_menu(query, context)
 
 
 async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Restart Gateway container on the current server"""
     try:
-        from config_manager import get_config_manager
-        from .menu import show_gateway_menu
         import asyncio
+
+        from config_manager import get_config_manager
+
+        from .menu import show_gateway_menu
 
         chat_id = query.message.chat_id
 
@@ -280,45 +308,40 @@ async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             "🌐 Gateway Configuration",
             include_gateway=False,  # Don't check status during restart
             chat_id=chat_id,
-            user_data=context.user_data
+            user_data=context.user_data,
         )
 
         restarting_text = (
-            header +
-            "🔄 *Restarting Gateway\\.\\.\\.*\n\n"
+            header + "🔄 *Restarting Gateway\\.\\.\\.*\n\n"
             "_Please wait, this may take a few moments\\._"
         )
 
         try:
-            await query.message.edit_text(
-                restarting_text,
-                parse_mode="MarkdownV2"
-            )
+            await query.message.edit_text(restarting_text, parse_mode="MarkdownV2")
         except:
             pass  # Ignore if message can't be edited
 
         # Perform the restart
-        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
+        client = await get_config_manager().get_client_for_chat(
+            chat_id, preferred_server=get_active_server(context.user_data)
+        )
         response = await client.gateway.restart()
 
         # Wait a moment for the restart to take effect
         await asyncio.sleep(2)
 
         # Show success message briefly
-        success = response.get('status') == 'success' or response.get('status') == 'running'
-        status_text = (
-            header +
-            ("✅ *Gateway Restarted Successfully*\n\n"
-             "_Refreshing menu\\.\\.\\._" if success else
-             "⚠️ *Gateway Restart Completed*\n\n"
-             "_Verifying status\\.\\.\\._")
+        success = (
+            response.get("status") == "success" or response.get("status") == "running"
+        )
+        status_text = header + (
+            "✅ *Gateway Restarted Successfully*\n\n" "_Refreshing menu\\.\\.\\._"
+            if success
+            else "⚠️ *Gateway Restart Completed*\n\n" "_Verifying status\\.\\.\\._"
         )
 
         try:
-            await query.message.edit_text(
-                status_text,
-                parse_mode="MarkdownV2"
-            )
+            await query.message.edit_text(status_text, parse_mode="MarkdownV2")
         except:
             pass  # Ignore if message can't be edited
 
@@ -335,6 +358,7 @@ async def restart_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         except:
             pass  # Query might have expired
         from .menu import show_gateway_menu
+
         try:
             await show_gateway_menu(query, context)
         except:
@@ -349,10 +373,12 @@ async def show_gateway_logs(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         await query.answer("📋 Loading logs...")
 
         chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(chat_id, preferred_server=get_active_server(context.user_data))
+        client = await get_config_manager().get_client_for_chat(
+            chat_id, preferred_server=get_active_server(context.user_data)
+        )
         response = await client.gateway.get_logs(tail=50)
 
-        logs = response.get('logs', 'No logs available')
+        logs = response.get("logs", "No logs available")
 
         # Truncate logs if too long for Telegram
         if len(logs) > 3500:
@@ -362,22 +388,19 @@ async def show_gateway_logs(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         logs_escaped = escape_markdown_v2(logs)
 
         message_text = (
-            "📋 *Gateway Logs* \\(last 50 lines\\)\n\n"
-            f"```\n{logs_escaped}\n```"
+            "📋 *Gateway Logs* \\(last 50 lines\\)\n\n" f"```\n{logs_escaped}\n```"
         )
 
         keyboard = [
             [InlineKeyboardButton("🔄 Refresh", callback_data="gateway_logs")],
-            [InlineKeyboardButton("« Back", callback_data="config_gateway")]
+            [InlineKeyboardButton("« Back", callback_data="config_gateway")],
         ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         try:
             await query.message.edit_text(
-                message_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
+                message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
             )
         except Exception as e:
             error_str = str(e)
@@ -398,13 +421,15 @@ async def show_gateway_logs(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         error_text = f"❌ Error loading logs: {escape_markdown_v2(str(e))}"
         keyboard = [[InlineKeyboardButton("« Back", callback_data="config_gateway")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(error_text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+        await query.message.edit_text(
+            error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
 
 
 async def handle_deployment_input(update, context) -> None:
     """Handle text input during gateway deployment flow"""
 
-    awaiting_field = context.user_data.get('awaiting_gateway_input')
+    awaiting_field = context.user_data.get("awaiting_gateway_input")
     if not awaiting_field:
         return
 
@@ -415,52 +440,56 @@ async def handle_deployment_input(update, context) -> None:
         pass
 
     try:
-        message_id = context.user_data.get('gateway_message_id')
-        chat_id = context.user_data.get('gateway_chat_id')
+        message_id = context.user_data.get("gateway_message_id")
+        chat_id = context.user_data.get("gateway_chat_id")
 
-        if awaiting_field == 'passphrase':
+        if awaiting_field == "passphrase":
             passphrase = update.message.text.strip()
-            docker_image = context.user_data.get('gateway_deploy_image', 'hummingbot/gateway:latest')
+            docker_image = context.user_data.get(
+                "gateway_deploy_image", "hummingbot/gateway:latest"
+            )
 
             # Clear context
-            context.user_data.pop('awaiting_gateway_input', None)
-            context.user_data.pop('gateway_deploy_image', None)
-            context.user_data.pop('gateway_message_id', None)
-            context.user_data.pop('gateway_chat_id', None)
+            context.user_data.pop("awaiting_gateway_input", None)
+            context.user_data.pop("gateway_deploy_image", None)
+            context.user_data.pop("gateway_message_id", None)
+            context.user_data.pop("gateway_chat_id", None)
 
             if not passphrase:
                 await update.get_bot().edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text="❌ Passphrase cannot be empty",
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
                 )
                 return
 
             # Execute deployment with provided passphrase
-            await execute_gateway_deploy(context, chat_id, message_id, docker_image, passphrase)
+            await execute_gateway_deploy(
+                context, chat_id, message_id, docker_image, passphrase
+            )
 
-        elif awaiting_field == 'custom_image':
+        elif awaiting_field == "custom_image":
             custom_image = update.message.text.strip()
 
             # Clear context
-            context.user_data.pop('awaiting_gateway_input', None)
-            context.user_data.pop('gateway_message_id', None)
-            context.user_data.pop('gateway_chat_id', None)
+            context.user_data.pop("awaiting_gateway_input", None)
+            context.user_data.pop("gateway_message_id", None)
+            context.user_data.pop("gateway_chat_id", None)
 
             if not custom_image:
                 await update.get_bot().edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
                     text="❌ Image name cannot be empty",
-                    parse_mode="MarkdownV2"
+                    parse_mode="MarkdownV2",
                 )
                 return
 
             # Store custom image and prompt for passphrase
-            context.user_data['gateway_deploy_image'] = custom_image
-            context.user_data['gateway_message_id'] = message_id
-            context.user_data['gateway_chat_id'] = chat_id
+            context.user_data["gateway_deploy_image"] = custom_image
+            context.user_data["gateway_message_id"] = message_id
+            context.user_data["gateway_chat_id"] = chat_id
 
             # Create mock query for prompt_passphrase
             class MockQuery:
@@ -481,7 +510,7 @@ async def handle_deployment_input(update, context) -> None:
                         chat_id=self.chat_id,
                         message_id=self.message_id,
                         text=text,
-                        **kwargs
+                        **kwargs,
                     )
 
             mock_message = MockMessage(chat_id, message_id, context.bot)
@@ -490,4 +519,4 @@ async def handle_deployment_input(update, context) -> None:
 
     except Exception as e:
         logger.error(f"Error handling deployment input: {e}", exc_info=True)
-        context.user_data.pop('awaiting_gateway_input', None)
+        context.user_data.pop("awaiting_gateway_input", None)

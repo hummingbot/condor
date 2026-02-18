@@ -3,6 +3,7 @@ CEX Trading main menu - redirects to unified trade menu
 """
 
 import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -24,10 +25,12 @@ def cancel_cex_loading_task(context) -> None:
 async def show_cex_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Display main CEX trading menu - redirects to unified trade menu"""
     from .trade import handle_trade
+
     await handle_trade(update, context)
 
 
 async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle closing the CEX trading interface"""
     from .trade import handle_close as trade_close
+
     await trade_close(update, context)

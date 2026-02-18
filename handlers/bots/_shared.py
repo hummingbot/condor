@@ -12,7 +12,7 @@ Controller-specific code (defaults, fields, charts) is in handlers/bots/controll
 
 import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -27,23 +27,24 @@ DEFAULT_CACHE_TTL = 60
 # New code should import directly from handlers.bots.controllers
 
 from .controllers import SUPPORTED_CONTROLLERS, get_controller
-from .controllers.grid_strike import (
-    SIDE_LONG,
-    SIDE_SHORT,
-    ORDER_TYPE_MARKET,
-    ORDER_TYPE_LIMIT,
-    ORDER_TYPE_LIMIT_MAKER,
-    ORDER_TYPE_LABELS,
-    generate_chart as _gs_generate_chart,
-    generate_id as _gs_generate_id,
-    calculate_auto_prices,
-    DEFAULTS as GRID_STRIKE_DEFAULTS,
-    FIELD_ORDER as GRID_STRIKE_FIELD_ORDER,
-    EDITABLE_FIELDS as GS_EDITABLE_FIELDS,
-)
 
 # Convert ControllerField objects to dicts for backwards compatibility
+from .controllers.grid_strike import DEFAULTS as GRID_STRIKE_DEFAULTS
+from .controllers.grid_strike import EDITABLE_FIELDS as GS_EDITABLE_FIELDS
+from .controllers.grid_strike import FIELD_ORDER as GRID_STRIKE_FIELD_ORDER
 from .controllers.grid_strike import FIELDS as _GS_FIELDS
+from .controllers.grid_strike import (
+    ORDER_TYPE_LABELS,
+    ORDER_TYPE_LIMIT,
+    ORDER_TYPE_LIMIT_MAKER,
+    ORDER_TYPE_MARKET,
+    SIDE_LONG,
+    SIDE_SHORT,
+    calculate_auto_prices,
+)
+from .controllers.grid_strike import generate_chart as _gs_generate_chart
+from .controllers.grid_strike import generate_id as _gs_generate_id
+
 GRID_STRIKE_FIELDS = {
     name: {
         "label": field.label,
@@ -59,7 +60,10 @@ GRID_STRIKE_FIELDS = {
 # SERVER CLIENT HELPER
 # ============================================
 
-async def get_bots_client(chat_id: Optional[int] = None, user_data: Optional[Dict] = None) -> Tuple[Any, str]:
+
+async def get_bots_client(
+    chat_id: Optional[int] = None, user_data: Optional[Dict] = None
+) -> Tuple[Any, str]:
     """Get the API client for bot operations
 
     Args:
@@ -77,28 +81,37 @@ async def get_bots_client(chat_id: Optional[int] = None, user_data: Optional[Dic
     cm = get_config_manager()
 
     # Get user_id from user_data for access control
-    user_id = user_data.get('_user_id') if user_data else None
+    user_id = user_data.get("_user_id") if user_data else None
 
     # Get servers the user has access to (not all servers)
     if user_id:
         accessible_servers = cm.get_accessible_servers(user_id)
         # Filter to only enabled servers
         all_servers = cm.list_servers()
-        enabled_accessible = [s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)]
+        enabled_accessible = [
+            s for s in accessible_servers if all_servers.get(s, {}).get("enabled", True)
+        ]
     else:
         # Fallback for legacy calls without user_data - use all enabled servers
         # This should not happen in normal operation
-        logger.warning("get_bots_client called without user_data - cannot verify server access")
+        logger.warning(
+            "get_bots_client called without user_data - cannot verify server access"
+        )
         all_servers = cm.list_servers()
-        enabled_accessible = [name for name, cfg in all_servers.items() if cfg.get("enabled", True)]
+        enabled_accessible = [
+            name for name, cfg in all_servers.items() if cfg.get("enabled", True)
+        ]
 
     if not enabled_accessible:
-        raise ValueError("No accessible API servers available. Please configure server access.")
+        raise ValueError(
+            "No accessible API servers available. Please configure server access."
+        )
 
     # Use user's preferred server if valid
     preferred = None
     if user_data:
         from handlers.config.user_preferences import get_active_server
+
         preferred = get_active_server(user_data)
 
     # Only use preferred server if user has access to it
@@ -117,6 +130,7 @@ async def get_bots_client(chat_id: Optional[int] = None, user_data: Optional[Dic
 # ============================================
 # STATE MANAGEMENT
 # ============================================
+
 
 def clear_bots_state(context) -> None:
     """Clear all bots-related state from user context
@@ -160,7 +174,9 @@ def set_controller_config(context, config: Dict[str, Any]) -> None:
     context.user_data["controller_config_params"] = config
 
 
-def init_new_controller_config(context, controller_type: str = "grid_strike") -> Dict[str, Any]:
+def init_new_controller_config(
+    context, controller_type: str = "grid_strike"
+) -> Dict[str, Any]:
     """Initialize a new controller config with defaults
 
     Args:
@@ -175,7 +191,9 @@ def init_new_controller_config(context, controller_type: str = "grid_strike") ->
         config = controller_cls.get_defaults()
     else:
         # Fallback to legacy method
-        controller_info = SUPPORTED_CONTROLLERS.get(controller_type, SUPPORTED_CONTROLLERS["grid_strike"])
+        controller_info = SUPPORTED_CONTROLLERS.get(
+            controller_type, SUPPORTED_CONTROLLERS["grid_strike"]
+        )
         config = controller_info["defaults"].copy()
         if "triple_barrier_config" in config:
             config["triple_barrier_config"] = config["triple_barrier_config"].copy()
@@ -187,6 +205,7 @@ def init_new_controller_config(context, controller_type: str = "grid_strike") ->
 # ============================================
 # FORMATTERS
 # ============================================
+
 
 def format_controller_config_summary(config: Dict[str, Any]) -> str:
     """Format a controller config for display
@@ -259,7 +278,10 @@ def format_config_field_value(field_name: str, value: Any) -> str:
 # CACHE UTILITIES (borrowed from cex/_shared.py)
 # ============================================
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     """Get a cached value if still valid."""
     cache = user_data.get("_bots_cache", {})
     entry = cache.get(key)
@@ -283,12 +305,7 @@ def set_cached(user_data: dict, key: str, value: Any) -> None:
 
 
 async def cached_call(
-    user_data: dict,
-    key: str,
-    fetch_func,
-    ttl: int = DEFAULT_CACHE_TTL,
-    *args,
-    **kwargs
+    user_data: dict, key: str, fetch_func, ttl: int = DEFAULT_CACHE_TTL, *args, **kwargs
 ) -> Any:
     """Execute an async function with caching."""
     cached = get_cached(user_data, key, ttl)
@@ -306,17 +323,30 @@ async def cached_call(
 # CEX CONNECTOR HELPERS
 # ============================================
 
+
 def is_cex_connector(connector_name: str) -> bool:
     """Check if a connector is a CEX (not DEX/on-chain)."""
     connector_lower = connector_name.lower()
-    dex_prefixes = ["solana", "ethereum", "polygon", "arbitrum", "base", "optimism", "avalanche"]
+    dex_prefixes = [
+        "solana",
+        "ethereum",
+        "polygon",
+        "arbitrum",
+        "base",
+        "optimism",
+        "avalanche",
+    ]
     return not any(connector_lower.startswith(prefix) for prefix in dex_prefixes)
 
 
-async def fetch_available_cex_connectors(client, account_name: str = "master_account") -> List[str]:
+async def fetch_available_cex_connectors(
+    client, account_name: str = "master_account"
+) -> List[str]:
     """Fetch list of available CEX connectors with credentials configured."""
     try:
-        configured_connectors = await client.accounts.list_account_credentials(account_name)
+        configured_connectors = await client.accounts.list_account_credentials(
+            account_name
+        )
         return [c for c in configured_connectors if is_cex_connector(c)]
     except Exception as e:
         logger.error(f"Error fetching connectors: {e}", exc_info=True)
@@ -328,7 +358,7 @@ async def get_available_cex_connectors(
     client,
     account_name: str = "master_account",
     ttl: int = 300,
-    server_name: str = "default"
+    server_name: str = "default",
 ) -> List[str]:
     """Get available CEX connectors with caching.
 
@@ -344,12 +374,7 @@ async def get_available_cex_connectors(
     """
     cache_key = f"available_cex_connectors_{server_name}_{account_name}"
     return await cached_call(
-        user_data,
-        cache_key,
-        fetch_available_cex_connectors,
-        ttl,
-        client,
-        account_name
+        user_data, cache_key, fetch_available_cex_connectors, ttl, client, account_name
     )
 
 
@@ -357,12 +382,14 @@ async def get_available_cex_connectors(
 # MARKET DATA HELPERS
 # ============================================
 
-async def fetch_current_price(client, connector_name: str, trading_pair: str) -> Optional[float]:
+
+async def fetch_current_price(
+    client, connector_name: str, trading_pair: str
+) -> Optional[float]:
     """Fetch current price for a trading pair."""
     try:
         prices = await client.market_data.get_prices(
-            connector_name=connector_name,
-            trading_pairs=trading_pair
+            connector_name=connector_name, trading_pairs=trading_pair
         )
         return prices.get("prices", {}).get(trading_pair)
     except Exception as e:
@@ -375,7 +402,7 @@ async def fetch_candles(
     connector_name: str,
     trading_pair: str,
     interval: str = "1m",
-    max_records: int = 420
+    max_records: int = 420,
 ) -> Optional[Dict[str, Any]]:
     """Fetch candles data for a trading pair."""
     try:
@@ -383,14 +410,16 @@ async def fetch_candles(
             connector_name=connector_name,
             trading_pair=trading_pair,
             interval=interval,
-            max_records=max_records
+            max_records=max_records,
         )
         # Validate that candles actually contain data
         if not candles:
             return None
         data = candles if isinstance(candles, list) else candles.get("data", [])
         if not data:
-            logger.debug(f"No candle data available for {trading_pair} on {connector_name}")
+            logger.debug(
+                f"No candle data available for {trading_pair} on {connector_name}"
+            )
             return None
         return candles
     except Exception as e:
@@ -402,13 +431,14 @@ async def fetch_candles(
 # BACKWARDS COMPATIBILITY WRAPPERS
 # ============================================
 
+
 def generate_config_id(
     connector_name: str,
     trading_pair: str,
     side: int = None,
     start_price: float = None,
     end_price: float = None,
-    existing_configs: List[Dict[str, Any]] = None
+    existing_configs: List[Dict[str, Any]] = None,
 ) -> str:
     """
     Generate a unique config ID with sequential numbering.
@@ -441,7 +471,7 @@ def generate_candles_chart(
     end_price: Optional[float] = None,
     limit_price: Optional[float] = None,
     current_price: Optional[float] = None,
-    side: int = SIDE_LONG
+    side: int = SIDE_LONG,
 ):
     """
     Generate a candlestick chart with grid zone overlay.
