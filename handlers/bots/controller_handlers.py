@@ -3058,8 +3058,8 @@ async def process_gs_wizard_input(
 
             # Validate trading pair exists on the connector
             client, _ = await get_bots_client(chat_id, context.user_data)
-            is_valid, error_msg, suggestions = await validate_trading_pair(
-                context.user_data, client, connector, pair
+            is_valid, error_msg, suggestions, correct_pair = (
+                await validate_trading_pair(context.user_data, client, connector, pair)
             )
 
             if not is_valid:
@@ -3069,12 +3069,17 @@ async def process_gs_wizard_input(
                 )
                 return
 
-            # Get correctly formatted pair from trading rules
-            trading_rules = await get_trading_rules(
-                context.user_data, client, connector
-            )
-            correct_pair = get_correct_pair_format(trading_rules, pair)
-            pair = correct_pair if correct_pair else pair
+            # Use the correct pair format returned by validation
+            if correct_pair:
+                pair = correct_pair
+            else:
+                # Fallback: Get correctly formatted pair from trading rules
+                trading_rules = await get_trading_rules(
+                    context.user_data, client, connector
+                )
+                fallback_pair = get_correct_pair_format(trading_rules, pair)
+                if fallback_pair:
+                    pair = fallback_pair
 
             # Clear old market data if pair changed (prevents stale data)
             old_pair = config.get("trading_pair", "")
@@ -7455,7 +7460,7 @@ async def process_pmm_wizard_input(
 
         # Validate trading pair exists on the connector
         client, _ = await get_bots_client(chat_id, context.user_data)
-        is_valid, error_msg, suggestions = await validate_trading_pair(
+        is_valid, error_msg, suggestions, correct_pair = await validate_trading_pair(
             context.user_data, client, connector, pair
         )
 
@@ -7466,10 +7471,17 @@ async def process_pmm_wizard_input(
             )
             return
 
-        # Get correctly formatted pair from trading rules
-        trading_rules = await get_trading_rules(context.user_data, client, connector)
-        correct_pair = get_correct_pair_format(trading_rules, pair)
-        pair = correct_pair if correct_pair else pair
+        # Use the correct pair format returned by validation
+        if correct_pair:
+            pair = correct_pair
+        else:
+            # Fallback: Get correctly formatted pair from trading rules
+            trading_rules = await get_trading_rules(
+                context.user_data, client, connector
+            )
+            fallback_pair = get_correct_pair_format(trading_rules, pair)
+            if fallback_pair:
+                pair = fallback_pair
 
         config["trading_pair"] = pair
         set_controller_config(context, config)
