@@ -7,83 +7,39 @@ Contains:
 - Cache invalidation mechanisms
 """
 
-import functools
 import logging
-import time
 from typing import Any, Callable, Dict, List, Optional
+
+from condor.cache import (
+    DEFAULT_CACHE_TTL,
+    clear_cache as _clear_cache,
+    get_cached as _get_cached,
+    invalidate_groups as _invalidate_groups,
+    invalidates as _invalidates,
+    set_cached as _set_cached,
+    cached_call as _cached_call,
+)
 
 logger = logging.getLogger(__name__)
 
-# Default cache TTL in seconds
-DEFAULT_CACHE_TTL = 60
-
 
 # ============================================
-# CONVERSATION-LEVEL CACHE
+# CONVERSATION-LEVEL CACHE (thin wrappers)
 # ============================================
 
+_NS = "_cex_cache"  # namespace for CEX cache
 
-def get_cached(
-    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
-) -> Optional[Any]:
-    """Get a cached value if still valid.
 
-    Args:
-        user_data: context.user_data dict
-        key: Cache key
-        ttl: Time-to-live in seconds
-
-    Returns:
-        Cached value or None if expired/missing
-    """
-    cache = user_data.get("_cex_cache", {})
-    entry = cache.get(key)
-
-    if entry is None:
-        return None
-
-    value, timestamp = entry
-    if time.time() - timestamp > ttl:
-        # Expired
-        return None
-
-    return value
+def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+    return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
 def set_cached(user_data: dict, key: str, value: Any) -> None:
-    """Store a value in the conversation cache.
-
-    Args:
-        user_data: context.user_data dict
-        key: Cache key
-        value: Value to cache
-    """
-    if "_cex_cache" not in user_data:
-        user_data["_cex_cache"] = {}
-
-    user_data["_cex_cache"][key] = (value, time.time())
+    _set_cached(user_data, key, value, namespace=_NS)
 
 
 def clear_cache(user_data: dict, key: Optional[str] = None) -> None:
-    """Clear cached values.
-
-    Args:
-        user_data: context.user_data dict
-        key: Specific key/prefix to clear, or None to clear all.
-              If key ends with '*', clears all keys starting with that prefix.
-              Otherwise clears exact key match.
-    """
-    if key is None:
-        user_data.pop("_cex_cache", None)
-    elif "_cex_cache" in user_data:
-        if key.endswith("*"):
-            # Prefix-based clearing
-            prefix = key[:-1]
-            keys_to_clear = [k for k in user_data["_cex_cache"] if k.startswith(prefix)]
-            for k in keys_to_clear:
-                user_data["_cex_cache"].pop(k, None)
-        else:
-            user_data["_cex_cache"].pop(key, None)
+    _clear_cache(user_data, key, namespace=_NS)
 
 
 async def cached_call(
@@ -94,100 +50,31 @@ async def cached_call(
     *args,
     **kwargs,
 ) -> Any:
-    """Execute an async function with caching.
-
-    Args:
-        user_data: context.user_data dict
-        key: Cache key
-        fetch_func: Async function to call if cache miss
-        ttl: Time-to-live in seconds
-        *args, **kwargs: Arguments to pass to fetch_func
-
-    Returns:
-        Cached or fresh result
-    """
-    # Check cache first
-    cached = get_cached(user_data, key, ttl)
-    if cached is not None:
-        logger.debug(f"CEX cache hit for '{key}'")
-        return cached
-
-    # Cache miss - fetch fresh data
-    logger.debug(f"CEX cache miss for '{key}', fetching...")
-    result = await fetch_func(*args, **kwargs)
-
-    # Store in cache
-    set_cached(user_data, key, result)
-
-    return result
+    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
 
 
 # ============================================
 # CACHE INVALIDATION GROUPS
 # ============================================
 
-# Define which cache keys should be invalidated together
 # Use '*' suffix for prefix-based clearing (e.g., "cex_balances_*" clears all account balances)
 CACHE_GROUPS = {
     "balances": ["cex_balances_*", "connector_balances_*"],
     "orders": ["active_orders_*", "order_history_*"],
     "positions": ["positions_*"],
     "trading_rules": ["trading_rules_*"],
-    "all": None,  # Special: clears entire cache
+    "all": None,
 }
 
 
 def invalidate_cache(user_data: dict, *groups: str) -> None:
-    """Invalidate cache keys by group name(s).
-
-    Args:
-        user_data: context.user_data dict
-        *groups: One or more group names or individual cache keys
-    """
-    for group in groups:
-        if group == "all":
-            clear_cache(user_data)
-            logger.debug("CEX cache fully cleared")
-            return
-
-        keys = CACHE_GROUPS.get(group, [group])  # Fallback to group as key
-        for key in keys:
-            clear_cache(user_data, key)
-        logger.debug(f"CLOB invalidated cache group '{group}': {keys}")
+    """Invalidate cache keys by group name(s)."""
+    _invalidate_groups(user_data, CACHE_GROUPS, *groups, namespace=_NS)
 
 
 def invalidates(*groups: str):
-    """Decorator that invalidates cache groups after handler execution.
-
-    Args:
-        *groups: Cache groups to invalidate after the handler runs
-
-    Example:
-        @invalidates("balances", "orders")
-        async def execute_order(update, context):
-            ...
-    """
-
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            result = await func(*args, **kwargs)
-
-            # Find context in args (usually second arg for handlers)
-            context = None
-            for arg in args:
-                if hasattr(arg, "user_data"):
-                    context = arg
-                    break
-
-            if context:
-                invalidate_cache(context.user_data, *groups)
-
-            return result
-
-        return wrapper
-
-    return decorator
+    """Decorator that invalidates cache groups after handler execution."""
+    return _invalidates(*groups, groups_map=CACHE_GROUPS, namespace=_NS)
 
 
 # ============================================

@@ -367,7 +367,9 @@ async def handle_connector_select(
         "_Enter pair \\(e\\.g\\. SOL\\-USDT\\):_",
     ]
 
-    executor_pairs = context.user_data.get("executor_deployed_pairs", [])
+    from handlers.config.user_preferences import get_executor_deployed_pairs
+
+    executor_pairs = get_executor_deployed_pairs(context.user_data)
     keyboard = []
 
     if executor_pairs:
@@ -939,14 +941,18 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if is_success:
             executor_id = result.get("executor_id", result.get("id", "unknown"))
 
-            # Store pair in deployed pairs list
+            # Save deployed pair and last-used config to user preferences
+            from handlers.config.user_preferences import (
+                add_executor_deployed_pair,
+                set_executor_last_config,
+            )
+
             deployed_pair = config.get("trading_pair", "")
             if deployed_pair:
-                deployed = context.user_data.get("executor_deployed_pairs", [])
-                if deployed_pair in deployed:
-                    deployed.remove(deployed_pair)
-                deployed.insert(0, deployed_pair)
-                context.user_data["executor_deployed_pairs"] = deployed[:8]
+                add_executor_deployed_pair(context.user_data, deployed_pair)
+
+            # Save config params so next position wizard starts with these values
+            set_executor_last_config(context.user_data, "position", config)
 
             keyboard = [
                 [
