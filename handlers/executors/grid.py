@@ -34,6 +34,9 @@ from handlers.cex._shared import (
 from utils.telegram_formatters import escape_markdown_v2, format_error_message
 
 from ._shared import (
+    ORDER_TYPE_LIMIT,
+    ORDER_TYPE_LIMIT_MAKER,
+    ORDER_TYPE_MARKET,
     clear_executors_state,
     create_executor,
     get_executor_config,
@@ -43,6 +46,8 @@ from ._shared import (
     normalize_side,
     set_executor_config,
 )
+
+ORDER_TYPE_LABELS = {ORDER_TYPE_MARKET: "MARKET", ORDER_TYPE_LIMIT: "LIMIT", ORDER_TYPE_LIMIT_MAKER: "LIMIT_MAKER"}
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +70,9 @@ EDITABLE_PARAMS = {
     "order_frequency": int,
     "min_order_amount_quote": float,
     "activation_bounds": float,
+    "keep_position": bool,
+    "open_order_type": int,
+    "take_profit_order_type": int,
 }
 
 
@@ -84,6 +92,9 @@ def _format_config_block(config: Dict[str, Any]) -> str:
     side_label = "LONG" if side == SIDE_LONG else "SHORT"
 
     coerce_tp = config.get("coerce_tp_to_step", False)
+    keep_position = config.get("keep_position", False)
+    open_ot = ORDER_TYPE_LABELS.get(config.get("open_order_type", ORDER_TYPE_LIMIT), "LIMIT")
+    tp_ot = ORDER_TYPE_LABELS.get(config.get("take_profit_order_type", ORDER_TYPE_LIMIT), "LIMIT")
 
     lines = [
         f"side={side_label}",
@@ -92,6 +103,9 @@ def _format_config_block(config: Dict[str, Any]) -> str:
         f"start_price={config.get('start_price', 0):.6g}",
         f"end_price={config.get('end_price', 0):.6g}",
         f"limit_price={config.get('limit_price', 0):.6g}",
+        f"keep_position={str(keep_position).lower()}",
+        f"open_order_type={open_ot}",
+        f"take_profit_order_type={tp_ot}",
         f"min_spread_between_orders={config.get('min_spread_between_orders', 0.0001)}",
         f"take_profit={config.get('take_profit', 0.0002)}",
         f"coerce_tp_to_step={str(coerce_tp).lower()}",
@@ -365,7 +379,9 @@ async def handle_connector_select(
         "_Enter pair \\(e\\.g\\. SOL\\-USDT\\):_",
     ]
 
-    executor_pairs = context.user_data.get("executor_deployed_pairs", [])
+    from handlers.config.user_preferences import get_executor_deployed_pairs
+
+    executor_pairs = get_executor_deployed_pairs(context.user_data)
     keyboard = []
 
     if executor_pairs:
@@ -830,6 +846,18 @@ async def handle_config_input(
                 errors.append("side: use long/short or 1/2")
             continue
 
+        # Handle order type fields: accept MARKET/LIMIT/LIMIT_MAKER or 1/2/3
+        if key in ("open_order_type", "take_profit_order_type"):
+            ot_map = {"market": ORDER_TYPE_MARKET, "limit": ORDER_TYPE_LIMIT, "limit_maker": ORDER_TYPE_LIMIT_MAKER}
+            val_lower = value.lower()
+            if val_lower in ot_map:
+                updates[key] = ot_map[val_lower]
+            elif value in ("1", "2", "3"):
+                updates[key] = int(value)
+            else:
+                errors.append(f"{key}: use MARKET/LIMIT/LIMIT_MAKER or 1/2/3")
+            continue
+
         # Handle booleans
         if EDITABLE_PARAMS[key] is bool:
             updates[key] = value.lower() in ("true", "1", "yes", "on")
@@ -943,9 +971,12 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "max_orders_per_batch": config.get("max_orders_per_batch", 2),
         "order_frequency": config.get("order_frequency", 1),
         "activation_bounds": config.get("activation_bounds", 0.001),
+        "keep_position": config.get("keep_position", False),
         "coerce_tp_to_step": config.get("coerce_tp_to_step", False),
         "triple_barrier_config": {
             "take_profit": config.get("take_profit", 0.0002),
+            "open_order_type": config.get("open_order_type", ORDER_TYPE_LIMIT),
+            "take_profit_order_type": config.get("take_profit_order_type", ORDER_TYPE_LIMIT),
         },
     }
 
@@ -979,14 +1010,18 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if is_success:
             executor_id = result.get("executor_id", result.get("id", "unknown"))
 
-            # Store pair in executor-specific deployed pairs list
+            # Save deployed pair and last-used config to user preferences
+            from handlers.config.user_preferences import (
+                add_executor_deployed_pair,
+                set_executor_last_config,
+            )
+
             deployed_pair = config.get("trading_pair", "")
             if deployed_pair:
-                deployed = context.user_data.get("executor_deployed_pairs", [])
-                if deployed_pair in deployed:
-                    deployed.remove(deployed_pair)
-                deployed.insert(0, deployed_pair)
-                context.user_data["executor_deployed_pairs"] = deployed[:8]
+                add_executor_deployed_pair(context.user_data, deployed_pair)
+
+            # Save config params so next grid wizard starts with these values
+            set_executor_last_config(context.user_data, "grid", config)
 
             keyboard = [
                 [

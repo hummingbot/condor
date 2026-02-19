@@ -5,80 +5,45 @@ Contains:
 - Server client helper
 - Explorer URL generation
 - Common formatters
-- Conversation-level caching
+- Conversation-level caching (delegates to condor.cache)
 """
 
 import asyncio
 import functools
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Callable, Dict, List, Optional
+
+from condor.cache import (
+    DEFAULT_CACHE_TTL,
+    clear_cache as _clear_cache,
+    get_cached as _get_cached,
+    invalidate_groups as _invalidate_groups,
+    invalidates as _invalidates,
+    set_cached as _set_cached,
+    cached_call as _cached_call,
+)
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
-
-# Default cache TTL in seconds
-DEFAULT_CACHE_TTL = 60
-
 
 # ============================================
-# CONVERSATION-LEVEL CACHE
+# CONVERSATION-LEVEL CACHE (thin wrappers)
 # ============================================
 
+_NS = "_cache"  # namespace for DEX cache
 
-def get_cached(
-    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
-) -> Optional[Any]:
-    """Get a cached value if still valid.
 
-    Args:
-        user_data: context.user_data dict
-        key: Cache key
-        ttl: Time-to-live in seconds
-
-    Returns:
-        Cached value or None if expired/missing
-    """
-    cache = user_data.get("_cache", {})
-    entry = cache.get(key)
-
-    if entry is None:
-        return None
-
-    value, timestamp = entry
-    if time.time() - timestamp > ttl:
-        # Expired
-        return None
-
-    return value
+def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+    return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
 def set_cached(user_data: dict, key: str, value: Any) -> None:
-    """Store a value in the conversation cache.
-
-    Args:
-        user_data: context.user_data dict
-        key: Cache key
-        value: Value to cache
-    """
-    if "_cache" not in user_data:
-        user_data["_cache"] = {}
-
-    user_data["_cache"][key] = (value, time.time())
+    _set_cached(user_data, key, value, namespace=_NS)
 
 
 def clear_cache(user_data: dict, key: Optional[str] = None) -> None:
-    """Clear cached values.
-
-    Args:
-        user_data: context.user_data dict
-        key: Specific key to clear, or None to clear all
-    """
-    if key is None:
-        user_data.pop("_cache", None)
-    elif "_cache" in user_data:
-        user_data["_cache"].pop(key, None)
+    _clear_cache(user_data, key, namespace=_NS)
 
 
 async def cached_call(
@@ -89,48 +54,13 @@ async def cached_call(
     *args,
     **kwargs,
 ) -> Any:
-    """Execute an async function with caching.
-
-    Args:
-        user_data: context.user_data dict
-        key: Cache key
-        fetch_func: Async function to call if cache miss
-        ttl: Time-to-live in seconds
-        *args, **kwargs: Arguments to pass to fetch_func
-
-    Returns:
-        Cached or fresh result
-
-    Example:
-        data = await cached_call(
-            context.user_data,
-            "gateway_balances",
-            _fetch_gateway_data,
-            ttl=60,
-            client
-        )
-    """
-    # Check cache first
-    cached = get_cached(user_data, key, ttl)
-    if cached is not None:
-        logger.debug(f"Cache hit for '{key}'")
-        return cached
-
-    # Cache miss - fetch fresh data
-    logger.debug(f"Cache miss for '{key}', fetching...")
-    result = await fetch_func(*args, **kwargs)
-
-    # Store in cache
-    set_cached(user_data, key, result)
-
-    return result
+    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
 
 
 # ============================================
 # CACHE INVALIDATION GROUPS
 # ============================================
 
-# Define which cache keys should be invalidated together
 CACHE_GROUPS = {
     "balances": [
         "gateway_balances",
@@ -147,71 +77,29 @@ CACHE_GROUPS = {
         "gateway_closed_positions",
     ],
     "swaps": ["swap_history", "recent_swaps"],
-    "tokens": ["token_cache"],  # Token list from gateway
-    "all": None,  # Special: clears entire cache
+    "tokens": ["token_cache"],
+    "all": None,
 }
 
 
 def invalidate_cache(user_data: dict, *groups: str) -> None:
-    """Invalidate cache keys by group name(s).
-
-    Args:
-        user_data: context.user_data dict
-        *groups: One or more group names or individual cache keys
-
-    Example:
-        invalidate_cache(context.user_data, "balances")
-        invalidate_cache(context.user_data, "balances", "swaps")
-    """
+    """Invalidate cache keys by group name(s)."""
+    # Handle special direct-on-user_data keys for backward compat
     for group in groups:
         if group == "all":
-            clear_cache(user_data)
-            # Also clear token_cache stored directly in user_data
             user_data.pop("token_cache", None)
-            logger.debug("Cache fully cleared")
-            return
-
-        keys = CACHE_GROUPS.get(group, [group])  # Fallback to group as key
-        for key in keys:
-            clear_cache(user_data, key)
-            # Also clear if stored directly in user_data (e.g., token_cache)
-            if key in user_data:
-                user_data.pop(key, None)
-        logger.debug(f"Invalidated cache group '{group}': {keys}")
+        else:
+            keys = CACHE_GROUPS.get(group, [group])
+            if keys:
+                for key in keys:
+                    if key in user_data:
+                        user_data.pop(key, None)
+    _invalidate_groups(user_data, CACHE_GROUPS, *groups, namespace=_NS)
 
 
 def invalidates(*groups: str):
-    """Decorator that invalidates cache groups after handler execution.
-
-    Args:
-        *groups: Cache groups to invalidate after the handler runs
-
-    Example:
-        @invalidates("balances", "swaps")
-        async def execute_swap(update, context):
-            ...
-    """
-
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-            result = await func(*args, **kwargs)
-
-            # Find context in args (usually second arg for handlers)
-            context = None
-            for arg in args:
-                if hasattr(arg, "user_data"):
-                    context = arg
-                    break
-
-            if context:
-                invalidate_cache(context.user_data, *groups)
-
-            return result
-
-        return wrapper
-
-    return decorator
+    """Decorator that invalidates cache groups after handler execution."""
+    return _invalidates(*groups, groups_map=CACHE_GROUPS, namespace=_NS)
 
 
 # ============================================

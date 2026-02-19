@@ -11,13 +11,14 @@ Controller-specific code (defaults, fields, charts) is in handlers/bots/controll
 """
 
 import logging
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+from condor.cache import DEFAULT_CACHE_TTL
+from condor.cache import get_cached as _get_cached
+from condor.cache import set_cached as _set_cached
+from condor.cache import cached_call as _cached_call
 
-# Default cache TTL in seconds
-DEFAULT_CACHE_TTL = 60
+logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -275,48 +276,24 @@ def format_config_field_value(field_name: str, value: Any) -> str:
 
 
 # ============================================
-# CACHE UTILITIES (borrowed from cex/_shared.py)
+# CACHE UTILITIES (delegates to condor.cache)
 # ============================================
 
+_NS = "_bots_cache"
 
-def get_cached(
-    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
-) -> Optional[Any]:
-    """Get a cached value if still valid."""
-    cache = user_data.get("_bots_cache", {})
-    entry = cache.get(key)
 
-    if entry is None:
-        return None
-
-    value, timestamp = entry
-    if time.time() - timestamp > ttl:
-        return None
-
-    return value
+def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+    return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
 def set_cached(user_data: dict, key: str, value: Any) -> None:
-    """Store a value in the conversation cache."""
-    if "_bots_cache" not in user_data:
-        user_data["_bots_cache"] = {}
-
-    user_data["_bots_cache"][key] = (value, time.time())
+    _set_cached(user_data, key, value, namespace=_NS)
 
 
 async def cached_call(
     user_data: dict, key: str, fetch_func, ttl: int = DEFAULT_CACHE_TTL, *args, **kwargs
 ) -> Any:
-    """Execute an async function with caching."""
-    cached = get_cached(user_data, key, ttl)
-    if cached is not None:
-        logger.debug(f"Bots cache hit for '{key}'")
-        return cached
-
-    logger.debug(f"Bots cache miss for '{key}', fetching...")
-    result = await fetch_func(*args, **kwargs)
-    set_cached(user_data, key, result)
-    return result
+    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
 
 
 # ============================================
