@@ -887,8 +887,8 @@ def generate_portfolio_dashboard(
             )
 
     # === RIGHT COLUMN TOP: TOKEN DISTRIBUTION PIE CHART ===
-    tokens_list = token_distribution_data.get("distribution", [])
-    tokens_dict = token_distribution_data.get("tokens", {})
+    tokens_list = token_distribution_data.get("distribution", []) if token_distribution_data else []
+    tokens_dict = token_distribution_data.get("tokens", {}) if token_distribution_data else {}
 
     token_labels = []
     token_values = []
@@ -957,8 +957,8 @@ def generate_portfolio_dashboard(
         )
 
     # === RIGHT COLUMN BOTTOM: ACCOUNT DISTRIBUTION STACKED BAR ===
-    accounts_list = accounts_distribution_data.get("distribution", [])
-    accounts_dict = accounts_distribution_data.get("accounts", {})
+    accounts_list = accounts_distribution_data.get("distribution", []) if accounts_distribution_data else []
+    accounts_dict = accounts_distribution_data.get("accounts", {}) if accounts_distribution_data else {}
 
     # Build account -> exchange -> value mapping
     account_data = {}
