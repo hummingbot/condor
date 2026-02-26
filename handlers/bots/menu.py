@@ -1436,48 +1436,55 @@ def _get_editable_controller_fields(
             "id": ctrl_config.get("id", ""),
             "connector_name": ctrl_config.get("connector_name", ""),
             "trading_pair": ctrl_config.get("trading_pair", ""),
-            "leverage": ctrl_config.get("leverage", 20),
-            "position_mode": ctrl_config.get("position_mode", "HEDGE"),
+            "leverage": ctrl_config.get("leverage", 1),
+            "position_mode": ctrl_config.get("position_mode", "ONEWAY"),
             # Amount settings
-            "total_amount_quote": ctrl_config.get("total_amount_quote", 100),
-            "portfolio_allocation": ctrl_config.get("portfolio_allocation", 0.05),
+            "total_amount_quote": ctrl_config.get("total_amount_quote", 1000),
+            "portfolio_allocation": ctrl_config.get("portfolio_allocation", 0.03),
             # Base percentages
             "target_base_pct": ctrl_config.get("target_base_pct", 0.5),
-            "min_base_pct": ctrl_config.get("min_base_pct", 0.4),
-            "max_base_pct": ctrl_config.get("max_base_pct", 0.6),
+            "min_base_pct": ctrl_config.get("min_base_pct", 0.3),
+            "max_base_pct": ctrl_config.get("max_base_pct", 0.7),
             # Spreads and amounts
-            "buy_spreads": ctrl_config.get("buy_spreads", "0.0002,0.001"),
-            "sell_spreads": ctrl_config.get("sell_spreads", "0.0002,0.001"),
-            "buy_amounts_pct": ctrl_config.get("buy_amounts_pct", "1,2"),
-            "sell_amounts_pct": ctrl_config.get("sell_amounts_pct", "1,2"),
+            "buy_spreads": ctrl_config.get("buy_spreads", "0.0002,0.0006"),
+            "sell_spreads": ctrl_config.get("sell_spreads", "0.0002,0.0006"),
+            "buy_amounts_pct": ctrl_config.get("buy_amounts_pct", "1,1"),
+            "sell_amounts_pct": ctrl_config.get("sell_amounts_pct", "1,1"),
             # Take profit settings
-            "take_profit": ctrl_config.get("take_profit", 0.0001),
+            "take_profit": ctrl_config.get("take_profit", 0.0003),
             "take_profit_order_type": ctrl_config.get(
                 "take_profit_order_type", "LIMIT_MAKER"
             ),
-            "open_order_type": ctrl_config.get("open_order_type", "LIMIT"),
+            "open_order_type": ctrl_config.get("open_order_type", "LIMIT_MAKER"),
             # Timing settings
-            "executor_refresh_time": ctrl_config.get("executor_refresh_time", 30),
-            "buy_cooldown_time": ctrl_config.get("buy_cooldown_time", 15),
-            "sell_cooldown_time": ctrl_config.get("sell_cooldown_time", 15),
+            "executor_refresh_time": ctrl_config.get("executor_refresh_time", 10),
+            "buy_cooldown_time": ctrl_config.get("buy_cooldown_time", 10),
+            "sell_cooldown_time": ctrl_config.get("sell_cooldown_time", 10),
             "buy_position_effectivization_time": ctrl_config.get(
-                "buy_position_effectivization_time", 3600
+                "buy_position_effectivization_time", 300
             ),
             "sell_position_effectivization_time": ctrl_config.get(
-                "sell_position_effectivization_time", 3600
+                "sell_position_effectivization_time", 300
             ),
-            # Distance settings
-            "min_buy_price_distance_pct": ctrl_config.get(
-                "min_buy_price_distance_pct", 0.003
+            # Tolerance settings
+            "price_distance_tolerance": ctrl_config.get(
+                "price_distance_tolerance", "0.0005"
             ),
-            "min_sell_price_distance_pct": ctrl_config.get(
-                "min_sell_price_distance_pct", 0.003
-            ),
+            "refresh_tolerance": ctrl_config.get("refresh_tolerance", "0.0005"),
+            "tolerance_scaling": ctrl_config.get("tolerance_scaling", "1.2"),
             # Executor settings
             "max_active_executors_by_level": ctrl_config.get(
-                "max_active_executors_by_level", 4
+                "max_active_executors_by_level", 10
             ),
             "tick_mode": ctrl_config.get("tick_mode", False),
+            # Risk management
+            "position_profit_protection": ctrl_config.get(
+                "position_profit_protection", True
+            ),
+            "min_skew": ctrl_config.get("min_skew", "1.0"),
+            "global_take_profit": ctrl_config.get("global_take_profit", "0.03"),
+            "global_stop_loss": ctrl_config.get("global_stop_loss", "0.05"),
+            "manual_kill_switch": ctrl_config.get("manual_kill_switch", False),
         }
     else:
         # Grid Strike editable fields

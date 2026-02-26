@@ -14,11 +14,13 @@ from typing import Dict, List, Optional, Type
 from ._base import BaseController, ControllerField
 from .grid_strike import GridStrikeController
 from .pmm_mister import PmmMisterController
+from .pmm_v1 import PmmV1Controller
 
 # Registry of controller types
 _CONTROLLER_REGISTRY: Dict[str, Type[BaseController]] = {
     "grid_strike": GridStrikeController,
     "pmm_mister": PmmMisterController,
+    "pmm_v1": PmmV1Controller,
 }
 
 
@@ -99,6 +101,7 @@ __all__ = [
     # Controller implementations
     "GridStrikeController",
     "PmmMisterController",
+    "PmmV1Controller",
     # Backwards compatibility
     "SUPPORTED_CONTROLLERS",
 ]

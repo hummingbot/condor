@@ -29,6 +29,8 @@ from handlers.cex._shared import (
 )
 from utils.telegram_formatters import escape_markdown_v2, format_error_message
 
+from .controllers import get_controller_info, get_supported_controller_types
+
 from ._shared import (
     GRID_STRIKE_DEFAULTS,
     GRID_STRIKE_FIELD_ORDER,
@@ -76,6 +78,8 @@ def _get_controller_type_display(controller_name: str) -> tuple[str, str]:
     """Get display name and emoji for controller type"""
     type_map = {
         "grid_strike": ("Grid Strike", "📊"),
+        "pmm_mister": ("PMM Mister", "📈"),
+        "pmm_v1": ("PMM V1", "📈"),
         "dman_v3": ("DMan V3", "🤖"),
         "xemm": ("XEMM", "🔄"),
         "pmm": ("PMM", "📈"),
@@ -160,13 +164,14 @@ async def show_controller_configs_menu(
         # Store all configs
         context.user_data["controller_configs_list"] = configs
 
-        # Get available types
+        # Get available types from registry (always shows all supported types)
+        all_types = get_supported_controller_types()
         type_counts = _get_available_controller_types(configs)
 
-        # Determine current type (default to first available or grid_strike)
+        # Determine current type (default to first registered or grid_strike)
         current_type = context.user_data.get("configs_controller_type")
-        if not current_type or current_type not in type_counts:
-            current_type = list(type_counts.keys())[0] if type_counts else "grid_strike"
+        if not current_type or current_type not in all_types:
+            current_type = all_types[0] if all_types else "grid_strike"
         context.user_data["configs_controller_type"] = current_type
 
         # Filter and sort configs by current type
@@ -230,8 +235,7 @@ async def show_controller_configs_menu(
         # Row 1: Type selector + Create buttons
         type_row = []
         # Type selector button (shows current type, click to change)
-        other_types = [t for t in type_counts.keys() if t != current_type]
-        if other_types or len(type_counts) > 1:
+        if len(all_types) > 1:
             type_row.append(
                 InlineKeyboardButton(
                     f"{emoji} {type_name} ▼", callback_data="bots:cfg_select_type"
@@ -242,19 +246,12 @@ async def show_controller_configs_menu(
                 InlineKeyboardButton(f"{emoji} {type_name}", callback_data="bots:noop")
             )
 
-        # Create button for current type
-        if current_type == "grid_strike":
-            type_row.append(
-                InlineKeyboardButton("➕ New", callback_data="bots:new_grid_strike")
+        # Create button - dynamically routes to the current type's wizard
+        type_row.append(
+            InlineKeyboardButton(
+                "➕ New", callback_data=f"bots:new_{current_type}"
             )
-        elif "pmm" in current_type.lower():
-            type_row.append(
-                InlineKeyboardButton("➕ New", callback_data="bots:new_pmm_mister")
-            )
-        else:
-            type_row.append(
-                InlineKeyboardButton("➕ New", callback_data="bots:new_grid_strike")
-            )
+        )
 
         keyboard.append(type_row)
 
@@ -411,9 +408,11 @@ async def show_type_selector(
 
     lines = [r"*Select Controller Type*", ""]
 
+    # Show all registered types from registry (not just existing configs)
     keyboard = []
-    for ctrl_type, count in sorted(type_counts.items()):
+    for ctrl_type, info in get_controller_info().items():
         type_name, emoji = _get_controller_type_display(ctrl_type)
+        count = type_counts.get(ctrl_type, 0)
         is_current = "• " if ctrl_type == current_type else ""
         keyboard.append(
             [
@@ -6877,17 +6876,17 @@ async def _show_pmm_wizard_review_step(
     else:
         open_order_type_str = str(open_order_type)
 
-    # Calculate amounts_pct based on spreads if not set
-    buy_spreads = config.get("buy_spreads", "0.0002,0.001")
-    sell_spreads = config.get("sell_spreads", "0.0002,0.001")
-    buy_amounts = config.get("buy_amounts_pct")
-    sell_amounts = config.get("sell_amounts_pct")
+    # Get amounts
+    buy_spreads = config.get("buy_spreads", "0.0002,0.0006")
+    sell_spreads = config.get("sell_spreads", "0.0002,0.0006")
+    buy_amounts = config.get("buy_amounts_pct", "1,1")
+    sell_amounts = config.get("sell_amounts_pct", "1,1")
 
     if not buy_amounts:
-        num_buy_spreads = len(buy_spreads.split(",")) if buy_spreads else 1
+        num_buy_spreads = len(buy_spreads.split(",")) if isinstance(buy_spreads, str) and buy_spreads else 1
         buy_amounts = ",".join(["1"] * num_buy_spreads)
     if not sell_amounts:
-        num_sell_spreads = len(sell_spreads.split(",")) if sell_spreads else 1
+        num_sell_spreads = len(sell_spreads.split(",")) if isinstance(sell_spreads, str) and sell_spreads else 1
         sell_amounts = ",".join(["1"] * num_sell_spreads)
 
     # Build copyable config block
@@ -6896,27 +6895,32 @@ async def _show_pmm_wizard_review_step(
         f"connector_name: {config.get('connector_name', '')}\n"
         f"trading_pair: {config.get('trading_pair', '')}\n"
         f"leverage: {config.get('leverage', 1)}\n"
-        f"position_mode: {config.get('position_mode', 'HEDGE')}\n"
-        f"total_amount_quote: {config.get('total_amount_quote', 100)}\n"
-        f"portfolio_allocation: {config.get('portfolio_allocation', 0.05)}\n"
+        f"position_mode: {config.get('position_mode', 'ONEWAY')}\n"
+        f"total_amount_quote: {config.get('total_amount_quote', 1000)}\n"
+        f"portfolio_allocation: {config.get('portfolio_allocation', 0.03)}\n"
         f"target_base_pct: {config.get('target_base_pct', 0.5)}\n"
-        f"min_base_pct: {config.get('min_base_pct', 0.4)}\n"
-        f"max_base_pct: {config.get('max_base_pct', 0.6)}\n"
+        f"min_base_pct: {config.get('min_base_pct', 0.3)}\n"
+        f"max_base_pct: {config.get('max_base_pct', 0.7)}\n"
         f"buy_spreads: {buy_spreads}\n"
         f"sell_spreads: {sell_spreads}\n"
         f"buy_amounts_pct: {buy_amounts}\n"
         f"sell_amounts_pct: {sell_amounts}\n"
-        f"take_profit: {config.get('take_profit', 0.0001)}\n"
+        f"take_profit: {config.get('take_profit', 0.0003)}\n"
         f"take_profit_order_type: {tp_order_type_str}\n"
         f"open_order_type: {open_order_type_str}\n"
-        f"executor_refresh_time: {config.get('executor_refresh_time', 30)}\n"
-        f"buy_cooldown_time: {config.get('buy_cooldown_time', 15)}\n"
-        f"sell_cooldown_time: {config.get('sell_cooldown_time', 15)}\n"
-        f"buy_position_effectivization_time: {config.get('buy_position_effectivization_time', 3600)}\n"
-        f"sell_position_effectivization_time: {config.get('sell_position_effectivization_time', 3600)}\n"
-        f"min_buy_price_distance_pct: {config.get('min_buy_price_distance_pct', 0.003)}\n"
-        f"min_sell_price_distance_pct: {config.get('min_sell_price_distance_pct', 0.003)}\n"
-        f"max_active_executors_by_level: {config.get('max_active_executors_by_level', 4)}"
+        f"executor_refresh_time: {config.get('executor_refresh_time', 10)}\n"
+        f"buy_cooldown_time: {config.get('buy_cooldown_time', 10)}\n"
+        f"sell_cooldown_time: {config.get('sell_cooldown_time', 10)}\n"
+        f"buy_position_effectivization_time: {config.get('buy_position_effectivization_time', 300)}\n"
+        f"sell_position_effectivization_time: {config.get('sell_position_effectivization_time', 300)}\n"
+        f"price_distance_tolerance: {config.get('price_distance_tolerance', '0.0005')}\n"
+        f"refresh_tolerance: {config.get('refresh_tolerance', '0.0005')}\n"
+        f"tolerance_scaling: {config.get('tolerance_scaling', '1.2')}\n"
+        f"max_active_executors_by_level: {config.get('max_active_executors_by_level', 10)}\n"
+        f"position_profit_protection: {config.get('position_profit_protection', True)}\n"
+        f"min_skew: {config.get('min_skew', '1.0')}\n"
+        f"global_take_profit: {config.get('global_take_profit', '0.03')}\n"
+        f"global_stop_loss: {config.get('global_stop_loss', '0.05')}"
     )
 
     pair = config.get("trading_pair", "")
@@ -7247,13 +7251,15 @@ async def handle_pmm_edit_advanced(
 
     await query.message.edit_text(
         r"*Advanced Settings*" + "\n\n"
-        f"📈 *Base %:* min=`{config.get('min_base_pct', 0.1)*100:.0f}%` "
-        f"target=`{config.get('target_base_pct', 0.2)*100:.0f}%` "
-        f"max=`{config.get('max_base_pct', 0.4)*100:.0f}%`" + "\n"
-        f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 30)}s`" + "\n"
-        f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 15)}s` "
-        f"sell=`{config.get('sell_cooldown_time', 15)}s`" + "\n"
-        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 4)}`",
+        f"📈 *Base %:* min=`{config.get('min_base_pct', 0.3)*100:.0f}%` "
+        f"target=`{config.get('target_base_pct', 0.5)*100:.0f}%` "
+        f"max=`{config.get('max_base_pct', 0.7)*100:.0f}%`" + "\n"
+        f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 10)}s`" + "\n"
+        f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 10)}s` "
+        f"sell=`{config.get('sell_cooldown_time', 10)}s`" + "\n"
+        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 10)}`" + "\n"
+        f"🛡️ *Profit Protection:* `{config.get('position_profit_protection', True)}`" + "\n"
+        f"📊 *Global TP/SL:* `{config.get('global_take_profit', '0.03')}`/`{config.get('global_stop_loss', '0.05')}`",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -7803,9 +7809,15 @@ async def process_pmm_wizard_input(
                 "sell_position_effectivization_time",
                 int,
             ),
-            "min_buy_price_distance_pct": ("min_buy_price_distance_pct", float),
-            "min_sell_price_distance_pct": ("min_sell_price_distance_pct", float),
+            "price_distance_tolerance": ("price_distance_tolerance", str),
+            "refresh_tolerance": ("refresh_tolerance", str),
+            "tolerance_scaling": ("tolerance_scaling", str),
             "max_active_executors_by_level": ("max_active_executors_by_level", int),
+            "position_profit_protection": ("position_profit_protection", str),
+            "min_skew": ("min_skew", str),
+            "global_take_profit": ("global_take_profit", str),
+            "global_stop_loss": ("global_stop_loss", str),
+            "manual_kill_switch": ("manual_kill_switch", str),
         }
 
         updated_fields = []
@@ -7863,23 +7875,23 @@ async def _pmm_show_review(context, chat_id, message_id, config):
     else:
         tp_order_type_str = str(tp_order_type)
 
-    open_order_type = config.get("open_order_type", "LIMIT")
+    open_order_type = config.get("open_order_type", "LIMIT_MAKER")
     if isinstance(open_order_type, int):
-        open_order_type_str = ORDER_TYPE_LABELS.get(open_order_type, "LIMIT")
+        open_order_type_str = ORDER_TYPE_LABELS.get(open_order_type, "LIMIT_MAKER")
     else:
         open_order_type_str = str(open_order_type)
 
-    # Calculate amounts_pct based on spreads if not set
-    buy_spreads = config.get("buy_spreads", "0.0002,0.001")
-    sell_spreads = config.get("sell_spreads", "0.0002,0.001")
-    buy_amounts = config.get("buy_amounts_pct")
-    sell_amounts = config.get("sell_amounts_pct")
+    # Get amounts
+    buy_spreads = config.get("buy_spreads", "0.0002,0.0006")
+    sell_spreads = config.get("sell_spreads", "0.0002,0.0006")
+    buy_amounts = config.get("buy_amounts_pct", "1,1")
+    sell_amounts = config.get("sell_amounts_pct", "1,1")
 
     if not buy_amounts:
-        num_buy_spreads = len(buy_spreads.split(",")) if buy_spreads else 1
+        num_buy_spreads = len(buy_spreads.split(",")) if isinstance(buy_spreads, str) and buy_spreads else 1
         buy_amounts = ",".join(["1"] * num_buy_spreads)
     if not sell_amounts:
-        num_sell_spreads = len(sell_spreads.split(",")) if sell_spreads else 1
+        num_sell_spreads = len(sell_spreads.split(",")) if isinstance(sell_spreads, str) and sell_spreads else 1
         sell_amounts = ",".join(["1"] * num_sell_spreads)
 
     # Build copyable config block
@@ -7888,27 +7900,32 @@ async def _pmm_show_review(context, chat_id, message_id, config):
         f"connector_name: {config.get('connector_name', '')}\n"
         f"trading_pair: {config.get('trading_pair', '')}\n"
         f"leverage: {config.get('leverage', 1)}\n"
-        f"position_mode: {config.get('position_mode', 'HEDGE')}\n"
-        f"total_amount_quote: {config.get('total_amount_quote', 100)}\n"
-        f"portfolio_allocation: {config.get('portfolio_allocation', 0.05)}\n"
+        f"position_mode: {config.get('position_mode', 'ONEWAY')}\n"
+        f"total_amount_quote: {config.get('total_amount_quote', 1000)}\n"
+        f"portfolio_allocation: {config.get('portfolio_allocation', 0.03)}\n"
         f"target_base_pct: {config.get('target_base_pct', 0.5)}\n"
-        f"min_base_pct: {config.get('min_base_pct', 0.4)}\n"
-        f"max_base_pct: {config.get('max_base_pct', 0.6)}\n"
+        f"min_base_pct: {config.get('min_base_pct', 0.3)}\n"
+        f"max_base_pct: {config.get('max_base_pct', 0.7)}\n"
         f"buy_spreads: {buy_spreads}\n"
         f"sell_spreads: {sell_spreads}\n"
         f"buy_amounts_pct: {buy_amounts}\n"
         f"sell_amounts_pct: {sell_amounts}\n"
-        f"take_profit: {config.get('take_profit', 0.0001)}\n"
+        f"take_profit: {config.get('take_profit', 0.0003)}\n"
         f"take_profit_order_type: {tp_order_type_str}\n"
         f"open_order_type: {open_order_type_str}\n"
-        f"executor_refresh_time: {config.get('executor_refresh_time', 30)}\n"
-        f"buy_cooldown_time: {config.get('buy_cooldown_time', 15)}\n"
-        f"sell_cooldown_time: {config.get('sell_cooldown_time', 15)}\n"
-        f"buy_position_effectivization_time: {config.get('buy_position_effectivization_time', 3600)}\n"
-        f"sell_position_effectivization_time: {config.get('sell_position_effectivization_time', 3600)}\n"
-        f"min_buy_price_distance_pct: {config.get('min_buy_price_distance_pct', 0.003)}\n"
-        f"min_sell_price_distance_pct: {config.get('min_sell_price_distance_pct', 0.003)}\n"
-        f"max_active_executors_by_level: {config.get('max_active_executors_by_level', 4)}"
+        f"executor_refresh_time: {config.get('executor_refresh_time', 10)}\n"
+        f"buy_cooldown_time: {config.get('buy_cooldown_time', 10)}\n"
+        f"sell_cooldown_time: {config.get('sell_cooldown_time', 10)}\n"
+        f"buy_position_effectivization_time: {config.get('buy_position_effectivization_time', 300)}\n"
+        f"sell_position_effectivization_time: {config.get('sell_position_effectivization_time', 300)}\n"
+        f"price_distance_tolerance: {config.get('price_distance_tolerance', '0.0005')}\n"
+        f"refresh_tolerance: {config.get('refresh_tolerance', '0.0005')}\n"
+        f"tolerance_scaling: {config.get('tolerance_scaling', '1.2')}\n"
+        f"max_active_executors_by_level: {config.get('max_active_executors_by_level', 10)}\n"
+        f"position_profit_protection: {config.get('position_profit_protection', True)}\n"
+        f"min_skew: {config.get('min_skew', '1.0')}\n"
+        f"global_take_profit: {config.get('global_take_profit', '0.03')}\n"
+        f"global_stop_loss: {config.get('global_stop_loss', '0.05')}"
     )
 
     pair = config.get("trading_pair", "")
@@ -7959,16 +7976,874 @@ async def _pmm_show_advanced(context, chat_id, message_id, config):
         chat_id=chat_id,
         message_id=message_id,
         text=r"*Advanced Settings*" + "\n\n"
-        f"📈 *Base %:* min=`{config.get('min_base_pct', 0.1)*100:.0f}%` "
-        f"target=`{config.get('target_base_pct', 0.2)*100:.0f}%` "
-        f"max=`{config.get('max_base_pct', 0.4)*100:.0f}%`" + "\n"
-        f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 30)}s`" + "\n"
-        f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 15)}s` "
-        f"sell=`{config.get('sell_cooldown_time', 15)}s`" + "\n"
-        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 4)}`",
+        f"📈 *Base %:* min=`{config.get('min_base_pct', 0.3)*100:.0f}%` "
+        f"target=`{config.get('target_base_pct', 0.5)*100:.0f}%` "
+        f"max=`{config.get('max_base_pct', 0.7)*100:.0f}%`" + "\n"
+        f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 10)}s`" + "\n"
+        f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 10)}s` "
+        f"sell=`{config.get('sell_cooldown_time', 10)}s`" + "\n"
+        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 10)}`" + "\n"
+        f"🛡️ *Profit Protection:* `{config.get('position_profit_protection', True)}`" + "\n"
+        f"📊 *Global TP/SL:* `{config.get('global_take_profit', '0.03')}`/`{config.get('global_stop_loss', '0.05')}`",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
+# ============================================
+# PMM V1 WIZARD
+# ============================================
+
+from .controllers.pmm_v1 import generate_id as pv1_generate_id
+from .controllers.pmm_v1 import validate_config as pv1_validate_config
+from .controllers.pmm_v1 import parse_spreads as pv1_parse_spreads
+from .controllers.pmm_v1 import FIELD_ORDER as PV1_FIELD_ORDER
+from .controllers.pmm_v1 import FIELDS as PV1_FIELDS
+
+
+async def show_new_pmm_v1_form(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Start the progressive PMM V1 wizard - Step 1: Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    config = init_new_controller_config(context, "pmm_v1")
+    context.user_data["bots_state"] = "pv1_wizard"
+    context.user_data["pv1_wizard_step"] = "connector_name"
+    context.user_data["pv1_wizard_message_id"] = query.message.message_id
+    context.user_data["pv1_wizard_chat_id"] = query.message.chat_id
+
+    await _show_pv1_wizard_connector_step(update, context)
+
+
+async def _show_pv1_wizard_connector_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """PMM V1 Wizard Step 1: Select Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+
+        if not cex_connectors:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🔑 Configure API Keys", callback_data="config_api_keys"
+                    )
+                ],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
+            ]
+            await query.message.edit_text(
+                r"*PMM V1 \- New Config*" + "\n\n"
+                r"⚠️ No CEX connectors available\." + "\n\n"
+                r"You need to connect API keys for an exchange to deploy strategies\."
+                + "\n"
+                r"Click below to configure your API keys\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        keyboard = []
+        row = []
+        for connector in cex_connectors:
+            row.append(
+                InlineKeyboardButton(
+                    f"🏦 {connector}", callback_data=f"bots:pv1_connector:{connector}"
+                )
+            )
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append(
+            [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")]
+        )
+
+        await query.message.edit_text(
+            r"*📈 PMM V1 \- New Config*" + "\n\n"
+            r"*Step 1/5:* 🏦 Select Connector",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"Error in PMM V1 connector step: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        await query.message.edit_text(
+            format_error_message(f"Error: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def handle_pv1_wizard_connector(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector: str
+) -> None:
+    """Handle connector selection"""
+    config = get_controller_config(context)
+    config["connector_name"] = connector
+    set_controller_config(context, config)
+    context.user_data["pv1_wizard_step"] = "trading_pair"
+    await _show_pv1_wizard_pair_step(update, context)
+
+
+async def _show_pv1_wizard_pair_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """PMM V1 Wizard Step 2: Trading Pair"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    context.user_data["bots_state"] = "pv1_wizard_input"
+    context.user_data["pv1_wizard_step"] = "trading_pair"
+
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(
+                InlineKeyboardButton(pair, callback_data=f"bots:pv1_pair:{pair}")
+            )
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+    keyboard.append(
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:connector"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ]
+    )
+
+    await query.message.edit_text(
+        r"*📈 PMM V1 \- New Config*" + "\n\n"
+        f"*Connector:* `{escape_markdown_v2(connector)}`" + "\n\n"
+        r"*Step 2/5:* 🔗 Trading Pair" + "\n\n"
+        r"Select or type a pair:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def handle_pv1_wizard_pair(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str
+) -> None:
+    """Handle pair selection"""
+    config = get_controller_config(context)
+    config["trading_pair"] = pair.upper()
+    set_controller_config(context, config)
+    context.user_data["pv1_wizard_step"] = "order_amount"
+    await _show_pv1_wizard_amount_step(update, context)
+
+
+async def _show_pv1_wizard_amount_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """PMM V1 Wizard Step 3: Order Amount (Base)"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "pv1_wizard_input"
+    context.user_data["pv1_wizard_step"] = "order_amount"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("0.001", callback_data="bots:pv1_amount:0.001"),
+            InlineKeyboardButton("0.01", callback_data="bots:pv1_amount:0.01"),
+            InlineKeyboardButton("0.1", callback_data="bots:pv1_amount:0.1"),
+        ],
+        [
+            InlineKeyboardButton("1", callback_data="bots:pv1_amount:1"),
+            InlineKeyboardButton("10", callback_data="bots:pv1_amount:10"),
+            InlineKeyboardButton("100", callback_data="bots:pv1_amount:100"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    # Extract base token for label
+    base_token = pair.split("-")[0] if "-" in pair else "base"
+
+    await query.message.edit_text(
+        r"*📈 PMM V1 \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+        + "\n\n"
+        f"*Step 3/5:* 💰 Order Amount \\({escape_markdown_v2(base_token)}\\)" + "\n\n"
+        r"Select or type amount:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def handle_pv1_wizard_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, amount: str
+) -> None:
+    """Handle amount selection"""
+    config = get_controller_config(context)
+    config["order_amount"] = amount
+    set_controller_config(context, config)
+    context.user_data["pv1_wizard_step"] = "spreads"
+    await _show_pv1_wizard_spreads_step(update, context)
+
+
+async def _show_pv1_wizard_spreads_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """PMM V1 Wizard Step 4: Spread"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    amount = config.get("order_amount", "0.001")
+
+    context.user_data["bots_state"] = "pv1_wizard_input"
+    context.user_data["pv1_wizard_step"] = "spreads"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("0.01%", callback_data="bots:pv1_spreads:0.0001"),
+            InlineKeyboardButton("0.02%", callback_data="bots:pv1_spreads:0.0002"),
+            InlineKeyboardButton("0.05%", callback_data="bots:pv1_spreads:0.0005"),
+        ],
+        [
+            InlineKeyboardButton("0.1%", callback_data="bots:pv1_spreads:0.001"),
+            InlineKeyboardButton("0.2%", callback_data="bots:pv1_spreads:0.002"),
+            InlineKeyboardButton("0.5%", callback_data="bots:pv1_spreads:0.005"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:amount"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    await query.message.edit_text(
+        r"*📈 PMM V1 \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+        + "\n"
+        f"💰 Amount: `{escape_markdown_v2(str(amount))}`"
+        + "\n\n"
+        r"*Step 4/5:* 📊 Spread" + "\n\n"
+        r"_Applied to both buy and sell\. Or type a custom value \(e\.g\. 0\.001\)_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def handle_pv1_wizard_spreads(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, spread: str
+) -> None:
+    """Handle spread selection - applies single spread to both buy and sell"""
+    config = get_controller_config(context)
+    spread_val = float(spread)
+    config["buy_spreads"] = [spread_val]
+    config["sell_spreads"] = [spread_val]
+    set_controller_config(context, config)
+    context.user_data["pv1_wizard_step"] = "review"
+    await _show_pv1_wizard_review_step(update, context)
+
+
+async def _show_pv1_wizard_review_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """PMM V1 Wizard Step 5: Review with copyable config format"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # Generate ID if not set
+    if not config.get("id"):
+        existing = context.user_data.get("controller_configs_list", [])
+        config["id"] = pv1_generate_id(config, existing)
+        set_controller_config(context, config)
+
+    context.user_data["bots_state"] = "pv1_wizard_input"
+    context.user_data["pv1_wizard_step"] = "review"
+
+    # Build copyable config block
+    config_block = (
+        f"id: {config.get('id', '')}\n"
+        f"connector_name: {config.get('connector_name', '')}\n"
+        f"trading_pair: {config.get('trading_pair', '')}\n"
+        f"order_amount: {config.get('order_amount', '0.001')}\n"
+        f"buy_spreads: {config.get('buy_spreads', [0.0002])}\n"
+        f"sell_spreads: {config.get('sell_spreads', [0.0002])}\n"
+        f"minimum_spread: {config.get('minimum_spread', '-1')}\n"
+        f"order_refresh_time: {config.get('order_refresh_time', 30)}\n"
+        f"max_order_age: {config.get('max_order_age', 1800)}\n"
+        f"order_refresh_tolerance_pct: {config.get('order_refresh_tolerance_pct', '-1')}\n"
+        f"filled_order_delay: {config.get('filled_order_delay', 60)}\n"
+        f"inventory_skew_enabled: {config.get('inventory_skew_enabled', False)}\n"
+        f"inventory_range_multiplier: {config.get('inventory_range_multiplier', '1.0')}\n"
+        f"price_ceiling: {config.get('price_ceiling', '-1')}\n"
+        f"price_floor: {config.get('price_floor', '-1')}\n"
+        f"manual_kill_switch: {config.get('manual_kill_switch', False)}"
+    )
+
+    pair = config.get("trading_pair", "")
+    message_text = (
+        f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
+        f"```\n{config_block}\n```\n\n"
+        f"_To edit, send `field: value` lines_"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Save Config", callback_data="bots:pv1_save")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:spreads"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    await query.message.edit_text(
+        message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def handle_pv1_back(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, target: str
+) -> None:
+    """Handle back navigation in PMM V1 wizard"""
+    if target == "connector":
+        await _show_pv1_wizard_connector_step(update, context)
+    elif target == "pair":
+        await _show_pv1_wizard_pair_step(update, context)
+    elif target == "amount":
+        await _show_pv1_wizard_amount_step(update, context)
+    elif target == "spreads":
+        await _show_pv1_wizard_spreads_step(update, context)
+
+
+async def handle_pv1_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save PMM V1 config"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    is_valid, error = pv1_validate_config(config)
+    if not is_valid:
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_review_back")]
+        ]
+        await query.message.edit_text(
+            f"*Validation Error*\n\n{escape_markdown_v2(error or 'Unknown error')}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        config_id = config.get("id", "")
+        result = await client.controllers.create_or_update_controller_config(
+            config_id, config
+        )
+
+        if result.get("status") == "success" or "success" in str(result).lower():
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "Create Another", callback_data="bots:new_pmm_v1"
+                    )
+                ],
+                [InlineKeyboardButton("Deploy Now", callback_data="bots:deploy_menu")],
+                [
+                    InlineKeyboardButton(
+                        "Back to Menu", callback_data="bots:controller_configs"
+                    )
+                ],
+            ]
+            await query.message.edit_text(
+                r"*✅ Config Saved\!*" + "\n\n"
+                f"*ID:* `{escape_markdown_v2(config.get('id', ''))}`",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            clear_bots_state(context)
+        else:
+            error_msg = result.get("message", str(result))
+            keyboard = [
+                [InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_review_back")]
+            ]
+            await query.message.edit_text(
+                f"*Save Failed*\n\n{escape_markdown_v2(error_msg[:200])}",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+    except Exception as e:
+        logger.error(f"Error saving PMM V1 config: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_review_back")]
+        ]
+        await query.message.edit_text(
+            f"*Error*\n\n{escape_markdown_v2(str(e)[:200])}",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def handle_pv1_review_back(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Back to review"""
+    await _show_pv1_wizard_review_step(update, context)
+
+
+async def handle_pv1_pair_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str
+) -> None:
+    """Handle selection of a suggested trading pair in PMM V1 wizard"""
+    config = get_controller_config(context)
+    message_id = context.user_data.get("pv1_wizard_message_id")
+    chat_id = context.user_data.get("pv1_wizard_chat_id")
+
+    config["trading_pair"] = trading_pair
+    set_controller_config(context, config)
+    connector = config.get("connector_name", "")
+
+    # Go to amount step
+    context.user_data["pv1_wizard_step"] = "order_amount"
+    context.user_data["bots_state"] = "pv1_wizard_input"
+
+    base_token = trading_pair.split("-")[0] if "-" in trading_pair else "base"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("0.001", callback_data="bots:pv1_amount:0.001"),
+            InlineKeyboardButton("0.01", callback_data="bots:pv1_amount:0.01"),
+            InlineKeyboardButton("0.1", callback_data="bots:pv1_amount:0.1"),
+        ],
+        [
+            InlineKeyboardButton("1", callback_data="bots:pv1_amount:1"),
+            InlineKeyboardButton("10", callback_data="bots:pv1_amount:10"),
+            InlineKeyboardButton("100", callback_data="bots:pv1_amount:100"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=r"*📈 PMM V1 \- New Config*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(trading_pair)}`"
+        + "\n\n"
+        f"*Step 3/5:* 💰 Order Amount \\({escape_markdown_v2(base_token)}\\)" + "\n\n"
+        r"Select or type amount:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _show_pv1_pair_suggestions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    input_pair: str,
+    error_msg: str,
+    suggestions: list,
+    connector: str,
+) -> None:
+    """Show trading pair suggestions when validation fails in PMM V1 wizard"""
+    message_id = context.user_data.get("pv1_wizard_message_id")
+    chat_id = context.user_data.get("pv1_wizard_chat_id")
+
+    help_text = f"❌ *{escape_markdown_v2(error_msg)}*\n\n"
+
+    if suggestions:
+        help_text += "💡 *Did you mean:*\n"
+    else:
+        help_text += "_No similar pairs found\\._\n"
+
+    keyboard = []
+    for pair in suggestions:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"📈 {pair}", callback_data=f"bots:pv1_pair_select:{pair}"
+                )
+            ]
+        )
+
+    keyboard.append(
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:connector"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ]
+    )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if message_id and chat_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            logger.debug(f"Could not update PMM V1 wizard message: {e}")
+    else:
+        await update.effective_chat.send_message(
+            help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+
+
+async def process_pv1_wizard_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
+) -> None:
+    """Process text input during PMM V1 wizard"""
+    step = context.user_data.get("pv1_wizard_step", "")
+    config = get_controller_config(context)
+    message_id = context.user_data.get("pv1_wizard_message_id")
+    chat_id = context.user_data.get("pv1_wizard_chat_id")
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if step == "trading_pair":
+        pair = user_input.upper().strip()
+        if "-" not in pair:
+            pair = pair.replace("/", "-").replace("_", "-")
+
+        connector = config.get("connector_name", "")
+
+        # Validate trading pair exists on the connector
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        is_valid, error_msg, suggestions, correct_pair = await validate_trading_pair(
+            context.user_data, client, connector, pair
+        )
+
+        if not is_valid:
+            await _show_pv1_pair_suggestions(
+                update, context, pair, error_msg, suggestions, connector
+            )
+            return
+
+        # Use the correct pair format
+        if correct_pair:
+            pair = correct_pair
+        else:
+            trading_rules = await get_trading_rules(
+                context.user_data, client, connector
+            )
+            fallback_pair = get_correct_pair_format(trading_rules, pair)
+            if fallback_pair:
+                pair = fallback_pair
+
+        config["trading_pair"] = pair
+        set_controller_config(context, config)
+
+        # Go to amount step
+        context.user_data["pv1_wizard_step"] = "order_amount"
+        base_token = pair.split("-")[0] if "-" in pair else "base"
+
+        keyboard = [
+            [
+                InlineKeyboardButton("0.001", callback_data="bots:pv1_amount:0.001"),
+                InlineKeyboardButton("0.01", callback_data="bots:pv1_amount:0.01"),
+                InlineKeyboardButton("0.1", callback_data="bots:pv1_amount:0.1"),
+            ],
+            [
+                InlineKeyboardButton("1", callback_data="bots:pv1_amount:1"),
+                InlineKeyboardButton("10", callback_data="bots:pv1_amount:10"),
+                InlineKeyboardButton("100", callback_data="bots:pv1_amount:100"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:pair"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+            ],
+        ]
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=r"*📈 PMM V1 \- New Config*" + "\n\n"
+            f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+            + "\n\n"
+            f"*Step 3/5:* 💰 Order Amount \\({escape_markdown_v2(base_token)}\\)"
+            + "\n\n"
+            r"Select or type amount:",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    elif step == "order_amount":
+        try:
+            amount_str = user_input.strip().replace(",", "")
+            amount = float(amount_str)
+            if amount <= 0:
+                raise ValueError("Amount must be positive")
+            config["order_amount"] = amount_str
+            set_controller_config(context, config)
+            context.user_data["pv1_wizard_step"] = "spreads"
+
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "0.01%", callback_data="bots:pv1_spreads:0.0001"
+                    ),
+                    InlineKeyboardButton(
+                        "0.02%", callback_data="bots:pv1_spreads:0.0002"
+                    ),
+                    InlineKeyboardButton(
+                        "0.05%", callback_data="bots:pv1_spreads:0.0005"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "0.1%", callback_data="bots:pv1_spreads:0.001"
+                    ),
+                    InlineKeyboardButton(
+                        "0.2%", callback_data="bots:pv1_spreads:0.002"
+                    ),
+                    InlineKeyboardButton(
+                        "0.5%", callback_data="bots:pv1_spreads:0.005"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back", callback_data="bots:pv1_back:amount"
+                    ),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                ],
+            ]
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=r"*📈 PMM V1 \- New Config*" + "\n\n"
+                f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+                + "\n"
+                f"💰 Amount: `{escape_markdown_v2(amount_str)}`"
+                + "\n\n"
+                r"*Step 4/5:* 📊 Spread" + "\n\n"
+                r"_Applied to both buy and sell\. Or type a custom value \(e\.g\. 0\.001\)_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except ValueError:
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+            base_token = pair.split("-")[0] if "-" in pair else "base"
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "0.001", callback_data="bots:pv1_amount:0.001"
+                    ),
+                    InlineKeyboardButton("0.01", callback_data="bots:pv1_amount:0.01"),
+                    InlineKeyboardButton("0.1", callback_data="bots:pv1_amount:0.1"),
+                ],
+                [
+                    InlineKeyboardButton("1", callback_data="bots:pv1_amount:1"),
+                    InlineKeyboardButton("10", callback_data="bots:pv1_amount:10"),
+                    InlineKeyboardButton("100", callback_data="bots:pv1_amount:100"),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back", callback_data="bots:pv1_back:pair"
+                    ),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                ],
+            ]
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=r"*📈 PMM V1 \- New Config*" + "\n\n"
+                f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+                + "\n\n"
+                f"*Step 3/5:* 💰 Order Amount \\({escape_markdown_v2(base_token)}\\)"
+                + "\n\n"
+                r"⚠️ _Invalid value\. Enter a positive number \(e\.g\. 0\.01\)_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+    elif step == "spreads":
+        try:
+            spread_val = float(user_input.strip().replace("%", ""))
+            # If user entered percentage like "0.02" meaning 0.02%, convert
+            # But if they enter something like 0.0002, treat as raw fraction
+            if spread_val <= 0:
+                raise ValueError("Spread must be positive")
+            config["buy_spreads"] = [spread_val]
+            config["sell_spreads"] = [spread_val]
+            set_controller_config(context, config)
+            context.user_data["pv1_wizard_step"] = "review"
+
+            # Show review via message edit
+            await _pv1_show_review(context, chat_id, message_id, config)
+        except ValueError:
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+            amount = config.get("order_amount", "0.001")
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "0.01%", callback_data="bots:pv1_spreads:0.0001"
+                    ),
+                    InlineKeyboardButton(
+                        "0.02%", callback_data="bots:pv1_spreads:0.0002"
+                    ),
+                    InlineKeyboardButton(
+                        "0.05%", callback_data="bots:pv1_spreads:0.0005"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "0.1%", callback_data="bots:pv1_spreads:0.001"
+                    ),
+                    InlineKeyboardButton(
+                        "0.2%", callback_data="bots:pv1_spreads:0.002"
+                    ),
+                    InlineKeyboardButton(
+                        "0.5%", callback_data="bots:pv1_spreads:0.005"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back", callback_data="bots:pv1_back:amount"
+                    ),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                ],
+            ]
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=r"*📈 PMM V1 \- New Config*" + "\n\n"
+                f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+                + "\n"
+                f"💰 Amount: `{escape_markdown_v2(str(amount))}`"
+                + "\n\n"
+                r"*Step 4/5:* 📊 Spread" + "\n\n"
+                r"⚠️ _Invalid value\. Enter a positive number \(e\.g\. 0\.001\)_",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+    elif step == "review":
+        # Handle field: value editing in review
+        if ":" in user_input:
+            field, _, value = user_input.partition(":")
+            field = field.strip().lower()
+            value = value.strip()
+
+            if field in config:
+                # Parse booleans
+                if value.lower() in ("true", "false"):
+                    config[field] = value.lower() == "true"
+                # Parse lists
+                elif value.startswith("["):
+                    try:
+                        import ast
+                        config[field] = ast.literal_eval(value)
+                    except Exception:
+                        config[field] = value
+                # Try numeric
+                else:
+                    try:
+                        if "." in value:
+                            config[field] = float(value)
+                        else:
+                            config[field] = int(value)
+                    except ValueError:
+                        config[field] = value
+
+                set_controller_config(context, config)
+
+        await _pv1_show_review(context, chat_id, message_id, config)
+
+
+async def _pv1_show_review(context, chat_id, message_id, config):
+    """Helper to show review step with copyable config format"""
+    # Generate ID if not set
+    if not config.get("id"):
+        existing = context.user_data.get("controller_configs_list", [])
+        config["id"] = pv1_generate_id(config, existing)
+        set_controller_config(context, config)
+
+    config_block = (
+        f"id: {config.get('id', '')}\n"
+        f"connector_name: {config.get('connector_name', '')}\n"
+        f"trading_pair: {config.get('trading_pair', '')}\n"
+        f"order_amount: {config.get('order_amount', '0.001')}\n"
+        f"buy_spreads: {config.get('buy_spreads', [0.0002])}\n"
+        f"sell_spreads: {config.get('sell_spreads', [0.0002])}\n"
+        f"minimum_spread: {config.get('minimum_spread', '-1')}\n"
+        f"order_refresh_time: {config.get('order_refresh_time', 30)}\n"
+        f"max_order_age: {config.get('max_order_age', 1800)}\n"
+        f"order_refresh_tolerance_pct: {config.get('order_refresh_tolerance_pct', '-1')}\n"
+        f"filled_order_delay: {config.get('filled_order_delay', 60)}\n"
+        f"inventory_skew_enabled: {config.get('inventory_skew_enabled', False)}\n"
+        f"inventory_range_multiplier: {config.get('inventory_range_multiplier', '1.0')}\n"
+        f"price_ceiling: {config.get('price_ceiling', '-1')}\n"
+        f"price_floor: {config.get('price_floor', '-1')}\n"
+        f"manual_kill_switch: {config.get('manual_kill_switch', False)}"
+    )
+
+    pair = config.get("trading_pair", "")
+    message_text = (
+        f"*{escape_markdown_v2(pair)}* \\- Review Config\n\n"
+        f"```\n{config_block}\n```\n\n"
+        f"_To edit, send `field: value` lines_"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("✅ Save Config", callback_data="bots:pv1_save")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:spreads"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        if "Message is not modified" not in str(e):
+            raise
 
 
 # ============================================
