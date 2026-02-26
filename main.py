@@ -12,8 +12,9 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    PicklePersistence,
 )
+
+from condor.persistence import SafePicklePersistence
 
 from handlers import clear_all_input_states
 from utils.auth import restricted
@@ -188,17 +189,31 @@ def reload_handlers():
         "handlers.config.gateway",
         "handlers.config.user_preferences",
         "handlers.routines",
+        "handlers.agents",
+        "handlers.agents.menu",
+        "handlers.agents.session",
+        "handlers.agents.stream",
+        "handlers.agents.confirmation",
+        "handlers.agents._shared",
         "handlers.admin",
         "routines.base",
         "utils.auth",
         "utils.telegram_formatters",
         "config_manager",
+        "condor.data_manager",
     ]
 
     for module_name in modules_to_reload:
         if module_name in sys.modules:
             importlib.reload(sys.modules[module_name])
             logger.info(f"Reloaded module: {module_name}")
+
+    # Re-register DataManager fetch functions after reload (preserves in-memory cache)
+    try:
+        from condor.data_manager import register_default_fetches
+        register_default_fetches()
+    except Exception as e:
+        logger.warning(f"Failed to re-register DataManager fetches: {e}")
 
 
 def register_handlers(application: Application) -> None:
@@ -216,6 +231,7 @@ def register_handlers(application: Application) -> None:
     from handlers.config.api_keys import keys_command
     from handlers.config.gateway import gateway_command
     from handlers.config.servers import servers_command
+    from handlers.agents import agent_callback_handler, agent_command
     from handlers.dex import dex_callback_handler, lp_command
     from handlers.executors import executors_callback_handler, executors_command
     from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
@@ -240,6 +256,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("lp", lp_command))
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
+    application.add_handler(CommandHandler("agent", agent_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -268,6 +285,11 @@ def register_handlers(application: Application) -> None:
     )
     application.add_handler(
         CallbackQueryHandler(executors_callback_handler, pattern="^executors:")
+    )
+
+    # Add agent callback handler
+    application.add_handler(
+        CallbackQueryHandler(agent_callback_handler, pattern="^agent:")
     )
 
     # Add admin callback handler
@@ -328,6 +350,7 @@ async def post_init(application: Application) -> None:
         BotCommand("trade", "Unified trading - CEX orders and DEX swaps"),
         BotCommand("lp", "Liquidity pool management"),
         BotCommand("routines", "Run configurable Python scripts"),
+        BotCommand("agent", "Chat with AI trading assistant"),
         BotCommand("servers", "Manage Hummingbot API servers"),
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Deploy Gateway for DEX trading"),
@@ -350,6 +373,12 @@ async def post_init(application: Application) -> None:
     from handlers.routines import restore_scheduled_jobs
 
     await restore_scheduled_jobs(application)
+
+    # Start DataManager (in-memory context-aware cache)
+    from condor.data_manager import get_data_manager, register_default_fetches
+
+    register_default_fetches()
+    get_data_manager().start()
 
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
@@ -379,12 +408,14 @@ async def watch_and_reload(application: Application) -> None:
             logger.error(f"❌ Auto-reload failed: {e}", exc_info=True)
 
 
-def get_persistence() -> PicklePersistence:
+def get_persistence() -> SafePicklePersistence:
     """
     Build a persistence object that works both locally and in Docker.
     - Uses an env var override if provided.
     - Defaults to <project_root>/data/condor_bot_data.pickle.
     - Ensures the parent directory exists, but does NOT create the file.
+    - Uses SafePicklePersistence for atomic writes, backup recovery,
+      and ephemeral key filtering.
     """
     base_dir = Path(__file__).parent
     default_path = base_dir / "data" / "condor_bot_data.pickle"
@@ -394,7 +425,7 @@ def get_persistence() -> PicklePersistence:
     # Make sure the directory exists; the file will be created by PTB
     persistence_path.parent.mkdir(parents=True, exist_ok=True)
 
-    return PicklePersistence(filepath=persistence_path)
+    return SafePicklePersistence(filepath=persistence_path, update_interval=10)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -412,12 +443,19 @@ def main() -> None:
     # This will save trading context, last used parameters, etc.
     persistence = get_persistence()
 
+    async def post_shutdown(application: Application) -> None:
+        """Clean up agent subprocesses on shutdown."""
+        from handlers.agents.session import destroy_all_sessions
+
+        await destroy_all_sessions()
+
     # Create the Application with persistence enabled
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .persistence(persistence)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
