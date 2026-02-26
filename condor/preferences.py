@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 USER_PREFERENCES_KEY = "user_preferences"
+_MIGRATION_DONE_KEY = "_prefs_migration_done"
 
 # Portfolio defaults
 DEFAULT_PORTFOLIO_DAYS = 3
@@ -150,6 +151,11 @@ class ExecutorPrefs(TypedDict, total=False):
     last_position: Dict[str, Any]  # Last position executor params
 
 
+class AgentPrefs(TypedDict, total=False):
+    default_agent: str       # "claude-code", "gemini", "codex"
+    show_tool_calls: bool    # Show tool call indicators (default True)
+
+
 class UserPreferences(TypedDict, total=False):
     portfolio: PortfolioPrefs
     clob: CLOBPrefs
@@ -158,6 +164,7 @@ class UserPreferences(TypedDict, total=False):
     gateway: GatewayPrefs
     unified_trade: UnifiedTradePrefs
     executors: ExecutorPrefs
+    agent: AgentPrefs
 
 
 # ============================================
@@ -200,6 +207,10 @@ def _get_default_preferences() -> UserPreferences:
             "last_grid": {},
             "last_position": {},
         },
+        "agent": {
+            "default_agent": "claude-code",
+            "show_tool_calls": True,
+        },
     }
 
 
@@ -207,21 +218,25 @@ def _ensure_preferences(user_data: Dict) -> UserPreferences:
     """Ensure preferences exist in user_data with proper structure"""
     if USER_PREFERENCES_KEY not in user_data:
         user_data[USER_PREFERENCES_KEY] = _get_default_preferences()
-    else:
-        # Ensure all sections exist (for backward compatibility)
-        prefs = user_data[USER_PREFERENCES_KEY]
-        defaults = _get_default_preferences()
+        return user_data[USER_PREFERENCES_KEY]
 
-        for section, section_defaults in defaults.items():
-            if section not in prefs:
-                prefs[section] = section_defaults
-            elif isinstance(section_defaults, dict):
-                # Ensure all keys in section exist
-                for key, default_value in section_defaults.items():
-                    if key not in prefs[section]:
-                        prefs[section][key] = default_value
+    prefs = user_data[USER_PREFERENCES_KEY]
+    defaults = _get_default_preferences()
 
-    return user_data[USER_PREFERENCES_KEY]
+    # Fast path: all top-level sections already present
+    if all(section in prefs for section in defaults):
+        return prefs
+
+    # Slow path: fill in missing sections / keys
+    for section, section_defaults in defaults.items():
+        if section not in prefs:
+            prefs[section] = section_defaults
+        elif isinstance(section_defaults, dict):
+            for key, default_value in section_defaults.items():
+                if key not in prefs[section]:
+                    prefs[section][key] = default_value
+
+    return prefs
 
 
 def _migrate_legacy_data(user_data: Dict) -> None:
@@ -231,6 +246,10 @@ def _migrate_legacy_data(user_data: Dict) -> None:
     - trading_context: old CLOB/DEX trading context
     - portfolio_config: old portfolio settings
     """
+    # Skip entirely once migration has already run for this user
+    if user_data.get(_MIGRATION_DONE_KEY):
+        return
+
     prefs = _ensure_preferences(user_data)
     migrated = False
 
@@ -290,6 +309,9 @@ def _migrate_legacy_data(user_data: Dict) -> None:
     if migrated:
         logger.info("Legacy data migration completed")
 
+    # Mark migration as done so subsequent calls are a no-op
+    user_data[_MIGRATION_DONE_KEY] = True
+
 
 # ============================================
 # PUBLIC API - GET PREFERENCES
@@ -306,7 +328,7 @@ def get_preferences(user_data: Dict) -> UserPreferences:
         Complete user preferences dictionary
     """
     _migrate_legacy_data(user_data)
-    return deepcopy(_ensure_preferences(user_data))
+    return deepcopy(user_data[USER_PREFERENCES_KEY])
 
 
 def get_portfolio_prefs(user_data: Dict) -> PortfolioPrefs:
@@ -316,7 +338,7 @@ def get_portfolio_prefs(user_data: Dict) -> PortfolioPrefs:
         Portfolio preferences with days and interval
     """
     _migrate_legacy_data(user_data)
-    prefs = _ensure_preferences(user_data)
+    prefs = user_data[USER_PREFERENCES_KEY]
     return {
         "days": prefs["portfolio"].get("days", DEFAULT_PORTFOLIO_DAYS),
         "interval": prefs["portfolio"].get("interval", DEFAULT_PORTFOLIO_INTERVAL),
@@ -330,8 +352,7 @@ def get_clob_prefs(user_data: Dict) -> CLOBPrefs:
         CLOB preferences with account, defaults, and last order params
     """
     _migrate_legacy_data(user_data)
-    prefs = _ensure_preferences(user_data)
-    return deepcopy(prefs["clob"])
+    return deepcopy(user_data[USER_PREFERENCES_KEY]["clob"])
 
 
 def get_dex_prefs(user_data: Dict) -> DEXPrefs:
@@ -341,8 +362,7 @@ def get_dex_prefs(user_data: Dict) -> DEXPrefs:
         DEX preferences with network, connector, slippage, and last params
     """
     _migrate_legacy_data(user_data)
-    prefs = _ensure_preferences(user_data)
-    return deepcopy(prefs["dex"])
+    return deepcopy(user_data[USER_PREFERENCES_KEY]["dex"])
 
 
 def get_general_prefs(user_data: Dict) -> GeneralPrefs:
@@ -352,8 +372,7 @@ def get_general_prefs(user_data: Dict) -> GeneralPrefs:
         General preferences with active_server
     """
     _migrate_legacy_data(user_data)
-    prefs = _ensure_preferences(user_data)
-    return deepcopy(prefs["general"])
+    return deepcopy(user_data[USER_PREFERENCES_KEY]["general"])
 
 
 # ============================================
@@ -410,7 +429,7 @@ def get_clob_last_order(user_data: Dict) -> CLOBOrderParams:
 def set_clob_last_order(user_data: Dict, params: CLOBOrderParams) -> None:
     """Set last CLOB order parameters (for quick trading)"""
     prefs = _ensure_preferences(user_data)
-    prefs["clob"]["last_order"].update(params)
+    prefs["clob"]["last_order"] = dict(params)
     logger.info(f"Updated CLOB last_order params")
 
 
@@ -436,7 +455,7 @@ def get_clob_order_defaults(user_data: Dict) -> CLOBOrderParams:
         "order_type": last_order.get("order_type", DEFAULT_CLOB_ORDER_TYPE),
         "position_mode": last_order.get("position_mode", DEFAULT_CLOB_POSITION_MODE),
         "amount": last_order.get("amount", DEFAULT_CLOB_AMOUNT),
-        "price": last_order.get("price", "88000"),
+        "price": last_order.get("price", ""),
     }
 
 
@@ -493,7 +512,7 @@ def get_dex_last_swap(user_data: Dict) -> DEXSwapParams:
 def set_dex_last_swap(user_data: Dict, params: DEXSwapParams) -> None:
     """Set last DEX swap parameters (for quick trading)"""
     prefs = _ensure_preferences(user_data)
-    prefs["dex"]["last_swap"].update(params)
+    prefs["dex"]["last_swap"] = dict(params)
     logger.info(f"Updated DEX last_swap params")
 
 
@@ -505,7 +524,7 @@ def get_dex_last_pool(user_data: Dict) -> DEXPoolParams:
 def set_dex_last_pool(user_data: Dict, params: DEXPoolParams) -> None:
     """Set last DEX pool parameters"""
     prefs = _ensure_preferences(user_data)
-    prefs["dex"]["last_pool"].update(params)
+    prefs["dex"]["last_pool"] = dict(params)
     logger.info(f"Updated DEX last_pool params")
 
 
@@ -569,7 +588,7 @@ def get_gateway_prefs(user_data: Dict) -> GatewayPrefs:
         Gateway preferences with wallet_networks
     """
     _migrate_legacy_data(user_data)
-    prefs = _ensure_preferences(user_data)
+    prefs = user_data[USER_PREFERENCES_KEY]
     return deepcopy(prefs.get("gateway", {"wallet_networks": {}}))
 
 
@@ -699,7 +718,7 @@ def get_unified_trade_prefs(user_data: Dict) -> UnifiedTradePrefs:
         Unified trade preferences with last_connector_type and last_connector_name
     """
     _migrate_legacy_data(user_data)
-    prefs = _ensure_preferences(user_data)
+    prefs = user_data[USER_PREFERENCES_KEY]
     return deepcopy(
         prefs.get(
             "unified_trade",
@@ -753,8 +772,7 @@ def set_last_trade_connector(
 def get_executor_prefs(user_data: Dict) -> ExecutorPrefs:
     """Get executor preferences"""
     _migrate_legacy_data(user_data)
-    prefs = _ensure_preferences(user_data)
-    return deepcopy(prefs["executors"])
+    return deepcopy(user_data[USER_PREFERENCES_KEY]["executors"])
 
 
 def get_executor_deployed_pairs(user_data: Dict) -> List[str]:
@@ -807,6 +825,34 @@ def set_executor_last_config(
     key = f"last_{executor_type}"
     prefs["executors"][key] = params
     logger.info(f"Updated executor last_{executor_type} config")
+
+
+# ============================================
+# UTILITY FUNCTIONS
+# ============================================
+
+
+# ============================================
+# PUBLIC API - AGENT
+# ============================================
+
+
+def get_agent_prefs(user_data: Dict) -> "AgentPrefs":
+    """Get agent preferences"""
+    _migrate_legacy_data(user_data)
+    return deepcopy(user_data[USER_PREFERENCES_KEY].get("agent", {
+        "default_agent": "claude-code",
+        "show_tool_calls": True,
+    }))
+
+
+def set_default_agent(user_data: Dict, agent_key: str) -> None:
+    """Set default agent"""
+    prefs = _ensure_preferences(user_data)
+    if "agent" not in prefs:
+        prefs["agent"] = {}
+    prefs["agent"]["default_agent"] = agent_key
+    logger.info(f"Set default agent to {agent_key}")
 
 
 # ============================================

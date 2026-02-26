@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_TTL = 60  # seconds
+DEFAULT_EVICT_MAX_AGE = 300  # seconds – entries older than this are swept
 
 
 def get_cached(
@@ -97,6 +98,39 @@ def clear_cache(
             store[namespace].pop(key, None)
 
 
+def evict_expired(
+    store: dict,
+    namespace: str = "_cache",
+    max_age: int = DEFAULT_EVICT_MAX_AGE,
+) -> int:
+    """Remove entries older than *max_age* seconds from a cache namespace.
+
+    Called automatically on every cache miss to keep memory bounded.
+
+    Args:
+        store: Dict-like object (e.g. context.user_data)
+        namespace: Dict key holding the cache sub-dict
+        max_age: Maximum age in seconds before eviction
+
+    Returns:
+        Number of entries evicted
+    """
+    cache = store.get(namespace)
+    if not cache:
+        return 0
+
+    now = time.time()
+    stale_keys = [k for k, (_, ts) in cache.items() if now - ts > max_age]
+    for k in stale_keys:
+        del cache[k]
+
+    if stale_keys:
+        logger.debug(
+            "Evicted %d stale entries from '%s'", len(stale_keys), namespace
+        )
+    return len(stale_keys)
+
+
 async def cached_call(
     store: dict,
     key: str,
@@ -123,6 +157,9 @@ async def cached_call(
     if cached is not None:
         logger.debug(f"Cache hit for '{key}' (ns={namespace})")
         return cached
+
+    # On cache miss, sweep stale entries before fetching fresh data
+    evict_expired(store, namespace=namespace)
 
     logger.debug(f"Cache miss for '{key}' (ns={namespace}), fetching...")
     result = await fetch_func(*args, **kwargs)
