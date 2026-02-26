@@ -13,6 +13,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from handlers.bots._shared import (
@@ -671,6 +672,9 @@ async def _refresh_step_2(
             parse_mode="MarkdownV2",
             reply_markup=reply_markup,
         )
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.error(f"Error refreshing position step 2: {e}", exc_info=True)
     except Exception as e:
         logger.error(f"Error refreshing position step 2: {e}", exc_info=True)
 

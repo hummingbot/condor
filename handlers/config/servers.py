@@ -456,6 +456,14 @@ async def set_default_server(
         invalidate_cache(context.user_data, "all")
         context.user_data["_current_server"] = server_name
 
+        # Invalidate DataManager cache for this user
+        user_id = query.from_user.id
+        try:
+            from condor.data_manager import get_data_manager
+            get_data_manager().invalidate_server(user_id)
+        except Exception:
+            pass
+
         await query.answer(f"✅ Set {server_name} as your default server")
         await show_server_details(query, context, server_name)
 
@@ -525,6 +533,12 @@ async def delete_server(
             # Invalidate cache if we deleted the server that was in use
             if was_current:
                 invalidate_cache(context.user_data, "all")
+                # Also invalidate DataManager
+                try:
+                    from condor.data_manager import get_data_manager
+                    get_data_manager().invalidate_server(user_id)
+                except Exception:
+                    pass
                 logger.info(
                     f"Cache invalidated after deleting current server '{server_name}'"
                 )

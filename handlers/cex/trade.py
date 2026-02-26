@@ -15,6 +15,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config_manager import get_client
+from condor.data_manager import (
+    DataType,
+    dm_get,
+    dm_invalidate,
+    dm_set_context,
+    get_data_manager,
+)
 from handlers.config.user_preferences import (
     get_all_enabled_networks,
     get_clob_account,
@@ -190,6 +197,21 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     context.user_data["cex_state"] = "trade"
 
+    # Set DataManager context for active TTLs and background refresh
+    params = context.user_data.get("trade_params", {})
+    user_id = context.user_data.get("_user_id")
+    if user_id:
+        from handlers.config.user_preferences import get_active_server
+        dm_set_context(
+            user_id,
+            command="trade",
+            connector=params.get("connector"),
+            trading_pair=params.get("trading_pair"),
+            account=get_clob_account(context.user_data),
+            server_name=get_active_server(context.user_data),
+            chat_id=update.effective_chat.id if update.effective_chat else 0,
+        )
+
     await show_trade_menu(update, context)
 
 
@@ -201,8 +223,11 @@ async def handle_trade_refresh(
     if query:
         await query.answer("Refreshing...")
 
-    # Invalidate caches
+    # Invalidate both old cache and DataManager
     invalidate_cache(context.user_data, "balances", "orders", "positions")
+    user_id = context.user_data.get("_user_id")
+    if user_id:
+        dm_invalidate(user_id, "cex_balances", "cex_orders", "cex_positions", "cex_prices")
 
     await handle_trade(update, context)
 
@@ -539,16 +564,29 @@ async def show_trade_menu(
         except Exception:
             pass
 
-    # Try to get cached data
-    balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
-    positions = (
-        get_cached(context.user_data, f"positions_{connector}", ttl=60)
-        if is_perpetual
-        else None
-    )
-    orders = get_cached(context.user_data, "recent_orders", ttl=60)
-    trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
-    current_price = context.user_data.get("current_market_price")
+    # Try to get cached data -- prefer DataManager, fall back to old cache
+    user_id = context.user_data.get("_user_id")
+    dm = get_data_manager()
+    dm_session = dm.get_session(user_id) if user_id else None
+
+    if dm_session:
+        balances = dm_session.get(f"cex_balances:{account}", DataType.CEX_BALANCES)
+        positions = (
+            dm_session.get(f"cex_positions:{connector}", DataType.CEX_POSITIONS)
+            if is_perpetual else None
+        )
+        orders = dm_session.get("cex_orders:5", DataType.CEX_ACTIVE_ORDERS)
+        trading_rules = dm_session.get(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES)
+        current_price = dm_session.get(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES)
+    else:
+        balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
+        positions = (
+            get_cached(context.user_data, f"positions_{connector}", ttl=60)
+            if is_perpetual else None
+        )
+        orders = get_cached(context.user_data, "recent_orders", ttl=60)
+        trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
+        current_price = context.user_data.get("current_market_price")
 
     # Use cached quote if available and no explicit quote provided
     if quote_data is None:
@@ -628,16 +666,29 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
     account = get_clob_account(context.user_data)
     is_perpetual = _is_perpetual_connector(connector)
 
-    # Get all cached data
-    balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
-    positions = (
-        get_cached(context.user_data, f"positions_{connector}", ttl=60)
-        if is_perpetual
-        else None
-    )
-    orders = get_cached(context.user_data, "recent_orders", ttl=60)
-    trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
-    current_price = context.user_data.get("current_market_price")
+    # Get all cached data -- prefer DataManager, fall back to old cache
+    user_id = context.user_data.get("_user_id")
+    dm = get_data_manager()
+    dm_session = dm.get_session(user_id) if user_id else None
+
+    if dm_session:
+        balances = dm_session.get(f"cex_balances:{account}", DataType.CEX_BALANCES)
+        positions = (
+            dm_session.get(f"cex_positions:{connector}", DataType.CEX_POSITIONS)
+            if is_perpetual else None
+        )
+        orders = dm_session.get("cex_orders:5", DataType.CEX_ACTIVE_ORDERS)
+        trading_rules = dm_session.get(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES)
+        current_price = dm_session.get(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES)
+    else:
+        balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
+        positions = (
+            get_cached(context.user_data, f"positions_{connector}", ttl=60)
+            if is_perpetual else None
+        )
+        orders = get_cached(context.user_data, "recent_orders", ttl=60)
+        trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
+        current_price = context.user_data.get("current_market_price")
     quote_data = get_cached(context.user_data, "trade_quote", ttl=30)
 
     leverage = (
@@ -691,18 +742,29 @@ async def _fetch_trade_data_background(
         logger.warning(f"Could not get client for trade data: {e}")
         return
 
+    # Get DataManager session for dual-write
+    user_id = context.user_data.get("_user_id")
+    dm = get_data_manager()
+    dm_session = dm.get_session(user_id, chat_id or 0) if user_id else None
+
     # Define safe fetch functions
     async def fetch_balances_safe():
         try:
             # Check if force refresh is needed (e.g., after trade execution)
             force_refresh = context.user_data.pop("_force_cex_balance_refresh", False)
-            return await get_cex_balances(
+            result = await get_cex_balances(
                 context.user_data, client, account, refresh=force_refresh
             )
+            # Dual-write to DataManager
+            if dm_session:
+                dm_session.put(f"cex_balances:{account}", DataType.CEX_BALANCES, result)
+            return result
         except Exception as e:
             logger.warning(f"Could not fetch balances: {e}")
             # Cache empty dict so display shows "No balance found" instead of "Loading..."
             set_cached(context.user_data, f"cex_balances_{account}", {})
+            if dm_session:
+                dm_session.put(f"cex_balances:{account}", DataType.CEX_BALANCES, {})
             return {}
 
     async def fetch_price_safe():
@@ -713,6 +775,9 @@ async def _fetch_trade_data_background(
             price = prices["prices"].get(trading_pair)
             if price:
                 context.user_data["current_market_price"] = price
+                # Dual-write to DataManager
+                if dm_session:
+                    dm_session.put(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES, price)
             return price
         except Exception as e:
             logger.warning(f"Could not fetch price: {e}")
@@ -720,7 +785,11 @@ async def _fetch_trade_data_background(
 
     async def fetch_rules_safe():
         try:
-            return await get_trading_rules(context.user_data, client, connector)
+            result = await get_trading_rules(context.user_data, client, connector)
+            # Dual-write to DataManager
+            if dm_session:
+                dm_session.put(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES, result)
+            return result
         except Exception as e:
             logger.warning(f"Could not fetch rules: {e}")
             return None
@@ -729,6 +798,9 @@ async def _fetch_trade_data_background(
         try:
             orders = await _fetch_recent_orders(client, limit=5)
             set_cached(context.user_data, "recent_orders", orders)
+            # Dual-write to DataManager
+            if dm_session:
+                dm_session.put("cex_orders:5", DataType.CEX_ACTIVE_ORDERS, orders)
             return orders
         except Exception as e:
             logger.warning(f"Could not fetch orders: {e}")
@@ -801,7 +873,11 @@ async def _fetch_trade_data_background(
 
     async def fetch_positions_safe():
         try:
-            return await get_positions(context.user_data, client, connector)
+            result = await get_positions(context.user_data, client, connector)
+            # Dual-write to DataManager
+            if dm_session:
+                dm_session.put(f"cex_positions:{connector}", DataType.CEX_POSITIONS, result)
+            return result
         except Exception as e:
             logger.warning(f"Could not fetch positions: {e}")
             return []
@@ -1180,6 +1256,22 @@ async def handle_trade_connector_select(
 
     _invalidate_trade_cache(context.user_data)
     invalidate_cache(context.user_data, "balances", "positions", "trading_rules")
+
+    # Invalidate DataManager and update context for new connector
+    user_id = context.user_data.get("_user_id")
+    if user_id:
+        dm_invalidate(user_id, "cex_balances", "cex_positions", "cex_rules", "cex_prices")
+        from handlers.config.user_preferences import get_active_server
+        dm_set_context(
+            user_id,
+            command="trade",
+            connector=connector_name,
+            trading_pair=params.get("trading_pair"),
+            account=get_clob_account(context.user_data),
+            server_name=get_active_server(context.user_data),
+            chat_id=update.effective_chat.id if update.effective_chat else 0,
+        )
+
     context.user_data["cex_state"] = "trade"
 
     await show_trade_menu(update, context)
@@ -1387,6 +1479,10 @@ async def handle_trade_execute(
         # Invalidate cache and flag for refresh on next fetch
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
+        # Also invalidate DataManager
+        exec_user_id = context.user_data.get("_user_id")
+        if exec_user_id:
+            dm_invalidate(exec_user_id, "cex_balances", "cex_orders", "cex_positions")
 
         # Save for quick repeat
         set_clob_last_order(
@@ -1459,18 +1555,31 @@ async def _update_trade_menu_after_input(
         account = get_clob_account(context.user_data)
         is_perpetual = _is_perpetual_connector(connector)
 
-        # Get cached data
-        balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
-        positions = (
-            get_cached(context.user_data, f"positions_{connector}", ttl=60)
-            if is_perpetual
-            else None
-        )
-        orders = get_cached(context.user_data, "recent_orders", ttl=60)
-        trading_rules = get_cached(
-            context.user_data, f"trading_rules_{connector}", ttl=300
-        )
-        current_price = context.user_data.get("current_market_price")
+        # Get cached data -- prefer DataManager, fall back to old cache
+        input_user_id = context.user_data.get("_user_id")
+        dm = get_data_manager()
+        dm_session = dm.get_session(input_user_id) if input_user_id else None
+
+        if dm_session:
+            balances = dm_session.get(f"cex_balances:{account}", DataType.CEX_BALANCES)
+            positions = (
+                dm_session.get(f"cex_positions:{connector}", DataType.CEX_POSITIONS)
+                if is_perpetual else None
+            )
+            orders = dm_session.get("cex_orders:5", DataType.CEX_ACTIVE_ORDERS)
+            trading_rules = dm_session.get(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES)
+            current_price = dm_session.get(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES)
+        else:
+            balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
+            positions = (
+                get_cached(context.user_data, f"positions_{connector}", ttl=60)
+                if is_perpetual else None
+            )
+            orders = get_cached(context.user_data, "recent_orders", ttl=60)
+            trading_rules = get_cached(
+                context.user_data, f"trading_rules_{connector}", ttl=300
+            )
+            current_price = context.user_data.get("current_market_price")
         quote_data = get_cached(context.user_data, "trade_quote", ttl=30)
 
         leverage = None
@@ -1587,6 +1696,10 @@ async def process_trade(
         # Invalidate cache and flag for refresh on next fetch
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
+        # Also invalidate DataManager
+        qt_user_id = context.user_data.get("_user_id")
+        if qt_user_id:
+            dm_invalidate(qt_user_id, "cex_balances", "cex_orders", "cex_positions")
 
         # Update params for next trade
         context.user_data["trade_params"] = {
