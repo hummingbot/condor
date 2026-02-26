@@ -1387,33 +1387,172 @@ def format_connector_detail(
     return message
 
 
+def format_ascii_chart(
+    history_data: Optional[Dict[str, Any]],
+    width: int = 30,
+    height: int = 8,
+    days: Optional[int] = None,
+) -> str:
+    """
+    Render an ASCII sparkline chart for portfolio value history.
+
+    Uses Unicode block characters (▁▂▃▄▅▆▇█) to draw the chart inside
+    a monospace code block.  Shows Y-axis min/max and X-axis date range.
+
+    Args:
+        history_data: History dict from the API with "data" key containing
+                      list of {timestamp, state} objects.
+        width: Number of columns for the chart area.
+        height: Number of rows for the chart area.
+        days: Number of days being displayed (for the header label).
+
+    Returns:
+        MarkdownV2-formatted string with the chart in a code block,
+        or empty string if there is insufficient data.
+    """
+    if not history_data:
+        return ""
+
+    data_points = history_data.get("data", [])
+    if len(data_points) < 2:
+        return ""
+
+    # Parse data points into (timestamp, total_value) pairs
+    parsed: list[tuple[datetime, float]] = []
+    for point in data_points:
+        ts_str = point.get("timestamp", "")
+        state = point.get("state", {})
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+
+        # Sum up all token values in the snapshot
+        total = 0.0
+        for account_data in state.values():
+            if not isinstance(account_data, dict):
+                continue
+            for holdings in account_data.values():
+                if not isinstance(holdings, list):
+                    continue
+                for h in holdings:
+                    if isinstance(h, dict):
+                        v = h.get("value", 0)
+                        try:
+                            total += float(v)
+                        except (ValueError, TypeError):
+                            pass
+
+        parsed.append((ts, total))
+
+    if len(parsed) < 2:
+        return ""
+
+    parsed.sort(key=lambda x: x[0])
+
+    # Resample / bucket into `width` columns
+    values: list[float] = []
+    if len(parsed) <= width:
+        values = [v for _, v in parsed]
+    else:
+        bucket_size = len(parsed) / width
+        for i in range(width):
+            start_idx = int(i * bucket_size)
+            end_idx = int((i + 1) * bucket_size)
+            bucket = [parsed[j][1] for j in range(start_idx, min(end_idx, len(parsed)))]
+            if bucket:
+                values.append(sum(bucket) / len(bucket))
+
+    if not values:
+        return ""
+
+    min_val = min(values)
+    max_val = max(values)
+    val_range = max_val - min_val
+
+    blocks = " ▁▂▃▄▅▆▇█"
+
+    # Build rows (top to bottom)
+    chart_rows: list[str] = []
+    for row in range(height - 1, -1, -1):
+        line = ""
+        for val in values:
+            if val_range == 0:
+                level = 4  # midpoint
+            else:
+                # Map value to a position within the row
+                normalized = (val - min_val) / val_range  # 0..1
+                cell_pos = normalized * height  # 0..height
+                # How much of this value falls into this row?
+                fill = cell_pos - row
+                if fill <= 0:
+                    level = 0
+                elif fill >= 1:
+                    level = 8
+                else:
+                    level = int(fill * 8)
+            line += blocks[level]
+        chart_rows.append(line)
+
+    # Format value labels
+    def _fmt_val(v: float) -> str:
+        if v >= 1_000_000:
+            return f"${v / 1_000_000:.1f}M"
+        if v >= 1_000:
+            return f"${v / 1_000:.1f}K"
+        return f"${v:.0f}"
+
+    max_label = _fmt_val(max_val)
+    min_label = _fmt_val(min_val)
+
+    # Date labels
+    start_date = parsed[0][0].strftime("%b %d")
+    end_date = parsed[-1][0].strftime("%b %d")
+
+    # Determine chart width for the bar
+    chart_width = len(values)
+
+    # Build the chart text inside a code block
+    # NOTE: In MarkdownV2, content inside ``` is pre-formatted and must NOT
+    # be escaped.  Only the header outside the code block needs escaping.
+    days_label = f"{days}d" if days else ""
+    header = f"Value History ({days_label})" if days_label else "Value History"
+
+    code_lines: list[str] = []
+    for i, row_str in enumerate(chart_rows):
+        if i == 0:
+            code_lines.append(f"│{row_str}│ {max_label}")
+        elif i == len(chart_rows) - 1:
+            code_lines.append(f"│{row_str}│ {min_label}")
+        else:
+            code_lines.append(f"│{row_str}│")
+
+    # X-axis
+    padding = chart_width - len(start_date) - len(end_date)
+    if padding < 1:
+        padding = 1
+    code_lines.append(f" {start_date}{' ' * padding}{end_date}")
+
+    code_block = "```\n" + "\n".join(code_lines) + "\n```"
+    return escape_markdown_v2(f"📊 {header}") + "\n" + code_block
+
+
 def format_portfolio_overview(
     overview_data: Dict[str, Any],
     server_name: Optional[str] = None,
     server_status: Optional[str] = None,
-    pnl_indicators: Optional[Dict[str, Optional[float]]] = None,
-    changes_24h: Optional[Dict[str, Any]] = None,
-    token_cache: Optional[Dict[str, str]] = None,
-    accounts_distribution: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Format complete portfolio overview with all sections
+    Format complete portfolio overview with balances.
 
     Args:
-        overview_data: Dictionary from get_portfolio_overview() containing:
+        overview_data: Dictionary containing:
             - balances: Portfolio state
-            - perp_positions: Perpetual positions data
-            - lp_positions: LP positions data
-            - active_orders: Active orders data
         server_name: Name of the server (optional)
         server_status: Status of the server (optional)
-        pnl_indicators: Dict with pnl_24h, pnl_7d, pnl_30d percentages (optional)
-        changes_24h: Dict with token and connector 24h changes (optional)
-        token_cache: Dict mapping token addresses to symbols for LP position resolution (optional)
-        accounts_distribution: From get_accounts_distribution() for exchange breakdown (optional)
 
     Returns:
-        Formatted Telegram message with all portfolio sections
+        Formatted Telegram message with portfolio sections
     """
     # Build header
     if server_name:
@@ -1430,7 +1569,7 @@ def format_portfolio_overview(
         message = "💼 *Portfolio Details*\n\n"
 
     # ============================================
-    # SECTION 1: TOTAL VALUE AND PNL
+    # SECTION 1: TOTAL VALUE
     # ============================================
     balances = overview_data.get("balances") if overview_data else None
 
@@ -1445,72 +1584,88 @@ def format_portfolio_overview(
                         if value > 0:
                             total_value += value
 
-    # Show total value with all PNL indicators on one line
-    pnl_24h = pnl_indicators.get("pnl_24h") if pnl_indicators else None
-    pnl_7d = pnl_indicators.get("pnl_7d") if pnl_indicators else None
-    pnl_30d = pnl_indicators.get("pnl_30d") if pnl_indicators else None
-    detected_movements = (
-        pnl_indicators.get("detected_movements", []) if pnl_indicators else []
-    )
-
     if total_value > 0:
         total_str = format_number(total_value)
         line = f"💵 *Total:* `{escape_markdown_v2(total_str)}`"
-        if pnl_24h is not None:
-            line += f" \\({escape_markdown_v2(format_pnl_indicator(pnl_24h))} 24h\\)"
     else:
         line = f"💵 *Total:* `{escape_markdown_v2('$0.00')}`"
 
-    # Add 7d/30d PNL on the same line
-    pnl_parts = []
-    if pnl_7d is not None:
-        pnl_parts.append(f"7d: {escape_markdown_v2(format_pnl_indicator(pnl_7d))}")
-    if pnl_30d is not None:
-        pnl_parts.append(f"30d: {escape_markdown_v2(format_pnl_indicator(pnl_30d))}")
-
-    if pnl_parts:
-        line += " 📈 " + " \\| ".join(pnl_parts)
-
-    message += line + "\n"
-
-    if detected_movements:
-        message += f"_\\({len(detected_movements)} movement\\(s\\) adjusted\\)_\n"
-
-    message += "\n"
+    message += line + "\n\n"
 
     # ============================================
-    # SECTION 2: EXCHANGE DISTRIBUTION (compact)
-    # ============================================
-    if accounts_distribution:
-        message += format_exchange_distribution(
-            accounts_distribution, changes_24h, total_value
-        )
-
-    # ============================================
-    # SECTION 3: AGGREGATED TOKEN HOLDINGS (compact)
+    # SECTION 2: PER-ACCOUNT, PER-CONNECTOR BREAKDOWN
     # ============================================
     if balances:
-        message += format_aggregated_tokens(
-            balances, changes_24h, total_value, max_tokens=10
-        )
+        for account_name, account_data in balances.items():
+            # Collect connectors with value > 0, sorted by total descending
+            connector_list = []
+            for connector_name, connector_balances in account_data.items():
+                if not connector_balances:
+                    continue
+                conn_total = sum(
+                    b.get("value", 0)
+                    for b in connector_balances
+                    if b.get("value", 0) > 0
+                )
+                if conn_total > 0:
+                    connector_list.append(
+                        (connector_name, connector_balances, conn_total)
+                    )
 
-    # ============================================
-    # SECTION 4: PERPETUAL POSITIONS
-    # ============================================
-    perp_positions = overview_data.get("perp_positions", {"positions": [], "total": 0})
-    message += format_perpetual_positions(perp_positions)
+            if not connector_list:
+                continue
 
-    # ============================================
-    # SECTION 3: LP POSITIONS
-    # ============================================
-    lp_positions = overview_data.get("lp_positions", {"positions": [], "total": 0})
-    message += format_lp_positions(lp_positions, token_cache)
+            connector_list.sort(key=lambda x: x[2], reverse=True)
 
-    # ============================================
-    # SECTION 4: ACTIVE ORDERS
-    # ============================================
-    active_orders = overview_data.get("active_orders", {"orders": [], "total": 0})
-    message += format_active_orders(active_orders)
+            message += f"*Account:* _{escape_markdown_v2(account_name)}_\n"
+
+            for connector_name, connector_balances, conn_total in connector_list:
+                conn_total_str = format_number(conn_total)
+                message += f"  🏦 *{escape_markdown_v2(connector_name)}* \\- `{escape_markdown_v2(conn_total_str)}`\n\n"
+
+                # Sort tokens by value descending, filter > $1
+                sorted_tokens = sorted(
+                    [b for b in connector_balances if b.get("value", 0) >= 1],
+                    key=lambda x: x.get("value", 0),
+                    reverse=True,
+                )
+
+                if sorted_tokens:
+                    message += "```\n"
+                    message += f"{'Token':<6} {'Price':<9} {'Value':<8} {'%Tot':>5}\n"
+                    message += f"{'─'*6} {'─'*9} {'─'*8} {'─'*5}\n"
+
+                    for balance in sorted_tokens[:10]:
+                        token = balance.get("token", "???")
+                        units = balance.get("units", 0)
+                        value = balance.get("value", 0)
+
+                        if isinstance(units, str):
+                            try:
+                                units = float(units)
+                            except (ValueError, TypeError):
+                                units = 0
+                        if isinstance(value, str):
+                            try:
+                                value = float(value)
+                            except (ValueError, TypeError):
+                                value = 0
+
+                        token_display = token[:5] if len(token) > 5 else token
+                        price = value / units if units > 0 else 0
+                        price_str = format_price(price)[:9]
+                        value_str = format_number(value)[:8]
+                        pct = (value / total_value * 100) if total_value > 0 else 0
+                        pct_str = f"{pct:.1f}%" if pct < 100 else f"{pct:.0f}%"
+
+                        message += f"{token_display:<6} {price_str:<9} {value_str:<8} {pct_str:>5}\n"
+
+                    if len(sorted_tokens) > 10:
+                        message += f"\n... +{len(sorted_tokens) - 10} more\n"
+
+                    message += "```\n"
+
+            message += "\n"
 
     return message
 
