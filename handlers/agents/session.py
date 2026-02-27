@@ -5,7 +5,11 @@ import logging
 from dataclasses import dataclass, field
 
 from condor.acp import ACPClient, ACP_COMMANDS, ACP_PROTOCOL, PermissionCallback
-from handlers.agents._shared import get_project_dir
+from handlers.agents._shared import (
+    build_initial_context,
+    build_mcp_servers_for_session,
+    get_project_dir,
+)
 
 log = logging.getLogger(__name__)
 
@@ -36,11 +40,12 @@ async def get_or_create_session(
     chat_id: int,
     agent_key: str,
     permission_callback: PermissionCallback | None = None,
+    user_id: int | None = None,
 ) -> AgentSession:
     """Get existing session or create a new one.
 
-    The agent subprocess auto-discovers stdio MCP servers from .mcp.json
-    in the working directory, so we don't pass them explicitly.
+    When user_id is provided, dynamically configures MCP servers using
+    the user's Condor server permissions instead of static .mcp.json.
     """
     session = _sessions.get(chat_id)
 
@@ -56,14 +61,49 @@ async def get_or_create_session(
     command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
     protocol = ACP_PROTOCOL.get(agent_key, "claude")
 
+    from condor.widget_bridge import get_widget_bridge
+
+    bridge = get_widget_bridge()
+
+    extra_env = {
+        "CONDOR_WIDGET_PORT": str(bridge.port),
+        "CONDOR_CHAT_ID": str(chat_id),
+    }
+
+    # Add agent bridge port if available
+    try:
+        from condor.agents.bridge import get_agent_bridge
+
+        agent_bridge = get_agent_bridge()
+        if agent_bridge.port:
+            extra_env["CONDOR_AGENT_BRIDGE_PORT"] = str(agent_bridge.port)
+    except Exception:
+        pass
+
+    # Build dynamic MCP servers from user's Condor permissions
+    mcp_servers: list[dict] = []
+    if user_id:
+        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, bridge.port)
+
     client = ACPClient(
         command=command,
         working_dir=get_project_dir(),
         protocol=protocol,
+        mcp_servers=mcp_servers,
         permission_callback=permission_callback,
+        extra_env=extra_env,
     )
 
     await client.start()
+
+    # Send initial context about server and permissions
+    if user_id and mcp_servers:
+        initial_context = build_initial_context(user_id, chat_id)
+        if initial_context:
+            try:
+                await client.prompt(initial_context)
+            except Exception:
+                log.warning("Failed to send initial context for chat %d", chat_id)
 
     session = AgentSession(
         chat_id=chat_id,
@@ -88,6 +128,11 @@ async def destroy_session(chat_id: int) -> bool:
 async def _destroy_session_internal(chat_id: int) -> bool:
     session = _sessions.pop(chat_id, None)
     if session:
+        # Cancel any pending widget futures for this chat
+        from condor.widget_bridge import get_widget_bridge
+
+        get_widget_bridge().cancel_for_chat(chat_id)
+
         try:
             await session.client.stop()
         except Exception:

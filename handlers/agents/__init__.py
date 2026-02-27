@@ -13,6 +13,11 @@ from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
+from .sub_agents import (
+    agents_callback_handler,
+    agents_command,
+    agents_message_handler,
+)
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +58,14 @@ async def agent_callback_handler(
         resolved = resolve_confirmation(request_id, approved=False)
         text = "Rejected." if resolved else "Request expired."
         await query.message.edit_text(text)
+    elif action.startswith("w:"):
+        parts = action.split(":")
+        request_id, btn_idx = parts[1], int(parts[2])
+        from condor.widget_bridge import get_widget_bridge
+
+        resolved = get_widget_bridge().resolve(request_id, btn_idx)
+        if not resolved:
+            await query.message.edit_text("Session expired.")
 
 
 async def _handle_select(
@@ -74,6 +87,7 @@ async def _handle_select(
 
     try:
         bot = context.bot
+        user_id = update.effective_user.id
 
         # Create permission callback bound to this bot/chat
         async def _perm_cb(tool_call, options):
@@ -84,6 +98,7 @@ async def _handle_select(
             chat_id=chat_id,
             agent_key=agent_key,
             permission_callback=_perm_cb,
+            user_id=user_id,
         )
         await query.message.edit_text(
             f"{label} is ready. Send a message to start chatting.\n\nUse /agent to see options or any other command to exit."
@@ -132,6 +147,7 @@ async def agent_message_handler(
     # Auto-create session if agent_state is active but no session exists
     if not session or not session.client.alive:
         agent_key = context.user_data.get("agent_selected", DEFAULT_AGENT)
+        user_id = update.effective_user.id if update.effective_user else None
         try:
             bot = context.bot
 
@@ -143,6 +159,7 @@ async def agent_message_handler(
                 chat_id=chat_id,
                 agent_key=agent_key,
                 permission_callback=_perm_cb,
+                user_id=user_id,
             )
         except Exception as e:
             log.exception("Failed to create agent session")

@@ -7,7 +7,7 @@ from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from ._shared import is_dangerous_tool_call
+from ._shared import BLOCKED_TOOLS, is_dangerous_tool_call
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +77,12 @@ async def permission_callback(
     For dangerous tools, sends a confirmation message and waits for user response.
     For safe tools, auto-approves immediately.
     """
+    # Block tools that bypass Condor's RBAC
+    tool_name = tool_call.get("tool", "") or tool_call.get("title", "")
+    if tool_name in BLOCKED_TOOLS:
+        log.warning("Blocked tool %s in chat %d", tool_name, chat_id)
+        return {"outcome": {"outcome": "cancelled"}}
+
     # Auto-approve safe tools
     if not is_dangerous_tool_call(tool_call):
         for opt in options:

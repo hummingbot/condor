@@ -20,6 +20,9 @@ DANGEROUS_TOOLS = {
     "manage_gateway_clmm",   # open/close position
 }
 
+# Tools that are always blocked (RBAC bypass prevention)
+BLOCKED_TOOLS = {"configure_api_servers"}
+
 # Actions within manage_executors that require confirmation
 DANGEROUS_EXECUTOR_ACTIONS = {"create", "stop"}
 
@@ -59,6 +62,12 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     return False
 
 
+def get_available_templates() -> dict:
+    """Get available sub-agent templates (convenience wrapper)."""
+    from condor.agents.template import discover_templates
+    return discover_templates()
+
+
 def get_project_dir() -> str:
     """Get the condor project root directory (where .mcp.json lives).
 
@@ -66,3 +75,112 @@ def get_project_dir() -> str:
     so we just need to point it at the project root.
     """
     return str(Path(__file__).parent.parent.parent)
+
+
+def build_mcp_servers_for_session(
+    user_id: int, chat_id: int, widget_port: int
+) -> list[dict[str, Any]]:
+    """Build dynamic MCP server configs for an agent session.
+
+    Resolves the user's default Condor server and returns ACP-format mcpServers
+    that override the static .mcp.json entries by name.
+    """
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+
+    # Resolve which server to use
+    server_name = cm.get_chat_default_server(chat_id)
+    if not server_name:
+        accessible = cm.get_accessible_servers(user_id)
+        server_name = accessible[0] if accessible else None
+
+    if not server_name:
+        return []  # Fall back to .mcp.json auto-discovery
+
+    server = cm.get_server(server_name)
+    if not server:
+        return []
+
+    # Translate localhost to host.docker.internal for Docker containers
+    host = server["host"]
+    if host in ("localhost", "127.0.0.1"):
+        host = "host.docker.internal"
+
+    api_url = f"http://{host}:{server['port']}"
+
+    mcp_hummingbot = {
+        "name": "mcp-hummingbot",
+        "command": "docker",
+        "args": [
+            "run", "-i", "--rm",
+            "-v", "hummingbot_mcp:/root/.hummingbot_mcp",
+            "-e", f"HUMMINGBOT_API_URL={api_url}",
+            "-e", f"HUMMINGBOT_USERNAME={server['username']}",
+            "-e", f"HUMMINGBOT_PASSWORD={server['password']}",
+            "hummingbot/hummingbot-mcp:latest",
+        ],
+        "env": [],
+    }
+
+    condor_widgets = {
+        "name": "condor-widgets",
+        "command": "uv",
+        "args": ["run", "python", "condor_widget_mcp.py"],
+        "env": [
+            {"name": "CONDOR_WIDGET_PORT", "value": str(widget_port)},
+            {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
+        ],
+    }
+
+    return [mcp_hummingbot, condor_widgets]
+
+
+def build_initial_context(user_id: int, chat_id: int) -> str:
+    """Build an initial context prompt telling the agent about server and permissions."""
+    from config_manager import get_config_manager, ServerPermission
+
+    cm = get_config_manager()
+
+    # Resolve active server
+    server_name = cm.get_chat_default_server(chat_id)
+    if not server_name:
+        accessible = cm.get_accessible_servers(user_id)
+        server_name = accessible[0] if accessible else None
+
+    if not server_name:
+        return ""
+
+    # Get permission level
+    perm = cm.get_server_permission(user_id, server_name)
+    perm_label = perm.value if perm else "unknown"
+
+    # List other accessible servers
+    accessible = cm.get_accessible_servers(user_id)
+    other_servers = [s for s in accessible if s != server_name]
+
+    lines = [
+        f"[System context -- do not repeat this to the user]",
+        f"Connected to Condor server: {server_name}",
+        f"User permission level: {perm_label}",
+    ]
+
+    if other_servers:
+        lines.append(f"Other accessible servers: {', '.join(other_servers)}")
+        lines.append(
+            "To switch servers, the user must use /config in Condor and start a new agent session."
+        )
+
+    lines.append(
+        "IMPORTANT: Never use the configure_api_servers tool. "
+        "Server management is handled by Condor's permission system."
+    )
+
+    if perm == ServerPermission.VIEWER:
+        lines.append(
+            "This user has VIEWER (read-only) access. "
+            "Do NOT execute trades, place orders, or modify positions. "
+            "Only provide information and analysis."
+        )
+
+    return "\n".join(lines)
