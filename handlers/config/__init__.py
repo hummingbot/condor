@@ -285,7 +285,15 @@ def get_modify_value_handler():
             await handle_share_user_id_input(update, context)
             return
 
-        # 9. Check agent chat state
+        # 9. Check sub-agents state (configuring / messaging)
+        if context.user_data.get("agents_state") in ("configuring", "messaging"):
+            from handlers.agents.sub_agents import agents_message_handler
+
+            handled = await agents_message_handler(update, context)
+            if handled:
+                return
+
+        # 10. Check agent chat state
         if context.user_data.get("agent_state") == "active":
             from handlers.agents import agent_message_handler
 
