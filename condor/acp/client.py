@@ -80,12 +80,14 @@ class ACPClient:
         protocol: str = "claude",
         mcp_servers: list[dict[str, Any]] | None = None,
         permission_callback: PermissionCallback | None = None,
+        extra_env: dict[str, str] | None = None,
     ):
         self.command = command
         self.working_dir = working_dir or os.getcwd()
         self.protocol = protocol  # "claude" or "gemini"
         self.mcp_servers: list[dict[str, Any]] = mcp_servers or []
         self.permission_callback = permission_callback
+        self.extra_env = extra_env
         self._process: asyncio.subprocess.Process | None = None
         self._peer = JSONRPCPeer()
         self._session_id: str | None = None
@@ -113,12 +115,17 @@ class ACPClient:
 
     async def start(self) -> None:
         """Spawn subprocess, run handshake."""
+        env = dict(os.environ)
+        if self.extra_env:
+            env.update(self.extra_env)
+
         self._process = await asyncio.create_subprocess_shell(
             self.command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.working_dir,
+            env=env,
             limit=10 * 1024 * 1024,
         )
         self._read_task = asyncio.create_task(self._read_loop())
