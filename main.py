@@ -542,6 +542,20 @@ async def restore_agent_routines(application: Application) -> int:
     return restored
 
 
+async def send_to_telegram(self, chat_id: int, message: str, parse_mode: str = "Markdown"):
+    """Sends a message to a specific Telegram chat."""
+    await self.bot.send_message(chat_id=chat_id, text=message, parse_mode=parse_mode)
+
+
+async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
+    """Sends a message to all users who have started the bot."""
+    for chat_id in self.user_data:
+        try:
+            await self.bot.send_message(chat_id=chat_id, text=message, parse_mode=parse_mode)
+        except Exception as e:
+            logger.warning(f"Failed to send message to chat {chat_id}: {e}")
+
+
 def main() -> None:
     """Run the bot."""
     # Setup persistence to save user data, chat data, and bot data
@@ -579,4 +593,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Add custom methods to the application object
+    Application.send_to_telegram = send_to_telegram
+    Application.send_to_all = send_to_all
     main()
