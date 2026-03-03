@@ -169,7 +169,11 @@ async def agent_message_handler(
 
     # Check if busy
     if session.is_busy:
-        await update.message.reply_text("Still processing previous message...")
+        await update.message.reply_text(
+            "\u23f3 Still working on the previous request\.\.\.\n"
+            "Your message will be queued — or wait for it to finish\.",
+            parse_mode="MarkdownV2",
+        )
         return
 
     # Send placeholder

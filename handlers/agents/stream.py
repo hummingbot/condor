@@ -126,6 +126,9 @@ class TelegramStreamer:
             # Thinking animation
             frame = _THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)]
             parts.append(frame)
+        elif self._finished_tools:
+            # Tools ran but no text response
+            parts.append("_(done — no additional response)_")
         else:
             parts.append("_(no response)_")
 

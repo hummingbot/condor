@@ -102,25 +102,20 @@ def build_mcp_servers_for_session(
     if not server:
         return []
 
-    # Translate localhost to host.docker.internal for Docker containers
-    host = server["host"]
-    if host in ("localhost", "127.0.0.1"):
-        host = "host.docker.internal"
-
-    api_url = f"http://{host}:{server['port']}"
+    api_url = f"http://{server['host']}:{server['port']}"
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
-        "command": "docker",
+        "command": "uv",
         "args": [
-            "run", "-i", "--rm",
-            "-v", "hummingbot_mcp:/root/.hummingbot_mcp",
-            "-e", f"HUMMINGBOT_API_URL={api_url}",
-            "-e", f"HUMMINGBOT_USERNAME={server['username']}",
-            "-e", f"HUMMINGBOT_PASSWORD={server['password']}",
-            "hummingbot/hummingbot-mcp:latest",
+            "--directory", "/Users/dman/Documents/mcp",
+            "run", "main.py",
         ],
-        "env": [],
+        "env": [
+            {"name": "HUMMINGBOT_API_URL", "value": api_url},
+            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
+            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
+        ],
     }
 
     condor_widgets = {

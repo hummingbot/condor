@@ -57,8 +57,6 @@ DEFAULTS: Dict[str, Any] = {
     "global_take_profit": "0.03",
     "global_stop_loss": "0.05",
     "manual_kill_switch": False,
-    "candles_config": [],
-    "initial_positions": [],
 }
 
 

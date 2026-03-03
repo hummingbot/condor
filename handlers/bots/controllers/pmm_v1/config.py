@@ -19,9 +19,7 @@ DEFAULTS: Dict[str, Any] = {
     "order_amount": "0.001",
     "buy_spreads": [0.0002],
     "sell_spreads": [0.0002],
-    "minimum_spread": "-1",
     "order_refresh_time": 30,
-    "max_order_age": 1800,
     "order_refresh_tolerance_pct": "-1",
     "filled_order_delay": 60,
     "inventory_skew_enabled": False,
@@ -29,8 +27,6 @@ DEFAULTS: Dict[str, Any] = {
     "price_ceiling": "-1",
     "price_floor": "-1",
     "manual_kill_switch": False,
-    "candles_config": [],
-    "initial_positions": [],
 }
 
 
@@ -81,14 +77,6 @@ FIELDS: Dict[str, ControllerField] = {
         hint="Spread list (e.g. [0.0002] or [0.001, 0.002])",
         default="[0.0002]",
     ),
-    "minimum_spread": ControllerField(
-        name="minimum_spread",
-        label="Minimum Spread",
-        type="str",
-        required=False,
-        hint="Minimum spread override (-1 to disable)",
-        default="-1",
-    ),
     "order_refresh_time": ControllerField(
         name="order_refresh_time",
         label="Refresh Time (s)",
@@ -96,14 +84,6 @@ FIELDS: Dict[str, ControllerField] = {
         required=False,
         hint="Order refresh interval (default: 30)",
         default=30,
-    ),
-    "max_order_age": ControllerField(
-        name="max_order_age",
-        label="Max Order Age (s)",
-        type="int",
-        required=False,
-        hint="Maximum order age before cancellation (default: 1800)",
-        default=1800,
     ),
     "order_refresh_tolerance_pct": ControllerField(
         name="order_refresh_tolerance_pct",
@@ -172,9 +152,7 @@ FIELD_ORDER: List[str] = [
     "order_amount",
     "buy_spreads",
     "sell_spreads",
-    "minimum_spread",
     "order_refresh_time",
-    "max_order_age",
     "order_refresh_tolerance_pct",
     "filled_order_delay",
     "inventory_skew_enabled",

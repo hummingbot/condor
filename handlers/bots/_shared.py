@@ -151,6 +151,11 @@ def clear_bots_state(context) -> None:
     context.user_data.pop("archived_current_db", None)
     context.user_data.pop("archived_page", None)
     context.user_data.pop("archived_summaries", None)
+    # Config menu state
+    context.user_data.pop("configs_controller_type", None)
+    context.user_data.pop("configs_page", None)
+    context.user_data.pop("selected_configs", None)
+    context.user_data.pop("configs_type_filtered", None)
 
 
 def get_controller_config(context) -> Dict[str, Any]:

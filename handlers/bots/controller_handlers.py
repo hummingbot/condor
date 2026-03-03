@@ -359,14 +359,15 @@ async def show_controller_configs_menu(
 
     except Exception as e:
         logger.error(f"Error loading controller configs: {e}", exc_info=True)
-        keyboard = [
-            [
+        keyboard = []
+        for ctrl_type in get_supported_controller_types():
+            type_name, emoji = _get_controller_type_display(ctrl_type)
+            keyboard.append([
                 InlineKeyboardButton(
-                    "➕ Grid Strike", callback_data="bots:new_grid_strike"
+                    f"➕ {type_name}", callback_data=f"bots:new_{ctrl_type}"
                 )
-            ],
-            [InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")],
-        ]
+            ])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")])
         error_msg = format_error_message(f"Failed to load configs: {str(e)}")
         try:
             if query and query.message:
@@ -1817,7 +1818,7 @@ async def _show_wizard_amount_step(
         rf"This is the total position size in {escape_markdown_v2(quote_token or 'quote asset')}, "
         r"including leverage\." + "\n\n"
         rf"_Example: 100 {escape_markdown_v2(quote_token or 'USDT')} at {leverage}x \= "
-        rf"{margin_example:.1f} margin used_" + "\n\n"
+        rf"{escape_markdown_v2(f'{margin_example:.1f}')} margin used_" + "\n\n"
         r"Select a preset or type a custom amount:"
     )
 
@@ -8297,9 +8298,7 @@ async def _show_pv1_wizard_review_step(
         f"order_amount: {config.get('order_amount', '0.001')}\n"
         f"buy_spreads: {config.get('buy_spreads', [0.0002])}\n"
         f"sell_spreads: {config.get('sell_spreads', [0.0002])}\n"
-        f"minimum_spread: {config.get('minimum_spread', '-1')}\n"
         f"order_refresh_time: {config.get('order_refresh_time', 30)}\n"
-        f"max_order_age: {config.get('max_order_age', 1800)}\n"
         f"order_refresh_tolerance_pct: {config.get('order_refresh_tolerance_pct', '-1')}\n"
         f"filled_order_delay: {config.get('filled_order_delay', 60)}\n"
         f"inventory_skew_enabled: {config.get('inventory_skew_enabled', False)}\n"
@@ -8806,9 +8805,7 @@ async def _pv1_show_review(context, chat_id, message_id, config):
         f"order_amount: {config.get('order_amount', '0.001')}\n"
         f"buy_spreads: {config.get('buy_spreads', [0.0002])}\n"
         f"sell_spreads: {config.get('sell_spreads', [0.0002])}\n"
-        f"minimum_spread: {config.get('minimum_spread', '-1')}\n"
         f"order_refresh_time: {config.get('order_refresh_time', 30)}\n"
-        f"max_order_age: {config.get('max_order_age', 1800)}\n"
         f"order_refresh_tolerance_pct: {config.get('order_refresh_tolerance_pct', '-1')}\n"
         f"filled_order_delay: {config.get('filled_order_delay', 60)}\n"
         f"inventory_skew_enabled: {config.get('inventory_skew_enabled', False)}\n"
