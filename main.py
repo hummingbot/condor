@@ -395,7 +395,7 @@ async def watch_and_reload(application: Application) -> None:
         from watchfiles import awatch
     except ImportError:
         logger.warning(
-            "watchfiles not installed. Auto-reload disabled. Install with: pip install watchfiles"
+            "watchfiles not installed. Auto-reload disabled. Install with: uv add watchfiles"
         )
         return
 

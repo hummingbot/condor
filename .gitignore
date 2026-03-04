@@ -165,3 +165,6 @@ condor_bot_data.pickle.bak
 
 # Claude Code local settings (user-specific overrides)
 .claude/settings.local.json
+
+# Node
+node_modules/
