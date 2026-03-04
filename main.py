@@ -15,7 +15,6 @@ from telegram.ext import (
 )
 
 from condor.persistence import SafePicklePersistence
-
 from handlers import clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN
@@ -194,13 +193,7 @@ def reload_handlers():
         "handlers.agents.session",
         "handlers.agents.stream",
         "handlers.agents.confirmation",
-        "handlers.agents.sub_agents",
         "handlers.agents._shared",
-        "condor.agents.template",
-        "condor.agents.instance",
-        "condor.agents.risk",
-        "condor.agents.llm",
-        "condor.agents.tools",
         "handlers.admin",
         "routines.base",
         "utils.auth",
@@ -217,6 +210,7 @@ def reload_handlers():
     # Re-register DataManager fetch functions after reload (preserves in-memory cache)
     try:
         from condor.data_manager import register_default_fetches
+
         register_default_fetches()
     except Exception as e:
         logger.warning(f"Failed to re-register DataManager fetches: {e}")
@@ -226,6 +220,7 @@ def register_handlers(application: Application) -> None:
     """Register all command handlers."""
     # Import fresh versions after reload
     from handlers.admin import admin_command
+    from handlers.agents import agent_callback_handler, agent_command
     from handlers.bots import (
         bots_callback_handler,
         bots_command,
@@ -237,11 +232,6 @@ def register_handlers(application: Application) -> None:
     from handlers.config.api_keys import keys_command
     from handlers.config.gateway import gateway_command
     from handlers.config.servers import servers_command
-    from handlers.agents import agent_callback_handler, agent_command
-    from handlers.agents.sub_agents import (
-        agents_callback_handler as sub_agents_callback_handler,
-        agents_command as sub_agents_command,
-    )
     from handlers.dex import dex_callback_handler, lp_command
     from handlers.executors import executors_callback_handler, executors_command
     from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
@@ -267,7 +257,6 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
-    application.add_handler(CommandHandler("agents", sub_agents_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -301,11 +290,6 @@ def register_handlers(application: Application) -> None:
     # Add agent callback handler
     application.add_handler(
         CallbackQueryHandler(agent_callback_handler, pattern="^agent:")
-    )
-
-    # Add sub-agents callback handler
-    application.add_handler(
-        CallbackQueryHandler(sub_agents_callback_handler, pattern="^agents:")
     )
 
     # Add admin callback handler
@@ -367,7 +351,6 @@ async def post_init(application: Application) -> None:
         BotCommand("lp", "Liquidity pool management"),
         BotCommand("routines", "Run configurable Python scripts"),
         BotCommand("agent", "Chat with AI trading assistant"),
-        BotCommand("agents", "Manage autonomous sub-agents"),
         BotCommand("servers", "Manage Hummingbot API servers"),
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Deploy Gateway for DEX trading"),
@@ -401,14 +384,6 @@ async def post_init(application: Application) -> None:
     from condor.widget_bridge import get_widget_bridge
 
     await get_widget_bridge().start(application.bot)
-
-    # Start agent bridge for sub-agent MCP management
-    from condor.agents.bridge import get_agent_bridge
-
-    await get_agent_bridge().start(application.bot, application)
-
-    # Restore sub-agent routines from persistence
-    await restore_agent_routines(application)
 
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
@@ -467,82 +442,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("Exception while handling an update:", exc_info=context.error)
 
 
-async def restore_agent_routines(application: Application) -> int:
-    """Restore sub-agent routines from persisted instances after bot restart.
-
-    Iterates agent_instances for each user and restarts running agents.
-    Returns count of restored agents.
-    """
-    from condor.agents.instance import get_instances
-    from condor.agents.template import get_template
-    from handlers.routines import _continuous_tasks, _run_continuous_routine
-
-    restored = 0
-    removed = 0
-
-    for chat_id, user_data in application.user_data.items():
-        instances = get_instances(user_data)
-        if not instances:
-            continue
-
-        to_remove = []
-
-        for instance_id, inst in list(instances.items()):
-            status = inst.get("status", "stopped")
-
-            if status == "stopped":
-                to_remove.append(instance_id)
-                continue
-
-            # Check template still exists
-            template = get_template(inst.get("template_name", ""))
-            if not template:
-                logger.warning(
-                    "Template %s not found, removing agent %s",
-                    inst.get("template_name"),
-                    instance_id,
-                )
-                to_remove.append(instance_id)
-                continue
-
-            if status == "running":
-                try:
-                    routine_iid = f"agent_{instance_id}"
-                    task = asyncio.create_task(
-                        _run_continuous_routine(
-                            application,
-                            routine_iid,
-                            "agent_runner",
-                            {"instance_id": instance_id},
-                            chat_id,
-                        )
-                    )
-                    _continuous_tasks[routine_iid] = task
-                    inst["routine_instance_id"] = routine_iid
-                    restored += 1
-                    logger.info(
-                        "Restored agent %s (%s) for chat %d",
-                        instance_id,
-                        inst.get("template_name"),
-                        chat_id,
-                    )
-                except Exception as e:
-                    logger.error("Failed to restore agent %s: %s", instance_id, e)
-                    to_remove.append(instance_id)
-
-            # Paused agents: keep instance but don't start routine
-
-        for instance_id in to_remove:
-            del instances[instance_id]
-            removed += 1
-
-    if restored > 0 or removed > 0:
-        logger.info("Sub-agents: restored %d, removed %d stale", restored, removed)
-
-    return restored
-
-
-async def send_to_telegram(self, chat_id: int, message: str, parse_mode: str = "Markdown"):
+async def send_to_telegram(
+    self, chat_id: int, message: str, parse_mode: str = "Markdown"
+):
     """Sends a message to a specific Telegram chat."""
     await self.bot.send_message(chat_id=chat_id, text=message, parse_mode=parse_mode)
 
@@ -551,7 +453,9 @@ async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
     """Sends a message to all users who have started the bot."""
     for chat_id in self.user_data:
         try:
-            await self.bot.send_message(chat_id=chat_id, text=message, parse_mode=parse_mode)
+            await self.bot.send_message(
+                chat_id=chat_id, text=message, parse_mode=parse_mode
+            )
         except Exception as e:
             logger.warning(f"Failed to send message to chat {chat_id}: {e}")
 
@@ -564,12 +468,10 @@ def main() -> None:
 
     async def post_shutdown(application: Application) -> None:
         """Clean up agent subprocesses, bridges on shutdown."""
-        from condor.agents.bridge import get_agent_bridge
         from condor.widget_bridge import get_widget_bridge
         from handlers.agents.session import destroy_all_sessions
 
         await destroy_all_sessions()
-        await get_agent_bridge().stop()
         await get_widget_bridge().stop()
 
     # Create the Application with persistence enabled

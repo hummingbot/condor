@@ -13,11 +13,6 @@ from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
-from .sub_agents import (
-    agents_callback_handler,
-    agents_command,
-    agents_message_handler,
-)
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +87,7 @@ async def _handle_select(
         # Create permission callback bound to this bot/chat
         async def _perm_cb(tool_call, options):
             from .confirmation import permission_callback
+
             return await permission_callback(bot, chat_id, tool_call, options)
 
         await get_or_create_session(
@@ -153,6 +149,7 @@ async def agent_message_handler(
 
             async def _perm_cb(tool_call, options):
                 from .confirmation import permission_callback
+
                 return await permission_callback(bot, chat_id, tool_call, options)
 
             session = await get_or_create_session(

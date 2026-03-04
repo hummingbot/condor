@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
-from condor.acp import ACPClient, ACP_COMMANDS, ACP_PROTOCOL, PermissionCallback
+from condor.acp import ACP_COMMANDS, ACP_PROTOCOL, ACPClient, PermissionCallback
 from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -20,7 +20,7 @@ _sessions: dict[int, "AgentSession"] = {}
 @dataclass
 class AgentSession:
     chat_id: int
-    agent_key: str           # "claude-code", "gemini", "codex"
+    agent_key: str  # "claude-code", "gemini", "codex"
     client: ACPClient
     is_busy: bool = False
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -69,16 +69,6 @@ async def get_or_create_session(
         "CONDOR_WIDGET_PORT": str(bridge.port),
         "CONDOR_CHAT_ID": str(chat_id),
     }
-
-    # Add agent bridge port if available
-    try:
-        from condor.agents.bridge import get_agent_bridge
-
-        agent_bridge = get_agent_bridge()
-        if agent_bridge.port:
-            extra_env["CONDOR_AGENT_BRIDGE_PORT"] = str(agent_bridge.port)
-    except Exception:
-        pass
 
     # Build dynamic MCP servers from user's Condor permissions
     mcp_servers: list[dict] = []

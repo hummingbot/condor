@@ -6,11 +6,11 @@ pre-commit
 black
 isort
 PyYAML
-pydantic-ai
-pydantic-ai-slim[openai]
 aiohttp
 watchfiles
 kaleido
 plotly
 pandas
 geckoterminal-py
+mcp
+pytest-asyncio

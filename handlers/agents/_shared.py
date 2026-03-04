@@ -17,7 +17,7 @@ DEFAULT_AGENT = "claude-code"
 DANGEROUS_TOOLS = {
     "place_order",
     "manage_gateway_swaps",  # execute action
-    "manage_gateway_clmm",   # open/close position
+    "manage_gateway_clmm",  # open/close position
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
@@ -62,12 +62,6 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     return False
 
 
-def get_available_templates() -> dict:
-    """Get available sub-agent templates (convenience wrapper)."""
-    from condor.agents.template import discover_templates
-    return discover_templates()
-
-
 def get_project_dir() -> str:
     """Get the condor project root directory (where .mcp.json lives).
 
@@ -108,8 +102,10 @@ def build_mcp_servers_for_session(
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": [
-            "--directory", "/Users/dman/Documents/mcp",
-            "run", "main.py",
+            "--directory",
+            "/Users/dman/Documents/mcp",
+            "run",
+            "main.py",
         ],
         "env": [
             {"name": "HUMMINGBOT_API_URL", "value": api_url},
@@ -133,7 +129,7 @@ def build_mcp_servers_for_session(
 
 def build_initial_context(user_id: int, chat_id: int) -> str:
     """Build an initial context prompt telling the agent about server and permissions."""
-    from config_manager import get_config_manager, ServerPermission
+    from config_manager import ServerPermission, get_config_manager
 
     cm = get_config_manager()
 
