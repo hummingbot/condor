@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from typing import Any
+import re
 
 from telegram import Bot
 from telegram.error import BadRequest, RetryAfter, TimedOut
@@ -28,6 +28,39 @@ TOOL_FAILED = "\u274c"          # X
 
 # Thinking animation frames
 _THINKING_FRAMES = ["Thinking.", "Thinking..", "Thinking..."]
+
+# Convert standard Markdown **bold** / *italic* to Telegram Markdown v1 *bold* / _italic_
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
+
+
+def _to_telegram_markdown(text: str) -> str:
+    """Convert standard Markdown to Telegram Markdown v1.
+
+    Telegram Markdown v1 uses:  *bold*  _italic_  `code`  ```code blocks```  [text](url)
+    Standard Markdown uses:     **bold**  *italic*  `code`  ```code blocks```  [text](url)
+
+    This converts **bold** → *bold* and *italic* → _italic_ while leaving
+    code spans, code blocks, and links untouched.
+    """
+    # Protect code blocks and inline code from transformation
+    protected: list[str] = []
+
+    def _protect(m: re.Match) -> str:
+        protected.append(m.group(0))
+        return f"\x00{len(protected) - 1}\x00"
+
+    result = re.sub(r"```[\s\S]*?```|`[^`\n]+`", _protect, text)
+
+    # Convert formatting in non-code text
+    result = _BOLD_RE.sub(r"*\1*", result)
+    result = _ITALIC_RE.sub(r"_\1_", result)
+
+    # Restore protected code spans
+    for i, original in enumerate(protected):
+        result = result.replace(f"\x00{i}\x00", original)
+
+    return result
 
 
 class TelegramStreamer:
@@ -132,24 +165,36 @@ class TelegramStreamer:
         else:
             parts.append("_(no response)_")
 
-        text = "\n\n".join(parts)
+        raw_text = "\n\n".join(parts)
+
+        # Convert to Telegram Markdown when we have actual content
+        if self._buffer:
+            text = _to_telegram_markdown(raw_text)
+            parse_mode = "Markdown"
+        else:
+            text = raw_text
+            parse_mode = None
 
         if len(text) > MAX_MESSAGE_LEN:
-            await self._handle_overflow(text, final)
+            await self._handle_overflow(text, final, parse_mode)
             return
 
-        await self._safe_edit(self._message_id, text)
+        await self._safe_edit(self._message_id, text, parse_mode=parse_mode)
 
-    async def _handle_overflow(self, text: str, final: bool) -> None:
+    async def _handle_overflow(
+        self, text: str, final: bool, parse_mode: str | None = None
+    ) -> None:
         """Split long messages across multiple Telegram messages."""
         chunks = self._split_text(text, MAX_MESSAGE_LEN)
-        await self._safe_edit(self._message_id, chunks[0])
+        await self._safe_edit(self._message_id, chunks[0], parse_mode=parse_mode)
 
         for i, chunk in enumerate(chunks[1:]):
             if i < len(self._continuation_ids):
-                await self._safe_edit(self._continuation_ids[i], chunk)
+                await self._safe_edit(
+                    self._continuation_ids[i], chunk, parse_mode=parse_mode
+                )
             else:
-                msg_id = await self._safe_send(chunk)
+                msg_id = await self._safe_send(chunk, parse_mode=parse_mode)
                 if msg_id:
                     self._continuation_ids.append(msg_id)
 
@@ -169,14 +214,24 @@ class TelegramStreamer:
             chunks.append(text)
         return chunks
 
-    async def _safe_edit(self, message_id: int, text: str) -> None:
+    async def _safe_edit(
+        self, message_id: int, text: str, parse_mode: str | None = None
+    ) -> None:
         """Edit a message with retry-after handling."""
         try:
             await self._bot.edit_message_text(
                 chat_id=self._chat_id,
                 message_id=message_id,
                 text=text,
+                parse_mode=parse_mode,
             )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                if parse_mode:
+                    # Markdown parse failed — fall back to plain text
+                    await self._safe_edit(message_id, text, parse_mode=None)
+                else:
+                    log.warning("Failed to edit message: %s", e)
         except RetryAfter as e:
             log.warning("Rate limited, waiting %s seconds", e.retry_after)
             await asyncio.sleep(e.retry_after)
@@ -185,31 +240,35 @@ class TelegramStreamer:
                     chat_id=self._chat_id,
                     message_id=message_id,
                     text=text,
+                    parse_mode=parse_mode,
                 )
             except Exception:
                 pass
-        except BadRequest as e:
-            if "not modified" not in str(e).lower():
-                log.warning("Failed to edit message: %s", e)
         except TimedOut:
             pass
         except Exception:
             log.exception("Unexpected error editing message")
 
-    async def _safe_send(self, text: str) -> int | None:
+    async def _safe_send(self, text: str, parse_mode: str | None = None) -> int | None:
         """Send a new message, return message_id."""
         try:
             msg = await self._bot.send_message(
                 chat_id=self._chat_id,
                 text=text,
+                parse_mode=parse_mode,
             )
             return msg.message_id
+        except BadRequest:
+            if parse_mode:
+                return await self._safe_send(text, parse_mode=None)
+            return None
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)
             try:
                 msg = await self._bot.send_message(
                     chat_id=self._chat_id,
                     text=text,
+                    parse_mode=parse_mode,
                 )
                 return msg.message_id
             except Exception:
