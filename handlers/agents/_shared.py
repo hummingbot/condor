@@ -13,6 +13,32 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
 
 DEFAULT_AGENT = "claude-code"
 
+# -- Compact prompt templates --
+
+COMPACT_PROMPT_AUTO = (
+    "Please provide a concise summary of our conversation so far. Include:\n"
+    "- Key decisions and conclusions reached\n"
+    "- Important data points and numbers discussed\n"
+    "- Current task state and any pending actions\n"
+    "- User preferences or instructions given\n\n"
+    "Be concise but thorough. This summary will be used to carry context into a fresh session."
+)
+
+COMPACT_PROMPT_CUSTOM_TEMPLATE = (
+    "Please provide a concise summary of our conversation, focusing specifically on:\n"
+    "{instructions}\n\n"
+    "Drop everything else. Be concise but preserve the details requested above. "
+    "This summary will be used to carry context into a fresh session."
+)
+
+COMPACT_CONTEXT_TEMPLATE = (
+    "[System context -- do not repeat this to the user]\n"
+    "This is a continuation of a previous conversation. "
+    "Here is the summary from that session:\n\n"
+    "{summary}\n\n"
+    "Continue from where we left off. The user compacted the context to free up space."
+)
+
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",

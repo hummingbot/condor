@@ -141,6 +141,7 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Agent states
     context.user_data.pop("agent_state", None)
     context.user_data.pop("agent_selected", None)
+    context.user_data.pop("agent_compact_custom", None)
 
     # Routines states
     context.user_data.pop("routines_state", None)

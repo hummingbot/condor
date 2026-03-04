@@ -8,7 +8,14 @@ from telegram.ext import ContextTypes
 from handlers import clear_all_input_states
 from utils.auth import restricted
 
-from ._shared import AGENT_OPTIONS, DEFAULT_AGENT, get_project_dir
+from ._shared import (
+    AGENT_OPTIONS,
+    COMPACT_CONTEXT_TEMPLATE,
+    COMPACT_PROMPT_AUTO,
+    COMPACT_PROMPT_CUSTOM_TEMPLATE,
+    DEFAULT_AGENT,
+    get_project_dir,
+)
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from .session import destroy_session, get_or_create_session, get_session
@@ -43,6 +50,16 @@ async def agent_callback_handler(
         await _handle_stop(update, context)
     elif action == "close":
         await _handle_close(update, context)
+    elif action == "menu":
+        await show_agent_menu(update, context)
+    elif action == "compact":
+        await _handle_compact_menu(update, context)
+    elif action == "compact_auto":
+        await _handle_compact(update, context, custom_instructions=None)
+    elif action == "compact_custom":
+        await _handle_compact_custom_prompt(update, context)
+    elif action == "new":
+        await _handle_new_session(update, context)
     elif action.startswith("confirm_trade:"):
         request_id = action.split(":", 1)[1]
         resolved = resolve_confirmation(request_id, approved=True)
@@ -128,6 +145,233 @@ async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.message.delete()
 
 
+async def _handle_compact_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show compact options sub-menu."""
+    from .menu import _compact_menu_keyboard
+
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if not session or not session.client.alive:
+        await query.message.edit_text("No active session to compact.")
+        return
+
+    await query.message.edit_text(
+        "How would you like to compact context?\n\n"
+        "Auto - summarize everything\n"
+        "Custom - specify what to keep",
+        reply_markup=_compact_menu_keyboard(),
+    )
+
+
+async def _handle_compact(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    custom_instructions: str | None = None,
+) -> None:
+    """Compact: summarize context → destroy session → recreate with summary."""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if not session or not session.client.alive:
+        await query.message.edit_text("No active session to compact.")
+        return
+
+    if session.is_busy:
+        await query.message.edit_text("Agent is busy. Wait for it to finish first.")
+        return
+
+    await query.message.edit_text("Compacting context...")
+
+    # Build the summary prompt
+    if custom_instructions:
+        prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=custom_instructions)
+    else:
+        prompt = COMPACT_PROMPT_AUTO
+
+    # Get summary from current session (non-streaming)
+    try:
+        summary = await session.client.prompt(prompt)
+    except Exception as e:
+        log.exception("Failed to get compact summary")
+        await query.message.edit_text(f"Compact failed: {e}")
+        return
+
+    if not summary or not summary.strip():
+        await query.message.edit_text("Agent returned empty summary. Compact aborted.")
+        return
+
+    # Destroy old session
+    agent_key = session.agent_key
+    await destroy_session(chat_id)
+
+    # Recreate session
+    try:
+        user_id = update.effective_user.id
+        bot = context.bot
+
+        async def _perm_cb(tool_call, options):
+            from .confirmation import permission_callback
+
+            return await permission_callback(bot, chat_id, tool_call, options)
+
+        new_session = await get_or_create_session(
+            chat_id=chat_id,
+            agent_key=agent_key,
+            permission_callback=_perm_cb,
+            user_id=user_id,
+        )
+
+        # Inject the summary as initial context
+        compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
+        await new_session.client.prompt(compact_context)
+
+    except Exception as e:
+        log.exception("Failed to recreate session after compact")
+        await query.message.edit_text(f"Compact failed during session reset: {e}")
+        context.user_data.pop("agent_state", None)
+        context.user_data.pop("agent_selected", None)
+        return
+
+    word_count = len(summary.split())
+    await query.message.edit_text(
+        f"Context compacted ({word_count} words carried over).\n\n"
+        "Send a message to continue chatting."
+    )
+
+
+async def _handle_compact_custom_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Prompt user to type custom compact instructions."""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if not session or not session.client.alive:
+        await query.message.edit_text("No active session to compact.")
+        return
+
+    context.user_data["agent_compact_custom"] = True
+    await query.message.edit_text(
+        "What should I keep in the summary?\n\n"
+        'Type your instructions (e.g. "keep the portfolio analysis and SOL trade setup"):'
+    )
+
+
+async def _handle_new_session(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Destroy current session and start a fresh one."""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if not session or not session.client.alive:
+        await query.message.edit_text("No active session.")
+        return
+
+    agent_key = session.agent_key
+    label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
+
+    await destroy_session(chat_id)
+    await query.message.edit_text(f"Starting fresh {label} session...")
+
+    try:
+        user_id = update.effective_user.id
+        bot = context.bot
+
+        async def _perm_cb(tool_call, options):
+            from .confirmation import permission_callback
+
+            return await permission_callback(bot, chat_id, tool_call, options)
+
+        await get_or_create_session(
+            chat_id=chat_id,
+            agent_key=agent_key,
+            permission_callback=_perm_cb,
+            user_id=user_id,
+        )
+        await query.message.edit_text(
+            f"Fresh {label} session ready.\n\nSend a message to start chatting."
+        )
+    except Exception as e:
+        log.exception("Failed to create new session")
+        await query.message.edit_text(f"Failed to start new session: {e}")
+        context.user_data.pop("agent_state", None)
+        context.user_data.pop("agent_selected", None)
+
+
+async def _do_compact_from_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, instructions: str
+) -> None:
+    """Execute custom compact from user's text input."""
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if not session or not session.client.alive:
+        await update.message.reply_text("No active session to compact.")
+        return
+
+    if session.is_busy:
+        await update.message.reply_text("Agent is busy. Wait for it to finish first.")
+        context.user_data["agent_compact_custom"] = True  # re-set state
+        return
+
+    placeholder = await update.message.reply_text("Compacting context...")
+
+    # Get summary with custom instructions
+    prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=instructions)
+    try:
+        summary = await session.client.prompt(prompt)
+    except Exception as e:
+        log.exception("Failed to get compact summary")
+        await placeholder.edit_text(f"Compact failed: {e}")
+        return
+
+    if not summary or not summary.strip():
+        await placeholder.edit_text("Agent returned empty summary. Compact aborted.")
+        return
+
+    # Destroy old session and recreate
+    agent_key = session.agent_key
+    await destroy_session(chat_id)
+
+    try:
+        user_id = update.effective_user.id
+        bot = context.bot
+
+        async def _perm_cb(tool_call, options):
+            from .confirmation import permission_callback
+
+            return await permission_callback(bot, chat_id, tool_call, options)
+
+        new_session = await get_or_create_session(
+            chat_id=chat_id,
+            agent_key=agent_key,
+            permission_callback=_perm_cb,
+            user_id=user_id,
+        )
+        compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
+        await new_session.client.prompt(compact_context)
+    except Exception as e:
+        log.exception("Failed to recreate session after compact")
+        await placeholder.edit_text(f"Compact failed during session reset: {e}")
+        context.user_data.pop("agent_state", None)
+        context.user_data.pop("agent_selected", None)
+        return
+
+    word_count = len(summary.split())
+    await placeholder.edit_text(
+        f"Context compacted ({word_count} words carried over).\n\n"
+        "Send a message to continue chatting."
+    )
+
+
 async def agent_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -136,6 +380,11 @@ async def agent_message_handler(
     text = update.message.text
 
     if not text:
+        return
+
+    # Handle custom compact input
+    if context.user_data.pop("agent_compact_custom", None):
+        await _do_compact_from_message(update, context, text)
         return
 
     session = get_session(chat_id)
@@ -167,8 +416,8 @@ async def agent_message_handler(
     # Check if busy
     if session.is_busy:
         await update.message.reply_text(
-            "\u23f3 Still working on the previous request\.\.\.\n"
-            "Your message will be queued — or wait for it to finish\.",
+            "⏳ Still working on the previous request\.\.\.\n"
+            r"Your message will be queued — or wait for it to finish\.",
             parse_mode="MarkdownV2",
         )
         return
