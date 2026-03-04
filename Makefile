@@ -31,8 +31,9 @@ setup-chrome:
 install-ai-tools:
 	@echo "Installing AI CLI tools (requires Node.js 18+)..."
 	@command -v node >/dev/null 2>&1 || { echo "Node.js not found. Install from https://nodejs.org/"; exit 1; }
-	npm install -g @anthropic-ai/claude-code @google/gemini-cli
-	@echo "AI CLI tools installed."
+	@command -v claude >/dev/null 2>&1 && echo "Claude Code already installed ($$(claude --version 2>/dev/null))" || npm install -g @anthropic-ai/claude-code
+	@command -v gemini >/dev/null 2>&1 && echo "Gemini CLI already installed ($$(gemini --version 2>/dev/null))" || npm install -g @google/gemini-cli
+	@echo "AI CLI tools ready."
 
 run:
 	uv run python main.py

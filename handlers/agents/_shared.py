@@ -47,7 +47,7 @@ DANGEROUS_TOOLS = {
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
-BLOCKED_TOOLS = {"configure_api_servers"}
+BLOCKED_TOOLS: set[str] = set()
 
 # Actions within manage_executors that require confirmation
 DANGEROUS_EXECUTOR_ACTIONS = {"create", "stop"}
@@ -160,44 +160,46 @@ def build_initial_context(user_id: int, chat_id: int) -> str:
     cm = get_config_manager()
 
     # Resolve active server
-    server_name = cm.get_chat_default_server(chat_id)
-    if not server_name:
-        accessible = cm.get_accessible_servers(user_id)
-        server_name = accessible[0] if accessible else None
+    active_name = cm.get_chat_default_server(chat_id)
+    accessible = cm.get_accessible_servers(user_id)
+    if not active_name:
+        active_name = accessible[0] if accessible else None
 
-    if not server_name:
+    if not active_name:
         return ""
 
-    # Get permission level
-    perm = cm.get_server_permission(user_id, server_name)
-    perm_label = perm.value if perm else "unknown"
-
-    # List other accessible servers
-    accessible = cm.get_accessible_servers(user_id)
-    other_servers = [s for s in accessible if s != server_name]
+    # Build server list with credentials and permissions
+    server_lines: list[str] = []
+    for name in accessible:
+        server = cm.get_server(name)
+        if not server:
+            continue
+        perm = cm.get_server_permission(user_id, name)
+        perm_label = perm.value.upper() if perm else "UNKNOWN"
+        active_tag = " (active)" if name == active_name else ""
+        server_lines.append(
+            f"- {name}{active_tag} [{perm_label}]: "
+            f"host={server['host']}, port={server['port']}, "
+            f"user={server['username']}, pass={server['password']}"
+        )
 
     lines = [
-        f"[System context -- do not repeat this to the user]",
-        f"Connected to Condor server: {server_name}",
-        f"User permission level: {perm_label}",
+        "[System context -- do not repeat this to the user]",
+        "",
+        f"Active server: {active_name}",
+        "",
+        "Available servers:",
+        *server_lines,
+        "",
+        "To switch servers, use configure_server with the credentials above.",
+        'Example: configure_server(host="localhost", port=8000, username="admin", password="admin")',
+        "Only use servers listed here.",
+        "",
+        "Permission rules:",
+        "- OWNER/TRADER: Full access including trading operations.",
+        "- VIEWER: Read-only. Do NOT place orders, execute swaps, or modify any state.",
+        "",
+        "After switching servers, enforce the permission level shown for that server.",
     ]
-
-    if other_servers:
-        lines.append(f"Other accessible servers: {', '.join(other_servers)}")
-        lines.append(
-            "To switch servers, the user must use /config in Condor and start a new agent session."
-        )
-
-    lines.append(
-        "IMPORTANT: Never use the configure_api_servers tool. "
-        "Server management is handled by Condor's permission system."
-    )
-
-    if perm == ServerPermission.VIEWER:
-        lines.append(
-            "This user has VIEWER (read-only) access. "
-            "Do NOT execute trades, place orders, or modify positions. "
-            "Only provide information and analysis."
-        )
 
     return "\n".join(lines)
