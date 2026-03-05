@@ -8,5 +8,6 @@ from .client import (
     ToolCallEvent,
     ToolCallUpdate,
     PromptDone,
+    Heartbeat,
     ACPEvent,
 )

@@ -63,7 +63,12 @@ class PromptDone:
     stop_reason: str
 
 
-ACPEvent = TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone
+@dataclass
+class Heartbeat:
+    elapsed_seconds: float
+
+
+ACPEvent = TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat
 
 
 # Type alias for the permission callback
@@ -195,9 +200,13 @@ class ACPClient:
                     break
                 await self._peer.handle_line(line.decode(), self._process.stdin)
         except asyncio.CancelledError:
-            pass
+            return  # Intentional shutdown via stop() -- skip sentinel
         except Exception:
             log.exception("ACP read loop error")
+
+        # Subprocess died or stream ended -- unblock any consumer waiting on _event_queue
+        self._peer.cancel_all()
+        self._event_queue.put_nowait(PromptDone(stop_reason="disconnected"))
 
     # --- Prompt ---
 
@@ -262,8 +271,24 @@ class ACPClient:
 
         future.add_done_callback(_on_response)
 
+        loop = asyncio.get_event_loop()
+        start_time = loop.time()
+        max_duration = 1860  # 31 min hard ceiling (slightly above session-level timeout)
+
         while True:
-            event = await self._event_queue.get()
+            try:
+                event = await asyncio.wait_for(self._event_queue.get(), timeout=30)
+            except asyncio.TimeoutError:
+                elapsed = loop.time() - start_time
+                if not self.alive:
+                    yield PromptDone(stop_reason="disconnected")
+                    break
+                if elapsed > max_duration:
+                    log.warning("Prompt hard timeout after %.0fs", elapsed)
+                    yield PromptDone(stop_reason="timeout")
+                    break
+                yield Heartbeat(elapsed_seconds=elapsed)
+                continue
             if event is None:
                 break
             yield event
@@ -292,8 +317,24 @@ class ACPClient:
 
         future.add_done_callback(_on_response)
 
+        loop = asyncio.get_event_loop()
+        start_time = loop.time()
+        max_duration = 660  # 11 min hard ceiling
+
         while True:
-            event = await self._event_queue.get()
+            try:
+                event = await asyncio.wait_for(self._event_queue.get(), timeout=30)
+            except asyncio.TimeoutError:
+                elapsed = loop.time() - start_time
+                if not self.alive:
+                    yield PromptDone(stop_reason="disconnected")
+                    break
+                if elapsed > max_duration:
+                    log.warning("Prompt hard timeout after %.0fs", elapsed)
+                    yield PromptDone(stop_reason="timeout")
+                    break
+                yield Heartbeat(elapsed_seconds=elapsed)
+                continue
             if event is None:
                 break
             yield event
