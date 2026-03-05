@@ -93,5 +93,54 @@ async def send_notification(message: str) -> dict:
     })
 
 
+@mcp.tool()
+async def send_progress(message: str, percentage: int | None = None) -> dict:
+    """Send a progress notification to the Telegram chat with an optional progress bar.
+
+    Args:
+        message: The progress message to display (e.g., "Analyzing 5/12 pairs...").
+        percentage: Optional progress percentage (0-100). Shows a visual progress bar when provided.
+
+    Returns:
+        {"sent": true} on success.
+    """
+    text = message
+    if percentage is not None:
+        pct = max(0, min(100, percentage))
+        filled = pct // 5  # 20-char bar
+        bar = "\u2588" * filled + "\u2591" * (20 - filled)
+        text = f"{message}\n{bar} {pct}%"
+
+    return await _bridge_request({
+        "method": "send_notification",
+        "chat_id": CHAT_ID,
+        "message": text,
+    })
+
+
+@mcp.tool()
+async def get_session_info() -> dict:
+    """Get information about the current Telegram session.
+
+    Returns:
+        A dict with chat_id, widget_port, and connected status.
+    """
+    connected = False
+    if WIDGET_PORT:
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", WIDGET_PORT)
+            writer.close()
+            await writer.wait_closed()
+            connected = True
+        except Exception:
+            pass
+
+    return {
+        "chat_id": CHAT_ID,
+        "widget_port": WIDGET_PORT,
+        "connected": connected,
+    }
+
+
 if __name__ == "__main__":
     mcp.run()

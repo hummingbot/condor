@@ -385,6 +385,11 @@ async def post_init(application: Application) -> None:
 
     await get_widget_bridge().start(application.bot)
 
+    # Start agent session health monitor
+    from handlers.agents.session import start_health_monitor
+
+    await start_health_monitor(application.bot)
+
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
 
@@ -469,8 +474,9 @@ def main() -> None:
     async def post_shutdown(application: Application) -> None:
         """Clean up agent subprocesses, bridges on shutdown."""
         from condor.widget_bridge import get_widget_bridge
-        from handlers.agents.session import destroy_all_sessions
+        from handlers.agents.session import destroy_all_sessions, stop_health_monitor
 
+        await stop_health_monitor()
         await destroy_all_sessions()
         await get_widget_bridge().stop()
 
