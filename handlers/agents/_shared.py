@@ -152,17 +152,18 @@ def build_mcp_servers_for_session(
         ],
     }
 
-    condor_widgets = {
-        "name": "condor-widgets",
+    condor = {
+        "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "condor_widget_mcp.py"],
+        "args": ["run", "python", "condor_mcp.py"],
         "env": [
             {"name": "CONDOR_WIDGET_PORT", "value": str(widget_port)},
             {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
+            {"name": "CONDOR_USER_ID", "value": str(user_id)},
         ],
     }
 
-    return [mcp_hummingbot, condor_widgets]
+    return [mcp_hummingbot, condor]
 
 
 def build_initial_context(user_id: int, chat_id: int) -> str:

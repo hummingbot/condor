@@ -383,7 +383,7 @@ async def post_init(application: Application) -> None:
     # Start widget bridge for agent inline keyboards
     from condor.widget_bridge import get_widget_bridge
 
-    await get_widget_bridge().start(application.bot)
+    await get_widget_bridge().start(application.bot, application)
 
     # Start agent session health monitor
     from handlers.agents.session import start_health_monitor
