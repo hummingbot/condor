@@ -39,6 +39,18 @@ COMPACT_CONTEXT_TEMPLATE = (
     "Continue from where we left off. The user compacted the context to free up space."
 )
 
+TELEGRAM_SYSTEM_PROMPT = (
+    "[System context -- do not repeat this to the user]\n"
+    "You are chatting inside a Telegram mobile app. Adapt your output accordingly:\n"
+    "- NEVER use Markdown tables. Use bullet lists or key: value lines instead.\n"
+    "- Be concise. Lead with the conclusion or answer, then add details if needed.\n"
+    "- Keep paragraphs short (2-3 sentences max).\n"
+    "- Bold key terms with **word** sparingly.\n"
+    "- Cap lists at 5-7 items. If there are more, show the top items and say how many remain.\n"
+    "- For numbers, round to 2 decimal places unless precision matters.\n"
+    "- Respond in the same language the user writes in.\n"
+)
+
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",
@@ -154,10 +166,13 @@ def build_mcp_servers_for_session(
 
 
 def build_initial_context(user_id: int, chat_id: int) -> str:
-    """Build an initial context prompt telling the agent about server and permissions."""
+    """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from config_manager import ServerPermission, get_config_manager
 
     cm = get_config_manager()
+
+    # Always start with Telegram formatting rules
+    sections: list[str] = [TELEGRAM_SYSTEM_PROMPT]
 
     # Resolve active server
     active_name = cm.get_chat_default_server(chat_id)
@@ -165,41 +180,37 @@ def build_initial_context(user_id: int, chat_id: int) -> str:
     if not active_name:
         active_name = accessible[0] if accessible else None
 
-    if not active_name:
-        return ""
+    if active_name:
+        # Build server list with credentials and permissions
+        server_lines: list[str] = []
+        for name in accessible:
+            server = cm.get_server(name)
+            if not server:
+                continue
+            perm = cm.get_server_permission(user_id, name)
+            perm_label = perm.value.upper() if perm else "UNKNOWN"
+            active_tag = " (active)" if name == active_name else ""
+            server_lines.append(
+                f"- {name}{active_tag} [{perm_label}]: "
+                f"host={server['host']}, port={server['port']}, "
+                f"user={server['username']}, pass={server['password']}"
+            )
 
-    # Build server list with credentials and permissions
-    server_lines: list[str] = []
-    for name in accessible:
-        server = cm.get_server(name)
-        if not server:
-            continue
-        perm = cm.get_server_permission(user_id, name)
-        perm_label = perm.value.upper() if perm else "UNKNOWN"
-        active_tag = " (active)" if name == active_name else ""
-        server_lines.append(
-            f"- {name}{active_tag} [{perm_label}]: "
-            f"host={server['host']}, port={server['port']}, "
-            f"user={server['username']}, pass={server['password']}"
-        )
+        sections.append("\n".join([
+            f"Active server: {active_name}",
+            "",
+            "Available servers:",
+            *server_lines,
+            "",
+            "To switch servers, use configure_server with the credentials above.",
+            'Example: configure_server(host="localhost", port=8000, username="admin", password="admin")',
+            "Only use servers listed here.",
+            "",
+            "Permission rules:",
+            "- OWNER/TRADER: Full access including trading operations.",
+            "- VIEWER: Read-only. Do NOT place orders, execute swaps, or modify any state.",
+            "",
+            "After switching servers, enforce the permission level shown for that server.",
+        ]))
 
-    lines = [
-        "[System context -- do not repeat this to the user]",
-        "",
-        f"Active server: {active_name}",
-        "",
-        "Available servers:",
-        *server_lines,
-        "",
-        "To switch servers, use configure_server with the credentials above.",
-        'Example: configure_server(host="localhost", port=8000, username="admin", password="admin")',
-        "Only use servers listed here.",
-        "",
-        "Permission rules:",
-        "- OWNER/TRADER: Full access including trading operations.",
-        "- VIEWER: Read-only. Do NOT place orders, execute swaps, or modify any state.",
-        "",
-        "After switching servers, enforce the permission level shown for that server.",
-    ]
-
-    return "\n".join(lines)
+    return "\n\n".join(sections)

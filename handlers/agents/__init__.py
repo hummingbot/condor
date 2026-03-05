@@ -18,6 +18,7 @@ from ._shared import (
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
+from condor.acp import PromptDone
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
 
@@ -139,9 +140,20 @@ async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Close the agent menu (keep session alive if running)."""
+    """Close the agent menu (keep session alive if running).
+
+    Only clears agent_state if there is no live session -- otherwise
+    messages would stop routing to the agent handler while the subprocess
+    is still running.
+    """
     query = update.callback_query
-    context.user_data.pop("agent_state", None)
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if not session or not session.client.alive:
+        # No live session -- safe to fully deactivate
+        context.user_data.pop("agent_state", None)
+
     await query.message.delete()
 
 
@@ -433,9 +445,11 @@ async def agent_message_handler(
     )
     edit_task = streamer.start_edit_loop()
 
+    last_event = None
     try:
         async for event in session.prompt_stream(text):
             await streamer.process_event(event)
+            last_event = event
     except Exception as e:
         log.exception("Agent prompt error")
         await streamer.finalize()
@@ -449,3 +463,17 @@ async def agent_message_handler(
         return
 
     await streamer.finalize()
+
+    # Detect subprocess death mid-stream
+    if isinstance(last_event, PromptDone) and last_event.stop_reason == "disconnected":
+        await destroy_session(chat_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Agent session disconnected. Send a message to start a new session.",
+        )
+    elif isinstance(last_event, PromptDone) and last_event.stop_reason == "timeout":
+        await destroy_session(chat_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Agent timed out (took too long). Send a message to start a new session.",
+        )
