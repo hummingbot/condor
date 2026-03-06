@@ -28,6 +28,14 @@ log = logging.getLogger(__name__)
 @restricted
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /agent command."""
+    # Block agent mode in group chats
+    chat_type = update.effective_chat.type
+    if chat_type in ("group", "supergroup"):
+        await update.message.reply_text(
+            "Agent mode is only available in private chats."
+        )
+        return
+
     clear_all_input_states(context)
     context.user_data["agent_state"] = "active"
     await show_agent_menu(update, context)
@@ -40,6 +48,12 @@ async def agent_callback_handler(
     """Route agent:* callbacks."""
     query = update.callback_query
     await query.answer()
+
+    # Block agent mode in group chats
+    chat_type = update.effective_chat.type
+    if chat_type in ("group", "supergroup"):
+        await query.message.edit_text("Agent mode is only available in private chats.")
+        return
 
     data = query.data
     action = data.split(":", 1)[1] if ":" in data else data
@@ -388,6 +402,12 @@ async def agent_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle text messages while agent is active."""
+    # Block agent mode in group chats
+    chat_type = update.effective_chat.type
+    if chat_type in ("group", "supergroup"):
+        context.user_data.pop("agent_state", None)
+        return
+
     chat_id = update.effective_chat.id
     text = update.message.text
 
