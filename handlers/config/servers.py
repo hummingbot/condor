@@ -132,7 +132,6 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 perm_badges = {
                     ServerPermission.OWNER: "👑",
                     ServerPermission.TRADER: "💱",
-                    ServerPermission.VIEWER: "👁",
                 }
                 perm_badge = perm_badges.get(perm, "") + " " if perm else ""
 
@@ -256,9 +255,6 @@ async def handle_api_server_action(query, context: ContextTypes.DEFAULT_TYPE) ->
     elif action_data.startswith("perm_trader_"):
         server_name = action_data.replace("perm_trader_", "")
         await set_share_permission(query, context, server_name, "trader")
-    elif action_data.startswith("perm_viewer_"):
-        server_name = action_data.replace("perm_viewer_", "")
-        await set_share_permission(query, context, server_name, "viewer")
     elif action_data.startswith("revoke_"):
         # Format: revoke_{user_id}_{server_name}
         parts = action_data.replace("revoke_", "").split("_", 1)
@@ -356,7 +352,6 @@ async def _show_server_details(
     perm_labels = {
         ServerPermission.OWNER: "👑 Owner",
         ServerPermission.TRADER: "💱 Trader",
-        ServerPermission.VIEWER: "👁 Viewer",
     }
     perm_label = perm_labels.get(perm, "Unknown")
 
@@ -1323,7 +1318,6 @@ async def show_server_sharing(
 
         perm_badges = {
             ServerPermission.TRADER: "💱",
-            ServerPermission.VIEWER: "👁",
         }
 
         for target_user_id, perm in shared_users:
@@ -1522,12 +1516,6 @@ async def select_share_user(
         ],
         [
             InlineKeyboardButton(
-                "👁 Viewer (read-only)",
-                callback_data=f"api_server_perm_viewer_{server_name}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 "❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}"
             )
         ],
@@ -1696,12 +1684,6 @@ async def handle_share_user_id_input(
         ],
         [
             InlineKeyboardButton(
-                "👁 Viewer (read-only)",
-                callback_data=f"api_server_perm_viewer_{server_name}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
                 "❌ Cancel", callback_data=f"api_server_share_cancel_{server_name}"
             )
         ],
@@ -1735,7 +1717,6 @@ async def set_share_permission(
 
     perm_map = {
         "trader": ServerPermission.TRADER,
-        "viewer": ServerPermission.VIEWER,
     }
     perm = perm_map.get(permission)
 
@@ -1762,7 +1743,7 @@ async def set_share_permission(
 
         # Notify target user
         try:
-            perm_label = "Trader" if perm == ServerPermission.TRADER else "Viewer"
+            perm_label = "Trader"
             default_note = (
                 "\n\n_This server has been set as your default\\._"
                 if auto_default

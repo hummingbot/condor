@@ -208,8 +208,8 @@ def build_initial_context(user_id: int, chat_id: int) -> str:
             "Only use servers listed here.",
             "",
             "Permission rules:",
-            "- OWNER/TRADER: Full access including trading operations.",
-            "- VIEWER: Read-only. Do NOT place orders, execute swaps, or modify any state.",
+            "- OWNER: Full access including trading operations and server management.",
+            "- TRADER: Can trade, view balances, and manage own settings.",
             "",
             "After switching servers, enforce the permission level shown for that server.",
         ]))
