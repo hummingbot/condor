@@ -29,13 +29,11 @@ class ServerPermission(str, Enum):
 
     OWNER = "owner"
     TRADER = "trader"
-    VIEWER = "viewer"
 
 
 PERMISSION_HIERARCHY = {
-    ServerPermission.VIEWER: 0,
-    ServerPermission.TRADER: 1,
-    ServerPermission.OWNER: 2,
+    ServerPermission.TRADER: 0,
+    ServerPermission.OWNER: 1,
 }
 
 
@@ -624,7 +622,7 @@ class ConfigManager:
         self,
         user_id: int,
         server_name: str,
-        min_permission: ServerPermission = ServerPermission.VIEWER,
+        min_permission: ServerPermission = ServerPermission.TRADER,
     ) -> bool:
         perm = self.get_server_permission(user_id, server_name)
         if perm is None:
