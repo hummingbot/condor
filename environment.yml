@@ -1,9 +1,0 @@
-name: condor
-channels:
-  - conda-forge
-dependencies:
-  - python=3.12
-  - pandas
-  - pip
-  - pip:
-      - -r requirements.txt

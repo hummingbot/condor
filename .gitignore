@@ -162,3 +162,9 @@ cython_debug/
 condor_bot_data.pickle
 condor_bot_data.pickle.bak
 .DS_Store
+
+# Claude Code local settings (user-specific overrides)
+.claude/settings.local.json
+
+# Node
+node_modules/

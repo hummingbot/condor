@@ -105,6 +105,9 @@ async def executors_callback_handler(
     )
     from .position import handle_connector_select as pos_handle_connector_select
     from .position import handle_deploy as pos_handle_deploy
+    from .position import (
+        handle_entry_price_select as pos_handle_entry_price,
+    )
     from .position import handle_pair_input as pos_handle_pair_input
     from .position import (
         show_step_2_config,
@@ -177,6 +180,10 @@ async def executors_callback_handler(
     elif action == "pos_pair_select" and len(parts) >= 3:
         pair = ":".join(parts[2:])  # Rejoin for HIP3 pairs with colons
         await pos_handle_pair_input(update, context, pair)
+
+    elif action == "pos_entry" and len(parts) >= 3:
+        option = parts[2]
+        await pos_handle_entry_price(update, context, option)
 
     elif action == "pos_step2":
         await show_step_2_config(update, context)

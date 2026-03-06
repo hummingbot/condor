@@ -13,14 +13,14 @@ A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
 
 ## Quick Start
 
-**Prerequisites:** Python 3.12+, Conda, Hummingbot Backend API running, Telegram Bot Token
+**Prerequisites:** Python 3.12+, [uv](https://docs.astral.sh/uv/), Hummingbot Backend API running, Telegram Bot Token
 
 ```bash
 git clone https://github.com/hummingbot/condor.git
 cd condor
 
 # Option 1: Local Python
-make install     # Interactive setup + conda environment
+make install     # Interactive setup + uv deps + AI CLI tools
 make run         # Start the bot
 
 # Option 2: Docker

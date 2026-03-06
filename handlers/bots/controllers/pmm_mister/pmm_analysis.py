@@ -179,8 +179,7 @@ def suggest_pmm_params(
         "buy_spreads": f"{round(first_spread, 4)},{round(second_spread, 4)}",
         "sell_spreads": f"{round(first_spread, 4)},{round(second_spread, 4)}",
         "take_profit": round(suggested_tp, 6),
-        "min_buy_price_distance_pct": round(min_price_distance, 4),
-        "min_sell_price_distance_pct": round(min_price_distance, 4),
+        "price_distance_tolerance": str(round(min_price_distance, 4)),
         "estimated_orders": estimated_orders,
         "reasoning": " | ".join(reasoning),
     }
