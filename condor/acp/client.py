@@ -19,7 +19,7 @@ from .jsonrpc import JSONRPCPeer
 log = logging.getLogger(__name__)
 
 ACP_COMMANDS: dict[str, str] = {
-    "claude-code": "claude-code-acp",
+    "claude-code": "claude-agent-acp",
     "gemini": "gemini --experimental-acp",
 }
 
