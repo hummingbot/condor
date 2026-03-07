@@ -136,12 +136,13 @@ def build_mcp_servers_for_session(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
+    mcp_dir = str(Path.home() / "mcp")
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": [
             "--directory",
-            "/Users/dman/Documents/mcp",
+            mcp_dir,
             "run",
             "main.py",
         ],
