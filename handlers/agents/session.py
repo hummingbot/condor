@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from telegram import Bot
 
-from condor.acp import ACP_COMMANDS, ACP_PROTOCOL, ACPClient, PermissionCallback, PromptDone, UsageUpdate
+from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone, UsageUpdate
 from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -107,7 +107,6 @@ async def get_or_create_session(
 
     # Create new session
     command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
-    protocol = ACP_PROTOCOL.get(agent_key, "claude")
 
     from condor.widget_bridge import get_widget_bridge
 
@@ -126,7 +125,6 @@ async def get_or_create_session(
     client = ACPClient(
         command=command,
         working_dir=get_project_dir(),
-        protocol=protocol,
         mcp_servers=mcp_servers,
         permission_callback=permission_callback,
         extra_env=extra_env,

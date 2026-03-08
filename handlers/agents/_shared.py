@@ -7,8 +7,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
-    "claude-code": {"label": "Claude Code", "protocol": "claude"},
-    "gemini": {"label": "Gemini CLI", "protocol": "gemini"},
+    "claude-code": {"label": "Claude Code"},
+    "gemini": {"label": "Gemini CLI"},
 }
 
 DEFAULT_AGENT = "claude-code"
