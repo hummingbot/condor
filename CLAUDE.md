@@ -37,6 +37,7 @@ Interact with the Telegram UI and Condor internals:
 - `manage_routines(action, ...)` — list/describe/run/schedule Python scripts
 - `manage_servers(action, ...)` — list/switch Hummingbot API servers
 - `get_user_context()` — get active server, user permissions
+- `get_session_usage()` — get token usage, context window size, percent used, cost
 
 ---
 

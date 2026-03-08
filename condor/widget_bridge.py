@@ -121,6 +121,10 @@ class WidgetBridge:
                     chat_id=request["chat_id"],
                     user_id=request.get("user_id"),
                 )
+            elif method == "get_session_usage":
+                result = self._handle_get_session_usage(
+                    chat_id=request["chat_id"],
+                )
             else:
                 result = {"error": f"Unknown method: {method}"}
 
@@ -568,6 +572,23 @@ class WidgetBridge:
             "is_admin": is_admin,
             "active_routine_count": active_routine_count,
             "preferences": prefs,
+        }
+
+    # --- Session Usage Handler ---
+
+    def _handle_get_session_usage(self, chat_id: int) -> dict:
+        from handlers.agents.session import get_session
+
+        session = get_session(chat_id)
+        if not session:
+            return {"error": "No active session"}
+
+        pct = round(session.tokens_used / session.context_window * 100) if session.context_window > 0 and session.tokens_used > 0 else 0
+        return {
+            "tokens_used": session.tokens_used,
+            "context_window": session.context_window,
+            "percent_used": pct,
+            "cost_usd": session.cost_usd,
         }
 
     # --- Resolution (called from Telegram callback handler) ---

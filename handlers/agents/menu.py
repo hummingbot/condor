@@ -66,7 +66,15 @@ async def show_agent_menu(
             "label", session.agent_key
         )
         status = "busy" if session.is_busy else "ready"
-        text = f"Agent: {agent_label}\nStatus: {status}\n\nSend a message to chat, or use the buttons below."
+        # Context usage
+        if session.context_window > 0 and session.tokens_used > 0:
+            pct = round(session.tokens_used / session.context_window * 100)
+            used_k = round(session.tokens_used / 1000)
+            total_k = round(session.context_window / 1000)
+            usage_line = f"Context: {used_k}k / {total_k}k ({pct}%)"
+        else:
+            usage_line = "Context: no usage data yet"
+        text = f"Agent: {agent_label}\nStatus: {status}\n{usage_line}\n\nSend a message to chat, or use the buttons below."
         keyboard = _active_session_keyboard()
     else:
         text = "Select an AI agent to start a trading chat session.\n\nThe agent has access to all Hummingbot trading tools."

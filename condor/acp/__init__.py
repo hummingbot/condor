@@ -7,6 +7,7 @@ from .client import (
     ThoughtChunk,
     ToolCallEvent,
     ToolCallUpdate,
+    UsageUpdate,
     PromptDone,
     Heartbeat,
     ACPEvent,

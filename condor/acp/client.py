@@ -64,11 +64,18 @@ class PromptDone:
 
 
 @dataclass
+class UsageUpdate:
+    used: int  # tokens used in last turn
+    size: int  # context window size
+    cost_usd: float  # cumulative cost in USD
+
+
+@dataclass
 class Heartbeat:
     elapsed_seconds: float
 
 
-ACPEvent = TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat
+ACPEvent = TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat | UsageUpdate
 
 
 # Type alias for the permission callback
@@ -267,6 +274,19 @@ class ACPClient:
                     if isinstance(result, dict)
                     else "end_turn"
                 )
+                # Extract accumulated token usage from prompt response
+                if isinstance(result, dict) and "usage" in result:
+                    usage = result["usage"]
+                    total = usage.get("totalTokens", 0)
+                    size = usage.get("contextWindow", 200000)
+                    cost = result.get("cost", {}) or {}
+                    self._event_queue.put_nowait(
+                        UsageUpdate(
+                            used=total,
+                            size=size,
+                            cost_usd=cost.get("amount", 0.0),
+                        )
+                    )
                 self._event_queue.put_nowait(PromptDone(stop_reason=reason))
 
         future.add_done_callback(_on_response)
@@ -372,6 +392,15 @@ class ACPClient:
                     tool_call_id=update.get("toolCallId", ""),
                     status=update.get("status"),
                     title=update.get("title"),
+                )
+            )
+        elif kind == "usage_update":
+            cost = update.get("cost") or {}
+            self._event_queue.put_nowait(
+                UsageUpdate(
+                    used=update.get("used", 0),
+                    size=update.get("size", 200000),
+                    cost_usd=cost.get("amount", 0.0),
                 )
             )
 
