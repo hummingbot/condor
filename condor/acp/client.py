@@ -298,6 +298,8 @@ class ACPClient:
                 )
             )
         elif kind == "usage_update":
+            # NOTE: UsageUpdate may also fire from _on_response (prompt result).
+            # AgentSession keeps the last value, so duplicates are harmless.
             cost = update.get("cost") or {}
             self._event_queue.put_nowait(
                 UsageUpdate(

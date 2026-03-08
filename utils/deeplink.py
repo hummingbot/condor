@@ -1,7 +1,10 @@
 """Deep link utilities for dashboard server registration.
 
 Uses compact pipe-delimited format to stay under Telegram's 64-char limit.
-Format: name|host|port|username|password (base64 encoded)
+Format: name|host|port|username|password (base64url encoded)
+
+NOTE: base64 is encoding, not encryption — treat these links as sensitive.
+The encode side lives in the Hummingbot Dashboard (generates the deep link).
 """
 
 import base64
