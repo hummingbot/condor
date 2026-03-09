@@ -260,7 +260,10 @@ async def get_session_usage() -> dict:
         percent_used: Percentage of context consumed.
         cost_usd: Cumulative session cost in USD.
     """
-    return await _call_bridge("get_session_usage")
+    return await _bridge_request({
+        "method": "get_session_usage",
+        "chat_id": CHAT_ID,
+    })
 
 
 @mcp.tool()
