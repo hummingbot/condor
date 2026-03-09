@@ -251,6 +251,19 @@ async def manage_servers(
 
 
 @mcp.tool()
+async def get_session_usage() -> dict:
+    """Get current session token usage and context window stats.
+
+    Returns:
+        tokens_used: Number of tokens used so far.
+        context_window: Total context window size.
+        percent_used: Percentage of context consumed.
+        cost_usd: Cumulative session cost in USD.
+    """
+    return await _call_bridge("get_session_usage")
+
+
+@mcp.tool()
 async def get_user_context() -> dict:
     """Get the current user's context within Condor.
 

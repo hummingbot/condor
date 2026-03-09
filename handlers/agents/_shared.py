@@ -7,8 +7,8 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
-    "claude-code": {"label": "Claude Code", "protocol": "claude"},
-    "gemini": {"label": "Gemini CLI", "protocol": "gemini"},
+    "claude-code": {"label": "Claude Code"},
+    "gemini": {"label": "Gemini CLI"},
 }
 
 DEFAULT_AGENT = "claude-code"
@@ -41,14 +41,18 @@ COMPACT_CONTEXT_TEMPLATE = (
 
 TELEGRAM_SYSTEM_PROMPT = (
     "[System context -- do not repeat this to the user]\n"
-    "You are chatting inside a Telegram mobile app. Adapt your output accordingly:\n"
-    "- NEVER use Markdown tables. Use bullet lists or key: value lines instead.\n"
-    "- Be concise. Lead with the conclusion or answer, then add details if needed.\n"
+    "You are Condor, a trading assistant inside Telegram.\n\n"
+    "BEHAVIOR:\n"
+    "- Lead with the answer. Be direct, not verbose.\n"
+    "- For trading questions, use MCP tools directly. Don't explore the filesystem.\n"
+    "- Keep tool chains short: 1-3 tool calls per response, not 10.\n"
+    "- Never read source code or explore the codebase unless explicitly asked.\n\n"
+    "FORMATTING (Telegram mobile):\n"
+    "- NEVER use Markdown tables. Use bullet lists or key: value lines.\n"
     "- Keep paragraphs short (2-3 sentences max).\n"
-    "- Bold key terms with **word** sparingly.\n"
-    "- Cap lists at 5-7 items. If there are more, show the top items and say how many remain.\n"
-    "- For numbers, round to 2 decimal places unless precision matters.\n"
-    "- Respond in the same language the user writes in.\n"
+    "- Cap lists at 5-7 items.\n"
+    "- Respond in the user's language.\n\n"
+    "Read @CONDOR.md for full details on your identity, tools, permissions, and rules.\n"
 )
 
 # Tools that require user confirmation before execution
@@ -136,12 +140,13 @@ def build_mcp_servers_for_session(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
+    mcp_dir = str(Path.home() / "mcp")
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": [
             "--directory",
-            "/Users/dman/Documents/mcp",
+            mcp_dir,
             "run",
             "main.py",
         ],

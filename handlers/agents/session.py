@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from telegram import Bot
 
-from condor.acp import ACP_COMMANDS, ACP_PROTOCOL, ACPClient, PermissionCallback, PromptDone
+from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone, UsageUpdate
 from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -37,6 +37,9 @@ class AgentSession:
     agent_key: str  # "claude-code", "gemini", "codex"
     client: ACPClient
     is_busy: bool = False
+    tokens_used: int = 0
+    context_window: int = 200000
+    cost_usd: float = 0.0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def prompt_stream(self, text: str):
@@ -61,6 +64,10 @@ class AgentSession:
             loop = asyncio.get_event_loop()
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
             async for event in self.client.prompt_stream(text):
+                if isinstance(event, UsageUpdate):
+                    self.tokens_used = event.used
+                    self.context_window = event.size
+                    self.cost_usd = event.cost_usd
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -100,7 +107,6 @@ async def get_or_create_session(
 
     # Create new session
     command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
-    protocol = ACP_PROTOCOL.get(agent_key, "claude")
 
     from condor.widget_bridge import get_widget_bridge
 
@@ -119,7 +125,6 @@ async def get_or_create_session(
     client = ACPClient(
         command=command,
         working_dir=get_project_dir(),
-        protocol=protocol,
         mcp_servers=mcp_servers,
         permission_callback=permission_callback,
         extra_env=extra_env,
