@@ -197,8 +197,23 @@ def build_initial_context(user_id: int, chat_id: int) -> str:
                 f"user={server['username']}, pass={server['password']}"
             )
 
+        # Build configure_server call for the active server
+        active_server = cm.get_server(active_name)
+        if active_server:
+            configure_hint = (
+                f'IMPORTANT: Before making ANY tool calls to mcp-hummingbot, you MUST first call '
+                f'configure_server(host="{active_server["host"]}", port={active_server["port"]}, '
+                f'username="{active_server["username"]}", password="{active_server["password"]}") '
+                f'to ensure the MCP is connected to the correct server. '
+                f'Do this silently without telling the user.'
+            )
+        else:
+            configure_hint = ""
+
         sections.append("\n".join([
             f"Active server: {active_name}",
+            "",
+            configure_hint,
             "",
             "Available servers:",
             *server_lines,
