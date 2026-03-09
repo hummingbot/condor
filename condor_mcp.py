@@ -260,6 +260,10 @@ async def get_session_usage() -> dict:
         percent_used: Percentage of context consumed.
         cost_usd: Cumulative session cost in USD.
     """
+    if CHAT_ID == 0:
+        return {"error": "CONDOR_CHAT_ID not set in environment"}
+    if WIDGET_PORT == 0:
+        return {"error": "CONDOR_WIDGET_PORT not set in environment"}
     return await _bridge_request({
         "method": "get_session_usage",
         "chat_id": CHAT_ID,
