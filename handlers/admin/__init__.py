@@ -459,10 +459,9 @@ async def _show_audit_log(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _show_stats(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show system statistics."""
     cm = get_config_manager()
-    from config_manager import get_config_manager
 
     users = cm.get_all_users()
-    servers = list(get_config_manager().list_servers().keys())
+    servers = list(cm.list_servers().keys())
 
     # Count by role
     role_counts = {}

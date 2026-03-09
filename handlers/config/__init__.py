@@ -285,6 +285,13 @@ def get_modify_value_handler():
             await handle_share_user_id_input(update, context)
             return
 
+        # 9. Check agent chat state
+        if context.user_data.get("agent_state") == "active":
+            from handlers.agents import agent_message_handler
+
+            await agent_message_handler(update, context)
+            return
+
         # No active state - ignore the message
         logger.debug(
             f"No active input state for message: {update.message.text[:50] if update.message else 'N/A'}..."

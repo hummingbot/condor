@@ -9,13 +9,15 @@ Contains:
 """
 
 import logging
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+from condor.cache import DEFAULT_CACHE_TTL
+from condor.cache import get_cached as _get_cached
+from condor.cache import set_cached as _set_cached
+from condor.cache import clear_cache as _clear_cache
+from condor.cache import cached_call as _cached_call
 
-# Default cache TTL in seconds
-DEFAULT_CACHE_TTL = 60
+logger = logging.getLogger(__name__)
 
 # Side constants (matching grid_strike)
 SIDE_LONG = 1
@@ -30,6 +32,11 @@ def normalize_side(side_val) -> int:
     if isinstance(side_val, str):
         return SIDE_SHORT if side_val.upper() in ("SELL", "SHORT", "S") else SIDE_LONG
     return side_val
+
+# Order type constants (matching grid_strike controller)
+ORDER_TYPE_MARKET = 1
+ORDER_TYPE_LIMIT = 2
+ORDER_TYPE_LIMIT_MAKER = 3
 
 # Grid executor defaults
 GRID_EXECUTOR_DEFAULTS = {
@@ -49,6 +56,8 @@ GRID_EXECUTOR_DEFAULTS = {
     "order_frequency": 1,
     "take_profit": 0.0002,
     "activation_bounds": 0.05,
+    "open_order_type": ORDER_TYPE_LIMIT,
+    "take_profit_order_type": ORDER_TYPE_LIMIT,
 }
 
 # Position executor defaults
@@ -140,6 +149,9 @@ def set_executor_config(context, config: Dict[str, Any]) -> None:
 def init_new_executor_config(context, executor_type: str = "grid") -> Dict[str, Any]:
     """Initialize a new executor config with defaults
 
+    Merges hardcoded defaults with user's last-used config params
+    (if any), so returning users start from their previous settings.
+
     Args:
         context: Telegram context object
         executor_type: Type of executor (default: grid)
@@ -153,6 +165,17 @@ def init_new_executor_config(context, executor_type: str = "grid") -> Dict[str, 
         config = POSITION_EXECUTOR_DEFAULTS.copy()
     else:
         config = GRID_EXECUTOR_DEFAULTS.copy()
+
+    # Overlay last-used config params from user preferences
+    from handlers.config.user_preferences import get_executor_last_config
+
+    last_config = get_executor_last_config(context.user_data, executor_type)
+    if last_config:
+        # Only merge keys that exist in defaults (skip connector/pair — those are wizard-selected)
+        skip_keys = {"type", "connector_name", "trading_pair", "start_price", "end_price", "limit_price"}
+        for key, value in last_config.items():
+            if key in config and key not in skip_keys:
+                config[key] = value
 
     context.user_data["executor_config_params"] = config
     return config
@@ -473,60 +496,33 @@ def format_executor_summary(executor: Dict[str, Any]) -> str:
 
 
 # ============================================
-# CACHE UTILITIES
+# CACHE UTILITIES (delegates to condor.cache)
 # ============================================
 
+_NS = "_executors_cache"
 
-def get_cached(
-    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
-) -> Optional[Any]:
-    """Get a cached value if still valid."""
-    cache = user_data.get("_executors_cache", {})
-    entry = cache.get(key)
 
-    if entry is None:
-        return None
-
-    value, timestamp = entry
-    if time.time() - timestamp > ttl:
-        return None
-
-    return value
+def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+    return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
 def set_cached(user_data: dict, key: str, value: Any) -> None:
-    """Store a value in the conversation cache."""
-    if "_executors_cache" not in user_data:
-        user_data["_executors_cache"] = {}
-
-    user_data["_executors_cache"][key] = (value, time.time())
+    _set_cached(user_data, key, value, namespace=_NS)
 
 
 def invalidate_cache(user_data: dict, *keys: str) -> None:
     """Invalidate specific cache keys or all if 'all' is passed."""
-    cache = user_data.get("_executors_cache", {})
-
     if "all" in keys:
-        user_data["_executors_cache"] = {}
+        _clear_cache(user_data, namespace=_NS)
         return
-
     for key in keys:
-        cache.pop(key, None)
+        _clear_cache(user_data, key, namespace=_NS)
 
 
 async def cached_call(
     user_data: dict, key: str, fetch_func, ttl: int = DEFAULT_CACHE_TTL, *args, **kwargs
 ) -> Any:
-    """Execute an async function with caching."""
-    cached = get_cached(user_data, key, ttl)
-    if cached is not None:
-        logger.debug(f"Executors cache hit for '{key}'")
-        return cached
-
-    logger.debug(f"Executors cache miss for '{key}', fetching...")
-    result = await fetch_func(*args, **kwargs)
-    set_cached(user_data, key, result)
-    return result
+    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
 
 
 # ============================================

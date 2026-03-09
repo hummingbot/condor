@@ -128,7 +128,7 @@ def admin_required(func):
     return wrapped
 
 
-def server_access_required(min_permission: ServerPermission = ServerPermission.VIEWER):
+def server_access_required(min_permission: ServerPermission = ServerPermission.TRADER):
     """
     Decorator factory that checks server permission.
     Server name is determined from context.user_data or per-chat default.

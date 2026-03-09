@@ -13,6 +13,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from handlers.bots._shared import (
@@ -211,15 +212,33 @@ def _build_step_2_text(
     return "\n".join(lines)
 
 
-def _build_step_2_keyboard() -> InlineKeyboardMarkup:
+def _build_step_2_keyboard(current_price: Optional[float] = None) -> InlineKeyboardMarkup:
     """Build the keyboard for step 2."""
-    keyboard = [
-        [InlineKeyboardButton("🚀 Deploy", callback_data="executors:pos_deploy")],
-        [
-            InlineKeyboardButton("⬅️ Back", callback_data="executors:create_position"),
-            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-        ],
-    ]
+    keyboard = []
+
+    # Entry price quick-pick buttons
+    if current_price and current_price > 0:
+        keyboard.append([
+            InlineKeyboardButton("📊 Market", callback_data="executors:pos_entry:market"),
+            InlineKeyboardButton(
+                f"📊 Current ({current_price:,.6g})",
+                callback_data="executors:pos_entry:current",
+            ),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("-2%", callback_data="executors:pos_entry:-2"),
+            InlineKeyboardButton("-1%", callback_data="executors:pos_entry:-1"),
+            InlineKeyboardButton("+1%", callback_data="executors:pos_entry:+1"),
+            InlineKeyboardButton("+2%", callback_data="executors:pos_entry:+2"),
+        ])
+
+    keyboard.append(
+        [InlineKeyboardButton("🚀 Deploy", callback_data="executors:pos_deploy")]
+    )
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="executors:create_position"),
+        InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+    ])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -349,7 +368,9 @@ async def handle_connector_select(
         "_Enter pair \\(e\\.g\\. SOL\\-USDT\\):_",
     ]
 
-    executor_pairs = context.user_data.get("executor_deployed_pairs", [])
+    from handlers.config.user_preferences import get_executor_deployed_pairs
+
+    executor_pairs = get_executor_deployed_pairs(context.user_data)
     keyboard = []
 
     if executor_pairs:
@@ -551,7 +572,7 @@ async def show_step_2_config(
         message_text = _build_step_2_text(
             config, current_price, balances, trading_rules
         )
-        reply_markup = _build_step_2_keyboard()
+        reply_markup = _build_step_2_keyboard(current_price)
 
         # Text-only: use edit_message_text
         if query:
@@ -641,7 +662,7 @@ async def _refresh_step_2(
     trading_rules = wizard_data.get("trading_rules")
 
     message_text = _build_step_2_text(config, current_price, balances, trading_rules)
-    reply_markup = _build_step_2_keyboard()
+    reply_markup = _build_step_2_keyboard(current_price)
 
     try:
         await context.bot.edit_message_text(
@@ -651,6 +672,9 @@ async def _refresh_step_2(
             parse_mode="MarkdownV2",
             reply_markup=reply_markup,
         )
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.error(f"Error refreshing position step 2: {e}", exc_info=True)
     except Exception as e:
         logger.error(f"Error refreshing position step 2: {e}", exc_info=True)
 
@@ -748,6 +772,38 @@ async def handle_config_input(
 
     set_executor_config(context, config)
 
+    await _refresh_step_2(context, chat_id, msg_id)
+
+
+# ============================================
+# ENTRY PRICE QUICK-PICK
+# ============================================
+
+
+async def handle_entry_price_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, option: str
+) -> None:
+    """Handle entry price quick-pick button."""
+    config = get_executor_config(context)
+    wizard_data = context.user_data.get("executor_wizard_data", {})
+    current_price = wizard_data.get("current_price")
+
+    if option == "market":
+        config["entry_price"] = 0.0
+    elif option == "current" and current_price:
+        config["entry_price"] = current_price
+    elif current_price:
+        try:
+            pct = float(option) / 100.0
+            config["entry_price"] = round(current_price * (1 + pct), 8)
+        except ValueError:
+            return
+
+    set_executor_config(context, config)
+
+    # Refresh step 2
+    chat_id = update.effective_chat.id
+    msg_id = update.callback_query.message.message_id
     await _refresh_step_2(context, chat_id, msg_id)
 
 
@@ -889,14 +945,18 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if is_success:
             executor_id = result.get("executor_id", result.get("id", "unknown"))
 
-            # Store pair in deployed pairs list
+            # Save deployed pair and last-used config to user preferences
+            from handlers.config.user_preferences import (
+                add_executor_deployed_pair,
+                set_executor_last_config,
+            )
+
             deployed_pair = config.get("trading_pair", "")
             if deployed_pair:
-                deployed = context.user_data.get("executor_deployed_pairs", [])
-                if deployed_pair in deployed:
-                    deployed.remove(deployed_pair)
-                deployed.insert(0, deployed_pair)
-                context.user_data["executor_deployed_pairs"] = deployed[:8]
+                add_executor_deployed_pair(context.user_data, deployed_pair)
+
+            # Save config params so next position wizard starts with these values
+            set_executor_last_config(context.user_data, "position", config)
 
             keyboard = [
                 [

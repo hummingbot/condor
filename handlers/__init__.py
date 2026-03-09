@@ -56,6 +56,12 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("place_order_params", None)
     context.user_data.pop("current_positions", None)
     context.user_data.pop("cex_previous_state", None)
+    context.user_data.pop("trade_params", None)
+    context.user_data.pop("current_orders", None)
+    context.user_data.pop("trade_menu_message_id", None)
+    context.user_data.pop("trade_menu_chat_id", None)
+    context.user_data.pop("current_market_price", None)
+    context.user_data.pop("swap_params", None)
 
     # DEX trading states
     context.user_data.pop("dex_state", None)
@@ -67,6 +73,9 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("position_list_data", None)
     context.user_data.pop("add_position_menu_msg_id", None)
     context.user_data.pop("add_position_menu_chat_id", None)
+    context.user_data.pop("quote_swap_params", None)
+    context.user_data.pop("execute_swap_params", None)
+    context.user_data.pop("dex_previous_state", None)
 
     # Config - server modification states
     context.user_data.pop("modifying_server", None)
@@ -99,6 +108,11 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Gateway - network states
     context.user_data.pop("awaiting_network_input", None)
+    context.user_data.pop("network_list", None)
+    context.user_data.pop("configuring_network", None)
+    context.user_data.pop("network_config_data", None)
+    context.user_data.pop("network_message_id", None)
+    context.user_data.pop("network_chat_id", None)
 
     # Gateway - token states
     context.user_data.pop("awaiting_token_input", None)
@@ -112,6 +126,10 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("editing_controller_field", None)
     context.user_data.pop("deploy_params", None)
     context.user_data.pop("editing_deploy_field", None)
+    context.user_data.pop("selected_configs", None)
+    context.user_data.pop("configs_controller_type", None)
+    context.user_data.pop("configs_type_filtered", None)
+    context.user_data.pop("configs_page", None)
 
     # Bots - archived states
     context.user_data.pop("archived_databases", None)
@@ -119,6 +137,11 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("archived_page", None)
     context.user_data.pop("archived_summaries", None)
     context.user_data.pop("archived_total_count", None)
+
+    # Agent states
+    context.user_data.pop("agent_state", None)
+    context.user_data.pop("agent_selected", None)
+    context.user_data.pop("agent_compact_custom", None)
 
     # Routines states
     context.user_data.pop("routines_state", None)
@@ -142,3 +165,30 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("executor_wizard_data", None)
     context.user_data.pop("executor_list_page", None)
     context.user_data.pop("executor_chart_interval", None)
+    context.user_data.pop("executor_wizard_type", None)
+
+    # Clear DataManager context (resets active TTLs to idle)
+    user_id = context.user_data.get("_user_id")
+    if user_id:
+        try:
+            from condor.data_manager import dm_clear_context
+
+            dm_clear_context(user_id)
+        except Exception:
+            pass
+
+    # Portfolio snapshot states (large transient data)
+    context.user_data.pop("portfolio_text_message_id", None)
+    context.user_data.pop("portfolio_photo_message_id", None)
+    context.user_data.pop("portfolio_chat_id", None)
+    context.user_data.pop("portfolio_graph_interval", None)
+    context.user_data.pop("portfolio_server_name", None)
+    context.user_data.pop("portfolio_server_status", None)
+    context.user_data.pop("portfolio_current_value", None)
+    context.user_data.pop("portfolio_balances", None)
+    context.user_data.pop("portfolio_accounts_distribution", None)
+    context.user_data.pop("portfolio_changes_24h", None)
+    context.user_data.pop("portfolio_pnl_indicators", None)
+    context.user_data.pop("portfolio_connector_keys", None)
+    context.user_data.pop("portfolio_view_mode", None)
+    context.user_data.pop("_portfolio_refresh", None)

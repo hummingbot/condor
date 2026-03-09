@@ -4,67 +4,22 @@ Portfolio command handler using hummingbot_api_client
 
 import logging
 import time
-from datetime import timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
 from handlers.config import clear_config_state
-from handlers.config.user_preferences import (
-    PORTFOLIO_DAYS_OPTIONS,
-    get_all_enabled_networks,
-    get_portfolio_prefs,
-    set_portfolio_days,
-)
+from handlers.config.user_preferences import get_all_enabled_networks
 from utils.auth import hummingbot_api_required, restricted
-from utils.portfolio_graphs import generate_portfolio_dashboard
 from utils.telegram_formatters import (
     escape_markdown_v2,
     format_connector_detail,
     format_error_message,
     format_portfolio_overview,
 )
-from utils.trading_data import get_portfolio_overview
 
 logger = logging.getLogger(__name__)
 
-
-def _calculate_start_time(days: int) -> int:
-    """Calculate start_time as now - days in Unix timestamp"""
-    return int(time.time()) - (days * 24 * 60 * 60)
-
-
-def _get_optimal_interval(days: int, max_points: int = 100) -> str:
-    """
-    Calculate the optimal interval based on days and max data points.
-
-    With limit=100, we need to choose an interval that covers the full period.
-    - 1 day = 96 points at 15m, 24 points at 1h
-    - 3 days = 288 points at 15m (too many!), 72 points at 1h
-    - 7 days = 168 points at 1h (too many!), 56 points at 3h
-    - 30 days = 720 points at 1h, 240 at 3h, 120 at 6h, 30 at 1d
-
-    Returns the smallest interval that fits within max_points.
-    """
-    total_hours = days * 24
-
-    # Available intervals in hours
-    intervals = [
-        (0.25, "15m"),  # 15 minutes
-        (1, "1h"),  # 1 hour
-        (3, "3h"),  # 3 hours
-        (6, "6h"),  # 6 hours
-        (12, "12h"),  # 12 hours
-        (24, "1d"),  # 1 day
-    ]
-
-    for interval_hours, interval_str in intervals:
-        points_needed = total_hours / interval_hours
-        if points_needed <= max_points:
-            return interval_str
-
-    # Fallback to 1d if nothing else works
-    return "1d"
 
 
 def _is_gateway_network(connector_name: str) -> bool:
@@ -137,498 +92,6 @@ def _filter_balances_by_networks(balances: dict, enabled_networks: set) -> dict:
     return filtered
 
 
-def _parse_snapshot_tokens(state: dict) -> dict:
-    """
-    Parse a state snapshot and return token holdings aggregated.
-
-    Returns: {token: {"units": float, "value": float}}
-    """
-    tokens = {}
-    for account_name, connectors in state.items():
-        if not isinstance(connectors, dict):
-            continue
-        for connector_name, holdings in connectors.items():
-            if not isinstance(holdings, list):
-                continue
-            for holding in holdings:
-                if isinstance(holding, dict):
-                    token = holding.get("token", "")
-                    if not token:
-                        continue
-
-                    units = holding.get("units", 0)
-                    value = holding.get("value", 0)
-
-                    # Convert to float
-                    if isinstance(units, str):
-                        try:
-                            units = float(units)
-                        except (ValueError, TypeError):
-                            units = 0
-                    if isinstance(value, str):
-                        try:
-                            value = float(value)
-                        except (ValueError, TypeError):
-                            value = 0
-
-                    if token not in tokens:
-                        tokens[token] = {"units": 0.0, "value": 0.0}
-                    tokens[token]["units"] += float(units)
-                    tokens[token]["value"] += float(value)
-
-    return tokens
-
-
-def _detect_deposit_withdrawals(
-    parsed_points: list, threshold_pct: float = 10.0
-) -> list:
-    """
-    Detect deposits/withdrawals by analyzing changes in token units between snapshots.
-
-    A deposit/withdrawal is detected when:
-    - Token units change significantly (>threshold_pct) between consecutive snapshots
-    - The change is too large to be explained by normal trading
-
-    Returns: List of detected movements with structure:
-        {
-            "timestamp": datetime,
-            "token": str,
-            "type": "deposit" | "withdrawal",
-            "units_change": float,
-            "value_estimate": float (value at time of movement)
-        }
-    """
-    if len(parsed_points) < 2:
-        return []
-
-    movements = []
-
-    for i in range(1, len(parsed_points)):
-        prev = parsed_points[i - 1]
-        curr = parsed_points[i]
-
-        prev_tokens = prev["tokens"]
-        curr_tokens = curr["tokens"]
-
-        # Check all tokens in both snapshots
-        all_tokens = set(prev_tokens.keys()) | set(curr_tokens.keys())
-
-        for token in all_tokens:
-            prev_units = prev_tokens.get(token, {}).get("units", 0)
-            curr_units = curr_tokens.get(token, {}).get("units", 0)
-            curr_value = curr_tokens.get(token, {}).get("value", 0)
-            prev_value = prev_tokens.get(token, {}).get("value", 0)
-
-            # Skip tokens with very small values (< $1)
-            if max(curr_value, prev_value) < 1:
-                continue
-
-            units_change = curr_units - prev_units
-
-            # Calculate percentage change in units
-            if prev_units > 0:
-                pct_change = abs(units_change / prev_units) * 100
-            elif curr_units > 0:
-                # New token appeared - likely deposit
-                pct_change = 100
-            else:
-                continue
-
-            # Detect significant unit changes (threshold%)
-            if pct_change > threshold_pct and abs(units_change) > 0.0001:
-                # Estimate value of the movement
-                if curr_units > 0:
-                    price = curr_value / curr_units
-                elif prev_units > 0:
-                    price = prev_value / prev_units
-                else:
-                    price = 0
-
-                value_estimate = abs(units_change) * price
-
-                # Only track movements worth more than $10
-                if value_estimate > 10:
-                    movements.append(
-                        {
-                            "timestamp": curr["timestamp"],
-                            "token": token,
-                            "type": "deposit" if units_change > 0 else "withdrawal",
-                            "units_change": units_change,
-                            "value_estimate": value_estimate,
-                        }
-                    )
-
-    return movements
-
-
-def _calculate_pnl_indicators(history_data: dict, current_value: float) -> dict:
-    """
-    Calculate PNL indicators from historical data, adjusted for deposits/withdrawals.
-
-    Returns dict with keys:
-        - pnl_24h, pnl_7d, pnl_30d: percentage change adjusted for deposits/withdrawals
-        - detected_movements: list of suspected deposits/withdrawals
-    """
-    from datetime import datetime, timedelta
-
-    result = {
-        "pnl_24h": None,
-        "pnl_7d": None,
-        "pnl_30d": None,
-        "detected_movements": [],
-    }
-
-    if not history_data or not current_value:
-        return result
-
-    data_points = history_data.get("data", [])
-    if not data_points:
-        return result
-
-    # Parse all data points with detailed token info
-    parsed_points = []
-    for point in data_points:
-        timestamp_str = point.get("timestamp", "")
-        state = point.get("state", {})
-
-        try:
-            ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            continue
-
-        tokens = _parse_snapshot_tokens(state)
-        total_value = sum(t["value"] for t in tokens.values())
-
-        parsed_points.append({"timestamp": ts, "value": total_value, "tokens": tokens})
-
-    if not parsed_points:
-        return result
-
-    # Sort by timestamp (oldest first)
-    parsed_points.sort(key=lambda x: x["timestamp"])
-
-    # Detect deposits/withdrawals
-    movements = _detect_deposit_withdrawals(parsed_points)
-    result["detected_movements"] = movements
-
-    # Calculate cumulative deposit/withdrawal value over time
-    # This will be used to adjust the PNL calculation
-    movement_adjustments = {}  # timestamp -> cumulative adjustment
-    cumulative = 0.0
-    for m in sorted(movements, key=lambda x: x["timestamp"]):
-        if m["type"] == "deposit":
-            cumulative += m["value_estimate"]
-        else:  # withdrawal
-            cumulative -= m["value_estimate"]
-        movement_adjustments[m["timestamp"]] = cumulative
-
-    now = (
-        datetime.now(parsed_points[-1]["timestamp"].tzinfo)
-        if parsed_points[-1]["timestamp"].tzinfo
-        else datetime.utcnow()
-    )
-
-    # Calculate total adjustment (all movements up to now)
-    total_adjustment = cumulative
-
-    # Find values closest to target times
-    targets = {
-        "pnl_24h": now - timedelta(days=1),
-        "pnl_7d": now - timedelta(days=7),
-        "pnl_30d": now - timedelta(days=30),
-    }
-
-    for key, target_time in targets.items():
-        closest_point = None
-        min_diff = float("inf")
-
-        for point in parsed_points:
-            diff = abs((point["timestamp"] - target_time).total_seconds())
-            if diff < min_diff and diff < 12 * 3600:
-                min_diff = diff
-                closest_point = point
-
-        if closest_point and closest_point["value"] > 0:
-            # Calculate adjustment at target time (movements that happened after target)
-            adjustment_at_target = 0.0
-            for m in movements:
-                if m["timestamp"] > closest_point["timestamp"]:
-                    if m["type"] == "deposit":
-                        adjustment_at_target += m["value_estimate"]
-                    else:
-                        adjustment_at_target -= m["value_estimate"]
-
-            # Adjusted current value = current - deposits + withdrawals (since target)
-            adjusted_current = current_value - adjustment_at_target
-
-            # Calculate PNL percentage
-            if closest_point["value"] > 0:
-                pnl_pct = (
-                    (adjusted_current - closest_point["value"]) / closest_point["value"]
-                ) * 100
-                result[key] = pnl_pct
-
-    return result
-
-
-def _calculate_24h_changes(history_data: dict, current_balances: dict) -> dict:
-    """
-    Calculate 24h changes for tokens and connectors.
-
-    Args:
-        history_data: Historical data from API
-        current_balances: Current balances from overview_data['balances']
-
-    Returns:
-        {
-            "tokens": {token: {"price_change": float, "units_change": float}},
-            "connectors": {account: {connector: {"value_change": float, "pct_change": float}}}
-        }
-    """
-    from datetime import datetime, timedelta
-
-    result = {
-        "tokens": {},
-        "connectors": {},
-    }
-
-    if not history_data or not current_balances:
-        return result
-
-    data_points = history_data.get("data", [])
-    if not data_points:
-        return result
-
-    # Parse current state - detailed by account/connector/token
-    current_detailed = {}  # {account: {connector: {token: {units, value}}}}
-    current_tokens = {}  # {token: {units, value}} aggregated
-
-    for account_name, account_data in current_balances.items():
-        if account_name not in current_detailed:
-            current_detailed[account_name] = {}
-        for connector_name, holdings in account_data.items():
-            if connector_name not in current_detailed[account_name]:
-                current_detailed[account_name][connector_name] = {}
-            connector_value = 0.0
-            if holdings:
-                for h in holdings:
-                    token = h.get("token", "")
-                    units = float(h.get("units", 0))
-                    value = float(h.get("value", 0))
-                    if token:
-                        current_detailed[account_name][connector_name][token] = {
-                            "units": units,
-                            "value": value,
-                        }
-                        connector_value += value
-                        # Aggregate tokens
-                        if token not in current_tokens:
-                            current_tokens[token] = {"units": 0.0, "value": 0.0}
-                        current_tokens[token]["units"] += units
-                        current_tokens[token]["value"] += value
-            current_detailed[account_name][connector_name]["_total"] = connector_value
-
-    # Find snapshot closest to 24h ago
-    now = datetime.now(timezone.utc)
-    target_time = now - timedelta(days=1)
-
-    closest_point = None
-    min_diff = float("inf")
-
-    for point in data_points:
-        timestamp_str = point.get("timestamp", "")
-        try:
-            ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            continue
-
-        diff = abs((ts - target_time).total_seconds())
-        if diff < min_diff and diff < 12 * 3600:  # Within 12 hours tolerance
-            min_diff = diff
-            closest_point = point
-
-    if not closest_point:
-        return result
-
-    # Parse 24h ago state
-    state_24h = closest_point.get("state", {})
-    tokens_24h = {}  # {token: {units, value}} aggregated
-    connectors_24h = {}  # {account: {connector: total_value}}
-
-    for account_name, connectors in state_24h.items():
-        if not isinstance(connectors, dict):
-            continue
-        if account_name not in connectors_24h:
-            connectors_24h[account_name] = {}
-        for connector_name, holdings in connectors.items():
-            if not isinstance(holdings, list):
-                continue
-            connector_value = 0.0
-            for h in holdings:
-                if isinstance(h, dict):
-                    token = h.get("token", "")
-                    units = float(h.get("units", 0) or 0)
-                    value = float(h.get("value", 0) or 0)
-                    if token:
-                        connector_value += value
-                        if token not in tokens_24h:
-                            tokens_24h[token] = {"units": 0.0, "value": 0.0}
-                        tokens_24h[token]["units"] += units
-                        tokens_24h[token]["value"] += value
-            connectors_24h[account_name][connector_name] = connector_value
-
-    # Calculate token changes (price and units)
-    for token, current in current_tokens.items():
-        past = tokens_24h.get(token, {"units": 0, "value": 0})
-
-        current_units = current["units"]
-        current_value = current["value"]
-        past_units = past["units"]
-        past_value = past["value"]
-
-        # Calculate price (value / units)
-        current_price = current_value / current_units if current_units > 0 else 0
-        past_price = past_value / past_units if past_units > 0 else 0
-
-        # Price change %
-        if past_price > 0:
-            price_change = ((current_price - past_price) / past_price) * 100
-        elif current_price > 0:
-            price_change = 100.0  # New token
-        else:
-            price_change = 0.0
-
-        # Units change %
-        if past_units > 0:
-            units_change = ((current_units - past_units) / past_units) * 100
-        elif current_units > 0:
-            units_change = 100.0  # New token
-        else:
-            units_change = 0.0
-
-        result["tokens"][token] = {
-            "price_change": price_change,
-            "units_change": units_change,
-        }
-
-    # Calculate connector changes
-    for account_name, connectors in current_detailed.items():
-        if account_name not in result["connectors"]:
-            result["connectors"][account_name] = {}
-        for connector_name, tokens in connectors.items():
-            current_total = tokens.get("_total", 0)
-            past_total = connectors_24h.get(account_name, {}).get(connector_name, 0)
-
-            if past_total > 0:
-                pct_change = ((current_total - past_total) / past_total) * 100
-            elif current_total > 0:
-                pct_change = 100.0  # New connector
-            else:
-                pct_change = 0.0
-
-            result["connectors"][account_name][connector_name] = {
-                "value_change": current_total - past_total,
-                "pct_change": pct_change,
-            }
-
-    return result
-
-
-async def _fetch_dashboard_data(client, days: int, refresh: bool = False):
-    """
-    Fetch all data needed for the portfolio dashboard.
-
-    Args:
-        client: The API client
-        days: Number of days for history
-        refresh: If True, force refresh balances from exchanges (bypasses API cache)
-
-    Returns:
-        Tuple of (overview_data, history, token_distribution, accounts_distribution, pnl_history, graph_interval)
-    """
-    import asyncio
-
-    # Calculate start_time based on days for graph
-    start_time = _calculate_start_time(days)
-    # For PNL indicators, we need 30 days of history
-    pnl_start_time = _calculate_start_time(30)
-
-    # Calculate optimal interval for the graph based on days
-    graph_interval = _get_optimal_interval(days)
-    logger.info(
-        f"Fetching portfolio data: days={days}, optimal_interval={graph_interval}, start_time={start_time}, refresh={refresh}"
-    )
-
-    # Fetch all data in parallel
-    overview_task = get_portfolio_overview(
-        client,
-        account_names=None,
-        include_balances=True,
-        include_perp_positions=True,
-        include_lp_positions=True,
-        include_active_orders=True,
-        refresh=refresh,
-    )
-
-    history_task = client.portfolio.get_history(
-        start_time=start_time, limit=100, interval=graph_interval
-    )
-
-    # Fetch 30-day history for PNL calculations (use 1d interval for efficiency)
-    pnl_history_task = client.portfolio.get_history(
-        start_time=pnl_start_time, limit=100, interval="1d"
-    )
-
-    token_dist_task = client.portfolio.get_distribution()
-    accounts_dist_task = client.portfolio.get_accounts_distribution()
-
-    results = await asyncio.gather(
-        overview_task,
-        history_task,
-        token_dist_task,
-        accounts_dist_task,
-        pnl_history_task,
-        return_exceptions=True,
-    )
-
-    # Handle any exceptions
-    overview_data = results[0] if not isinstance(results[0], Exception) else None
-    history = results[1] if not isinstance(results[1], Exception) else None
-    token_distribution = results[2] if not isinstance(results[2], Exception) else None
-    accounts_distribution = (
-        results[3] if not isinstance(results[3], Exception) else None
-    )
-    pnl_history = results[4] if not isinstance(results[4], Exception) else None
-
-    # Log what the API returned for history
-    if history and not isinstance(history, Exception):
-        pagination = history.get("pagination", {})
-        data_count = len(history.get("data", []))
-        logger.info(
-            f"History API response: {data_count} data points, pagination={pagination}"
-        )
-
-    if isinstance(results[0], Exception):
-        logger.error(f"Error fetching overview: {results[0]}")
-    if isinstance(results[1], Exception):
-        logger.error(f"Error fetching history: {results[1]}")
-    if isinstance(results[2], Exception):
-        logger.error(f"Error fetching token distribution: {results[2]}")
-    if isinstance(results[3], Exception):
-        logger.error(f"Error fetching accounts distribution: {results[3]}")
-    if isinstance(results[4], Exception):
-        logger.error(f"Error fetching PNL history: {results[4]}")
-
-    return (
-        overview_data,
-        history,
-        token_distribution,
-        accounts_distribution,
-        pnl_history,
-        graph_interval,
-    )
-
-
 def _get_connector_keys(balances: dict) -> list:
     """
     Extract connector keys from balances for keyboard buttons.
@@ -661,13 +124,12 @@ def _get_connector_keys(balances: dict) -> list:
     return [c["key"] for c in connector_values]
 
 
-def build_portfolio_keyboard(connector_keys: list, days: int) -> InlineKeyboardMarkup:
+def build_portfolio_keyboard(connector_keys: list) -> InlineKeyboardMarkup:
     """
-    Build keyboard with connector buttons and controls.
+    Build keyboard with connector buttons and refresh.
 
     Args:
         connector_keys: List of "account:connector" keys
-        days: Current days setting for Settings button
 
     Returns:
         InlineKeyboardMarkup with connector buttons
@@ -693,14 +155,9 @@ def build_portfolio_keyboard(connector_keys: list, days: int) -> InlineKeyboardM
         if connector_row:
             keyboard.append(connector_row)
 
-    # Bottom row: Refresh + Settings
+    # Bottom row: Refresh only
     keyboard.append(
-        [
-            InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh"),
-            InlineKeyboardButton(
-                f"⚙️ Settings ({days}d)", callback_data="portfolio:settings"
-            ),
-        ]
+        [InlineKeyboardButton("🔄 Refresh", callback_data="portfolio:refresh")]
     )
 
     return InlineKeyboardMarkup(keyboard)
@@ -730,8 +187,6 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     Progressive loading: Fetches all data in parallel and updates UI as each piece arrives.
     """
-    import asyncio
-
     # Clear any config state to prevent interference
     clear_config_state(context)
 
@@ -746,12 +201,6 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     try:
         from config_manager import get_config_manager
-        from utils.trading_data import (
-            get_active_orders,
-            get_lp_positions,
-            get_perpetual_positions,
-            get_tokens_for_networks,
-        )
 
         # Get first enabled server
         servers = get_config_manager().list_servers()
@@ -783,221 +232,61 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             parse_mode="MarkdownV2",
         )
 
+        t_start = time.time()
+
         client = await get_config_manager().get_client(server_name)
+        logger.info(f"[TIMING] get_client: {time.time() - t_start:.2f}s")
 
-        # Check server status
-        server_status_info = await get_config_manager().check_server_status(server_name)
-        server_status = server_status_info.get("status", "online")
-
-        # Get portfolio config
-        config = get_portfolio_prefs(context.user_data)
-        days = config.get("days", 3)
-        start_time = _calculate_start_time(days)
-        pnl_start_time = _calculate_start_time(30)
-        graph_interval = _get_optimal_interval(days)
-
-        # Always refresh balances for /portfolio command (CEX balances need real-time data)
-        refresh = True
-        context.user_data.pop("_portfolio_refresh", None)  # Clear any stale flag
+        # Server is online if we got a client
+        server_status = "online"
 
         # ========================================
-        # START ALL FETCHES IN PARALLEL
-        # ========================================
-        balances_task = asyncio.create_task(client.portfolio.get_state(refresh=refresh))
-        perp_task = asyncio.create_task(get_perpetual_positions(client))
-        lp_task = asyncio.create_task(get_lp_positions(client))
-        orders_task = asyncio.create_task(get_active_orders(client))
-        history_task = asyncio.create_task(
-            client.portfolio.get_history(
-                start_time=start_time, limit=100, interval=graph_interval
-            )
-        )
-        pnl_history_task = asyncio.create_task(
-            client.portfolio.get_history(
-                start_time=pnl_start_time, limit=100, interval="1d"
-            )
-        )
-        token_dist_task = asyncio.create_task(client.portfolio.get_distribution())
-        accounts_dist_task = asyncio.create_task(
-            client.portfolio.get_accounts_distribution()
-        )
-
-        # Initialize data holders
-        balances = None
-        perp_positions = {"positions": [], "total": 0}
-        lp_positions = {"positions": [], "total": 0}
-        active_orders = {"orders": [], "total": 0}
-        pnl_indicators = None
-        changes_24h = None
-        current_value = 0.0
-        token_cache = {}  # Will be populated with Gateway tokens
-
-        # Track accounts_distribution for UI updates
-        accounts_distribution = None
-
-        # Helper to update UI
-        async def update_ui(loading_text: str = None):
-            nonlocal current_value
-            # Recalculate current value
-            if balances:
-                current_value = 0.0
-                for account_data in balances.values():
-                    for connector_balances in account_data.values():
-                        if connector_balances:
-                            for balance in connector_balances:
-                                value = balance.get("value", 0)
-                                if value > 0:
-                                    current_value += value
-
-            overview_data = {
-                "balances": balances,
-                "perp_positions": perp_positions,
-                "lp_positions": lp_positions,
-                "active_orders": active_orders,
-            }
-            formatted_message = format_portfolio_overview(
-                overview_data,
-                server_name=server_name,
-                server_status=server_status,
-                pnl_indicators=pnl_indicators,
-                changes_24h=changes_24h,
-                token_cache=token_cache,
-                accounts_distribution=accounts_distribution,
-            )
-            if loading_text:
-                formatted_message += f"\n_{escape_markdown_v2(loading_text)}_"
-            try:
-                await text_msg.edit_text(formatted_message, parse_mode="MarkdownV2")
-            except Exception:
-                pass
-
-        # ========================================
-        # WAIT FOR BALANCES FIRST (usually fast)
+        # FETCH BALANCES
         # ========================================
         try:
-            balances = await balances_task
-            # Filter balances by enabled networks from wallet preferences
-            enabled_networks = get_all_enabled_networks(context.user_data)
-            if enabled_networks:
-                logger.info(
-                    f"Filtering portfolio by enabled networks: {enabled_networks}"
-                )
-                balances = _filter_balances_by_networks(balances, enabled_networks)
-            await update_ui("Loading positions & 24h data...")
+            balances = await client.portfolio.get_state(refresh=True)
         except Exception as e:
             logger.error(f"Failed to fetch balances: {e}")
+            balances = None
+        logger.info(f"[TIMING] balances fetch: {time.time() - t_start:.2f}s")
 
-        # ========================================
-        # WAIT FOR POSITIONS AND 24H DATA IN PARALLEL
-        # ========================================
-        # Gather remaining fast tasks
-        try:
-            results = await asyncio.gather(
-                perp_task,
-                lp_task,
-                orders_task,
-                pnl_history_task,
-                return_exceptions=True,
-            )
-
-            if not isinstance(results[0], Exception):
-                perp_positions = results[0]
-            if not isinstance(results[1], Exception):
-                lp_positions = results[1]
-                # Populate token_cache from LP positions networks
-                lp_networks = list(
-                    set(
-                        pos.get("network", "solana-mainnet-beta")
-                        for pos in lp_positions.get("positions", [])
-                    )
-                )
-                if lp_networks:
-                    try:
-                        token_cache = await get_tokens_for_networks(client, lp_networks)
-                    except Exception as e:
-                        logger.debug(f"Failed to fetch tokens for LP networks: {e}")
-
-            if not isinstance(results[2], Exception):
-                active_orders = results[2]
-
-            # Calculate 24h changes if we have history
-            pnl_history = results[3] if not isinstance(results[3], Exception) else None
-            if pnl_history and balances:
-                pnl_indicators = _calculate_pnl_indicators(pnl_history, current_value)
-                changes_24h = _calculate_24h_changes(pnl_history, balances)
-
-            await update_ui("Generating graphs...")
-        except Exception as e:
-            logger.error(f"Error fetching positions: {e}")
-
-        # ========================================
-        # WAIT FOR GRAPH DATA
-        # ========================================
-        history = None
-        token_distribution = None
-
-        try:
-            graph_results = await asyncio.gather(
-                history_task,
-                token_dist_task,
-                accounts_dist_task,
-                return_exceptions=True,
-            )
-            history = (
-                graph_results[0]
-                if not isinstance(graph_results[0], Exception)
-                else None
-            )
-            token_distribution = (
-                graph_results[1]
-                if not isinstance(graph_results[1], Exception)
-                else None
-            )
-            accounts_distribution = (
-                graph_results[2]
-                if not isinstance(graph_results[2], Exception)
-                else None
-            )
-        except Exception as e:
-            logger.error(f"Error fetching graph data: {e}")
-
-        # Final UI update (no loading text)
-        await update_ui()
-
-        # Send "upload_photo" status
-        await message.reply_chat_action("upload_photo")
-
-        # Generate the comprehensive dashboard
-        dashboard_bytes = generate_portfolio_dashboard(
-            history_data=history,
-            token_distribution_data=token_distribution,
-            accounts_distribution_data=accounts_distribution,
-        )
+        # Filter balances by enabled networks from wallet preferences
+        if balances:
+            enabled_networks = get_all_enabled_networks(context.user_data)
+            if enabled_networks:
+                balances = _filter_balances_by_networks(balances, enabled_networks)
 
         # Build keyboard with connector buttons
         connector_keys = _get_connector_keys(balances)
-        reply_markup = build_portfolio_keyboard(connector_keys, days)
+        reply_markup = build_portfolio_keyboard(connector_keys)
 
-        # Send the dashboard image with buttons
-        photo_msg = await message.reply_photo(
-            photo=dashboard_bytes,
-            caption=f"📊 Portfolio Dashboard - {server_name}",
-            reply_markup=reply_markup,
+        # Render final message
+        overview_data = {
+            "balances": balances,
+        }
+        formatted_message = format_portfolio_overview(
+            overview_data,
+            server_name=server_name,
+            server_status=server_status,
         )
+        try:
+            await text_msg.edit_text(
+                formatted_message,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            pass
 
-        # Store message IDs and data for later updates (including data for connector detail view)
+        logger.info(f"[TIMING] /portfolio total: {time.time() - t_start:.2f}s")
+
+        # Store data for callbacks
         context.user_data["portfolio_text_message_id"] = text_msg.message_id
-        context.user_data["portfolio_photo_message_id"] = photo_msg.message_id
         context.user_data["portfolio_chat_id"] = message.chat_id
-        context.user_data["portfolio_graph_interval"] = graph_interval
         context.user_data["portfolio_server_name"] = server_name
         context.user_data["portfolio_server_status"] = server_status
-        context.user_data["portfolio_current_value"] = current_value
         # Cache data for connector detail callbacks
         context.user_data["portfolio_balances"] = balances
-        context.user_data["portfolio_accounts_distribution"] = accounts_distribution
-        context.user_data["portfolio_changes_24h"] = changes_24h
-        context.user_data["portfolio_pnl_indicators"] = pnl_indicators
         context.user_data["portfolio_connector_keys"] = connector_keys
 
     except Exception as e:
@@ -1007,7 +296,7 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 # ============================================
-# PORTFOLIO SETTINGS CALLBACK HANDLERS
+# PORTFOLIO CALLBACK HANDLERS
 # ============================================
 
 
@@ -1029,31 +318,10 @@ async def portfolio_callback_handler(
 
         if action == "refresh":
             await handle_portfolio_refresh(update, context)
-        elif action == "settings":
-            await show_portfolio_settings(update, context)
-        elif action.startswith("set_days:"):
-            days = int(action.split(":")[1])
-            set_portfolio_days(context.user_data, days)
-            # Calculate the new optimal interval for display
-            new_interval = _get_optimal_interval(days)
-            await show_portfolio_settings(
-                update,
-                context,
-                message=f"Days set to {days} (interval: {new_interval})",
-            )
-        elif action == "close":
-            # Close settings menu and refresh dashboard with new settings
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
-            await refresh_portfolio_dashboard(update, context)
         elif action.startswith("connector:"):
-            # Show detailed view for a specific connector
             connector_key = action.replace("connector:", "")
             await handle_connector_detail(update, context, connector_key)
         elif action == "back_overview":
-            # Return to main portfolio overview
             await handle_back_to_overview(update, context)
         else:
             logger.warning(f"Unknown portfolio action: {action}")
@@ -1073,11 +341,6 @@ async def handle_portfolio_refresh(
     """Handle refresh button - force refresh balances from exchanges"""
     query = update.callback_query
     await query.answer("Refreshing from exchanges...")
-
-    # Set flag to force API refresh
-    context.user_data["_portfolio_refresh"] = True
-
-    # Refresh the dashboard with fresh data
     await refresh_portfolio_dashboard(update, context, refresh=True)
 
 
@@ -1095,16 +358,22 @@ async def handle_connector_detail(
 
     # Get cached data
     balances = context.user_data.get("portfolio_balances")
-    changes_24h = context.user_data.get("portfolio_changes_24h")
-    total_value = context.user_data.get("portfolio_current_value", 0.0)
     text_message_id = context.user_data.get("portfolio_text_message_id")
-    photo_message_id = context.user_data.get("portfolio_photo_message_id")
     chat_id = context.user_data.get("portfolio_chat_id")
-    server_name = context.user_data.get("portfolio_server_name", "")
 
     if not balances or not text_message_id or not chat_id:
         logger.warning("Missing cached data for connector detail view")
         return
+
+    # Calculate total value from balances
+    total_value = 0.0
+    for account_data in balances.values():
+        for connector_balances in account_data.values():
+            if connector_balances:
+                for b in connector_balances:
+                    v = b.get("value", 0)
+                    if v > 0:
+                        total_value += v
 
     try:
         bot = query.get_bot()
@@ -1113,28 +382,17 @@ async def handle_connector_detail(
         detail_message = format_connector_detail(
             balances=balances,
             connector_key=connector_key,
-            changes_24h=changes_24h,
             total_value=total_value,
         )
 
-        # Update text message with connector detail (no keyboard on text)
+        # Update text message with connector detail and Back button
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=text_message_id,
             text=detail_message,
             parse_mode="MarkdownV2",
+            reply_markup=build_connector_detail_keyboard(),
         )
-
-        # Update photo message keyboard to show "Back to Overview" button
-        if photo_message_id:
-            try:
-                await bot.edit_message_reply_markup(
-                    chat_id=chat_id,
-                    message_id=photo_message_id,
-                    reply_markup=build_connector_detail_keyboard(),
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update photo keyboard: {e}")
 
         # Store current view mode
         context.user_data["portfolio_view_mode"] = f"connector:{connector_key}"
@@ -1152,14 +410,10 @@ async def handle_back_to_overview(
 
     # Get cached data
     balances = context.user_data.get("portfolio_balances")
-    accounts_distribution = context.user_data.get("portfolio_accounts_distribution")
-    changes_24h = context.user_data.get("portfolio_changes_24h")
-    pnl_indicators = context.user_data.get("portfolio_pnl_indicators")
     server_name = context.user_data.get("portfolio_server_name")
     server_status = context.user_data.get("portfolio_server_status")
     connector_keys = context.user_data.get("portfolio_connector_keys", [])
     text_message_id = context.user_data.get("portfolio_text_message_id")
-    photo_message_id = context.user_data.get("portfolio_photo_message_id")
     chat_id = context.user_data.get("portfolio_chat_id")
 
     if not text_message_id or not chat_id:
@@ -1168,45 +422,22 @@ async def handle_back_to_overview(
 
     try:
         bot = query.get_bot()
-        config = get_portfolio_prefs(context.user_data)
-        days = config.get("days", 3)
 
-        # Build overview data
-        overview_data = {
-            "balances": balances,
-            "perp_positions": {"positions": [], "total": 0},
-            "lp_positions": {"positions": [], "total": 0},
-            "active_orders": {"orders": [], "total": 0},
-        }
-
-        # Format overview message
+        overview_data = {"balances": balances}
         overview_message = format_portfolio_overview(
             overview_data,
             server_name=server_name,
             server_status=server_status,
-            pnl_indicators=pnl_indicators,
-            changes_24h=changes_24h,
-            accounts_distribution=accounts_distribution,
         )
 
-        # Update text message with overview (no keyboard on text)
+        # Update text message with overview and connector buttons
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=text_message_id,
             text=overview_message,
             parse_mode="MarkdownV2",
+            reply_markup=build_portfolio_keyboard(connector_keys),
         )
-
-        # Update photo message keyboard to show connector buttons
-        if photo_message_id:
-            try:
-                await bot.edit_message_reply_markup(
-                    chat_id=chat_id,
-                    message_id=photo_message_id,
-                    reply_markup=build_portfolio_keyboard(connector_keys, days),
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update photo keyboard: {e}")
 
         # Clear view mode
         context.user_data["portfolio_view_mode"] = "overview"
@@ -1228,15 +459,13 @@ async def refresh_portfolio_dashboard(
 
     chat_id = context.user_data.get("portfolio_chat_id")
     text_message_id = context.user_data.get("portfolio_text_message_id")
-    photo_message_id = context.user_data.get("portfolio_photo_message_id")
 
-    if not chat_id or not photo_message_id:
+    if not chat_id or not text_message_id:
         logger.warning("Missing message IDs for refresh")
         return
 
     try:
         from config_manager import get_config_manager
-        from utils.trading_data import get_tokens_for_networks
 
         # Use user's preferred server
         servers = get_config_manager().list_servers()
@@ -1256,189 +485,51 @@ async def refresh_portfolio_dashboard(
             else enabled_servers[0]
         )
 
-        # Update caption to show "Updating..." status
+        client = await get_config_manager().get_client(server_name)
+        server_status = "online"
+
+        # Fetch balances only
         try:
-            await bot.edit_message_caption(
+            balances = await client.portfolio.get_state(refresh=refresh)
+        except Exception as e:
+            logger.error(f"Failed to fetch balances: {e}")
+            balances = None
+
+        # Filter balances by enabled networks
+        if balances:
+            enabled_networks = get_all_enabled_networks(context.user_data)
+            if enabled_networks:
+                balances = _filter_balances_by_networks(balances, enabled_networks)
+
+        connector_keys = _get_connector_keys(balances)
+        reply_markup = build_portfolio_keyboard(connector_keys)
+
+        overview_data = {"balances": balances}
+        formatted_message = format_portfolio_overview(
+            overview_data,
+            server_name=server_name,
+            server_status=server_status,
+        )
+        try:
+            await bot.edit_message_text(
                 chat_id=chat_id,
-                message_id=photo_message_id,
-                caption="🔄 Updating graph...",
+                message_id=text_message_id,
+                text=formatted_message,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
             )
         except Exception as e:
-            logger.warning(f"Failed to update caption to 'Updating': {e}")
-
-        client = await get_config_manager().get_client(server_name)
-        server_status_info = await get_config_manager().check_server_status(server_name)
-        server_status = server_status_info.get("status", "online")
-
-        # Get current config (only days, interval is auto-calculated)
-        config = get_portfolio_prefs(context.user_data)
-        days = config.get("days", 3)
-
-        # Fetch all data (interval is calculated based on days)
-        # Pass refresh=True to force API to fetch fresh data from exchanges
-        (
-            overview_data,
-            history,
-            token_distribution,
-            accounts_distribution,
-            pnl_history,
-            graph_interval,
-        ) = await _fetch_dashboard_data(client, days, refresh=refresh)
-
-        # Filter balances by enabled networks from wallet preferences
-        enabled_networks = get_all_enabled_networks(context.user_data)
-        if enabled_networks and overview_data and overview_data.get("balances"):
-            logger.info(
-                f"Filtering portfolio refresh by enabled networks: {enabled_networks}"
-            )
-            overview_data["balances"] = _filter_balances_by_networks(
-                overview_data["balances"], enabled_networks
-            )
-
-        # Calculate current portfolio value for PNL
-        current_value = 0.0
-        if overview_data and overview_data.get("balances"):
-            for account_data in overview_data["balances"].values():
-                for connector_balances in account_data.values():
-                    if connector_balances:
-                        for balance in connector_balances:
-                            value = balance.get("value", 0)
-                            if value > 0:
-                                current_value += value
-
-        # Calculate PNL indicators and 24h changes
-        pnl_indicators = _calculate_pnl_indicators(pnl_history, current_value)
-        changes_24h = (
-            _calculate_24h_changes(pnl_history, overview_data.get("balances", {}))
-            if pnl_history
-            else None
-        )
-
-        # Fetch tokens for LP positions
-        token_cache = {}
-        lp_positions = overview_data.get("lp_positions", {}) if overview_data else {}
-        if lp_positions and lp_positions.get("positions"):
-            lp_networks = list(
-                set(
-                    pos.get("network", "solana-mainnet-beta")
-                    for pos in lp_positions.get("positions", [])
-                )
-            )
-            if lp_networks:
-                try:
-                    token_cache = await get_tokens_for_networks(client, lp_networks)
-                except Exception as e:
-                    logger.debug(f"Failed to fetch tokens for LP networks: {e}")
-
-        # Get balances for connector keys
-        balances = overview_data.get("balances") if overview_data else None
-        connector_keys = _get_connector_keys(balances)
-
-        # Update text message if we have it
-        if text_message_id:
-            formatted_message = format_portfolio_overview(
-                overview_data,
-                server_name=server_name,
-                server_status=server_status,
-                pnl_indicators=pnl_indicators,
-                changes_24h=changes_24h,
-                token_cache=token_cache,
-                accounts_distribution=accounts_distribution,
-            )
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=text_message_id,
-                    text=formatted_message,
-                    parse_mode="MarkdownV2",
-                )
-            except Exception as e:
-                logger.warning(f"Failed to update text message: {e}")
-
-        # Generate new dashboard
-        dashboard_bytes = generate_portfolio_dashboard(
-            history_data=history,
-            token_distribution_data=token_distribution,
-            accounts_distribution_data=accounts_distribution,
-        )
-
-        # Build keyboard with connector buttons
-        reply_markup = build_portfolio_keyboard(connector_keys, days)
-
-        # Update photo with new image
-        from telegram import InputMediaPhoto
-
-        await bot.edit_message_media(
-            chat_id=chat_id,
-            message_id=photo_message_id,
-            media=InputMediaPhoto(
-                media=dashboard_bytes, caption=f"📊 Portfolio Dashboard - {server_name}"
-            ),
-            reply_markup=reply_markup,
-        )
+            logger.warning(f"Failed to update text message: {e}")
 
         # Store data for callbacks
-        context.user_data["portfolio_graph_interval"] = graph_interval
         context.user_data["portfolio_server_name"] = server_name
         context.user_data["portfolio_server_status"] = server_status
-        context.user_data["portfolio_current_value"] = current_value
-        # Cache data for connector detail callbacks
         context.user_data["portfolio_balances"] = balances
-        context.user_data["portfolio_accounts_distribution"] = accounts_distribution
-        context.user_data["portfolio_changes_24h"] = changes_24h
-        context.user_data["portfolio_pnl_indicators"] = pnl_indicators
         context.user_data["portfolio_connector_keys"] = connector_keys
 
     except Exception as e:
         logger.error(f"Failed to refresh portfolio dashboard: {e}", exc_info=True)
 
-
-async def show_portfolio_settings(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, message: str = None
-) -> None:
-    """Display portfolio settings menu"""
-    query = update.callback_query
-
-    config = get_portfolio_prefs(context.user_data)
-    current_days = config.get("days", 3)
-    # Get the auto-calculated interval from context or calculate it
-    current_interval = context.user_data.get(
-        "portfolio_graph_interval", _get_optimal_interval(current_days)
-    )
-
-    # Build settings message
-    settings_text = "⚙️ *Portfolio Graph Settings*\n\n"
-    settings_text += f"📅 *Days:* `{current_days}`\n"
-    settings_text += f"⏱️ *Interval:* `{current_interval}` \\(auto\\)\n"
-
-    if message:
-        settings_text += f"\n_{escape_markdown_v2(message)}_"
-
-    # Build keyboard with days options only (interval is auto-calculated)
-    days_buttons = []
-    for days in PORTFOLIO_DAYS_OPTIONS:
-        label = f"{'✓ ' if days == current_days else ''}{days}d"
-        days_buttons.append(
-            InlineKeyboardButton(label, callback_data=f"portfolio:set_days:{days}")
-        )
-
-    keyboard = [
-        days_buttons,
-        [InlineKeyboardButton("✅ Apply & Close", callback_data="portfolio:close")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Check if message has text (settings menu) or photo (dashboard image)
-    if query.message.text:
-        # Edit existing text message
-        await query.edit_message_text(
-            settings_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
-    else:
-        # Message is a photo, send new text message for settings
-        await query.message.reply_text(
-            settings_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
 
 
 def get_portfolio_callback_handler():
