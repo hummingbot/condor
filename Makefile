@@ -29,10 +29,11 @@ setup-chrome:
 		echo "Chrome installation skipped (not required for basic usage)"
 
 install-ai-tools:
-	@echo "Installing AI CLI tools (requires Node.js 18+)..."
-	@command -v node >/dev/null 2>&1 || { echo "Node.js not found. Install from https://nodejs.org/"; exit 1; }
-	@command -v claude >/dev/null 2>&1 && echo "Claude Code already installed ($$(claude --version 2>/dev/null))" || npm install -g @anthropic-ai/claude-code
+	@echo "Installing AI CLI tools..."
+	@command -v claude >/dev/null 2>&1 && echo "Claude Code already installed ($$(claude --version 2>/dev/null))" || curl -fsSL https://claude.ai/install.sh | sh
+	@command -v node >/dev/null 2>&1 || { echo "Node.js not found (needed for Gemini CLI). Install from https://nodejs.org/"; exit 1; }
 	@command -v gemini >/dev/null 2>&1 && echo "Gemini CLI already installed ($$(gemini --version 2>/dev/null))" || npm install -g @google/gemini-cli
+	@command -v claude-code-acp >/dev/null 2>&1 && echo "Claude Code ACP already installed" || npm install -g @zed-industries/claude-code-acp
 	@echo "AI CLI tools ready."
 
 run:

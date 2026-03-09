@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 
 # AI CLI tools
-RUN npm install -g @anthropic-ai/claude-code @google/gemini-cli
+RUN npm install -g @anthropic-ai/claude-code @google/gemini-cli @zed-industries/claude-code-acp
 
 # Chromium for Kaleido/Plotly
 RUN apt-get update && apt-get install -y --no-install-recommends \
