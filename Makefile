@@ -34,6 +34,7 @@ install-ai-tools:
 	@command -v node >/dev/null 2>&1 || { echo "Node.js not found (needed for Gemini CLI). Install from https://nodejs.org/"; exit 1; }
 	@command -v gemini >/dev/null 2>&1 && echo "Gemini CLI already installed ($$(gemini --version 2>/dev/null))" || npm install -g @google/gemini-cli
 	@command -v claude-code-acp >/dev/null 2>&1 && echo "Claude Code ACP already installed" || npm install -g @zed-industries/claude-code-acp
+	@command -v codex-acp >/dev/null 2>&1 && echo "Codex ACP already installed" || npm install -g @zed-industries/codex-acp
 	@echo "AI CLI tools ready."
 
 run:
