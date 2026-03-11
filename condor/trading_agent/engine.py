@@ -1,7 +1,7 @@
 """TickEngine -- main orchestrator for autonomous trading agents.
 
 One TickEngine instance per running agent.  Each tick:
-1. Pre-compute core skills (portfolio, active executors)
+1. Pre-compute core data providers (active executors)
 2. Read journal
 3. Build prompt with strategy + data + risk state
 4. Spawn a fresh ACP session, send prompt, wait for completion
@@ -23,7 +23,7 @@ from .prompts import build_tick_prompt
 from .risk import RiskEngine, RiskLimits, auto_approve_with_risk_check
 from .strategy import Strategy
 from .tracker import ExecutorTracker
-from .skills import SkillRegistry
+from .providers import ProviderRegistry
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ class TickEngine:
     journal: JournalManager = field(init=False)
     risk: RiskEngine = field(init=False)
     tracker: ExecutorTracker = field(init=False)
-    skill_registry: SkillRegistry = field(init=False)
+    provider_registry: ProviderRegistry = field(init=False)
 
     # Runtime state
     _task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -70,7 +70,7 @@ class TickEngine:
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
         self.risk = RiskEngine(risk_limits)
         self.tracker = ExecutorTracker(self.agent_id)
-        self.skill_registry = SkillRegistry()
+        self.provider_registry = ProviderRegistry()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -153,8 +153,8 @@ class TickEngine:
             self.journal.append_error("No API client available")
             return
 
-        # 2. Run core skills (returns dict[str, SkillResult])
-        skill_results = await self.skill_registry.run_core_skills(
+        # 2. Run core data providers (returns dict[str, ProviderResult])
+        skill_results = await self.provider_registry.run_core_providers(
             client, self.config, agent_id=self.agent_id
         )
 
@@ -189,11 +189,11 @@ class TickEngine:
             return
 
         # 5. Build prompt
-        from .skills import get_skill_templates
+        from .skill_loader import get_tick_skills
 
         server_creds = self._get_server_credentials()
         next_tick = self.tracker.tick_count + 1
-        skill_prompts = get_skill_templates(self.strategy.skills, self.config)
+        skill_prompts = get_tick_skills(self.strategy.skills, self.config)
         prompt = build_tick_prompt(
             strategy=self.strategy,
             config=self.config,

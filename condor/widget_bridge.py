@@ -875,49 +875,66 @@ class WidgetBridge:
     async def _handle_manage_skills(
         self, chat_id: int, user_id: int | None, params: dict
     ) -> dict:
-        from condor.trading_agent.skills import list_skills, get_skill
+        from condor.trading_agent.providers import list_providers, get_provider
+        from condor.trading_agent.skill_loader import list_skills as list_skill_files
 
         action = params.get("action", "list")
 
         if action == "list":
-            skills = list_skills()
-            return {
-                "skills": [
-                    {
-                        "name": s.name,
-                        "is_core": s.is_core,
-                        "type": "core" if s.is_core else "optional",
-                    }
-                    for s in skills
-                ]
-            }
+            # Combine data providers and SKILL.md files
+            items = []
+            for p in list_providers():
+                items.append({
+                    "name": p.name,
+                    "is_core": p.is_core,
+                    "type": "provider",
+                })
+            for s in list_skill_files():
+                items.append({
+                    "name": s.name,
+                    "is_core": False,
+                    "type": "skill",
+                    "description": s.description,
+                })
+            return {"skills": items}
 
         elif action == "test":
             name = params.get("name")
             if not name:
                 return {"error": "name is required"}
-            skill = get_skill(name)
-            if not skill:
-                return {"error": f"Skill '{name}' not found"}
 
-            skill_params = params.get("params", {})
+            # Try data provider first
+            provider = get_provider(name)
+            if provider:
+                skill_params = params.get("params", {})
+                try:
+                    from handlers.bots._shared import get_bots_client
+                    client, _ = await get_bots_client(chat_id)
+                except Exception as e:
+                    return {"error": f"Could not get API client: {e}"}
+                try:
+                    result = await provider.execute(client, skill_params)
+                    return {
+                        "name": result.name,
+                        "summary": result.summary,
+                        "data": result.data,
+                    }
+                except Exception as e:
+                    return {"error": f"Provider execution failed: {e}"}
 
-            # Get API client
-            try:
-                from handlers.bots._shared import get_bots_client
-                client, _ = await get_bots_client(chat_id)
-            except Exception as e:
-                return {"error": f"Could not get API client: {e}"}
-
-            try:
-                result = await skill.execute(client, skill_params)
+            # Try SKILL.md file
+            from condor.trading_agent.skill_loader import load_skill, _render_placeholders
+            skill_info = load_skill(name)
+            if skill_info:
+                config = params.get("params", {})
+                rendered = _render_placeholders(skill_info.body, config)
                 return {
-                    "name": result.name,
-                    "summary": result.summary,
-                    "data": result.data,
+                    "name": skill_info.name,
+                    "description": skill_info.description,
+                    "rendered_prompt": rendered,
                 }
-            except Exception as e:
-                return {"error": f"Skill execution failed: {e}"}
+
+            return {"error": f"Skill or provider '{name}' not found"}
 
         return {"error": f"Unknown action: {action}"}
 
