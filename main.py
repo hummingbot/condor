@@ -195,6 +195,9 @@ def reload_handlers():
         "handlers.agents.confirmation",
         "handlers.agents._shared",
         "handlers.admin",
+        "handlers.trading_agent",
+        "handlers.trading_agent.menu",
+        "handlers.trading_agent._shared",
         "routines.base",
         "utils.auth",
         "utils.telegram_formatters",
@@ -238,6 +241,11 @@ def register_handlers(application: Application) -> None:
     from handlers.routines import routines_callback_handler, routines_command
     from handlers.trading import trade_command as unified_trade_command
     from handlers.trading.router import unified_trade_callback_handler
+    from handlers.trading_agent import (
+        trading_agent_callback_handler,
+        trading_agent_command,
+        trading_agent_message_handler,
+    )
 
     # Clear existing handlers
     application.handlers.clear()
@@ -257,6 +265,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    application.add_handler(CommandHandler("agent_trading", trading_agent_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -290,6 +299,11 @@ def register_handlers(application: Application) -> None:
     # Add agent callback handler
     application.add_handler(
         CallbackQueryHandler(agent_callback_handler, pattern="^agent:")
+    )
+
+    # Add trading agent callback handler
+    application.add_handler(
+        CallbackQueryHandler(trading_agent_callback_handler, pattern="^ta:")
     )
 
     # Add admin callback handler
@@ -351,6 +365,7 @@ async def post_init(application: Application) -> None:
         BotCommand("lp", "Liquidity pool management"),
         BotCommand("routines", "Run configurable Python scripts"),
         BotCommand("agent", "Chat with AI trading assistant"),
+        BotCommand("agent_trading", "Autonomous trading agents"),
         BotCommand("servers", "Manage Hummingbot API servers"),
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Deploy Gateway for DEX trading"),
@@ -390,8 +405,49 @@ async def post_init(application: Application) -> None:
 
     await start_health_monitor(application.bot)
 
+    # Restore trading agent instances from persistence
+    await restore_trading_agents(application)
+
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
+
+
+async def restore_trading_agents(application: Application) -> None:
+    """Restore trading agent instances from persisted user_data."""
+    from condor.trading_agent.engine import TickEngine
+    from condor.trading_agent.strategy import StrategyStore
+
+    store = StrategyStore()
+    restored = 0
+
+    for chat_id, user_data in application.user_data.items():
+        instances = user_data.get("ta_instances", {})
+        for agent_id, inst in list(instances.items()):
+            if inst.get("status") != "running":
+                continue
+            strategy_id = inst.get("strategy_id")
+            strategy = store.get(strategy_id) if strategy_id else None
+            if not strategy:
+                logger.warning("Cannot restore agent %s: strategy %s not found", agent_id, strategy_id)
+                inst["status"] = "stopped"
+                continue
+            try:
+                engine = TickEngine(
+                    agent_id=agent_id,
+                    strategy=strategy,
+                    config=inst.get("config", {}),
+                    chat_id=chat_id,
+                    user_id=inst.get("user_id", 0),
+                )
+                await engine.start(bot=application.bot)
+                restored += 1
+                logger.info("Restored trading agent %s for chat %s", agent_id, chat_id)
+            except Exception as e:
+                logger.error("Failed to restore agent %s: %s", agent_id, e)
+                inst["status"] = "error"
+
+    if restored:
+        logger.info("Restored %d trading agent(s)", restored)
 
 
 async def watch_and_reload(application: Application) -> None:
@@ -406,9 +462,10 @@ async def watch_and_reload(application: Application) -> None:
 
     handlers_path = Path(__file__).parent / "handlers"
     routines_path = Path(__file__).parent / "routines"
-    logger.info(f"👀 Watching for changes in: {handlers_path}, {routines_path}")
+    trading_agent_path = Path(__file__).parent / "condor" / "trading_agent"
+    logger.info(f"👀 Watching for changes in: {handlers_path}, {routines_path}, {trading_agent_path}")
 
-    async for changes in awatch(handlers_path, routines_path):
+    async for changes in awatch(handlers_path, routines_path, trading_agent_path):
         logger.info(f"📝 Detected changes: {changes}")
         try:
             reload_handlers()
@@ -478,6 +535,15 @@ def main() -> None:
 
         await stop_health_monitor()
         await destroy_all_sessions()
+
+        # Stop all trading agents
+        from condor.trading_agent.engine import get_all_engines
+        for engine in list(get_all_engines().values()):
+            try:
+                await engine.stop()
+            except Exception:
+                pass
+
         await get_widget_bridge().stop()
 
     # Create the Application with persistence enabled

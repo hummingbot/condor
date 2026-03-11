@@ -285,5 +285,177 @@ async def get_user_context() -> dict:
     })
 
 
+# =============================================================================
+# Trading Agent Tools
+# =============================================================================
+
+
+@mcp.tool()
+async def trading_agent_journal_read(
+    agent_id: str,
+    section: str = "recent",
+    max_entries: int = 30,
+) -> dict:
+    """Read the trading agent's journal.
+
+    Args:
+        agent_id: The trading agent instance ID.
+        section: What to read: "recent" (last 10 actions),
+                 "learnings" (all learnings, max 20),
+                 "state" (current state snapshot),
+                 or "full" (entire journal).
+        max_entries: Unused (kept for compatibility).
+
+    Returns:
+        {"content": "<journal text>"}
+    """
+    return await _bridge_request({
+        "method": "trading_agent_journal",
+        "chat_id": CHAT_ID,
+        "params": {"action": "read", "agent_id": agent_id, "section": section, "max_entries": max_entries},
+    })
+
+
+@mcp.tool()
+async def trading_agent_journal_write(
+    agent_id: str,
+    entry_type: str,
+    text: str,
+    reasoning: str = "",
+    risk_note: str = "",
+    tick: int = 0,
+) -> dict:
+    """Write to the trading agent's journal. Keep entries SHORT (one line).
+
+    Args:
+        agent_id: The trading agent instance ID.
+        entry_type: "action", "learning", or "state".
+            - "action": What you did this tick (auto-trimmed to last 10).
+            - "learning": A new insight. Duplicates are auto-filtered. Only write
+              if this is genuinely new and not already in learnings (max 20).
+            - "state": Overwrite the current state snapshot (e.g. price, position, grids).
+        text: The entry content. Keep it to ONE short line.
+        reasoning: One-sentence reasoning (for actions only).
+        risk_note: Optional risk note (for actions only).
+        tick: Current tick number (for actions only).
+
+    Returns:
+        {"written": true}
+    """
+    return await _bridge_request({
+        "method": "trading_agent_journal",
+        "chat_id": CHAT_ID,
+        "params": {
+            "action": "write",
+            "agent_id": agent_id,
+            "entry_type": entry_type,
+            "text": text,
+            "reasoning": reasoning,
+            "risk_note": risk_note,
+            "tick": tick,
+        },
+    })
+
+
+@mcp.tool()
+async def manage_trading_agent(
+    action: str,
+    agent_id: str | None = None,
+    strategy_id: str | None = None,
+    name: str | None = None,
+    description: str | None = None,
+    instructions: str | None = None,
+    agent_key: str | None = None,
+    skills: list[str] | None = None,
+    config: dict | None = None,
+) -> dict:
+    """Manage trading agents and strategies.
+
+    Actions -- Strategies:
+    - "list_strategies": List all strategies for the current user
+    - "get_strategy": Get full strategy details including instructions (requires strategy_id)
+    - "create_strategy": Create a new strategy (requires name, description, instructions)
+    - "update_strategy": Update an existing strategy (requires strategy_id, plus fields to update)
+    - "delete_strategy": Delete a strategy (requires strategy_id)
+
+    Actions -- Agent lifecycle:
+    - "list_agents": List running agent instances with status and PnL
+    - "start_agent": Start an agent from a strategy (requires strategy_id, optional config)
+    - "stop_agent": Stop a running agent (requires agent_id)
+    - "pause_agent": Pause a running agent (requires agent_id)
+    - "resume_agent": Resume a paused agent (requires agent_id)
+
+    Actions -- Monitoring:
+    - "agent_status": Get status, PnL, tick count, risk state of an agent (requires agent_id)
+    - "agent_tracker": Get the full tracker markdown (tick history, executor ledger, snapshots) (requires agent_id)
+    - "agent_journal": Get recent journal entries and learnings (requires agent_id)
+    - "agent_risk": Get current risk limits and state (requires agent_id)
+
+    Args:
+        action: The action to perform.
+        agent_id: Agent instance ID (for agent actions).
+        strategy_id: Strategy ID (for strategy actions).
+        name: Strategy name (for create/update).
+        description: Strategy description (for create/update).
+        instructions: Strategy instructions text (for create/update).
+        agent_key: Agent type "claude-code" or "gemini" (for create, default "claude-code").
+        skills: List of optional skill names to enable (for create/update).
+        config: Agent config overrides (for start, or risk_limits dict).
+
+    Returns:
+        Action-specific result dict.
+    """
+    params: dict = {"action": action}
+    for key, val in [
+        ("agent_id", agent_id), ("strategy_id", strategy_id),
+        ("name", name), ("description", description),
+        ("instructions", instructions), ("agent_key", agent_key),
+        ("skills", skills), ("config", config),
+    ]:
+        if val is not None:
+            params[key] = val
+
+    return await _bridge_request({
+        "method": "manage_trading_agent",
+        "chat_id": CHAT_ID,
+        "user_id": USER_ID,
+        "params": params,
+    })
+
+
+@mcp.tool()
+async def manage_skills(
+    action: str,
+    name: str | None = None,
+    params: dict | None = None,
+) -> dict:
+    """Manage trading agent skills (market analysis tools).
+
+    Actions:
+    - "list": List all available skills with descriptions
+    - "test": Test a skill with given params (requires name)
+
+    Args:
+        action: The action to perform (list, test).
+        name: Skill name (for test).
+        params: Skill parameters (for test, e.g. {"connector_name": "binance", "trading_pair": "BTC-USDT"}).
+
+    Returns:
+        Action-specific result dict.
+    """
+    req_params: dict = {"action": action}
+    if name is not None:
+        req_params["name"] = name
+    if params is not None:
+        req_params["params"] = params
+
+    return await _bridge_request({
+        "method": "manage_skills",
+        "chat_id": CHAT_ID,
+        "user_id": USER_ID,
+        "params": req_params,
+    })
+
+
 if __name__ == "__main__":
     mcp.run()
