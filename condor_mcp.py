@@ -255,7 +255,9 @@ async def get_session_usage() -> dict:
     """Get current session token usage and context window stats.
 
     Returns:
-        tokens_used: Number of tokens used so far.
+        tokens_used: Total tokens used so far.
+        input_tokens: Cumulative input tokens (user messages + context).
+        output_tokens: Cumulative output tokens (assistant responses).
         context_window: Total context window size.
         percent_used: Percentage of context consumed.
         cost_usd: Cumulative session cost in USD.
