@@ -122,6 +122,7 @@ def clear_executors_state(context) -> None:
     context.user_data.pop("executor_wizard_type", None)
     context.user_data.pop("executor_list_page", None)
     context.user_data.pop("executor_chart_interval", None)
+    context.user_data.pop("history_executors", None)
 
 
 def get_executor_config(context) -> Dict[str, Any]:
@@ -209,13 +210,13 @@ async def get_executors_client(
 
 
 async def search_running_executors(
-    client, status: str = "RUNNING", limit: int = 50
+    client, status: Optional[str] = "RUNNING", limit: int = 50
 ) -> List[Dict[str, Any]]:
     """Search for executors with a specific status
 
     Args:
         client: API client
-        status: Status to filter by (default: running)
+        status: Status to filter by (default: running), None for all
         limit: Maximum number of results
 
     Returns:

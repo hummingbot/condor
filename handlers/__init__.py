@@ -158,6 +158,12 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("share_message_id", None)
     context.user_data.pop("share_chat_id", None)
 
+    # Trading agent states
+    context.user_data.pop("ta_state", None)
+    context.user_data.pop("ta_selected_strategy", None)
+    context.user_data.pop("ta_selected_agent", None)
+    context.user_data.pop("ta_config_params", None)
+
     # Executors states
     context.user_data.pop("executors_state", None)
     context.user_data.pop("executor_config_params", None)

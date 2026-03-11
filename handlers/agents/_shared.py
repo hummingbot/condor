@@ -114,19 +114,19 @@ def get_project_dir() -> str:
 
 
 def build_mcp_servers_for_session(
-    user_id: int, chat_id: int, widget_port: int
+    user_id: int, chat_id: int, widget_port: int, user_data: dict | None = None
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
     Resolves the user's default Condor server and returns ACP-format mcpServers
     that override the static .mcp.json entries by name.
     """
-    from config_manager import get_config_manager
+    from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
 
-    # Resolve which server to use
-    server_name = cm.get_chat_default_server(chat_id)
+    # Resolve which server to use (respects user preferences)
+    server_name = get_effective_server(chat_id, user_data)
     if not server_name:
         accessible = cm.get_accessible_servers(user_id)
         server_name = accessible[0] if accessible else None
@@ -143,7 +143,7 @@ def build_mcp_servers_for_session(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uvx",
-        "args": ["hummingbot-mcp"],
+        "args": ["hummingbot-mcp==1.0.2"],
         "env": [
             {"name": "HUMMINGBOT_API_URL", "value": api_url},
             {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
@@ -165,17 +165,59 @@ def build_mcp_servers_for_session(
     return [mcp_hummingbot, condor]
 
 
-def build_initial_context(user_id: int, chat_id: int) -> str:
+def build_mcp_servers_for_agent(
+    server_name: str, user_id: int, chat_id: int, widget_port: int
+) -> list[dict[str, Any]]:
+    """Build MCP server configs for a trading agent bound to a specific server.
+
+    Unlike build_mcp_servers_for_session(), this resolves the server by name
+    directly instead of using chat-based resolution.
+    """
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+    server = cm.get_server(server_name)
+    if not server:
+        return []
+
+    api_url = f"http://{server['host']}:{server['port']}"
+
+    mcp_hummingbot = {
+        "name": "mcp-hummingbot",
+        "command": "uvx",
+        "args": ["hummingbot-mcp==1.0.2"],
+        "env": [
+            {"name": "HUMMINGBOT_API_URL", "value": api_url},
+            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
+            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
+        ],
+    }
+
+    condor = {
+        "name": "condor",
+        "command": "uv",
+        "args": ["run", "python", "condor_mcp.py"],
+        "env": [
+            {"name": "CONDOR_WIDGET_PORT", "value": str(widget_port)},
+            {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
+            {"name": "CONDOR_USER_ID", "value": str(user_id)},
+        ],
+    }
+
+    return [mcp_hummingbot, condor]
+
+
+def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = None) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
-    from config_manager import ServerPermission, get_config_manager
+    from config_manager import ServerPermission, get_config_manager, get_effective_server
 
     cm = get_config_manager()
 
     # Always start with Telegram formatting rules
     sections: list[str] = [TELEGRAM_SYSTEM_PROMPT]
 
-    # Resolve active server
-    active_name = cm.get_chat_default_server(chat_id)
+    # Resolve active server (respects user preferences)
+    active_name = get_effective_server(chat_id, user_data)
     accessible = cm.get_accessible_servers(user_id)
     if not active_name:
         active_name = accessible[0] if accessible else None
@@ -209,8 +251,44 @@ def build_initial_context(user_id: int, chat_id: int) -> str:
         else:
             configure_hint = ""
 
-        sections.append("\n".join([
+        # Instruct agent to preload all MCP tools in one shot to avoid
+    # repeated ToolSearch calls that bloat the context window.
+    mcp_tools = [
+        "mcp__mcp-hummingbot__configure_server",
+        "mcp__mcp-hummingbot__get_market_data",
+        "mcp__mcp-hummingbot__get_portfolio_overview",
+        "mcp__mcp-hummingbot__manage_executors",
+        "mcp__mcp-hummingbot__manage_bots",
+        "mcp__mcp-hummingbot__manage_controllers",
+        "mcp__mcp-hummingbot__explore_dex_pools",
+        "mcp__mcp-hummingbot__manage_gateway_swaps",
+        "mcp__mcp-hummingbot__manage_gateway_config",
+        "mcp__mcp-hummingbot__manage_gateway_container",
+        "mcp__mcp-hummingbot__search_history",
+        "mcp__mcp-hummingbot__setup_connector",
+        "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
+        "mcp__condor__send_buttons",
+        "mcp__condor__send_notification",
+        "mcp__condor__send_progress",
+        "mcp__condor__manage_routines",
+        "mcp__condor__manage_servers",
+        "mcp__condor__get_user_context",
+        "mcp__condor__get_session_info",
+        "mcp__condor__get_session_usage",
+        "mcp__condor__ask_user_choice",
+    ]
+    tool_preload_hint = (
+        "IMPORTANT: At the very start of the session (before your first response), "
+        "load ALL MCP tools in a single ToolSearch call:\n"
+        f'ToolSearch(query="select:{",".join(mcp_tools)}")\n'
+        "This avoids repeated ToolSearch calls that waste context tokens. "
+        "Do this silently without telling the user."
+    )
+
+    sections.append("\n".join([
             f"Active server: {active_name}",
+            "",
+            tool_preload_hint,
             "",
             configure_hint,
             "",

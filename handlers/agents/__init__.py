@@ -73,6 +73,8 @@ async def agent_callback_handler(
         await _handle_compact(update, context, custom_instructions=None)
     elif action == "compact_custom":
         await _handle_compact_custom_prompt(update, context)
+    elif action == "context":
+        await _handle_context_dump(update, context)
     elif action == "new":
         await _handle_new_session(update, context)
     elif action.startswith("confirm_trade:"):
@@ -127,6 +129,7 @@ async def _handle_select(
             agent_key=agent_key,
             permission_callback=_perm_cb,
             user_id=user_id,
+            user_data=context.user_data,
         )
         await query.message.edit_text(
             f"{label} is ready. Send a message to start chatting.\n\nUse /agent to see options or any other command to exit."
@@ -169,6 +172,42 @@ async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context.user_data.pop("agent_state", None)
 
     await query.message.delete()
+
+
+CONTEXT_DUMP_PROMPT = (
+    "List ALL context you currently have loaded. Include:\n"
+    "1. System prompt / CLAUDE.md instructions (summarize key points)\n"
+    "2. Initial context injected at session start\n"
+    "3. Every user message and your response (with approximate token count per turn)\n"
+    "4. All tool calls made and their results (summarized)\n"
+    "5. Any MCP servers connected and tools available\n\n"
+    "Format as a numbered conversation log. Be concise but complete. "
+    "This is for debugging context usage - show everything."
+)
+
+
+async def _handle_context_dump(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Ask the agent to dump its full loaded context."""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if not session or not session.client.alive:
+        await query.message.edit_text("No active session.")
+        return
+
+    if session.is_busy:
+        await query.message.edit_text("Agent is busy. Wait for it to finish first.")
+        return
+
+    await query.message.edit_text("Fetching context dump...")
+
+    streamer = TelegramStreamer(context.bot, chat_id, reply_to=query.message.message_id)
+    async for event in session.prompt_stream(CONTEXT_DUMP_PROMPT):
+        await streamer.process_event(event)
+    await streamer.finalize()
 
 
 async def _handle_compact_menu(
@@ -250,11 +289,21 @@ async def _handle_compact(
             agent_key=agent_key,
             permission_callback=_perm_cb,
             user_id=user_id,
+            user_data=context.user_data,
         )
 
         # Inject the summary as initial context
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
         await new_session.client.prompt(compact_context)
+
+        # Update usage stats from compact context injection
+        if new_session.client.last_usage:
+            u = new_session.client.last_usage
+            if u.used >= new_session.tokens_used:
+                new_session.tokens_used = u.used
+            new_session.context_window = u.size
+            if u.cost_usd >= new_session.cost_usd:
+                new_session.cost_usd = u.cost_usd
 
     except Exception as e:
         log.exception("Failed to recreate session after compact")
@@ -264,8 +313,10 @@ async def _handle_compact(
         return
 
     word_count = len(summary.split())
+    pct = round(new_session.tokens_used / new_session.context_window * 100) if new_session.context_window > 0 and new_session.tokens_used > 0 else 0
     await query.message.edit_text(
-        f"Context compacted ({word_count} words carried over).\n\n"
+        f"Context compacted ({word_count} words carried over).\n"
+        f"Context: {round(new_session.tokens_used / 1000)}k / {round(new_session.context_window / 1000)}k ({pct}%)\n\n"
         "Send a message to continue chatting."
     )
 
@@ -321,6 +372,7 @@ async def _handle_new_session(
             agent_key=agent_key,
             permission_callback=_perm_cb,
             user_id=user_id,
+            user_data=context.user_data,
         )
         await query.message.edit_text(
             f"Fresh {label} session ready.\n\nSend a message to start chatting."
@@ -381,9 +433,19 @@ async def _do_compact_from_message(
             agent_key=agent_key,
             permission_callback=_perm_cb,
             user_id=user_id,
+            user_data=context.user_data,
         )
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
         await new_session.client.prompt(compact_context)
+
+        # Update usage stats from compact context injection
+        if new_session.client.last_usage:
+            u = new_session.client.last_usage
+            if u.used >= new_session.tokens_used:
+                new_session.tokens_used = u.used
+            new_session.context_window = u.size
+            if u.cost_usd >= new_session.cost_usd:
+                new_session.cost_usd = u.cost_usd
     except Exception as e:
         log.exception("Failed to recreate session after compact")
         await placeholder.edit_text(f"Compact failed during session reset: {e}")
@@ -392,8 +454,10 @@ async def _do_compact_from_message(
         return
 
     word_count = len(summary.split())
+    pct = round(new_session.tokens_used / new_session.context_window * 100) if new_session.context_window > 0 and new_session.tokens_used > 0 else 0
     await placeholder.edit_text(
-        f"Context compacted ({word_count} words carried over).\n\n"
+        f"Context compacted ({word_count} words carried over).\n"
+        f"Context: {round(new_session.tokens_used / 1000)}k / {round(new_session.context_window / 1000)}k ({pct}%)\n\n"
         "Send a message to continue chatting."
     )
 
@@ -438,6 +502,7 @@ async def agent_message_handler(
                 agent_key=agent_key,
                 permission_callback=_perm_cb,
                 user_id=user_id,
+                user_data=context.user_data,
             )
         except Exception as e:
             log.exception("Failed to create agent session")

@@ -239,7 +239,15 @@ def get_modify_value_handler():
             await bots_message_handler(update, context)
             return
 
-        # 3.5. Check Executors state
+        # 3.5. Check Trading Agent config state
+        if context.user_data.get("ta_state"):
+            from handlers.trading_agent import trading_agent_message_handler
+
+            handled = await trading_agent_message_handler(update, context)
+            if handled:
+                return
+
+        # 3.6. Check Executors state
         if context.user_data.get("executors_state"):
             from handlers.executors import executors_message_handler
 

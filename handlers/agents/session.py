@@ -65,9 +65,19 @@ class AgentSession:
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
             async for event in self.client.prompt_stream(text):
                 if isinstance(event, UsageUpdate):
-                    self.tokens_used = event.used
+                    # Only accept values that increase (avoid spurious drops
+                    # from per-turn vs cumulative mismatch between sources).
+                    if event.used >= self.tokens_used:
+                        self.tokens_used = event.used
+                    else:
+                        log.debug(
+                            "Ignoring lower usage %d (current %d)",
+                            event.used,
+                            self.tokens_used,
+                        )
                     self.context_window = event.size
-                    self.cost_usd = event.cost_usd
+                    if event.cost_usd >= self.cost_usd:
+                        self.cost_usd = event.cost_usd
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -89,6 +99,7 @@ async def get_or_create_session(
     agent_key: str,
     permission_callback: PermissionCallback | None = None,
     user_id: int | None = None,
+    user_data: dict | None = None,
 ) -> AgentSession:
     """Get existing session or create a new one.
 
@@ -120,7 +131,7 @@ async def get_or_create_session(
     # Build dynamic MCP servers from user's Condor permissions
     mcp_servers: list[dict] = []
     if user_id:
-        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, bridge.port)
+        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, bridge.port, user_data)
 
     client = ACPClient(
         command=command,
@@ -134,7 +145,7 @@ async def get_or_create_session(
 
     # Send initial context about server and permissions
     if user_id:
-        initial_context = build_initial_context(user_id, chat_id)
+        initial_context = build_initial_context(user_id, chat_id, user_data)
         if initial_context:
             try:
                 await client.prompt(initial_context)
@@ -146,6 +157,11 @@ async def get_or_create_session(
         agent_key=agent_key,
         client=client,
     )
+    # Seed usage from initial prompt if available
+    if client.last_usage:
+        session.tokens_used = client.last_usage.used
+        session.context_window = client.last_usage.size
+        session.cost_usd = client.last_usage.cost_usd
     _sessions[chat_id] = session
     log.info("Created agent session for chat %d: %s", chat_id, agent_key)
     return session

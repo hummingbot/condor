@@ -102,6 +102,8 @@ async def executors_callback_handler(
         show_create_menu,
         show_executor_detail,
         show_executors_menu,
+        show_history,
+        show_history_detail,
     )
     from .position import handle_connector_select as pos_handle_connector_select
     from .position import handle_deploy as pos_handle_deploy
@@ -141,6 +143,14 @@ async def executors_callback_handler(
 
     elif action == "create_position":
         await start_position_wizard(update, context)
+
+    elif action == "history":
+        page = int(parts[2]) if len(parts) >= 3 else 0
+        await show_history(update, context, page)
+
+    elif action == "hist_detail" and len(parts) >= 3:
+        executor_id = parts[2]
+        await show_history_detail(update, context, executor_id)
 
     elif action == "close":
         await handle_close(update, context)

@@ -33,9 +33,10 @@ def _active_session_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("New", callback_data="agent:new"),
             ],
             [
+                InlineKeyboardButton("Context", callback_data="agent:context"),
                 InlineKeyboardButton("Stop", callback_data="agent:stop"),
-                InlineKeyboardButton("Close", callback_data="agent:close"),
             ],
+            [InlineKeyboardButton("Close", callback_data="agent:close")],
         ]
     )
 
@@ -74,7 +75,12 @@ async def show_agent_menu(
             usage_line = f"Context: {used_k}k / {total_k}k ({pct}%)"
         else:
             usage_line = "Context: no usage data yet"
-        text = f"Agent: {agent_label}\nStatus: {status}\n{usage_line}\n\nSend a message to chat, or use the buttons below."
+        cost_line = f"Cost: ${session.cost_usd:.4f}" if session.cost_usd > 0 else ""
+        lines = [f"Agent: {agent_label}", f"Status: {status}", usage_line]
+        if cost_line:
+            lines.append(cost_line)
+        lines.append("\nSend a message to chat, or use the buttons below.")
+        text = "\n".join(lines)
         keyboard = _active_session_keyboard()
     else:
         text = "Select an AI agent to start a trading chat session.\n\nThe agent has access to all Hummingbot trading tools."
