@@ -82,16 +82,30 @@ POSITION_EXECUTOR_DEFAULTS = {
     "activation_bounds": -1,      # -1 = disabled, float = value
 }
 
+# Swap executor defaults (Gateway AMM swaps via Jupiter router)
+SWAP_EXECUTOR_DEFAULTS = {
+    "type": "swap_executor",
+    "connector_name": "jupiter/router",  # Gateway router connector
+    "trading_pair": "",
+    "side": SIDE_SHORT,  # SELL=2, BUY=1
+    "amount": 0.0,       # Base token amount to swap
+    "slippage_pct": None,  # Optional: override default slippage
+}
+
 
 def get_executor_type(executor: Dict[str, Any]) -> str:
     """Determine executor type from its data.
 
-    Returns: 'grid' or 'position'
+    Returns: 'grid', 'position', 'swap', or 'lp'
     """
     config = executor.get("config", executor)
     for source in (config, executor):
         ex_type = source.get("type", "")
         if isinstance(ex_type, str):
+            if "swap" in ex_type.lower():
+                return "swap"
+            if "lp" in ex_type.lower():
+                return "lp"
             if "position" in ex_type.lower():
                 return "position"
             if "grid" in ex_type.lower():
@@ -164,6 +178,8 @@ def init_new_executor_config(context, executor_type: str = "grid") -> Dict[str, 
         config = GRID_EXECUTOR_DEFAULTS.copy()
     elif executor_type == "position":
         config = POSITION_EXECUTOR_DEFAULTS.copy()
+    elif executor_type == "swap":
+        config = SWAP_EXECUTOR_DEFAULTS.copy()
     else:
         config = GRID_EXECUTOR_DEFAULTS.copy()
 
