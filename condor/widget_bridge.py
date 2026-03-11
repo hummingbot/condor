@@ -602,6 +602,8 @@ class WidgetBridge:
         pct = round(session.tokens_used / session.context_window * 100) if session.context_window > 0 and session.tokens_used > 0 else 0
         return {
             "tokens_used": session.tokens_used,
+            "input_tokens": session.input_tokens,
+            "output_tokens": session.output_tokens,
             "context_window": session.context_window,
             "percent_used": pct,
             "cost_usd": session.cost_usd,

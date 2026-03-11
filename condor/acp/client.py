@@ -61,6 +61,8 @@ class UsageUpdate:
     used: int  # cumulative tokens consumed in the conversation context
     size: int  # total context window size
     cost_usd: float  # cumulative cost in USD
+    input_tokens: int = 0  # cumulative input tokens
+    output_tokens: int = 0  # cumulative output tokens
 
 
 @dataclass
@@ -235,17 +237,21 @@ class ACPClient:
                     usage = result["usage"]
                     total = usage.get("totalTokens", 0)
                     size = usage.get("contextWindow", 200000)
+                    input_tokens = usage.get("inputTokens", 0)
+                    output_tokens = usage.get("outputTokens", 0)
                     cost = result.get("cost", {}) or {}
                     log.debug(
                         "Usage from prompt response: totalTokens=%d, contextWindow=%d, "
-                        "raw_usage=%s",
-                        total, size, usage,
+                        "input=%d, output=%d, raw_usage=%s",
+                        total, size, input_tokens, output_tokens, usage,
                     )
                     self._event_queue.put_nowait(
                         UsageUpdate(
                             used=total,
                             size=size,
                             cost_usd=cost.get("amount", 0.0),
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
                         )
                     )
                 self._event_queue.put_nowait(PromptDone(stop_reason=reason))
@@ -315,15 +321,19 @@ class ACPClient:
             cost = update.get("cost") or {}
             used = update.get("used", 0)
             size = update.get("size", 200000)
+            input_tokens = update.get("inputTokens", 0)
+            output_tokens = update.get("outputTokens", 0)
             log.debug(
-                "Usage from session/update: used=%d, size=%d, raw=%s",
-                used, size, update,
+                "Usage from session/update: used=%d, size=%d, input=%d, output=%d, raw=%s",
+                used, size, input_tokens, output_tokens, update,
             )
             self._event_queue.put_nowait(
                 UsageUpdate(
                     used=used,
                     size=size,
                     cost_usd=cost.get("amount", 0.0),
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
                 )
             )
 

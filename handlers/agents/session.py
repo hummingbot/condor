@@ -38,6 +38,8 @@ class AgentSession:
     client: ACPClient
     is_busy: bool = False
     tokens_used: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     context_window: int = 200000
     cost_usd: float = 0.0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -78,6 +80,11 @@ class AgentSession:
                     self.context_window = event.size
                     if event.cost_usd >= self.cost_usd:
                         self.cost_usd = event.cost_usd
+                    # Track input/output tokens (cumulative, always increasing)
+                    if event.input_tokens >= self.input_tokens:
+                        self.input_tokens = event.input_tokens
+                    if event.output_tokens >= self.output_tokens:
+                        self.output_tokens = event.output_tokens
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -162,6 +169,8 @@ async def get_or_create_session(
         session.tokens_used = client.last_usage.used
         session.context_window = client.last_usage.size
         session.cost_usd = client.last_usage.cost_usd
+        session.input_tokens = client.last_usage.input_tokens
+        session.output_tokens = client.last_usage.output_tokens
     _sessions[chat_id] = session
     log.info("Created agent session for chat %d: %s", chat_id, agent_key)
     return session
