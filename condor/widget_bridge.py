@@ -125,6 +125,22 @@ class WidgetBridge:
                 result = self._handle_get_session_usage(
                     chat_id=request["chat_id"],
                 )
+            elif method == "trading_agent_journal":
+                result = self._handle_trading_agent_journal(
+                    params=request.get("params", {}),
+                )
+            elif method == "manage_trading_agent":
+                result = await self._handle_manage_trading_agent(
+                    chat_id=request["chat_id"],
+                    user_id=request.get("user_id"),
+                    params=request.get("params", {}),
+                )
+            elif method == "manage_skills":
+                result = await self._handle_manage_skills(
+                    chat_id=request["chat_id"],
+                    user_id=request.get("user_id"),
+                    params=request.get("params", {}),
+                )
             else:
                 result = {"error": f"Unknown method: {method}"}
 
@@ -591,6 +607,320 @@ class WidgetBridge:
             "cost_usd": session.cost_usd,
         }
 
+    # --- Trading Agent Journal Handler ---
+
+    def _handle_trading_agent_journal(self, params: dict) -> dict:
+        from condor.trading_agent.journal import JournalManager
+
+        action = params.get("action", "read")
+        agent_id = params.get("agent_id", "")
+        if not agent_id:
+            return {"error": "agent_id is required"}
+
+        jm = JournalManager(agent_id)
+
+        if action == "read":
+            section = params.get("section", "recent")
+            if section == "full":
+                return {"content": jm.read_full()}
+            elif section == "learnings":
+                return {"content": jm.read_learnings()}
+            elif section == "state":
+                return {"content": jm.read_state()}
+            else:
+                return {"content": jm.read_recent()}
+
+        elif action == "write":
+            entry_type = params.get("entry_type", "action")
+            text = params.get("text", "")
+            if not text:
+                return {"error": "text is required"}
+
+            if entry_type == "learning":
+                jm.append_learning(text)
+            elif entry_type == "state":
+                jm.write_state(text)
+            else:
+                tick = params.get("tick", 0)
+                reasoning = params.get("reasoning", "")
+                risk_note = params.get("risk_note", "")
+                jm.append_action(tick, text, reasoning, risk_note)
+            return {"written": True}
+
+        return {"error": f"Unknown action: {action}"}
+
+    # --- Trading Agent Management Handler ---
+
+    async def _handle_manage_trading_agent(
+        self, chat_id: int, user_id: int | None, params: dict
+    ) -> dict:
+        from condor.trading_agent.strategy import StrategyStore
+        from condor.trading_agent.engine import TickEngine, get_engine, get_all_engines
+
+        action = params.get("action", "list_strategies")
+        store = StrategyStore()
+
+        if action == "list_strategies":
+            strategies = store.list_all(user_id=user_id)
+            return {
+                "strategies": [
+                    {
+                        "id": s.id,
+                        "name": s.name,
+                        "description": s.description,
+                        "agent_key": s.agent_key,
+                        "skills": s.skills,
+                        "default_config": s.default_config,
+                    }
+                    for s in strategies
+                ]
+            }
+
+        elif action == "create_strategy":
+            name = params.get("name")
+            description = params.get("description", "")
+            instructions = params.get("instructions", "")
+            if not name or not instructions:
+                return {"error": "name and instructions are required"}
+            strategy = store.create(
+                name=name,
+                description=description,
+                agent_key=params.get("agent_key", "claude-code"),
+                instructions=instructions,
+                skills=params.get("skills"),
+                default_config=params.get("config"),
+                created_by=user_id or 0,
+            )
+            return {"created": True, "strategy_id": strategy.id, "name": strategy.name}
+
+        elif action == "delete_strategy":
+            strategy_id = params.get("strategy_id")
+            if not strategy_id:
+                return {"error": "strategy_id is required"}
+            deleted = store.delete(strategy_id)
+            return {"deleted": deleted}
+
+        elif action == "list_agents":
+            engines = get_all_engines()
+            agents = []
+            for eid, engine in engines.items():
+                if engine.chat_id == chat_id:
+                    agents.append(engine.get_info())
+            return {"agents": agents}
+
+        elif action == "start_agent":
+            strategy_id = params.get("strategy_id")
+            if not strategy_id:
+                return {"error": "strategy_id is required"}
+            strategy = store.get(strategy_id)
+            if not strategy:
+                return {"error": f"Strategy '{strategy_id}' not found"}
+
+            config = dict(strategy.default_config)
+            if params.get("config"):
+                config.update(params["config"])
+
+            import uuid
+            agent_id = uuid.uuid4().hex[:8]
+
+            engine = TickEngine(
+                agent_id=agent_id,
+                strategy=strategy,
+                config=config,
+                chat_id=chat_id,
+                user_id=user_id or 0,
+            )
+            bot = self._bot
+            await engine.start(bot=bot)
+
+            # Store in user_data for persistence
+            user_data = self._get_user_data(chat_id)
+            if "ta_instances" not in user_data:
+                user_data["ta_instances"] = {}
+            user_data["ta_instances"][agent_id] = {
+                "strategy_id": strategy_id,
+                "config": config,
+                "user_id": user_id,
+                "status": "running",
+            }
+
+            return {"started": True, "agent_id": agent_id, "strategy": strategy.name}
+
+        elif action == "stop_agent":
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return {"error": "agent_id is required"}
+            engine = get_engine(agent_id)
+            if not engine:
+                return {"error": f"Agent '{agent_id}' not found or not running"}
+            await engine.stop()
+
+            user_data = self._get_user_data(chat_id)
+            instances = user_data.get("ta_instances", {})
+            if agent_id in instances:
+                instances[agent_id]["status"] = "stopped"
+
+            return {"stopped": True, "agent_id": agent_id}
+
+        elif action == "agent_status":
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return {"error": "agent_id is required"}
+            engine = get_engine(agent_id)
+            if not engine:
+                return {"error": f"Agent '{agent_id}' not found"}
+            return engine.get_info()
+
+        elif action == "pause_agent":
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return {"error": "agent_id is required"}
+            engine = get_engine(agent_id)
+            if not engine:
+                return {"error": f"Agent '{agent_id}' not found"}
+            engine.pause()
+            return {"paused": True, "agent_id": agent_id}
+
+        elif action == "resume_agent":
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return {"error": "agent_id is required"}
+            engine = get_engine(agent_id)
+            if not engine:
+                return {"error": f"Agent '{agent_id}' not found"}
+            engine.resume()
+            return {"resumed": True, "agent_id": agent_id}
+
+        elif action == "get_strategy":
+            strategy_id = params.get("strategy_id")
+            if not strategy_id:
+                return {"error": "strategy_id is required"}
+            strategy = store.get(strategy_id)
+            if not strategy:
+                return {"error": f"Strategy '{strategy_id}' not found"}
+            from dataclasses import asdict
+            return asdict(strategy)
+
+        elif action == "update_strategy":
+            strategy_id = params.get("strategy_id")
+            if not strategy_id:
+                return {"error": "strategy_id is required"}
+            strategy = store.get(strategy_id)
+            if not strategy:
+                return {"error": f"Strategy '{strategy_id}' not found"}
+            # Update only provided fields
+            if params.get("name"):
+                strategy.name = params["name"]
+            if params.get("description") is not None:
+                strategy.description = params["description"]
+            if params.get("instructions") is not None:
+                strategy.instructions = params["instructions"]
+            if params.get("agent_key"):
+                strategy.agent_key = params["agent_key"]
+            if params.get("skills") is not None:
+                strategy.skills = params["skills"]
+            if params.get("config") is not None:
+                strategy.default_config.update(params["config"])
+            store.update(strategy)
+            return {"updated": True, "strategy_id": strategy.id}
+
+        elif action == "agent_tracker":
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return {"error": "agent_id is required"}
+            from condor.trading_agent.tracker import ExecutorTracker
+            tracker = ExecutorTracker(agent_id)
+            content = tracker._read()
+            summary = tracker.get_summary()
+            tracker.close()
+            return {"tracker_md": content, "summary": summary}
+
+        elif action == "agent_journal":
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return {"error": "agent_id is required"}
+            from condor.trading_agent.journal import JournalManager
+            jm = JournalManager(agent_id)
+            return {
+                "recent_actions": jm.read_recent(max_entries=30),
+                "learnings": jm.read_learnings(),
+                "entry_count": jm.entry_count(),
+            }
+
+        elif action == "agent_risk":
+            agent_id = params.get("agent_id")
+            if not agent_id:
+                return {"error": "agent_id is required"}
+            engine = get_engine(agent_id)
+            if not engine:
+                return {"error": f"Agent '{agent_id}' not found or not running"}
+            risk_state = engine.risk.get_state(engine.tracker)
+            return {
+                **risk_state.to_dict(),
+                "limits": {
+                    "max_position_size_quote": engine.risk.limits.max_position_size_quote,
+                    "max_daily_loss_quote": engine.risk.limits.max_daily_loss_quote,
+                    "max_drawdown_pct": engine.risk.limits.max_drawdown_pct,
+                    "max_open_executors": engine.risk.limits.max_open_executors,
+                    "max_single_order_quote": engine.risk.limits.max_single_order_quote,
+                    "max_cost_per_day_usd": engine.risk.limits.max_cost_per_day_usd,
+                    "cooldown_after_loss_sec": engine.risk.limits.cooldown_after_loss_sec,
+                },
+            }
+
+        return {"error": f"Unknown action: {action}"}
+
+    # --- Skills Management Handler ---
+
+    async def _handle_manage_skills(
+        self, chat_id: int, user_id: int | None, params: dict
+    ) -> dict:
+        from condor.trading_agent.skills import list_skills, get_skill
+
+        action = params.get("action", "list")
+
+        if action == "list":
+            skills = list_skills()
+            return {
+                "skills": [
+                    {
+                        "name": s.name,
+                        "is_core": s.is_core,
+                        "type": "core" if s.is_core else "optional",
+                    }
+                    for s in skills
+                ]
+            }
+
+        elif action == "test":
+            name = params.get("name")
+            if not name:
+                return {"error": "name is required"}
+            skill = get_skill(name)
+            if not skill:
+                return {"error": f"Skill '{name}' not found"}
+
+            skill_params = params.get("params", {})
+
+            # Get API client
+            try:
+                from handlers.bots._shared import get_bots_client
+                client, _ = await get_bots_client(chat_id)
+            except Exception as e:
+                return {"error": f"Could not get API client: {e}"}
+
+            try:
+                result = await skill.execute(client, skill_params)
+                return {
+                    "name": result.name,
+                    "summary": result.summary,
+                    "data": result.data,
+                }
+            except Exception as e:
+                return {"error": f"Skill execution failed: {e}"}
+
+        return {"error": f"Unknown action: {action}"}
+
     # --- Resolution (called from Telegram callback handler) ---
 
     def resolve(self, request_id: str, button_index: int) -> bool:
@@ -618,10 +948,9 @@ class WidgetBridge:
         self, chat_id: int, message_id: int, selected: str
     ) -> None:
         try:
-            await self._bot.edit_message_text(
+            await self._bot.delete_message(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=f"Selected: {selected}",
             )
         except Exception:
             pass

@@ -58,8 +58,8 @@ class PromptDone:
 
 @dataclass
 class UsageUpdate:
-    used: int  # tokens used in last turn
-    size: int  # context window size
+    used: int  # cumulative tokens consumed in the conversation context
+    size: int  # total context window size
     cost_usd: float  # cumulative cost in USD
 
 
@@ -96,6 +96,7 @@ class ACPClient:
         self._session_id: str | None = None
         self._read_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
+        self.last_usage: UsageUpdate | None = None  # Updated by non-streaming prompt()
         self._peer.register_handler("session/update", self._on_session_update)
         self._peer.register_handler("session/request_permission", self._on_request_permission)
 
@@ -178,11 +179,17 @@ class ACPClient:
     # --- Prompt ---
 
     async def prompt(self, text: str) -> str:
-        """One-shot prompt: send text, collect all agent message chunks, return joined."""
+        """One-shot prompt: send text, collect all agent message chunks, return joined.
+
+        Also stores the last UsageUpdate in ``self.last_usage`` so callers
+        (e.g. AgentSession) can read token stats after a non-streaming call.
+        """
         chunks: list[str] = []
         async for event in self.prompt_stream(text):
             if isinstance(event, TextChunk):
                 chunks.append(event.text)
+            elif isinstance(event, UsageUpdate):
+                self.last_usage = event
         return "".join(chunks)
 
     async def prompt_stream(self, text: str) -> AsyncIterator[ACPEvent]:
@@ -229,6 +236,11 @@ class ACPClient:
                     total = usage.get("totalTokens", 0)
                     size = usage.get("contextWindow", 200000)
                     cost = result.get("cost", {}) or {}
+                    log.debug(
+                        "Usage from prompt response: totalTokens=%d, contextWindow=%d, "
+                        "raw_usage=%s",
+                        total, size, usage,
+                    )
                     self._event_queue.put_nowait(
                         UsageUpdate(
                             used=total,
@@ -299,12 +311,18 @@ class ACPClient:
             )
         elif kind == "usage_update":
             # NOTE: UsageUpdate may also fire from _on_response (prompt result).
-            # AgentSession keeps the last value, so duplicates are harmless.
+            # AgentSession keeps the highest value seen.
             cost = update.get("cost") or {}
+            used = update.get("used", 0)
+            size = update.get("size", 200000)
+            log.debug(
+                "Usage from session/update: used=%d, size=%d, raw=%s",
+                used, size, update,
+            )
             self._event_queue.put_nowait(
                 UsageUpdate(
-                    used=update.get("used", 0),
-                    size=update.get("size", 200000),
+                    used=used,
+                    size=size,
                     cost_usd=cost.get("amount", 0.0),
                 )
             )

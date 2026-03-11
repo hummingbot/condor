@@ -151,6 +151,12 @@ class ExecutorPrefs(TypedDict, total=False):
     last_position: Dict[str, Any]  # Last position executor params
 
 
+class TradingAgentPrefs(TypedDict, total=False):
+    last_strategy_id: Optional[str]     # Last selected strategy
+    default_frequency_sec: int          # Default tick frequency
+    default_risk_limits: Dict[str, Any] # Default risk limits
+
+
 class AgentPrefs(TypedDict, total=False):
     default_agent: str       # "claude-code", "gemini", "codex"
     show_tool_calls: bool    # Show tool call indicators (default True)
@@ -165,6 +171,7 @@ class UserPreferences(TypedDict, total=False):
     unified_trade: UnifiedTradePrefs
     executors: ExecutorPrefs
     agent: AgentPrefs
+    trading_agent: TradingAgentPrefs
 
 
 # ============================================
@@ -210,6 +217,11 @@ def _get_default_preferences() -> UserPreferences:
         "agent": {
             "default_agent": "claude-code",
             "show_tool_calls": True,
+        },
+        "trading_agent": {
+            "last_strategy_id": None,
+            "default_frequency_sec": 60,
+            "default_risk_limits": {},
         },
     }
 
