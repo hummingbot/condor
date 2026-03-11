@@ -593,12 +593,11 @@ class WidgetBridge:
     # --- Session Usage Handler ---
 
     def _handle_get_session_usage(self, chat_id: int) -> dict:
-        from handlers.agents.session import get_session, _sessions
+        from handlers.agents.session import get_session
 
-        log.debug("get_session_usage: chat_id=%d, known_sessions=%s", chat_id, list(_sessions.keys()))
         session = get_session(chat_id)
         if not session:
-            return {"error": f"No active session for chat_id={chat_id}, known={list(_sessions.keys())}"}
+            return {"error": "No active session"}
 
         pct = round(session.tokens_used / session.context_window * 100) if session.context_window > 0 and session.tokens_used > 0 else 0
         return {
