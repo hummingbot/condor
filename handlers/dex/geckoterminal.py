@@ -3167,8 +3167,7 @@ async def handle_gecko_token_add(
 
         success_text = (
             f"✅ *Token Added*\n\n"
-            f"*{escape_markdown_v2(symbol)}* added to {escape_markdown_v2(gateway_network)}\n\n"
-            "⚠️ _Restart Gateway for changes to take effect\\._"
+            f"*{escape_markdown_v2(symbol)}* added to {escape_markdown_v2(gateway_network)}"
         )
 
         keyboard = [
@@ -3741,22 +3740,14 @@ async def handle_gecko_add_tokens(
 
     # Build result message
     if added_tokens:
-        result_msg = f"✅ *Added:* {escape_markdown_v2(', '.join(added_tokens))}\n\n"
+        result_msg = f"✅ *Added:* {escape_markdown_v2(', '.join(added_tokens))}"
     else:
-        result_msg = "ℹ️ _Tokens already in Gateway_\n\n"
+        result_msg = "ℹ️ _Tokens already in Gateway_"
 
     if errors:
-        result_msg += f"⚠️ Failed: {escape_markdown_v2(', '.join(errors))}\n\n"
+        result_msg += f"\n\n⚠️ Failed: {escape_markdown_v2(', '.join(errors))}"
 
-    result_msg += r"⚠️ _Restart Gateway for changes to take effect_"
-
-    # Add restart button
     keyboard = [
-        [
-            InlineKeyboardButton(
-                "🔄 Restart Gateway", callback_data="dex:gecko_restart_gateway"
-            )
-        ],
         [
             InlineKeyboardButton(
                 "« Back to Pool",

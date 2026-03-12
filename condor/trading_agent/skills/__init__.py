@@ -23,6 +23,8 @@ def _auto_register() -> None:
     """Import built-in Python skill modules and discover markdown templates."""
     # Core Python skills
     from . import executors  # noqa: F401
+    from . import trending_pools  # noqa: F401
+    from . import pool_candles  # noqa: F401
 
     # Discover markdown skill templates
     for md_path in _SKILLS_DIR.glob("*.md"):

@@ -1821,8 +1821,6 @@ async def handle_add_to_gateway(
     if errors:
         success_msg += f"\n⚠️ Failed: {', '.join(errors)}"
 
-    success_msg += "\n\n⚠️ Restart Gateway for changes to take effect"
-
     # Go back to pool detail
     try:
         (

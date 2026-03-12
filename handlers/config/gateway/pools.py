@@ -503,8 +503,7 @@ async def prompt_remove_pool(
                 f"➖ *Remove Pool from {connector_escaped}*\n"
                 f"Network: `{network_escaped}`\n\n"
                 "*Select a pool to remove:*\n\n"
-                f"{pools_text}\n\n"
-                "⚠️ _Restart Gateway after removing for changes to take effect\\._"
+                f"{pools_text}"
             )
             keyboard.append(
                 [InlineKeyboardButton("« Cancel", callback_data="gateway_pool_view")]
@@ -548,8 +547,7 @@ async def show_delete_pool_confirmation(
             f"Network: *{network_escaped}*\n"
             f"Type: *{pool_type_escaped}*\n"
             f"Address: `{addr_escaped}`\n\n"
-            f"⚠️ This will remove the pool from *{connector_escaped}* on *{network_escaped}*\\.\n"
-            "You will need to restart the Gateway for changes to take effect\\.\n\n"
+            f"⚠️ This will remove the pool from *{connector_escaped}* on *{network_escaped}*\\.\n\n"
             "Are you sure you want to delete this pool?"
         )
 
@@ -623,8 +621,7 @@ async def remove_pool(
         success_text = (
             f"✅ *Pool Removed*\n\n"
             f"`{addr_escaped}`\n\n"
-            f"Removed from {connector_escaped} on {network_escaped}\n\n"
-            "⚠️ _Restart Gateway for changes to take effect\\._"
+            f"Removed from {connector_escaped} on {network_escaped}"
         )
 
         keyboard = [

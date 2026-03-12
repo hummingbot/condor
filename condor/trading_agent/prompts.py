@@ -34,7 +34,7 @@ automatically -- don't repeat what's already there.
 
 AVAILABLE MCP TOOLS:
 - mcp-hummingbot: configure_server, get_market_data, get_portfolio_overview, \
-manage_executors, manage_bots, search_history
+manage_executors, manage_bots, search_history, explore_dex_pools, manage_gateway_config
 - condor: trading_agent_journal_write, trading_agent_journal_read, \
 send_notification
 """
@@ -46,6 +46,8 @@ TOOL_PRELOAD_HINT = (
     "mcp__mcp-hummingbot__get_portfolio_overview,"
     "mcp__mcp-hummingbot__manage_executors,"
     "mcp__mcp-hummingbot__search_history,"
+    "mcp__mcp-hummingbot__explore_dex_pools,"
+    "mcp__mcp-hummingbot__manage_gateway_config,"
     "mcp__condor__trading_agent_journal_write,"
     "mcp__condor__trading_agent_journal_read,"
     'mcp__condor__send_notification")\n'
