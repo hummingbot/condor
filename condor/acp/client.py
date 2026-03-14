@@ -18,7 +18,7 @@ from .jsonrpc import JSONRPCPeer
 log = logging.getLogger(__name__)
 
 ACP_COMMANDS: dict[str, str] = {
-    "claude-code": "claude-agent-acp",
+    "claude-code": "claude-code-acp",
     "gemini": "gemini --experimental-acp",
 }
 
@@ -97,6 +97,7 @@ class ACPClient:
         self._peer = JSONRPCPeer()
         self._session_id: str | None = None
         self._read_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
         self.last_usage: UsageUpdate | None = None  # Updated by non-streaming prompt()
         self._peer.register_handler("session/update", self._on_session_update)
@@ -120,6 +121,7 @@ class ACPClient:
             limit=10 * 1024 * 1024,
         )
         self._read_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         await self._peer.send_request(
             "initialize",
@@ -141,12 +143,13 @@ class ACPClient:
     async def stop(self) -> None:
         """Terminate the subprocess."""
         self._peer.cancel_all()
-        if self._read_task:
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._read_task, self._stderr_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         if self._process and self._process.returncode is None:
             self._process.terminate()
             try:
@@ -177,6 +180,22 @@ class ACPClient:
         # Subprocess died or stream ended -- unblock any consumer waiting on _event_queue
         self._peer.cancel_all()
         self._event_queue.put_nowait(PromptDone(stop_reason="disconnected"))
+
+    async def _drain_stderr(self) -> None:
+        """Read and log stderr to prevent pipe buffer from filling up and blocking the subprocess."""
+        assert self._process and self._process.stderr
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    log.debug("ACP stderr: %s", text)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("ACP stderr drain error")
 
     # --- Prompt ---
 

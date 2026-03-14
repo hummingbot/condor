@@ -120,37 +120,14 @@ def build_mcp_servers_for_session(
 
     Resolves the user's default Condor server and returns ACP-format mcpServers
     that override the static .mcp.json entries by name.
+    Always includes the condor MCP server; hummingbot is added when a valid
+    server can be resolved for the user.
     """
     from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
 
-    # Resolve which server to use (respects user preferences)
-    server_name = get_effective_server(chat_id, user_data)
-    if not server_name:
-        accessible = cm.get_accessible_servers(user_id)
-        server_name = accessible[0] if accessible else None
-
-    if not server_name:
-        return []  # Fall back to .mcp.json auto-discovery
-
-    server = cm.get_server(server_name)
-    if not server:
-        return []
-
-    api_url = f"http://{server['host']}:{server['port']}"
-
-    mcp_hummingbot = {
-        "name": "mcp-hummingbot",
-        "command": "uvx",
-        "args": ["hummingbot-mcp==1.0.2"],
-        "env": [
-            {"name": "HUMMINGBOT_API_URL", "value": api_url},
-            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
-            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
-        ],
-    }
-
+    # Condor MCP is always available (widgets, routines, notes, etc.)
     condor = {
         "name": "condor",
         "command": "uv",
@@ -159,6 +136,42 @@ def build_mcp_servers_for_session(
             {"name": "CONDOR_WIDGET_PORT", "value": str(widget_port)},
             {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
             {"name": "CONDOR_USER_ID", "value": str(user_id)},
+        ],
+    }
+
+    # Resolve which hummingbot server to use (respects user preferences)
+    server_name = get_effective_server(chat_id, user_data)
+    if not server_name:
+        accessible = cm.get_accessible_servers(user_id)
+        server_name = accessible[0] if accessible else None
+
+    if not server_name:
+        log.warning(
+            "No accessible server for user %s (chat %s) — "
+            "agent will start without mcp-hummingbot",
+            user_id, chat_id,
+        )
+        return [condor]
+
+    server = cm.get_server(server_name)
+    if not server:
+        log.warning(
+            "Server '%s' resolved for user %s but not found in servers config — "
+            "agent will start without mcp-hummingbot",
+            server_name, user_id,
+        )
+        return [condor]
+
+    api_url = f"http://{server['host']}:{server['port']}"
+
+    mcp_hummingbot = {
+        "name": "mcp-hummingbot",
+        "command": "uvx",
+        "args": ["hummingbot-mcp==1.0.4"],
+        "env": [
+            {"name": "HUMMINGBOT_API_URL", "value": api_url},
+            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
+            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
         ],
     }
 
@@ -172,26 +185,11 @@ def build_mcp_servers_for_agent(
 
     Unlike build_mcp_servers_for_session(), this resolves the server by name
     directly instead of using chat-based resolution.
+    Always includes the condor MCP server.
     """
     from config_manager import get_config_manager
 
     cm = get_config_manager()
-    server = cm.get_server(server_name)
-    if not server:
-        return []
-
-    api_url = f"http://{server['host']}:{server['port']}"
-
-    mcp_hummingbot = {
-        "name": "mcp-hummingbot",
-        "command": "uvx",
-        "args": ["hummingbot-mcp==1.0.2"],
-        "env": [
-            {"name": "HUMMINGBOT_API_URL", "value": api_url},
-            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
-            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
-        ],
-    }
 
     condor = {
         "name": "condor",
@@ -201,6 +199,28 @@ def build_mcp_servers_for_agent(
             {"name": "CONDOR_WIDGET_PORT", "value": str(widget_port)},
             {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
             {"name": "CONDOR_USER_ID", "value": str(user_id)},
+        ],
+    }
+
+    server = cm.get_server(server_name)
+    if not server:
+        log.warning(
+            "Server '%s' not found in servers config — "
+            "trading agent will start without mcp-hummingbot",
+            server_name,
+        )
+        return [condor]
+
+    api_url = f"http://{server['host']}:{server['port']}"
+
+    mcp_hummingbot = {
+        "name": "mcp-hummingbot",
+        "command": "uvx",
+        "args": ["hummingbot-mcp==1.0.4"],
+        "env": [
+            {"name": "HUMMINGBOT_API_URL", "value": api_url},
+            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
+            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
         ],
     }
 

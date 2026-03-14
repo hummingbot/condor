@@ -46,7 +46,9 @@ async def _bridge_request(request: dict) -> dict:
 
 
 @mcp.tool()
-async def send_buttons(message: str, buttons: list[list[dict]]) -> dict:
+async def send_buttons(
+    message: str, buttons: list[list[dict]], parse_mode: str | None = None
+) -> dict:
     """Send a message with an inline keyboard to the Telegram chat.
 
     Args:
@@ -54,16 +56,20 @@ async def send_buttons(message: str, buttons: list[list[dict]]) -> dict:
         buttons: A list of rows, where each row is a list of button objects
                  with "label" (display text) and "value" (returned on click).
                  Example: [[{"label": "Option A", "value": "a"}, {"label": "Option B", "value": "b"}]]
+        parse_mode: Optional Telegram parse mode: "HTML" or "MarkdownV2".
 
     Returns:
         {"selected": "<value>"} when the user clicks a button, or {"timeout": true} after 120s.
     """
-    return await _bridge_request({
+    req = {
         "method": "send_buttons",
         "chat_id": CHAT_ID,
         "message": message,
         "buttons": buttons,
-    })
+    }
+    if parse_mode:
+        req["parse_mode"] = parse_mode
+    return await _bridge_request(req)
 
 
 @mcp.tool()
@@ -89,20 +95,25 @@ async def ask_user_choice(question: str, options: list[str]) -> dict:
 
 
 @mcp.tool()
-async def send_notification(message: str) -> dict:
+async def send_notification(message: str, parse_mode: str | None = None) -> dict:
     """Send a one-way notification message to the Telegram chat (no buttons, no waiting).
 
     Args:
         message: The notification text to send.
+        parse_mode: Optional Telegram parse mode: "HTML" or "MarkdownV2".
+                    If not set, the message is sent as plain text.
 
     Returns:
         {"sent": true} on success.
     """
-    return await _bridge_request({
+    req = {
         "method": "send_notification",
         "chat_id": CHAT_ID,
         "message": message,
-    })
+    }
+    if parse_mode:
+        req["parse_mode"] = parse_mode
+    return await _bridge_request(req)
 
 
 @mcp.tool()
@@ -302,14 +313,18 @@ async def trading_agent_journal_read(
 
     Args:
         agent_id: The trading agent instance ID.
-        section: What to read: "recent" (last 10 actions),
+        section: What to read:
+                 "recent" (last 10 decisions from run snapshots),
                  "learnings" (all learnings, max 20),
-                 "state" (current state snapshot),
-                 or "full" (entire journal).
-        max_entries: Unused (kept for compatibility).
+                 "summary" (current status one-liner),
+                 "state" (alias for summary),
+                 "full" (entire journal),
+                 "runs" (list recent run snapshots),
+                 "run:N" (read specific run snapshot, e.g. "run:3").
+        max_entries: Max entries for recent/runs (default 30).
 
     Returns:
-        {"content": "<journal text>"}
+        {"content": "<journal text>"} or {"runs": [...]} for runs listing.
     """
     return await _bridge_request({
         "method": "trading_agent_journal",
@@ -356,6 +371,48 @@ async def trading_agent_journal_write(
             "risk_note": risk_note,
             "tick": tick,
         },
+    })
+
+
+@mcp.tool()
+async def manage_notes(
+    action: str,
+    key: str | None = None,
+    value: str | None = None,
+) -> dict:
+    """Manage persistent key-value notes for Condor's memory.
+
+    Use this to remember facts across sessions: client chat IDs, server aliases,
+    trading preferences, or any context the user asks you to remember.
+
+    Actions:
+    - "list": List all saved notes
+    - "get": Get a specific note (requires key)
+    - "set": Save a note (requires key and value)
+    - "delete": Delete a note (requires key)
+
+    Naming convention for keys:
+    - Use dot-separated namespaces: "server.brigado_2.group_chat_id"
+    - Common prefixes: "server.", "client.", "routine.", "trading."
+
+    Args:
+        action: The action to perform (list, get, set, delete)
+        key: The note key (required for get, set, delete)
+        value: The note value (required for set)
+
+    Returns:
+        Action-specific result dict.
+    """
+    params: dict = {"action": action}
+    if key is not None:
+        params["key"] = key
+    if value is not None:
+        params["value"] = value
+
+    return await _bridge_request({
+        "method": "manage_notes",
+        "chat_id": CHAT_ID,
+        "params": params,
     })
 
 

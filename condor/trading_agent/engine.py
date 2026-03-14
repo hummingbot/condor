@@ -18,11 +18,10 @@ from typing import Any
 
 from condor.acp.client import ACP_COMMANDS, ACPClient, TextChunk, UsageUpdate
 
-from .journal import JournalManager
+from .journal import JournalManager, next_session_number
 from .prompts import build_tick_prompt
 from .risk import RiskEngine, RiskLimits, auto_approve_with_risk_check
 from .strategy import Strategy
-from .tracker import ExecutorTracker
 from .providers import ProviderRegistry
 
 log = logging.getLogger(__name__)
@@ -50,8 +49,8 @@ class TickEngine:
     # Components (created in __post_init__)
     journal: JournalManager = field(init=False)
     risk: RiskEngine = field(init=False)
-    tracker: ExecutorTracker = field(init=False)
     provider_registry: ProviderRegistry = field(init=False)
+    session_dir: "Path | None" = field(default=None, init=False)
 
     # Runtime state
     _task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -62,14 +61,20 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self):
+        # Compute session directory from strategy slug
+        agent_dir = self.strategy.agent_dir
+        session_num = next_session_number(agent_dir)
+        self.session_dir = agent_dir / "trading_sessions" / f"session_{session_num}"
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+
         self.journal = JournalManager(
             self.agent_id,
             strategy_name=self.strategy.name,
             strategy_description=self.strategy.description,
+            session_dir=self.session_dir,
         )
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
         self.risk = RiskEngine(risk_limits)
-        self.tracker = ExecutorTracker(self.agent_id)
         self.provider_registry = ProviderRegistry()
 
     # ------------------------------------------------------------------
@@ -95,7 +100,7 @@ class TickEngine:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        self.tracker.close()
+        self.journal.close()
         _engines.pop(self.agent_id, None)
         log.info("TickEngine %s stopped", self.agent_id)
 
@@ -172,19 +177,20 @@ class TickEngine:
         }
 
         # 3. Read journal
-        journal_content = self.journal.read_recent(max_entries=30)
         learnings = self.journal.read_learnings()
+        recent_decisions = self.journal.get_recent_decisions(count=3)
+        summary = self.journal.read_summary()
 
         # 4. Get risk state
-        risk_state = self.risk.get_state(self.tracker)
+        risk_state = self.risk.get_state(self.journal)
 
         if risk_state.is_blocked:
             self.journal.append_action(
-                self.tracker.tick_count + 1,
+                self.journal.tick_count + 1,
                 "tick_blocked",
                 risk_state.block_reason,
             )
-            self.tracker.record_tick("blocked: " + risk_state.block_reason)
+            self.journal.record_tick("blocked: " + risk_state.block_reason)
             await self._notify(f"Agent {self.agent_id} blocked: {risk_state.block_reason}")
             return
 
@@ -192,14 +198,15 @@ class TickEngine:
         from .skill_loader import get_tick_skills
 
         server_creds = self._get_server_credentials()
-        next_tick = self.tracker.tick_count + 1
+        next_tick = self.journal.tick_count + 1
         skill_prompts = get_tick_skills(self.strategy.skills, self.config)
         prompt = build_tick_prompt(
             strategy=self.strategy,
             config=self.config,
             core_data=core_data_summaries,
-            journal=journal_content,
             learnings=learnings,
+            summary=summary,
+            recent_decisions=recent_decisions,
             risk_state=risk_state.to_dict(),
             server_credentials=server_creds,
             tick_number=next_tick,
@@ -254,7 +261,8 @@ class TickEngine:
             await acp_client.stop()
 
         # 7. Record tick
-        tick_num = self.tracker.record_tick(
+        tick_duration = time.time() - self._last_tick_at
+        tick_num = self.journal.record_tick(
             response_summary=response_text[:500],
             cost=cost,
         )
@@ -264,11 +272,37 @@ class TickEngine:
         skill_volume = self._last_skill_data.get("total_volume", 0.0)
         skill_executors = len(self._last_skill_data.get("executors", []))
         skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
-        self.tracker.record_snapshot(
+        self.journal.record_snapshot(
             total_pnl=skill_pnl,
             total_volume=skill_volume,
             open_count=skill_executors,
             position_size=skill_exposure,
+        )
+
+        # 9. Save run snapshot
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        self.journal.save_run_snapshot(
+            tick=tick_num,
+            timestamp=timestamp,
+            config=self.config,
+            core_data_summaries=core_data_summaries,
+            risk_state=risk_state.to_dict(),
+            learnings=learnings,
+            recent_actions=recent_decisions,
+            response_text=response_text,
+            cost=cost,
+            duration=tick_duration,
+        )
+
+        # 10. Update journal summary
+        action_brief = response_text[:100].replace("\n", " ") if response_text else "No response"
+        self.journal.write_summary(
+            tick=tick_num,
+            status="Running",
+            pnl=skill_pnl,
+            open_count=skill_executors,
+            last_action=action_brief,
         )
 
         log.info(
@@ -314,7 +348,7 @@ class TickEngine:
 
             from config_manager import get_config_manager
             cm = get_config_manager()
-            return cm.get_client(server_name)
+            return await cm.get_client(server_name)
         except Exception:
             log.exception("Failed to get API client for agent %s", self.agent_id)
             return None
@@ -341,7 +375,7 @@ class TickEngine:
 
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""
-        summary = self.tracker.get_summary()
+        summary = self.journal.get_summary_dict()
         # Prefer live skill data over tracker-parsed data
         sd = self._last_skill_data
         return {
@@ -359,4 +393,5 @@ class TickEngine:
             "last_error": self._last_error,
             "connector": self.config.get("connector_name", ""),
             "pair": self.config.get("trading_pair", ""),
+            "session_dir": str(self.session_dir) if self.session_dir else "",
         }

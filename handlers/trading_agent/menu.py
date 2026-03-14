@@ -210,40 +210,40 @@ async def show_agent_dashboard(query, context: ContextTypes.DEFAULT_TYPE, agent_
         controls,
         [
             InlineKeyboardButton("📓 Journal", callback_data=f"ta:journal:{agent_id}"),
-            InlineKeyboardButton("🔄 Refresh", callback_data=f"ta:agent:{agent_id}"),
+            InlineKeyboardButton("📊 Runs", callback_data=f"ta:runs:{agent_id}"),
         ],
-        [InlineKeyboardButton("« Back", callback_data="ta:running")],
+        [
+            InlineKeyboardButton("🔄 Refresh", callback_data=f"ta:agent:{agent_id}"),
+            InlineKeyboardButton("« Back", callback_data="ta:running"),
+        ],
     ]
 
     await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def show_agent_journal(query, context: ContextTypes.DEFAULT_TYPE, agent_id: str) -> None:
-    """Show recent journal entries for an agent."""
+    """Show living memory (learnings + summary) for an agent."""
+    from condor.trading_agent.engine import get_engine
     from condor.trading_agent.journal import JournalManager
 
-    jm = JournalManager(agent_id)
-    state = jm.read_state()
+    engine = get_engine(agent_id)
+    session_dir = engine.session_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir)
+    summary = jm.read_state()
     learnings = jm.read_learnings()
-    recent = jm.read_recent()
 
     parts = []
-    if state:
-        parts.append(f"📍 State\n{state}")
+    if summary:
+        parts.append(f"📍 Status\n{summary}")
     if learnings:
         # Show only last 5 learnings in the UI to keep it readable
         lines = [l for l in learnings.splitlines() if l.startswith("- ")]
+        total = len(lines)
         if len(lines) > 5:
             lines = lines[-5:]
-            parts.append(f"💡 Learnings (last 5 of {len(learnings.splitlines())})\n" + "\n".join(lines))
+            parts.append(f"💡 Learnings (last 5 of {total})\n" + "\n".join(lines))
         else:
             parts.append(f"💡 Learnings\n" + "\n".join(lines))
-    if recent:
-        # Show only last 5 actions in the UI
-        lines = [l for l in recent.splitlines() if l.strip()]
-        if len(lines) > 5:
-            lines = lines[-5:]
-        parts.append(f"📋 Recent Actions\n" + "\n".join(lines))
 
     text = "\n\n".join(parts) if parts else "Journal is empty."
 
@@ -254,6 +254,71 @@ async def show_agent_journal(query, context: ContextTypes.DEFAULT_TYPE, agent_id
     text = escape_markdown_v2(text)
 
     keyboard = [
-        [InlineKeyboardButton("« Back", callback_data=f"ta:agent:{agent_id}")],
+        [
+            InlineKeyboardButton("📊 Runs", callback_data=f"ta:runs:{agent_id}"),
+            InlineKeyboardButton("« Back", callback_data=f"ta:agent:{agent_id}"),
+        ],
+    ]
+    await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def show_agent_runs(query, context: ContextTypes.DEFAULT_TYPE, agent_id: str) -> None:
+    """Show list of recent run snapshots for an agent."""
+    from condor.trading_agent.engine import get_engine
+    from condor.trading_agent.journal import JournalManager
+
+    engine = get_engine(agent_id)
+    session_dir = engine.session_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir)
+    runs = jm.list_runs(limit=10)
+
+    if not runs:
+        text = "No run snapshots yet\\."
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=f"ta:agent:{agent_id}")]]
+        await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    keyboard = []
+    for run in runs:
+        # Read just the first line to get timestamp
+        content = jm.read_run_snapshot(run["tick"])
+        label = f"Tick #{run['tick']}"
+        if content:
+            import re
+            m = re.search(r"^# Tick #\d+ — (.+)$", content, re.MULTILINE)
+            if m:
+                label = f"#{run['tick']} — {m.group(1)}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"ta:run:{agent_id}:{run['tick']}")])
+
+    keyboard.append([InlineKeyboardButton("« Back", callback_data=f"ta:agent:{agent_id}")])
+
+    text = escape_markdown_v2(f"📊 Run Snapshots ({len(runs)} recent)")
+    await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def show_run_detail(query, context: ContextTypes.DEFAULT_TYPE, agent_id: str, tick: int) -> None:
+    """Show a single run snapshot detail."""
+    from condor.trading_agent.engine import get_engine
+    from condor.trading_agent.journal import JournalManager
+
+    engine = get_engine(agent_id)
+    session_dir = engine.session_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir)
+    content = jm.read_run_snapshot(tick)
+
+    if not content:
+        text = f"Run snapshot for tick #{tick} not found\\."
+        keyboard = [[InlineKeyboardButton("« Back", callback_data=f"ta:runs:{agent_id}")]]
+        await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    # Truncate for Telegram
+    if len(content) > 3500:
+        content = content[:3500] + "\n...(truncated)"
+
+    text = escape_markdown_v2(content)
+
+    keyboard = [
+        [InlineKeyboardButton("« Back to Runs", callback_data=f"ta:runs:{agent_id}")],
     ]
     await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))

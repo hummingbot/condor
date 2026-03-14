@@ -172,6 +172,7 @@ class UserPreferences(TypedDict, total=False):
     executors: ExecutorPrefs
     agent: AgentPrefs
     trading_agent: TradingAgentPrefs
+    notes: Dict[str, str]
 
 
 # ============================================
@@ -223,6 +224,7 @@ def _get_default_preferences() -> UserPreferences:
             "default_frequency_sec": 60,
             "default_risk_limits": {},
         },
+        "notes": {},
     }
 
 
@@ -865,6 +867,43 @@ def set_default_agent(user_data: Dict, agent_key: str) -> None:
         prefs["agent"] = {}
     prefs["agent"]["default_agent"] = agent_key
     logger.info(f"Set default agent to {agent_key}")
+
+
+# ============================================
+# PUBLIC API - NOTES (key-value memory for the AI agent)
+# ============================================
+
+
+def get_notes(user_data: Dict) -> Dict[str, str]:
+    """Get all notes (key-value pairs stored by the AI agent)."""
+    _migrate_legacy_data(user_data)
+    return deepcopy(user_data[USER_PREFERENCES_KEY].get("notes", {}))
+
+
+def get_note(user_data: Dict, key: str) -> Optional[str]:
+    """Get a single note by key."""
+    notes = get_notes(user_data)
+    return notes.get(key)
+
+
+def set_note(user_data: Dict, key: str, value: str) -> None:
+    """Set a note (key-value pair)."""
+    prefs = _ensure_preferences(user_data)
+    if "notes" not in prefs:
+        prefs["notes"] = {}
+    prefs["notes"][key] = value
+    logger.info(f"Set note '{key}'")
+
+
+def delete_note(user_data: Dict, key: str) -> bool:
+    """Delete a note by key. Returns True if it existed."""
+    prefs = _ensure_preferences(user_data)
+    notes = prefs.get("notes", {})
+    if key in notes:
+        del notes[key]
+        logger.info(f"Deleted note '{key}'")
+        return True
+    return False
 
 
 # ============================================

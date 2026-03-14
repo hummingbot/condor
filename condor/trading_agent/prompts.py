@@ -2,7 +2,7 @@
 
 Assembles the single prompt sent to a fresh ACP session each tick,
 combining: base rules, strategy instructions, config, risk state,
-pre-computed skill data, and recent journal entries.
+pre-computed skill data, and journal context (learnings + recent decisions).
 """
 
 from __future__ import annotations
@@ -57,8 +57,9 @@ def build_tick_prompt(
     strategy: Strategy,
     config: dict[str, Any],
     core_data: dict[str, str],
-    journal: str,
     learnings: str,
+    summary: str,
+    recent_decisions: str,
     risk_state: dict[str, Any],
     server_credentials: dict[str, str] | None = None,
     tick_number: int = 1,
@@ -108,16 +109,18 @@ def build_tick_prompt(
     sections.append("\n".join(risk_lines))
 
     # Core skill data (pre-computed)
-    for name, summary in core_data.items():
-        sections.append(f"[CORE DATA - {name}]\n{summary}")
+    for name, data_summary in core_data.items():
+        sections.append(f"[CORE DATA - {name}]\n{data_summary}")
 
     # Journal -- compact memory
     if learnings:
         sections.append(
             f"[LEARNINGS — do NOT repeat these, only add genuinely new insights]\n{learnings}"
         )
-    if journal:
-        sections.append(f"[RECENT ACTIONS — last {len(journal.splitlines())} ticks]\n{journal}")
+    if summary:
+        sections.append(f"[CURRENT STATUS]\n{summary}")
+    if recent_decisions:
+        sections.append(f"[RECENT DECISIONS — last 3 ticks]\n{recent_decisions}")
 
     # Skill prompts (rendered markdown templates)
     if skill_prompts:

@@ -98,11 +98,13 @@ class WidgetBridge:
                     chat_id=request["chat_id"],
                     message=request["message"],
                     buttons=request["buttons"],
+                    parse_mode=request.get("parse_mode"),
                 )
             elif method == "send_notification":
                 result = await self._handle_send_notification(
                     chat_id=request["chat_id"],
                     message=request["message"],
+                    parse_mode=request.get("parse_mode"),
                 )
             elif method == "manage_routines":
                 result = await self._handle_manage_routines(
@@ -141,6 +143,11 @@ class WidgetBridge:
                     user_id=request.get("user_id"),
                     params=request.get("params", {}),
                 )
+            elif method == "manage_notes":
+                result = self._handle_manage_notes(
+                    chat_id=request["chat_id"],
+                    params=request.get("params", {}),
+                )
             else:
                 result = {"error": f"Unknown method: {method}"}
 
@@ -165,7 +172,8 @@ class WidgetBridge:
     # --- Widget Handlers ---
 
     async def _handle_send_buttons(
-        self, chat_id: int, message: str, buttons: list[list[dict]]
+        self, chat_id: int, message: str, buttons: list[list[dict]],
+        parse_mode: str | None = None,
     ) -> dict:
         assert self._bot is not None
 
@@ -187,9 +195,10 @@ class WidgetBridge:
             keyboard_rows.append(kb_row)
 
         markup = InlineKeyboardMarkup(keyboard_rows)
-        sent = await self._bot.send_message(
-            chat_id=chat_id, text=message, reply_markup=markup
-        )
+        kwargs: dict = {"chat_id": chat_id, "text": message, "reply_markup": markup}
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
+        sent = await self._bot.send_message(**kwargs)
 
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[request_id] = _PendingWidget(
@@ -214,9 +223,14 @@ class WidgetBridge:
                 pass
             return {"timeout": True}
 
-    async def _handle_send_notification(self, chat_id: int, message: str) -> dict:
+    async def _handle_send_notification(
+        self, chat_id: int, message: str, parse_mode: str | None = None
+    ) -> dict:
         assert self._bot is not None
-        await self._bot.send_message(chat_id=chat_id, text=message)
+        kwargs: dict = {"chat_id": chat_id, "text": message}
+        if parse_mode:
+            kwargs["parse_mode"] = parse_mode
+        await self._bot.send_message(**kwargs)
         return {"sent": True}
 
     # --- Routines Handler ---
@@ -285,13 +299,14 @@ class WidgetBridge:
 
     async def _routine_run(self, chat_id: int, params: dict) -> dict:
         """Execute a routine once and return the result."""
-        from routines.base import get_routine
+        from routines.base import discover_routines
 
         name = params.get("name")
         if not name:
             return {"error": "name is required"}
 
-        routine = get_routine(name)
+        routines = discover_routines(force_reload=True)
+        routine = routines.get(name)
         if not routine:
             return {"error": f"Routine '{name}' not found"}
 
@@ -612,6 +627,7 @@ class WidgetBridge:
     # --- Trading Agent Journal Handler ---
 
     def _handle_trading_agent_journal(self, params: dict) -> dict:
+        from condor.trading_agent.engine import get_engine
         from condor.trading_agent.journal import JournalManager
 
         action = params.get("action", "read")
@@ -619,18 +635,33 @@ class WidgetBridge:
         if not agent_id:
             return {"error": "agent_id is required"}
 
-        jm = JournalManager(agent_id)
+        engine = get_engine(agent_id)
+        session_dir = engine.session_dir if engine else None
+        jm = JournalManager(agent_id, session_dir=session_dir)
 
         if action == "read":
             section = params.get("section", "recent")
+            max_entries = params.get("max_entries", 30)
             if section == "full":
                 return {"content": jm.read_full()}
             elif section == "learnings":
                 return {"content": jm.read_learnings()}
-            elif section == "state":
+            elif section in ("state", "summary"):
                 return {"content": jm.read_state()}
+            elif section == "runs":
+                runs = jm.list_runs(limit=max_entries)
+                return {"runs": runs}
+            elif section.startswith("run:"):
+                try:
+                    tick_num = int(section.split(":", 1)[1])
+                except (ValueError, IndexError):
+                    return {"error": "Invalid run format. Use 'run:N' where N is the tick number."}
+                content = jm.read_run_snapshot(tick_num)
+                if not content:
+                    return {"error": f"No run snapshot found for tick #{tick_num}"}
+                return {"content": content}
             else:
-                return {"content": jm.read_recent()}
+                return {"content": jm.read_recent(max_entries=max_entries)}
 
         elif action == "write":
             entry_type = params.get("entry_type", "action")
@@ -663,7 +694,7 @@ class WidgetBridge:
         store = StrategyStore()
 
         if action == "list_strategies":
-            strategies = store.list_all(user_id=user_id)
+            strategies = store.list_all()
             return {
                 "strategies": [
                     {
@@ -677,6 +708,47 @@ class WidgetBridge:
                     for s in strategies
                 ]
             }
+
+        elif action == "get_strategy":
+            strategy_id = params.get("strategy_id")
+            if not strategy_id:
+                return {"error": "strategy_id is required"}
+            s = store.get(strategy_id)
+            if not s:
+                return {"error": f"Strategy '{strategy_id}' not found"}
+            return {
+                "id": s.id,
+                "name": s.name,
+                "description": s.description,
+                "agent_key": s.agent_key,
+                "instructions": s.instructions,
+                "skills": s.skills,
+                "default_config": s.default_config,
+                "created_by": s.created_by,
+                "created_at": s.created_at,
+            }
+
+        elif action == "update_strategy":
+            strategy_id = params.get("strategy_id")
+            if not strategy_id:
+                return {"error": "strategy_id is required"}
+            s = store.get(strategy_id)
+            if not s:
+                return {"error": f"Strategy '{strategy_id}' not found"}
+            if params.get("name"):
+                s.name = params["name"]
+            if params.get("description"):
+                s.description = params["description"]
+            if params.get("instructions"):
+                s.instructions = params["instructions"]
+            if params.get("agent_key"):
+                s.agent_key = params["agent_key"]
+            if "skills" in params:
+                s.skills = params["skills"]
+            if "config" in params and params["config"]:
+                s.default_config = params["config"]
+            store.update(s)
+            return {"updated": True, "strategy_id": s.id, "name": s.name}
 
         elif action == "create_strategy":
             name = params.get("name")
@@ -830,11 +902,12 @@ class WidgetBridge:
             agent_id = params.get("agent_id")
             if not agent_id:
                 return {"error": "agent_id is required"}
-            from condor.trading_agent.tracker import ExecutorTracker
-            tracker = ExecutorTracker(agent_id)
-            content = tracker._read()
-            summary = tracker.get_summary()
-            tracker.close()
+            from condor.trading_agent.journal import JournalManager
+            engine = get_engine(agent_id)
+            session_dir = engine.session_dir if engine else None
+            jm = JournalManager(agent_id, session_dir=session_dir)
+            content = jm.read_full()
+            summary = jm.get_summary_dict()
             return {"tracker_md": content, "summary": summary}
 
         elif action == "agent_journal":
@@ -842,7 +915,9 @@ class WidgetBridge:
             if not agent_id:
                 return {"error": "agent_id is required"}
             from condor.trading_agent.journal import JournalManager
-            jm = JournalManager(agent_id)
+            engine = get_engine(agent_id)
+            session_dir = engine.session_dir if engine else None
+            jm = JournalManager(agent_id, session_dir=session_dir)
             return {
                 "recent_actions": jm.read_recent(max_entries=30),
                 "learnings": jm.read_learnings(),
@@ -856,7 +931,7 @@ class WidgetBridge:
             engine = get_engine(agent_id)
             if not engine:
                 return {"error": f"Agent '{agent_id}' not found or not running"}
-            risk_state = engine.risk.get_state(engine.tracker)
+            risk_state = engine.risk.get_state(engine.journal)
             return {
                 **risk_state.to_dict(),
                 "limits": {
@@ -937,6 +1012,45 @@ class WidgetBridge:
                 }
 
             return {"error": f"Skill or provider '{name}' not found"}
+
+        return {"error": f"Unknown action: {action}"}
+
+    # --- Notes Handler ---
+
+    def _handle_manage_notes(self, chat_id: int, params: dict) -> dict:
+        from condor.preferences import get_notes, get_note, set_note, delete_note
+
+        action = params.get("action", "list")
+        user_data = self._get_user_data(chat_id)
+
+        if action == "list":
+            return {"notes": get_notes(user_data)}
+
+        elif action == "get":
+            key = params.get("key")
+            if not key:
+                return {"error": "key is required"}
+            value = get_note(user_data, key)
+            if value is None:
+                return {"error": f"Note '{key}' not found"}
+            return {"key": key, "value": value}
+
+        elif action == "set":
+            key = params.get("key")
+            value = params.get("value")
+            if not key or value is None:
+                return {"error": "key and value are required"}
+            set_note(user_data, key, str(value))
+            return {"saved": True, "key": key, "value": str(value)}
+
+        elif action == "delete":
+            key = params.get("key")
+            if not key:
+                return {"error": "key is required"}
+            deleted = delete_note(user_data, key)
+            if not deleted:
+                return {"error": f"Note '{key}' not found"}
+            return {"deleted": True, "key": key}
 
         return {"error": f"Unknown action: {action}"}
 

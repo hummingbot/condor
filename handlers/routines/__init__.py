@@ -227,6 +227,7 @@ async def _execute_routine(
     routine_name: str,
     config_dict: dict,
     chat_id: int,
+    active_server: str | None = None,
 ) -> tuple[str, float]:
     """Execute a routine and return (result, duration)."""
     routine = get_routine(routine_name)
@@ -238,7 +239,12 @@ async def _execute_routine(
     # Prepare context for routine
     context._chat_id = chat_id
     context._instance_id = instance_id
-    context._user_data = context.application.user_data.get(chat_id, {})
+    user_data = context.application.user_data.get(chat_id, {})
+    # Inject the active server captured at creation time so routines
+    # in group chats connect to the correct server.
+    if active_server and not user_data.get("preferences", {}).get("general", {}).get("active_server"):
+        user_data.setdefault("preferences", {}).setdefault("general", {})["active_server"] = active_server
+    context._user_data = user_data
 
     try:
         config = routine.config_class(**config_dict)
@@ -258,6 +264,7 @@ async def _run_continuous_routine(
     routine_name: str,
     config_dict: dict,
     chat_id: int,
+    active_server: str | None = None,
 ) -> None:
     """Run a continuous routine as an asyncio task."""
     routine = get_routine(routine_name)
@@ -274,6 +281,9 @@ async def _run_continuous_routine(
             if chat_id not in application.user_data:
                 application.user_data[chat_id] = {}
             self._user_data = application.user_data[chat_id]
+            # Inject active server so group chats connect to the correct server
+            if active_server and not self._user_data.get("preferences", {}).get("general", {}).get("active_server"):
+                self._user_data.setdefault("preferences", {}).setdefault("general", {})["active_server"] = active_server
             self.bot = application.bot
             self.application = application
 
@@ -317,7 +327,8 @@ async def _interval_job_callback(context: CallbackContext) -> None:
         return
 
     result, duration = await _execute_routine(
-        context, instance_id, routine_name, config_dict, chat_id
+        context, instance_id, routine_name, config_dict, chat_id,
+        active_server=data.get("active_server"),
     )
 
     # Re-check instance exists after execution (may have been stopped during run)
@@ -366,7 +377,8 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     background = data.get("background", False)
 
     result, duration = await _execute_routine(
-        context, instance_id, routine_name, config_dict, chat_id
+        context, instance_id, routine_name, config_dict, chat_id,
+        active_server=data.get("active_server"),
     )
 
     # Remove one-shot instance after completion
@@ -406,7 +418,8 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     chat_id = data["chat_id"]
 
     result, duration = await _execute_routine(
-        context, instance_id, routine_name, config_dict, chat_id
+        context, instance_id, routine_name, config_dict, chat_id,
+        active_server=data.get("active_server"),
     )
 
     # Update instance state
@@ -462,6 +475,16 @@ def _create_scheduled_instance(
         "run_count": 0,
     }
 
+    # Capture the active server at creation time so routines in groups
+    # connect to the correct server (user_data is keyed by user_id,
+    # not chat_id, so group chats can't look it up later).
+    active_server = None
+    try:
+        from config_manager import get_effective_server
+        active_server = get_effective_server(chat_id, context.user_data)
+    except Exception:
+        pass
+
     job_data = {
         "instance_id": instance_id,
         "routine_name": routine_name,
@@ -469,6 +492,7 @@ def _create_scheduled_instance(
         "chat_id": chat_id,
         "msg_id": msg_id,
         "background": background,
+        "active_server": active_server,
     }
 
     stype = schedule.get("type", "once")
@@ -514,6 +538,14 @@ def _create_continuous_instance(
     """Create a continuous routine instance. Returns instance_id."""
     instance_id = _generate_instance_id()
 
+    # Capture active server at creation time (same fix as scheduled instances)
+    active_server = None
+    try:
+        from config_manager import get_effective_server
+        active_server = get_effective_server(chat_id, context.user_data)
+    except Exception:
+        pass
+
     # Store instance
     instances = _get_instances(context)
     instances[instance_id] = {
@@ -537,6 +569,7 @@ def _create_continuous_instance(
             routine_name,
             frozen_config,
             chat_id,
+            active_server=active_server,
         )
     )
     _continuous_tasks[instance_id] = task
@@ -1539,6 +1572,14 @@ async def restore_scheduled_jobs(application) -> int:
                 to_remove.append(instance_id)
                 continue
 
+            # Resolve server for this chat's routines
+            _active_server = None
+            try:
+                from config_manager import get_effective_server
+                _active_server = get_effective_server(chat_id, user_data)
+            except Exception:
+                pass
+
             # Continuous routines need to be restarted as asyncio tasks
             if stype == "continuous":
                 try:
@@ -1549,6 +1590,7 @@ async def restore_scheduled_jobs(application) -> int:
                             routine_name,
                             config_dict,
                             chat_id,
+                            active_server=_active_server,
                         )
                     )
                     _continuous_tasks[instance_id] = task
@@ -1570,6 +1612,7 @@ async def restore_scheduled_jobs(application) -> int:
                 "routine_name": routine_name,
                 "config_dict": config_dict,
                 "chat_id": chat_id,
+                "active_server": _active_server,
             }
 
             try:

@@ -6,17 +6,17 @@ executors, and writes observations back to the journal.
 """
 
 from .engine import TickEngine
-from .journal import JournalManager
+from .journal import JournalManager, get_session_dir, next_session_number
 from .risk import RiskEngine, RiskLimits
 from .strategy import Strategy, StrategyStore
-from .tracker import ExecutorTracker
 
 __all__ = [
     "TickEngine",
     "JournalManager",
+    "get_session_dir",
+    "next_session_number",
     "RiskEngine",
     "RiskLimits",
     "Strategy",
     "StrategyStore",
-    "ExecutorTracker",
 ]

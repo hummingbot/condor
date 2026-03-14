@@ -1,9 +1,11 @@
 """Trading Agent handler -- /agent_trading command and callbacks.
 
-Provides UI for managing autonomous trading agents:
-- Strategy listing, creation (via AI agent), deletion
+Starts an ACP session focused on autonomous trading agent management:
+- Strategy creation, editing, deletion
 - Agent start/stop/pause/resume
-- Dashboard with PnL, journal, config
+- Monitoring dashboards, journal, runs
+
+Also provides inline keyboard UI for quick actions via ta:* callbacks.
 """
 
 import logging
@@ -27,10 +29,152 @@ logger = logging.getLogger(__name__)
 
 @restricted
 async def trading_agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /agent_trading command."""
+    """Handle /agent_trading — start a trading-focused ACP session."""
+    # Block in group chats (same as /agent)
+    chat_type = update.effective_chat.type
+    if chat_type in ("group", "supergroup"):
+        await update.message.reply_text("Trading agent mode is only available in private chats.")
+        return
+
     clear_all_input_states(context)
-    from .menu import show_main_menu
-    await show_main_menu(update, context)
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else None
+
+    # Set agent state so messages route through agent_message_handler
+    context.user_data["agent_state"] = "active"
+    context.user_data["agent_selected"] = "claude-code"
+    context.user_data["agent_mode"] = "trading"
+
+    placeholder = await update.message.reply_text("Starting trading agent session...")
+
+    try:
+        from handlers.agents.session import get_or_create_session, destroy_session
+
+        # Destroy existing session to start fresh with trading context
+        await destroy_session(chat_id)
+
+        bot = context.bot
+
+        async def _perm_cb(tool_call, options):
+            from handlers.agents.confirmation import permission_callback
+            return await permission_callback(bot, chat_id, tool_call, options)
+
+        session = await get_or_create_session(
+            chat_id=chat_id,
+            agent_key="claude-code",
+            permission_callback=_perm_cb,
+            user_id=user_id,
+            user_data=context.user_data,
+        )
+
+        # Inject trading-focused context on top of the base context
+        trading_context = _build_trading_context()
+        if trading_context:
+            try:
+                await session.client.prompt(trading_context)
+                # Update usage from context injection
+                if session.client.last_usage:
+                    u = session.client.last_usage
+                    if u.used >= session.tokens_used:
+                        session.tokens_used = u.used
+                    session.context_window = u.size
+                    if u.cost_usd >= session.cost_usd:
+                        session.cost_usd = u.cost_usd
+            except Exception:
+                logger.warning("Failed to inject trading context for chat %d", chat_id)
+
+        await placeholder.edit_text(
+            "🤖 Trading agent mode active.\n\n"
+            "I can help you create strategies, start/stop agents, and monitor performance.\n"
+            "Ask me anything about your trading agents, or say what you want to do."
+        )
+
+    except Exception as e:
+        logger.exception("Failed to start trading agent session")
+        await placeholder.edit_text(f"Failed to start session: {e}")
+        context.user_data.pop("agent_state", None)
+        context.user_data.pop("agent_mode", None)
+
+
+def _build_trading_context() -> str:
+    """Build the trading-focused initial context prompt."""
+    from condor.trading_agent.strategy import StrategyStore
+    from condor.trading_agent.engine import get_all_engines
+
+    sections = [TRADING_SYSTEM_PROMPT]
+
+    # List existing strategies
+    store = StrategyStore()
+    strategies = store.list_all()
+    if strategies:
+        strat_lines = ["Existing strategies:"]
+        for s in strategies:
+            skills = ", ".join(s.skills) if s.skills else "none"
+            pair = s.default_config.get("trading_pair", "")
+            strat_lines.append(f"- {s.name} (id={s.id}, agent={s.agent_key}, skills={skills}, pair={pair})")
+        sections.append("\n".join(strat_lines))
+    else:
+        sections.append("No strategies exist yet. Help the user create their first one.")
+
+    # List running agents
+    engines = get_all_engines()
+    if engines:
+        agent_lines = ["Running agents:"]
+        for eid, engine in engines.items():
+            info = engine.get_info()
+            agent_lines.append(
+                f"- {info['strategy']} ({eid}): {info['status']}, "
+                f"PnL=${info['daily_pnl']:+.2f}, ticks={info['tick_count']}, "
+                f"open={info['open_executors']}"
+            )
+        sections.append("\n".join(agent_lines))
+    else:
+        sections.append("No agents are currently running.")
+
+    return "\n\n".join(sections)
+
+
+TRADING_SYSTEM_PROMPT = """\
+[System context -- do not repeat this to the user]
+You are now in TRADING AGENT mode. Your focus is on managing autonomous \
+trading agents -- creating strategies, starting agents, monitoring \
+performance, and reviewing trading decisions.
+
+WHAT YOU CAN DO:
+- Create, edit, and delete trading strategies via manage_trading_agent tool
+- Start, stop, pause, resume trading agents
+- Read agent journals and run snapshots (trading_agent_journal_read)
+- Monitor agent status, PnL, risk state
+- Review run history (decision logs per tick)
+
+WORKFLOW FOR CREATING A NEW STRATEGY:
+1. Discuss with user what they want to trade and how
+2. Use manage_trading_agent(action="create_strategy", name=..., description=..., \
+instructions=..., agent_key="claude-code") to create it
+3. Then start an agent with manage_trading_agent(action="start_agent", strategy_id=..., config={...})
+
+WORKFLOW FOR MONITORING:
+1. Use manage_trading_agent(action="list_agents") to see running agents
+2. Use manage_trading_agent(action="agent_status", agent_id=...) for detailed status
+3. Use trading_agent_journal_read(agent_id=..., section="summary") for quick status
+4. Use trading_agent_journal_read(agent_id=..., section="runs") to list run snapshots
+5. Use trading_agent_journal_read(agent_id=..., section="run:N") to see tick N detail
+
+DATA STRUCTURE:
+Each strategy has its own folder: data/trading_agents/{slug}/
+  - agent.md: strategy definition
+  - trading_sessions/session_N/: per-session data
+    - journal.md: learnings + summary + ticks + executors + snapshots
+    - runs/: per-tick snapshots (run_1.md, run_2.md, ...)
+
+RULES:
+- Be direct and concise. This is Telegram, keep messages short.
+- When showing agent status, use key: value format, not tables.
+- When the user asks to create a strategy, help them write good instructions \
+for the trading agent (the LLM that will execute ticks).
+- Always include risk limits when starting agents.
+"""
 
 
 @restricted
@@ -46,7 +190,9 @@ async def trading_agent_callback_handler(update: Update, context: ContextTypes.D
     from .menu import (
         show_agent_dashboard,
         show_agent_journal,
+        show_agent_runs,
         show_main_menu,
+        show_run_detail,
         show_running_agents,
         show_start_config,
         show_strategies,
@@ -102,6 +248,21 @@ async def trading_agent_callback_handler(update: Update, context: ContextTypes.D
     elif action.startswith("journal:"):
         agent_id = action.split(":", 1)[1]
         await show_agent_journal(query, context, agent_id)
+
+    elif action.startswith("runs:"):
+        agent_id = action.split(":", 1)[1]
+        await show_agent_runs(query, context, agent_id)
+
+    elif action.startswith("run:"):
+        # Format: run:{agent_id}:{tick}
+        parts = action.split(":", 2)
+        if len(parts) == 3:
+            agent_id = parts[1]
+            try:
+                tick = int(parts[2])
+            except ValueError:
+                return
+            await show_run_detail(query, context, agent_id, tick)
 
 
 async def trading_agent_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -179,6 +340,7 @@ async def _launch_agent(query, context, strategy_id: str) -> None:
         "config": config,
         "user_id": user_id,
         "status": "running",
+        "session_dir": str(engine.session_dir) if engine.session_dir else "",
     }
 
     clear_ta_state(context)
