@@ -184,6 +184,9 @@ async def config_callback_handler(
         await handle_api_keys_callback(update, context)
     elif query.data == "config_gateway" or query.data.startswith("gateway_"):
         await handle_gateway_callback(update, context)
+    elif query.data.startswith("vkey_"):
+        from .verify_keys import handle_verify_key_callback
+        await handle_verify_key_callback(update, context)
     elif query.data == "config_admin" or query.data.startswith("admin:"):
         from handlers.admin import admin_callback_handler
 
@@ -195,7 +198,7 @@ def get_config_callback_handler():
     """Get the callback query handler for config menu"""
     return CallbackQueryHandler(
         config_callback_handler,
-        pattern="^config_|^modify_field_|^add_server_|^api_server_|^api_key_|^gateway_|^admin:",
+        pattern="^config_|^modify_field_|^add_server_|^api_server_|^api_key_|^gateway_|^admin:|^vkey_",
     )
 
 
@@ -262,7 +265,13 @@ def get_modify_value_handler():
             await handle_server_input(update, context)
             return
 
-        # 5. Check config flows - API keys
+        # 5a. Check verification key wizard state
+        if context.user_data.get("vkey_state"):
+            from .verify_keys import handle_verify_key_input
+            await handle_verify_key_input(update, context)
+            return
+
+        # 5b. Check config flows - API keys
         if context.user_data.get("awaiting_api_key_input"):
             await handle_api_key_input(update, context)
             return

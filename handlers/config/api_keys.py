@@ -156,6 +156,13 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     ]
                 )
                 keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🌐 Verification Keys", callback_data="vkey_menu"
+                        )
+                    ]
+                )
+                keyboard.append(
                     [InlineKeyboardButton("« Close", callback_data="config_close")]
                 )
 

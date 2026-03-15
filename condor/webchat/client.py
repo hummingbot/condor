@@ -102,7 +102,7 @@ class SiteClient:
                 "token": self.token,
                 "name": name,
                 "description": description,
-                "agentKey": agent_key,
+                "agentId": agent_key,
                 "skills": skills,
                 "defaultConfig": default_config,
             })
@@ -132,3 +132,47 @@ class SiteClient:
             })
         except Exception as e:
             log.warning("Failed to mark message done: %s", e)
+
+    # ── Verification keys ────────────────────────────────────────────────────
+
+    async def add_cex_key(
+        self,
+        *,
+        exchange: str,
+        api_key: str,
+        api_secret: str,
+        label: str | None = None,
+    ) -> dict:
+        """Store a read-only CEX API key in condor-web for trade verification."""
+        r = await self._client.post("/api/keys/cex", json={
+            "token": self.token,
+            "exchange": exchange,
+            "apiKey": api_key,
+            "apiSecret": api_secret,
+            "label": label,
+        })
+        r.raise_for_status()
+        return r.json()
+
+    async def add_dex_wallet(
+        self,
+        *,
+        chain: str,
+        address: str,
+        label: str | None = None,
+    ) -> dict:
+        """Store a public DEX wallet address in condor-web for on-chain verification."""
+        r = await self._client.post("/api/keys/dex", json={
+            "token": self.token,
+            "chain": chain,
+            "address": address,
+            "label": label,
+        })
+        r.raise_for_status()
+        return r.json()
+
+    async def list_keys(self) -> dict:
+        """List stored verification keys (CEX + DEX) for this user."""
+        r = await self._client.get(f"/api/keys?token={self.token}")
+        r.raise_for_status()
+        return r.json()  # {"cex": [...], "dex": [...]}
