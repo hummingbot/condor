@@ -246,6 +246,7 @@ def register_handlers(application: Application) -> None:
         trading_agent_command,
         trading_agent_message_handler,
     )
+    from handlers.webchat import webchat_command, webtoken_command
 
     # Clear existing handlers
     application.handlers.clear()
@@ -266,6 +267,10 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
     application.add_handler(CommandHandler("agent_trading", trading_agent_command))
+
+    # Webchat commands
+    application.add_handler(CommandHandler("webtoken", webtoken_command))
+    application.add_handler(CommandHandler("webchat", webchat_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
