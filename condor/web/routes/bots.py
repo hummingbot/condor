@@ -164,15 +164,21 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                     positions = []
 
                 # Extract connector/pair from controller config or performance
+                ctrl_config = ctrl_info.get("config", {})
+                if not isinstance(ctrl_config, dict):
+                    ctrl_config = {}
                 connector = (
                     ctrl_perf.get("connector", "")
                     or ctrl_info.get("connector", "")
                     or ctrl_perf.get("connector_name", "")
+                    or ctrl_config.get("connector_name", "")
+                    or ctrl_config.get("connector", "")
                     or ""
                 )
                 trading_pair = (
                     ctrl_perf.get("trading_pair", "")
                     or ctrl_info.get("trading_pair", "")
+                    or ctrl_config.get("trading_pair", "")
                     or ""
                 )
 
@@ -193,6 +199,7 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                         volume_traded=volume,
                         close_type_counts=close_types,
                         positions_summary=positions,
+                        deployed_at=bot_runs.get(bot_name),
                     )
                 )
 

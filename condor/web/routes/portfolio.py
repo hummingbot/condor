@@ -138,6 +138,7 @@ async def get_portfolio_history(
 
     # Parse defensively — the response may be a list of snapshots or a dict with data key
     snapshots = []
+    found_key = False
     if isinstance(history, list):
         snapshots = history
     elif isinstance(history, dict):
@@ -145,11 +146,10 @@ async def get_portfolio_history(
         for key in ("data", "snapshots", "history", "points", "results"):
             if key in history and isinstance(history[key], list):
                 snapshots = history[key]
+                found_key = True
                 break
-        if not snapshots:
+        if not snapshots and not found_key:
             # Maybe the dict itself maps timestamps → portfolio states
-            # like {account: {connector: [balances]}} per timestamp
-            # Try treating top-level as timestamp-keyed
             for ts_key, snapshot_data in history.items():
                 try:
                     ts = _parse_timestamp(ts_key)
@@ -166,7 +166,9 @@ async def get_portfolio_history(
         total = snapshot.get("total_value", snapshot.get("total_usd", 0))
         if total == 0:
             # Sum token values from nested structure
-            total = _sum_snapshot_value(snapshot)
+            # API returns {timestamp, state: {account: {connector: [balances]}}}
+            state = snapshot.get("state", snapshot)
+            total = _sum_snapshot_value(state)
         if ts:
             points.append(PortfolioHistoryPoint(timestamp=_parse_timestamp(ts), total_usd=float(total)))
 

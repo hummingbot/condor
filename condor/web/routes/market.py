@@ -4,7 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from config_manager import get_config_manager
 from condor.web.auth import get_current_user
-from condor.web.models import CandleData, MarketPriceResponse, WebUser
+from condor.web.models import (
+    CandleData,
+    MarketPriceResponse,
+    OrderBookLevel,
+    OrderBookResponse,
+    TradingRuleItem,
+    TradingRulesResponse,
+    WebUser,
+)
 
 router = APIRouter(tags=["market"])
 
@@ -58,6 +66,80 @@ async def get_price(
             best_ask=float(result.get("best_ask", 0)),
         )
     raise HTTPException(status_code=502, detail="Unexpected response format")
+
+
+@router.get("/servers/{name}/market/trading-rules", response_model=TradingRulesResponse)
+async def get_trading_rules(
+    name: str,
+    connector: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from condor.server_data_service import ServerDataType, get_server_data_service
+
+    try:
+        result = await get_server_data_service().get_or_fetch(
+            name, ServerDataType.TRADING_RULES, connector_name=connector
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not isinstance(result, dict):
+        return TradingRulesResponse(connector=connector, rules=[])
+
+    rules = []
+    for pair, rule_data in result.items():
+        if isinstance(rule_data, dict):
+            rules.append(
+                TradingRuleItem(
+                    trading_pair=pair,
+                    min_order_size=float(rule_data.get("min_order_size", 0)),
+                    min_notional_size=float(rule_data.get("min_notional_size", 0)),
+                    min_price_increment=float(rule_data.get("min_price_increment", 0)),
+                    min_base_amount_increment=float(rule_data.get("min_base_amount_increment", 0)),
+                )
+            )
+    return TradingRulesResponse(connector=connector, rules=rules)
+
+
+@router.get("/servers/{name}/market/order-book", response_model=OrderBookResponse)
+async def get_order_book(
+    name: str,
+    connector: str = Query(...),
+    trading_pair: str = Query(...),
+    depth: int = Query(default=20, ge=1, le=100),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.market_data.get_order_book(
+            connector_name=connector, trading_pair=trading_pair
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    bids = []
+    asks = []
+    if isinstance(result, dict):
+        for entry in (result.get("bids") or [])[:depth]:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                bids.append(OrderBookLevel(price=float(entry[0]), amount=float(entry[1])))
+            elif isinstance(entry, dict):
+                bids.append(OrderBookLevel(price=float(entry.get("price", 0)), amount=float(entry.get("amount", entry.get("quantity", 0)))))
+        for entry in (result.get("asks") or [])[:depth]:
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                asks.append(OrderBookLevel(price=float(entry[0]), amount=float(entry[1])))
+            elif isinstance(entry, dict):
+                asks.append(OrderBookLevel(price=float(entry.get("price", 0)), amount=float(entry.get("amount", entry.get("quantity", 0)))))
+
+    return OrderBookResponse(connector=connector, trading_pair=trading_pair, bids=bids, asks=asks)
 
 
 @router.get("/servers/{name}/market/candles", response_model=list[CandleData])

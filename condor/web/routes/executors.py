@@ -70,6 +70,7 @@ async def list_executors(
                 trading_pair=config.get("trading_pair") or ex.get("trading_pair") or "",
                 side=str(config.get("side") or ex.get("side") or ""),
                 status=ex.get("status") or "",
+                close_type=str(ex.get("close_type") or ""),
                 pnl=get_executor_pnl(ex),
                 volume=get_executor_volume(ex),
                 timestamp=float(ex.get("timestamp") or 0),

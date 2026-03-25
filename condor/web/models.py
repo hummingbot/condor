@@ -107,6 +107,7 @@ class ControllerInfo(BaseModel):
     volume_traded: float = 0.0
     close_type_counts: dict[str, int] = {}
     positions_summary: list[dict[str, Any]] = []
+    deployed_at: Optional[str] = None
 
 
 class BotSummary(BaseModel):
@@ -136,6 +137,7 @@ class ExecutorInfo(BaseModel):
     trading_pair: str
     side: str = ""
     status: str = ""
+    close_type: str = ""
     pnl: float = 0.0
     volume: float = 0.0
     timestamp: float = 0.0
@@ -160,3 +162,28 @@ class MarketPriceResponse(BaseModel):
     mid_price: float
     best_bid: float = 0.0
     best_ask: float = 0.0
+
+
+class OrderBookLevel(BaseModel):
+    price: float
+    amount: float
+
+
+class OrderBookResponse(BaseModel):
+    connector: str
+    trading_pair: str
+    bids: list[OrderBookLevel]
+    asks: list[OrderBookLevel]
+
+
+class TradingRuleItem(BaseModel):
+    trading_pair: str
+    min_order_size: float = 0.0
+    min_notional_size: float = 0.0
+    min_price_increment: float = 0.0
+    min_base_amount_increment: float = 0.0
+
+
+class TradingRulesResponse(BaseModel):
+    connector: str
+    rules: list[TradingRuleItem]
