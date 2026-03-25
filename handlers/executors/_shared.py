@@ -86,22 +86,22 @@ POSITION_EXECUTOR_DEFAULTS = {
 def get_executor_type(executor: Dict[str, Any]) -> str:
     """Determine executor type from its data.
 
-    Returns: 'grid' or 'position'
+    Returns the executor type label (e.g. 'grid', 'position', 'order', 'dca', 'lp').
     """
     config = executor.get("config", executor)
     for source in (config, executor):
         ex_type = source.get("type", "")
-        if isinstance(ex_type, str):
-            if "position" in ex_type.lower():
-                return "position"
-            if "grid" in ex_type.lower():
-                return "grid"
+        if isinstance(ex_type, str) and ex_type:
+            # Strip common suffixes for a clean label
+            label = ex_type.lower().replace("_executor", "").replace("executor", "").strip("_")
+            if label:
+                return label
     # Heuristic fallback based on config fields
-    if "total_amount_quote" in config or "start_price" in config:
+    if "start_price" in config and "end_price" in config:
         return "grid"
     if "stop_loss" in config or "trailing_stop" in config:
         return "position"
-    return "grid"
+    return "unknown"
 
 
 # ============================================

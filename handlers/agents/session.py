@@ -36,6 +36,7 @@ class AgentSession:
     chat_id: int
     agent_key: str  # "claude-code", "gemini", "codex"
     client: ACPClient
+    mode: str = "condor"  # "condor", "agent_builder", "chat_with_agent"
     is_busy: bool = False
     tokens_used: int = 0
     input_tokens: int = 0
@@ -107,6 +108,7 @@ async def get_or_create_session(
     permission_callback: PermissionCallback | None = None,
     user_id: int | None = None,
     user_data: dict | None = None,
+    mode: str = "condor",
 ) -> AgentSession:
     """Get existing session or create a new one.
 
@@ -163,6 +165,7 @@ async def get_or_create_session(
         chat_id=chat_id,
         agent_key=agent_key,
         client=client,
+        mode=mode,
     )
     # Seed usage from initial prompt if available
     if client.last_usage:

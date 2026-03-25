@@ -9,11 +9,15 @@ from handlers import clear_all_input_states
 from utils.auth import restricted
 
 from ._shared import (
+    AGENT_MODES,
     AGENT_OPTIONS,
     COMPACT_CONTEXT_TEMPLATE,
     COMPACT_PROMPT_AUTO,
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
+    DEFAULT_MODE,
+    build_agent_chat_context,
+    build_trading_context,
     get_project_dir,
 )
 from .confirmation import resolve_confirmation
@@ -27,8 +31,7 @@ log = logging.getLogger(__name__)
 
 @restricted
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /agent command."""
-    # Block agent mode in group chats
+    """Handle /agent command — auto-start Condor or show active session menu."""
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
         await update.message.reply_text(
@@ -37,8 +40,20 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     clear_all_input_states(context)
-    context.user_data["agent_state"] = "active"
-    await show_agent_menu(update, context)
+
+    chat_id = update.effective_chat.id
+    session = get_session(chat_id)
+
+    if session and session.client.alive:
+        # Active session exists — show menu
+        context.user_data["agent_state"] = "active"
+        await show_agent_menu(update, context)
+    else:
+        # No session — show menu with start/settings options
+        context.user_data["agent_state"] = "active"
+        context.user_data.setdefault("agent_mode", DEFAULT_MODE)
+        context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
+        await show_agent_menu(update, context)
 
 
 @restricted
@@ -49,7 +64,6 @@ async def agent_callback_handler(
     query = update.callback_query
     await query.answer()
 
-    # Block agent mode in group chats
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
         await query.message.edit_text("Agent mode is only available in private chats.")
@@ -58,9 +72,27 @@ async def agent_callback_handler(
     data = query.data
     action = data.split(":", 1)[1] if ":" in data else data
 
-    if action.startswith("select:"):
-        agent_key = action.split(":", 1)[1]
-        await _handle_select(update, context, agent_key)
+    # Mode switching
+    if action.startswith("mode:"):
+        mode = action.split(":", 1)[1]
+        if mode == "chat_with_agent":
+            await _handle_chat_with_agent_menu(update, context)
+        else:
+            await _handle_mode_start(update, context, mode)
+    elif action.startswith("chat_target:"):
+        agent_id = action.split(":", 1)[1]
+        await _handle_mode_start(update, context, "chat_with_agent", agent_id=agent_id)
+    elif action == "switch_mode":
+        await _handle_switch_mode_menu(update, context)
+
+    # Settings
+    elif action == "settings":
+        await _handle_settings(update, context)
+    elif action.startswith("set_llm:"):
+        llm_key = action.split(":", 1)[1]
+        await _handle_set_llm(update, context, llm_key)
+
+    # Session management
     elif action == "stop":
         await _handle_stop(update, context)
     elif action == "close":
@@ -77,6 +109,8 @@ async def agent_callback_handler(
         await _handle_context_dump(update, context)
     elif action == "new":
         await _handle_new_session(update, context)
+
+    # Trade confirmations
     elif action.startswith("confirm_trade:"):
         request_id = action.split(":", 1)[1]
         resolved = resolve_confirmation(request_id, approved=True)
@@ -87,6 +121,8 @@ async def agent_callback_handler(
         resolved = resolve_confirmation(request_id, approved=False)
         text = "Rejected." if resolved else "Request expired."
         await query.message.edit_text(text)
+
+    # Widget callbacks
     elif action.startswith("w:"):
         parts = action.split(":")
         request_id, btn_idx = parts[1], int(parts[2])
@@ -97,48 +133,148 @@ async def agent_callback_handler(
             await query.message.edit_text("Session expired.")
 
 
-async def _handle_select(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, agent_key: str
+async def _handle_mode_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    mode: str,
+    agent_id: str | None = None,
 ) -> None:
-    """Start a new agent session."""
+    """Start a session in the given mode."""
     query = update.callback_query
+    message = query.message if query else update.message
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
 
-    if agent_key not in AGENT_OPTIONS:
-        await query.message.edit_text("Unknown agent.")
-        return
+    # Backward compat: treat "trading" as "agent_builder"
+    if mode == "trading":
+        mode = "agent_builder"
 
-    label = AGENT_OPTIONS[agent_key]["label"]
-    await query.message.edit_text(f"Starting {label} session...")
+    agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
+    mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
+    llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
+
+    status_text = f"Starting {mode_label} session ({llm_label})..."
+    if query:
+        await message.edit_text(status_text)
+    else:
+        message = await message.reply_text(status_text)
+
+    # Destroy existing session
+    await destroy_session(chat_id)
 
     context.user_data["agent_state"] = "active"
+    context.user_data["agent_mode"] = mode
     context.user_data["agent_selected"] = agent_key
+    if agent_id:
+        context.user_data["agent_chat_target"] = agent_id
 
     try:
         bot = context.bot
-        user_id = update.effective_user.id
 
-        # Create permission callback bound to this bot/chat
         async def _perm_cb(tool_call, options):
             from .confirmation import permission_callback
 
             return await permission_callback(bot, chat_id, tool_call, options)
 
-        await get_or_create_session(
+        session = await get_or_create_session(
             chat_id=chat_id,
             agent_key=agent_key,
             permission_callback=_perm_cb,
             user_id=user_id,
             user_data=context.user_data,
+            mode=mode,
         )
-        await query.message.edit_text(
-            f"{label} is ready. Send a message to start chatting.\n\nUse /agent to see options or any other command to exit."
+
+        # Inject mode-specific context
+        extra_context = None
+        if mode == "agent_builder":
+            extra_context = build_trading_context()
+        elif mode == "chat_with_agent" and agent_id:
+            extra_context = build_agent_chat_context(agent_id)
+
+        if extra_context:
+            try:
+                await session.client.prompt(extra_context)
+                if session.client.last_usage:
+                    u = session.client.last_usage
+                    if u.used >= session.tokens_used:
+                        session.tokens_used = u.used
+                    session.context_window = u.size
+                    if u.cost_usd >= session.cost_usd:
+                        session.cost_usd = u.cost_usd
+            except Exception:
+                log.warning("Failed to inject %s context for chat %d", mode, chat_id)
+
+        await message.edit_text(
+            f"{mode_label} is ready. Send a message to start chatting.\n\n"
+            "Use /agent to see options or any other command to exit."
         )
     except Exception as e:
         log.exception("Failed to start agent session")
-        await query.message.edit_text(f"Failed to start agent: {e}")
+        await message.edit_text(f"Failed to start agent: {e}")
         context.user_data.pop("agent_state", None)
+        context.user_data.pop("agent_mode", None)
         context.user_data.pop("agent_selected", None)
+        context.user_data.pop("agent_chat_target", None)
+
+
+async def _handle_switch_mode_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show mode selection menu."""
+    from .menu import _mode_selection_keyboard
+
+    query = update.callback_query
+    lines = ["Select a mode:\n"]
+    for key, info in AGENT_MODES.items():
+        lines.append(f"• {info['label']} — {info['description']}")
+    await query.message.edit_text(
+        "\n".join(lines), reply_markup=_mode_selection_keyboard()
+    )
+
+
+async def _handle_chat_with_agent_menu(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show list of running agents to chat with."""
+    from .menu import _running_agents_keyboard
+
+    query = update.callback_query
+    await query.message.edit_text(
+        "Select a running agent to chat with:",
+        reply_markup=_running_agents_keyboard(),
+    )
+
+
+async def _handle_settings(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show settings sub-menu with LLM picker."""
+    from .menu import _settings_keyboard
+
+    query = update.callback_query
+    current_llm = context.user_data.get("agent_llm", DEFAULT_AGENT)
+    await query.message.edit_text(
+        "Select the LLM for new sessions:",
+        reply_markup=_settings_keyboard(current_llm),
+    )
+
+
+async def _handle_set_llm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, llm_key: str
+) -> None:
+    """Update the preferred LLM."""
+    query = update.callback_query
+    if llm_key not in AGENT_OPTIONS:
+        await query.message.edit_text("Unknown LLM option.")
+        return
+
+    context.user_data["agent_llm"] = llm_key
+    label = AGENT_OPTIONS[llm_key]["label"]
+    await query.message.edit_text(
+        f"LLM set to {label}. New sessions will use this model.\n\n"
+        "Use /agent to continue."
+    )
 
 
 async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -149,6 +285,8 @@ async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     destroyed = await destroy_session(chat_id)
     context.user_data.pop("agent_state", None)
     context.user_data.pop("agent_selected", None)
+    context.user_data.pop("agent_mode", None)
+    context.user_data.pop("agent_chat_target", None)
 
     if destroyed:
         await query.message.edit_text("Agent session stopped.")
@@ -157,18 +295,12 @@ async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Close the agent menu (keep session alive if running).
-
-    Only clears agent_state if there is no live session -- otherwise
-    messages would stop routing to the agent handler while the subprocess
-    is still running.
-    """
+    """Close the agent menu (keep session alive if running)."""
     query = update.callback_query
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
 
     if not session or not session.client.alive:
-        # No live session -- safe to fully deactivate
         context.user_data.pop("agent_state", None)
 
     await query.message.delete()
@@ -252,13 +384,11 @@ async def _handle_compact(
 
     await query.message.edit_text("Compacting context...")
 
-    # Build the summary prompt
     if custom_instructions:
         prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=custom_instructions)
     else:
         prompt = COMPACT_PROMPT_AUTO
 
-    # Get summary from current session (non-streaming)
     try:
         summary = await session.client.prompt(prompt)
     except Exception as e:
@@ -270,11 +400,10 @@ async def _handle_compact(
         await query.message.edit_text("Agent returned empty summary. Compact aborted.")
         return
 
-    # Destroy old session
     agent_key = session.agent_key
+    mode = session.mode
     await destroy_session(chat_id)
 
-    # Recreate session
     try:
         user_id = update.effective_user.id
         bot = context.bot
@@ -290,13 +419,12 @@ async def _handle_compact(
             permission_callback=_perm_cb,
             user_id=user_id,
             user_data=context.user_data,
+            mode=mode,
         )
 
-        # Inject the summary as initial context
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
         await new_session.client.prompt(compact_context)
 
-        # Update usage stats from compact context injection
         if new_session.client.last_usage:
             u = new_session.client.last_usage
             if u.used >= new_session.tokens_used:
@@ -310,6 +438,7 @@ async def _handle_compact(
         await query.message.edit_text(f"Compact failed during session reset: {e}")
         context.user_data.pop("agent_state", None)
         context.user_data.pop("agent_selected", None)
+        context.user_data.pop("agent_mode", None)
         return
 
     word_count = len(summary.split())
@@ -343,7 +472,7 @@ async def _handle_compact_custom_prompt(
 async def _handle_new_session(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Destroy current session and start a fresh one."""
+    """Destroy current session and start a fresh one in the same mode."""
     query = update.callback_query
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
@@ -352,36 +481,9 @@ async def _handle_new_session(
         await query.message.edit_text("No active session.")
         return
 
-    agent_key = session.agent_key
-    label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
-
-    await destroy_session(chat_id)
-    await query.message.edit_text(f"Starting fresh {label} session...")
-
-    try:
-        user_id = update.effective_user.id
-        bot = context.bot
-
-        async def _perm_cb(tool_call, options):
-            from .confirmation import permission_callback
-
-            return await permission_callback(bot, chat_id, tool_call, options)
-
-        await get_or_create_session(
-            chat_id=chat_id,
-            agent_key=agent_key,
-            permission_callback=_perm_cb,
-            user_id=user_id,
-            user_data=context.user_data,
-        )
-        await query.message.edit_text(
-            f"Fresh {label} session ready.\n\nSend a message to start chatting."
-        )
-    except Exception as e:
-        log.exception("Failed to create new session")
-        await query.message.edit_text(f"Failed to start new session: {e}")
-        context.user_data.pop("agent_state", None)
-        context.user_data.pop("agent_selected", None)
+    mode = session.mode
+    agent_id = context.user_data.get("agent_chat_target")
+    await _handle_mode_start(update, context, mode, agent_id=agent_id)
 
 
 async def _do_compact_from_message(
@@ -397,12 +499,11 @@ async def _do_compact_from_message(
 
     if session.is_busy:
         await update.message.reply_text("Agent is busy. Wait for it to finish first.")
-        context.user_data["agent_compact_custom"] = True  # re-set state
+        context.user_data["agent_compact_custom"] = True
         return
 
     placeholder = await update.message.reply_text("Compacting context...")
 
-    # Get summary with custom instructions
     prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=instructions)
     try:
         summary = await session.client.prompt(prompt)
@@ -415,8 +516,8 @@ async def _do_compact_from_message(
         await placeholder.edit_text("Agent returned empty summary. Compact aborted.")
         return
 
-    # Destroy old session and recreate
     agent_key = session.agent_key
+    mode = session.mode
     await destroy_session(chat_id)
 
     try:
@@ -434,11 +535,11 @@ async def _do_compact_from_message(
             permission_callback=_perm_cb,
             user_id=user_id,
             user_data=context.user_data,
+            mode=mode,
         )
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
         await new_session.client.prompt(compact_context)
 
-        # Update usage stats from compact context injection
         if new_session.client.last_usage:
             u = new_session.client.last_usage
             if u.used >= new_session.tokens_used:
@@ -451,6 +552,7 @@ async def _do_compact_from_message(
         await placeholder.edit_text(f"Compact failed during session reset: {e}")
         context.user_data.pop("agent_state", None)
         context.user_data.pop("agent_selected", None)
+        context.user_data.pop("agent_mode", None)
         return
 
     word_count = len(summary.split())
@@ -462,11 +564,54 @@ async def _do_compact_from_message(
     )
 
 
+async def agent_voice_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle voice messages while agent is active — transcribe and forward as text."""
+    if context.user_data.get("agent_state") != "active":
+        return
+
+    chat_type = update.effective_chat.type
+    if chat_type in ("group", "supergroup"):
+        return
+
+    voice = update.message.voice
+    if not voice:
+        return
+
+    # Download the voice file
+    status_msg = await update.message.reply_text("🎙 Transcribing voice...")
+    try:
+        tg_file = await voice.get_file()
+        file_bytes = await tg_file.download_as_bytearray()
+
+        from utils.transcribe import transcribe_voice
+
+        text = await transcribe_voice(bytes(file_bytes))
+    except Exception as e:
+        log.exception("Voice transcription failed")
+        await status_msg.edit_text(f"Transcription failed: {e}")
+        return
+
+    if not text or not text.strip():
+        await status_msg.edit_text("Could not transcribe any speech from the voice message.")
+        return
+
+    # Show the transcribed text
+    from utils.telegram_formatters import escape_markdown_v2
+
+    escaped = escape_markdown_v2(text)
+    await status_msg.edit_text(f"🎙 _{escaped}_", parse_mode="MarkdownV2")
+
+    # Inject the transcribed text as if the user typed it
+    update.message.text = text
+    await agent_message_handler(update, context)
+
+
 async def agent_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle text messages while agent is active."""
-    # Block agent mode in group chats
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
         context.user_data.pop("agent_state", None)
@@ -483,11 +628,35 @@ async def agent_message_handler(
         await _do_compact_from_message(update, context, text)
         return
 
+    # Directive injection for Chat with Agent mode
+    mode = context.user_data.get("agent_mode", DEFAULT_MODE)
+    # Backward compat
+    if mode == "trading":
+        mode = "agent_builder"
+
+    if mode == "chat_with_agent" and text.startswith("!"):
+        agent_id = context.user_data.get("agent_chat_target")
+        if agent_id:
+            from condor.trading_agent.engine import get_engine
+
+            engine = get_engine(agent_id)
+            if engine:
+                directive = text[1:].strip()
+                engine.inject_directive(directive)
+                await update.message.reply_text(
+                    f"Directive injected for agent {agent_id}. "
+                    "It will be applied on the next tick."
+                )
+                return
+            else:
+                await update.message.reply_text(f"Agent {agent_id} is no longer running.")
+                return
+
     session = get_session(chat_id)
 
     # Auto-create session if agent_state is active but no session exists
     if not session or not session.client.alive:
-        agent_key = context.user_data.get("agent_selected", DEFAULT_AGENT)
+        agent_key = context.user_data.get("agent_llm", context.user_data.get("agent_selected", DEFAULT_AGENT))
         user_id = update.effective_user.id if update.effective_user else None
         try:
             bot = context.bot
@@ -503,7 +672,31 @@ async def agent_message_handler(
                 permission_callback=_perm_cb,
                 user_id=user_id,
                 user_data=context.user_data,
+                mode=mode,
             )
+
+            # Inject mode-specific context for non-condor modes
+            extra_context = None
+            if mode == "agent_builder":
+                extra_context = build_trading_context()
+            elif mode == "chat_with_agent":
+                target = context.user_data.get("agent_chat_target")
+                if target:
+                    extra_context = build_agent_chat_context(target)
+
+            if extra_context:
+                try:
+                    await session.client.prompt(extra_context)
+                    if session.client.last_usage:
+                        u = session.client.last_usage
+                        if u.used >= session.tokens_used:
+                            session.tokens_used = u.used
+                        session.context_window = u.size
+                        if u.cost_usd >= session.cost_usd:
+                            session.cost_usd = u.cost_usd
+                except Exception:
+                    log.warning("Failed to inject %s context for chat %d", mode, chat_id)
+
         except Exception as e:
             log.exception("Failed to create agent session")
             await update.message.reply_text(f"Failed to start agent: {e}")
@@ -543,7 +736,6 @@ async def agent_message_handler(
             message_id=placeholder.message_id,
             text=f"Agent error: {e}",
         )
-        # Destroy broken session so next message recreates it
         await destroy_session(chat_id)
         return
 

@@ -13,6 +13,164 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
 
 DEFAULT_AGENT = "claude-code"
 
+# -- Agent modes --
+
+AGENT_MODES: dict[str, dict[str, str]] = {
+    "condor": {"label": "Condor", "description": "General trading assistant"},
+    "agent_builder": {"label": "Agent Builder", "description": "Create and manage autonomous trading strategies"},
+    "chat_with_agent": {"label": "Chat with Agent", "description": "Talk to a running trading agent"},
+}
+DEFAULT_MODE = "condor"
+
+# -- Trading agent system prompt (moved from handlers/trading_agent/__init__.py) --
+
+TRADING_SYSTEM_PROMPT = """\
+[System context -- do not repeat this to the user]
+You are now in TRADING AGENT mode. Your focus is on managing autonomous \
+trading agents -- creating strategies, starting agents, monitoring \
+performance, and reviewing trading decisions.
+
+WHAT YOU CAN DO:
+- Create, edit, and delete trading strategies via manage_trading_agent tool
+- Start, stop, pause, resume trading agents
+- Read agent journals and run snapshots (trading_agent_journal_read)
+- Monitor agent status, PnL, risk state
+- Review run history (decision logs per tick)
+
+WORKFLOW FOR CREATING A NEW STRATEGY:
+1. Discuss with user what they want to trade and how
+2. Use manage_trading_agent(action="create_strategy", name=..., description=..., \
+instructions=..., agent_key="claude-code") to create it
+3. Then start an agent with manage_trading_agent(action="start_agent", strategy_id=..., config={...})
+
+WORKFLOW FOR MONITORING:
+1. Use manage_trading_agent(action="list_agents") to see running agents
+2. Use manage_trading_agent(action="agent_status", agent_id=...) for detailed status
+3. Use trading_agent_journal_read(agent_id=..., section="summary") for quick status
+4. Use trading_agent_journal_read(agent_id=..., section="runs") to list run snapshots
+5. Use trading_agent_journal_read(agent_id=..., section="run:N") to see tick N detail
+
+DATA STRUCTURE:
+Each strategy has its own folder: data/trading_agents/{slug}/
+  - agent.md: strategy definition
+  - trading_sessions/session_N/: per-session data
+    - journal.md: learnings + summary + ticks + executors + snapshots
+    - runs/: per-tick snapshots (run_1.md, run_2.md, ...)
+
+RULES:
+- Be direct and concise. This is Telegram, keep messages short.
+- When showing agent status, use key: value format, not tables.
+- When the user asks to create a strategy, help them write good instructions \
+for the trading agent (the LLM that will execute ticks).
+- Always include risk limits when starting agents.
+"""
+
+# -- Agent Chat prompts --
+
+AGENT_CHAT_SYSTEM_PROMPT = """\
+[System context -- do not repeat this to the user]
+You are chatting about a specific running trading agent. You have full context \
+about its strategy, journal, learnings, and recent decisions.
+
+You can help the user:
+- Understand what the agent is doing and why
+- Review recent decisions and performance
+- Suggest adjustments to the strategy
+- Inject directives (user will prefix with !) that get included in the next tick
+
+Keep answers concise. Use key: value format, not tables.
+"""
+
+AGENT_CHAT_DIRECTIVE_PROMPT = """\
+USER DIRECTIVE (injected by the user, apply on next tick):
+{directive}
+"""
+
+
+def build_trading_context() -> str:
+    """Build the trading-focused initial context prompt."""
+    from condor.trading_agent.strategy import StrategyStore
+    from condor.trading_agent.engine import get_all_engines
+
+    sections = [TRADING_SYSTEM_PROMPT]
+
+    # List existing strategies
+    store = StrategyStore()
+    strategies = store.list_all()
+    if strategies:
+        strat_lines = ["Existing strategies:"]
+        for s in strategies:
+            skills = ", ".join(s.skills) if s.skills else "none"
+            pair = s.default_config.get("trading_pair", "")
+            strat_lines.append(f"- {s.name} (id={s.id}, agent={s.agent_key}, skills={skills}, pair={pair})")
+        sections.append("\n".join(strat_lines))
+    else:
+        sections.append("No strategies exist yet. Help the user create their first one.")
+
+    # List running agents
+    engines = get_all_engines()
+    if engines:
+        agent_lines = ["Running agents:"]
+        for eid, engine in engines.items():
+            info = engine.get_info()
+            agent_lines.append(
+                f"- {info['strategy']} ({eid}): {info['status']}, "
+                f"PnL=${info['daily_pnl']:+.2f}, ticks={info['tick_count']}, "
+                f"open={info['open_executors']}"
+            )
+        sections.append("\n".join(agent_lines))
+    else:
+        sections.append("No agents are currently running.")
+
+    return "\n\n".join(sections)
+
+
+def build_agent_chat_context(agent_id: str) -> str:
+    """Build context for chatting with a specific running agent."""
+    from condor.trading_agent.engine import get_engine
+
+    engine = get_engine(agent_id)
+    if not engine:
+        return f"Agent {agent_id} is not currently running."
+
+    sections = [AGENT_CHAT_SYSTEM_PROMPT]
+
+    # Strategy info
+    s = engine.strategy
+    sections.append(
+        f"Strategy: {s.name}\n"
+        f"Description: {s.description or 'N/A'}\n"
+        f"Skills: {', '.join(s.skills) if s.skills else 'none'}"
+    )
+
+    # Agent status
+    info = engine.get_info()
+    sections.append(
+        f"Agent ID: {agent_id}\n"
+        f"Status: {info['status']}\n"
+        f"Ticks: {info['tick_count']}\n"
+        f"Daily PnL: ${info['daily_pnl']:+.2f}\n"
+        f"Open executors: {info['open_executors']}\n"
+        f"Exposure: ${info.get('total_exposure', 0):,.2f}"
+    )
+
+    # Journal learnings
+    learnings = engine.journal.read_learnings()
+    if learnings:
+        sections.append(f"Learnings:\n{learnings}")
+
+    # Summary
+    summary = engine.journal.read_summary()
+    if summary:
+        sections.append(f"Summary:\n{summary}")
+
+    # Recent decisions
+    recent = engine.journal.get_recent_decisions(count=5)
+    if recent:
+        sections.append("Recent decisions:\n" + "\n".join(f"- {d}" for d in recent))
+
+    return "\n\n".join(sections)
+
 # -- Compact prompt templates --
 
 COMPACT_PROMPT_AUTO = (
@@ -127,7 +285,7 @@ def build_mcp_servers_for_session(
 
     cm = get_config_manager()
 
-    # Condor MCP is always available (widgets, routines, notes, etc.)
+    # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
     condor = {
         "name": "condor",
         "command": "uv",
@@ -166,8 +324,8 @@ def build_mcp_servers_for_session(
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
-        "command": "uvx",
-        "args": ["hummingbot-mcp==1.0.4"],
+        "command": "uv",
+        "args": ["run", "python", "-m", "hummingbot_mcp"],
         "env": [
             {"name": "HUMMINGBOT_API_URL", "value": api_url},
             {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
@@ -215,8 +373,8 @@ def build_mcp_servers_for_agent(
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
-        "command": "uvx",
-        "args": ["hummingbot-mcp==1.0.4"],
+        "command": "uv",
+        "args": ["run", "python", "-m", "hummingbot_mcp"],
         "env": [
             {"name": "HUMMINGBOT_API_URL", "value": api_url},
             {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},

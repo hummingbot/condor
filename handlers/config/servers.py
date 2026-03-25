@@ -451,13 +451,8 @@ async def set_default_server(
         invalidate_cache(context.user_data, "all")
         context.user_data["_current_server"] = server_name
 
-        # Invalidate DataManager cache for this user
-        user_id = query.from_user.id
-        try:
-            from condor.data_manager import get_data_manager
-            get_data_manager().invalidate_server(user_id)
-        except Exception:
-            pass
+        # Note: DataManager uses server-scoped sessions, no need to invalidate
+        # when switching servers — data is shared per-server, not per-user
 
         await query.answer(f"✅ Set {server_name} as your default server")
         await show_server_details(query, context, server_name)
@@ -528,10 +523,10 @@ async def delete_server(
             # Invalidate cache if we deleted the server that was in use
             if was_current:
                 invalidate_cache(context.user_data, "all")
-                # Also invalidate DataManager
+                # Also invalidate SDS (server-scoped)
                 try:
-                    from condor.data_manager import get_data_manager
-                    get_data_manager().invalidate_server(user_id)
+                    from condor.server_data_service import get_server_data_service
+                    get_server_data_service().invalidate_server(server_name)
                 except Exception:
                     pass
                 logger.info(

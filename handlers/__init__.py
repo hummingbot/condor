@@ -142,6 +142,9 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("agent_state", None)
     context.user_data.pop("agent_selected", None)
     context.user_data.pop("agent_compact_custom", None)
+    context.user_data.pop("agent_mode", None)
+    context.user_data.pop("agent_chat_target", None)
+    # Note: agent_llm is NOT cleared (persistent user preference)
 
     # Routines states
     context.user_data.pop("routines_state", None)
@@ -173,13 +176,13 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("executor_chart_interval", None)
     context.user_data.pop("executor_wizard_type", None)
 
-    # Clear DataManager context (resets active TTLs to idle)
+    # Clear SDS subscriptions for this user (resets active polling)
     user_id = context.user_data.get("_user_id")
     if user_id:
         try:
-            from condor.data_manager import dm_clear_context
+            from condor.server_data_service import get_server_data_service
 
-            dm_clear_context(user_id)
+            get_server_data_service().unsubscribe_all(f"tg_trade_{user_id}")
         except Exception:
             pass
 

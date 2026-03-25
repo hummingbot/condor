@@ -15,13 +15,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config_manager import get_client
-from condor.data_manager import (
-    DataType,
-    dm_get,
-    dm_invalidate,
-    dm_set_context,
-    get_data_manager,
-)
+from condor.server_data_service import ServerDataType, get_server_data_service
 from handlers.config.user_preferences import (
     get_all_enabled_networks,
     get_clob_account,
@@ -202,15 +196,20 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = context.user_data.get("_user_id")
     if user_id:
         from handlers.config.user_preferences import get_active_server
-        dm_set_context(
-            user_id,
-            command="trade",
-            connector=params.get("connector"),
-            trading_pair=params.get("trading_pair"),
-            account=get_clob_account(context.user_data),
-            server_name=get_active_server(context.user_data),
-            chat_id=update.effective_chat.id if update.effective_chat else 0,
-        )
+        server = get_active_server(context.user_data)
+        if server:
+            sds = get_server_data_service()
+            sub_id = f"tg_trade_{user_id}"
+            connector = params.get("connector", "")
+            pair = params.get("trading_pair", "")
+            account = get_clob_account(context.user_data)
+            # Subscribe to relevant data types for active trading
+            import asyncio
+            asyncio.ensure_future(sds.subscribe(server, ServerDataType.PRICES, sub_id, interval=3, connector_name=connector, trading_pair=pair))
+            asyncio.ensure_future(sds.subscribe(server, ServerDataType.ACTIVE_ORDERS, sub_id, interval=10, limit="5"))
+            asyncio.ensure_future(sds.subscribe(server, ServerDataType.TRADING_RULES, sub_id, interval=300, connector_name=connector))
+            if "perpetual" in (connector or "").lower():
+                asyncio.ensure_future(sds.subscribe(server, ServerDataType.POSITIONS, sub_id, interval=10, connector_name=connector))
 
     await show_trade_menu(update, context)
 
@@ -223,11 +222,14 @@ async def handle_trade_refresh(
     if query:
         await query.answer("Refreshing...")
 
-    # Invalidate both old cache and DataManager
+    # Invalidate both old cache and SDS
     invalidate_cache(context.user_data, "balances", "orders", "positions")
-    user_id = context.user_data.get("_user_id")
-    if user_id:
-        dm_invalidate(user_id, "cex_balances", "cex_orders", "cex_positions", "cex_prices")
+    from handlers.config.user_preferences import get_active_server
+    server = get_active_server(context.user_data)
+    if server:
+        sds = get_server_data_service()
+        sds.invalidate(server, ServerDataType.PORTFOLIO, ServerDataType.ACTIVE_ORDERS,
+                        ServerDataType.POSITIONS, ServerDataType.PRICES)
 
     await handle_trade(update, context)
 
@@ -564,20 +566,18 @@ async def show_trade_menu(
         except Exception:
             pass
 
-    # Try to get cached data -- prefer DataManager, fall back to old cache
-    user_id = context.user_data.get("_user_id")
-    dm = get_data_manager()
-    dm_session = dm.get_session(user_id) if user_id else None
+    # Try to get cached data from SDS (server-scoped), fall back to old cache
+    sds = get_server_data_service()
 
-    if dm_session:
-        balances = dm_session.get(f"cex_balances:{account}", DataType.CEX_BALANCES)
+    if server_name:
+        balances = sds.get(server_name, ServerDataType.PORTFOLIO, account_name=account)
         positions = (
-            dm_session.get(f"cex_positions:{connector}", DataType.CEX_POSITIONS)
+            sds.get(server_name, ServerDataType.POSITIONS, connector_name=connector)
             if is_perpetual else None
         )
-        orders = dm_session.get("cex_orders:5", DataType.CEX_ACTIVE_ORDERS)
-        trading_rules = dm_session.get(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES)
-        current_price = dm_session.get(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES)
+        orders = sds.get(server_name, ServerDataType.ACTIVE_ORDERS, limit="5")
+        trading_rules = sds.get(server_name, ServerDataType.TRADING_RULES, connector_name=connector)
+        current_price = sds.get(server_name, ServerDataType.PRICES, connector_name=connector, trading_pair=trading_pair)
     else:
         balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
         positions = (
@@ -666,20 +666,20 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
     account = get_clob_account(context.user_data)
     is_perpetual = _is_perpetual_connector(connector)
 
-    # Get all cached data -- prefer DataManager, fall back to old cache
-    user_id = context.user_data.get("_user_id")
-    dm = get_data_manager()
-    dm_session = dm.get_session(user_id) if user_id else None
+    # Get all cached data from SDS (server-scoped), fall back to old cache
+    from handlers.config.user_preferences import get_active_server
+    server = get_active_server(context.user_data)
+    sds = get_server_data_service()
 
-    if dm_session:
-        balances = dm_session.get(f"cex_balances:{account}", DataType.CEX_BALANCES)
+    if server:
+        balances = sds.get(server, ServerDataType.PORTFOLIO, account_name=account)
         positions = (
-            dm_session.get(f"cex_positions:{connector}", DataType.CEX_POSITIONS)
+            sds.get(server, ServerDataType.POSITIONS, connector_name=connector)
             if is_perpetual else None
         )
-        orders = dm_session.get("cex_orders:5", DataType.CEX_ACTIVE_ORDERS)
-        trading_rules = dm_session.get(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES)
-        current_price = dm_session.get(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES)
+        orders = sds.get(server, ServerDataType.ACTIVE_ORDERS, limit="5")
+        trading_rules = sds.get(server, ServerDataType.TRADING_RULES, connector_name=connector)
+        current_price = sds.get(server, ServerDataType.PRICES, connector_name=connector, trading_pair=trading_pair)
     else:
         balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
         positions = (
@@ -742,10 +742,10 @@ async def _fetch_trade_data_background(
         logger.warning(f"Could not get client for trade data: {e}")
         return
 
-    # Get DataManager session for dual-write
-    user_id = context.user_data.get("_user_id")
-    dm = get_data_manager()
-    dm_session = dm.get_session(user_id, chat_id or 0) if user_id else None
+    # Get SDS for dual-write (server-scoped)
+    from handlers.config.user_preferences import get_active_server
+    server = get_active_server(context.user_data)
+    sds = get_server_data_service()
 
     # Define safe fetch functions
     async def fetch_balances_safe():
@@ -755,16 +755,15 @@ async def _fetch_trade_data_background(
             result = await get_cex_balances(
                 context.user_data, client, account, refresh=force_refresh
             )
-            # Dual-write to DataManager
-            if dm_session:
-                dm_session.put(f"cex_balances:{account}", DataType.CEX_BALANCES, result)
+            # Write to SDS
+            if server:
+                sds.put(server, ServerDataType.PORTFOLIO, result, account_name=account)
             return result
         except Exception as e:
             logger.warning(f"Could not fetch balances: {e}")
-            # Cache empty dict so display shows "No balance found" instead of "Loading..."
             set_cached(context.user_data, f"cex_balances_{account}", {})
-            if dm_session:
-                dm_session.put(f"cex_balances:{account}", DataType.CEX_BALANCES, {})
+            if server:
+                sds.put(server, ServerDataType.PORTFOLIO, {}, account_name=account)
             return {}
 
     async def fetch_price_safe():
@@ -775,9 +774,8 @@ async def _fetch_trade_data_background(
             price = prices["prices"].get(trading_pair)
             if price:
                 context.user_data["current_market_price"] = price
-                # Dual-write to DataManager
-                if dm_session:
-                    dm_session.put(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES, price)
+                if server:
+                    sds.put(server, ServerDataType.PRICES, price, connector_name=connector, trading_pair=trading_pair)
             return price
         except Exception as e:
             logger.warning(f"Could not fetch price: {e}")
@@ -786,9 +784,8 @@ async def _fetch_trade_data_background(
     async def fetch_rules_safe():
         try:
             result = await get_trading_rules(context.user_data, client, connector)
-            # Dual-write to DataManager
-            if dm_session:
-                dm_session.put(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES, result)
+            if server:
+                sds.put(server, ServerDataType.TRADING_RULES, result, connector_name=connector)
             return result
         except Exception as e:
             logger.warning(f"Could not fetch rules: {e}")
@@ -798,9 +795,8 @@ async def _fetch_trade_data_background(
         try:
             orders = await _fetch_recent_orders(client, limit=5)
             set_cached(context.user_data, "recent_orders", orders)
-            # Dual-write to DataManager
-            if dm_session:
-                dm_session.put("cex_orders:5", DataType.CEX_ACTIVE_ORDERS, orders)
+            if server:
+                sds.put(server, ServerDataType.ACTIVE_ORDERS, orders, limit="5")
             return orders
         except Exception as e:
             logger.warning(f"Could not fetch orders: {e}")
@@ -874,9 +870,8 @@ async def _fetch_trade_data_background(
     async def fetch_positions_safe():
         try:
             result = await get_positions(context.user_data, client, connector)
-            # Dual-write to DataManager
-            if dm_session:
-                dm_session.put(f"cex_positions:{connector}", DataType.CEX_POSITIONS, result)
+            if server:
+                sds.put(server, ServerDataType.POSITIONS, result, connector_name=connector)
             return result
         except Exception as e:
             logger.warning(f"Could not fetch positions: {e}")
@@ -1259,18 +1254,18 @@ async def handle_trade_connector_select(
 
     # Invalidate DataManager and update context for new connector
     user_id = context.user_data.get("_user_id")
-    if user_id:
-        dm_invalidate(user_id, "cex_balances", "cex_positions", "cex_rules", "cex_prices")
-        from handlers.config.user_preferences import get_active_server
-        dm_set_context(
-            user_id,
-            command="trade",
-            connector=connector_name,
-            trading_pair=params.get("trading_pair"),
-            account=get_clob_account(context.user_data),
-            server_name=get_active_server(context.user_data),
-            chat_id=update.effective_chat.id if update.effective_chat else 0,
-        )
+    from handlers.config.user_preferences import get_active_server
+    server = get_active_server(context.user_data)
+    if server:
+        sds = get_server_data_service()
+        sds.invalidate(server, ServerDataType.PORTFOLIO, ServerDataType.POSITIONS,
+                        ServerDataType.TRADING_RULES, ServerDataType.PRICES)
+        if user_id:
+            sub_id = f"tg_trade_{user_id}"
+            asyncio.ensure_future(sds.subscribe(server, ServerDataType.PRICES, sub_id, interval=3,
+                                                 connector_name=connector_name, trading_pair=params.get("trading_pair", "")))
+            asyncio.ensure_future(sds.subscribe(server, ServerDataType.ACTIVE_ORDERS, sub_id, interval=10, limit="5"))
+            asyncio.ensure_future(sds.subscribe(server, ServerDataType.TRADING_RULES, sub_id, interval=300, connector_name=connector_name))
 
     context.user_data["cex_state"] = "trade"
 
@@ -1479,10 +1474,13 @@ async def handle_trade_execute(
         # Invalidate cache and flag for refresh on next fetch
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
-        # Also invalidate DataManager
-        exec_user_id = context.user_data.get("_user_id")
-        if exec_user_id:
-            dm_invalidate(exec_user_id, "cex_balances", "cex_orders", "cex_positions")
+        # Also invalidate DataManager (server-scoped)
+        from handlers.config.user_preferences import get_active_server
+        exec_server = get_active_server(context.user_data)
+        if exec_server:
+            get_server_data_service().invalidate(
+                exec_server, ServerDataType.PORTFOLIO, ServerDataType.ACTIVE_ORDERS, ServerDataType.POSITIONS
+            )
 
         # Save for quick repeat
         set_clob_last_order(
@@ -1555,20 +1553,20 @@ async def _update_trade_menu_after_input(
         account = get_clob_account(context.user_data)
         is_perpetual = _is_perpetual_connector(connector)
 
-        # Get cached data -- prefer DataManager, fall back to old cache
-        input_user_id = context.user_data.get("_user_id")
-        dm = get_data_manager()
-        dm_session = dm.get_session(input_user_id) if input_user_id else None
+        # Get cached data from DataManager (server-scoped), fall back to old cache
+        from handlers.config.user_preferences import get_active_server
+        input_server = get_active_server(context.user_data)
+        sds = get_server_data_service()
 
-        if dm_session:
-            balances = dm_session.get(f"cex_balances:{account}", DataType.CEX_BALANCES)
+        if input_server:
+            balances = sds.get(input_server, ServerDataType.PORTFOLIO, account_name=account)
             positions = (
-                dm_session.get(f"cex_positions:{connector}", DataType.CEX_POSITIONS)
+                sds.get(input_server, ServerDataType.POSITIONS, connector_name=connector)
                 if is_perpetual else None
             )
-            orders = dm_session.get("cex_orders:5", DataType.CEX_ACTIVE_ORDERS)
-            trading_rules = dm_session.get(f"cex_rules:{connector}", DataType.CEX_TRADING_RULES)
-            current_price = dm_session.get(f"cex_prices:{connector}:{trading_pair}", DataType.CEX_PRICES)
+            orders = sds.get(input_server, ServerDataType.ACTIVE_ORDERS, limit="5")
+            trading_rules = sds.get(input_server, ServerDataType.TRADING_RULES, connector_name=connector)
+            current_price = sds.get(input_server, ServerDataType.PRICES, connector_name=connector, trading_pair=trading_pair)
         else:
             balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
             positions = (
@@ -1696,10 +1694,13 @@ async def process_trade(
         # Invalidate cache and flag for refresh on next fetch
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
-        # Also invalidate DataManager
-        qt_user_id = context.user_data.get("_user_id")
-        if qt_user_id:
-            dm_invalidate(qt_user_id, "cex_balances", "cex_orders", "cex_positions")
+        # Also invalidate SDS (server-scoped)
+        from handlers.config.user_preferences import get_active_server
+        qt_server = get_active_server(context.user_data)
+        if qt_server:
+            get_server_data_service().invalidate(
+                qt_server, ServerDataType.PORTFOLIO, ServerDataType.ACTIVE_ORDERS, ServerDataType.POSITIONS
+            )
 
         # Update params for next trade
         context.user_data["trade_params"] = {
