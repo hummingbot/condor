@@ -1,4 +1,4 @@
-"""Prompt builder for trading agent ticks.
+"""Prompt builder for trading agent snapshots.
 
 Assembles the single prompt sent to a fresh ACP session each tick,
 combining: base rules, strategy instructions, config, risk state,
@@ -120,7 +120,7 @@ def build_tick_prompt(
     if summary:
         sections.append(f"[CURRENT STATUS]\n{summary}")
     if recent_decisions:
-        sections.append(f"[RECENT DECISIONS — last 3 ticks]\n{recent_decisions}")
+        sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
 
     # Skill prompts (rendered markdown templates)
     if skill_prompts:

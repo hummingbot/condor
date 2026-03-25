@@ -58,7 +58,7 @@ class RiskState:
 
 
 class RiskEngine:
-    """Evaluates risk state and can block ticks or individual tool calls."""
+    """Evaluates risk state and can block snapshots or individual tool calls."""
 
     def __init__(self, limits: RiskLimits | None = None):
         self.limits = limits or RiskLimits()

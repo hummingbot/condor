@@ -59,6 +59,7 @@ class TickEngine:
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
+    _pending_directives: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self):
         # Compute session directory from strategy slug
@@ -109,6 +110,11 @@ class TickEngine:
 
     def resume(self) -> None:
         self._paused = False
+
+    def inject_directive(self, text: str) -> None:
+        """Queue a user directive to be included in the next tick's prompt."""
+        self._pending_directives.append(text)
+        log.info("TickEngine %s: directive queued: %s", self.agent_id, text[:80])
 
     @property
     def is_running(self) -> bool:
@@ -214,23 +220,29 @@ class TickEngine:
             skill_prompts=skill_prompts,
         )
 
+        # Inject pending user directives
+        if self._pending_directives:
+            directives = "\n".join(f"- {d}" for d in self._pending_directives)
+            prompt += (
+                f"\n\nUSER DIRECTIVES (apply these on this tick):\n{directives}"
+            )
+            self._pending_directives.clear()
+
         # 6. Create ACP session
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
             build_mcp_servers_for_session,
             get_project_dir,
         )
-        from condor.widget_bridge import get_widget_bridge
 
-        widget_port = get_widget_bridge().port
         server_name = self.config.get("server_name")
         if server_name:
             mcp_servers = build_mcp_servers_for_agent(
-                server_name, self.user_id, self.chat_id, widget_port
+                server_name, self.user_id, self.chat_id
             )
         else:
             mcp_servers = build_mcp_servers_for_session(
-                self.user_id, self.chat_id, widget_port
+                self.user_id, self.chat_id
             )
 
         agent_cmd = ACP_COMMANDS.get(self.strategy.agent_key, ACP_COMMANDS["claude-code"])

@@ -7,9 +7,9 @@ Data is organized by strategy and session::
             agent.md            # strategy definition
             trading_sessions/
                 session_1/
-                    journal.md  # learnings + summary + ticks + executors + snapshots
+                    journal.md  # learnings + summary + snapshots + executors + snapshots
                     runs/
-                        run_1.md
+                        tick_1.md
 
 Legacy agents (pre-session structure) are stored directly under
 ``data/trading_agents/{hex_id}/`` and still work via the fallback path.
@@ -36,7 +36,7 @@ JOURNAL_TEMPLATE = """\
 ## Learnings
 
 ## Summary
-No ticks yet.
+No snapshots yet.
 
 ## Ticks
 

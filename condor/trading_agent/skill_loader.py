@@ -1,4 +1,4 @@
-"""Loads and renders Claude Code SKILL.md files for trading agent ticks."""
+"""Loads and renders Claude Code SKILL.md files for trading agent snapshots."""
 
 from __future__ import annotations
 
