@@ -17,3 +17,7 @@ if _admin_id_str:
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+WEB_PORT = int(os.environ.get("WEB_PORT", "8088"))
+
+WEB_URL = os.environ.get("WEB_URL", "").strip() or None
