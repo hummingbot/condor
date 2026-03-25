@@ -12,11 +12,14 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from condor.persistence import SafePicklePersistence
 from handlers import clear_all_input_states
 from utils.auth import restricted
+from utils.config import WEB_PORT, WEB_URL
 from utils.config import TELEGRAM_TOKEN
 
 # Enable logging
@@ -39,6 +42,37 @@ def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
         keyboard.append([InlineKeyboardButton("👑 Admin", callback_data="start:admin")])
     keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="start:cancel")])
     return InlineKeyboardMarkup(keyboard)
+
+
+@restricted
+async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a one-time login link for the web dashboard."""
+    from condor.web.auth import create_login_token
+
+    user = update.effective_user
+    token = create_login_token(user.id, user.username or "", user.first_name or "")
+
+    if WEB_URL:
+        base = WEB_URL.rstrip("/")
+        url = f"{base}/login?token={token}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🌐 Open Dashboard", url=url)]]
+        )
+        await update.message.reply_text(
+            "🌐 *Web Dashboard*\n\n"
+            "Tap the button below to open the dashboard\\.\n"
+            "_Link valid for 5 minutes\\._",
+            reply_markup=keyboard,
+            parse_mode="MarkdownV2",
+        )
+    else:
+        url = f"http://localhost:{WEB_PORT}/login?token={token}"
+        await update.message.reply_text(
+            f"🌐 *Web Dashboard*\n\n"
+            f"Open this link in your browser:\n`{url}`\n\n"
+            f"_Link valid for 5 minutes\\._",
+            parse_mode="MarkdownV2",
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -210,7 +244,14 @@ def reload_handlers():
             importlib.reload(sys.modules[module_name])
             logger.info(f"Reloaded module: {module_name}")
 
-    # Re-register DataManager fetch functions after reload (preserves in-memory cache)
+    # Re-register fetch functions after reload (preserves in-memory cache)
+    try:
+        from condor.server_data_service import register_default_fetches as sds_register
+
+        sds_register()
+    except Exception as e:
+        logger.warning(f"Failed to re-register SDS fetches: {e}")
+
     try:
         from condor.data_manager import register_default_fetches
 
@@ -223,7 +264,7 @@ def register_handlers(application: Application) -> None:
     """Register all command handlers."""
     # Import fresh versions after reload
     from handlers.admin import admin_command
-    from handlers.agents import agent_callback_handler, agent_command
+    from handlers.agents import agent_callback_handler, agent_command, agent_voice_handler
     from handlers.bots import (
         bots_callback_handler,
         bots_command,
@@ -243,7 +284,6 @@ def register_handlers(application: Application) -> None:
     from handlers.trading.router import unified_trade_callback_handler
     from handlers.trading_agent import (
         trading_agent_callback_handler,
-        trading_agent_command,
         trading_agent_message_handler,
     )
 
@@ -265,13 +305,13 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
-    application.add_handler(CommandHandler("agent_trading", trading_agent_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
     application.add_handler(CommandHandler("keys", keys_command))
     application.add_handler(CommandHandler("gateway", gateway_command))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("web", web_command))
 
     # Add callback query handler for start menu navigation
     application.add_handler(
@@ -325,6 +365,9 @@ def register_handlers(application: Application) -> None:
     # competing for the same filter.
     application.add_handler(get_modify_value_handler())
 
+    # Add voice message handler for agent transcription
+    application.add_handler(MessageHandler(filters.VOICE, agent_voice_handler))
+
     # Add document handler for file uploads (e.g., config files in /bots)
     application.add_handler(get_bots_document_handler())
 
@@ -364,11 +407,11 @@ async def post_init(application: Application) -> None:
         BotCommand("trade", "Unified trading - CEX orders and DEX swaps"),
         BotCommand("lp", "Liquidity pool management"),
         BotCommand("routines", "Run configurable Python scripts"),
-        BotCommand("agent", "Chat with AI trading assistant"),
-        BotCommand("agent_trading", "Autonomous trading agents"),
+        BotCommand("agent", "AI trading assistant with modes"),
         BotCommand("servers", "Manage Hummingbot API servers"),
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Deploy Gateway for DEX trading"),
+        BotCommand("web", "Open the web dashboard"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -389,16 +432,18 @@ async def post_init(application: Application) -> None:
 
     await restore_scheduled_jobs(application)
 
-    # Start DataManager (in-memory context-aware cache)
+    # Start ServerDataService (unified server-centric cache)
+    from condor.server_data_service import get_server_data_service
+    from condor.server_data_service import register_default_fetches as sds_register
+
+    sds_register()
+    get_server_data_service().start()
+
+    # Start DataManager (legacy, delegates to SDS)
     from condor.data_manager import get_data_manager, register_default_fetches
 
     register_default_fetches()
     get_data_manager().start()
-
-    # Start widget bridge for agent inline keyboards
-    from condor.widget_bridge import get_widget_bridge
-
-    await get_widget_bridge().start(application.bot, application)
 
     # Start agent session health monitor
     from handlers.agents.session import start_health_monitor
@@ -529,8 +574,7 @@ def main() -> None:
     persistence = get_persistence()
 
     async def post_shutdown(application: Application) -> None:
-        """Clean up agent subprocesses, bridges on shutdown."""
-        from condor.widget_bridge import get_widget_bridge
+        """Clean up agent subprocesses on shutdown."""
         from handlers.agents.session import destroy_all_sessions, stop_health_monitor
 
         await stop_health_monitor()
@@ -544,7 +588,21 @@ def main() -> None:
             except Exception:
                 pass
 
-        await get_widget_bridge().stop()
+        # Stop WebSocket manager
+        from condor.web.ws_manager import get_ws_manager
+        get_ws_manager().stop()
+
+        # Stop ServerDataService
+        from condor.server_data_service import get_server_data_service
+        get_server_data_service().stop()
+
+        # Close cached Hummingbot API clients (ConfigManager)
+        from config_manager import get_config_manager
+        await get_config_manager().close_all_clients()
+
+        # Close MCP hummingbot client
+        from hummingbot_mcp.hummingbot_client import hummingbot_client
+        await hummingbot_client.close()
 
     # Create the Application with persistence enabled
     application = (
@@ -563,8 +621,64 @@ def main() -> None:
     # Register error handler
     application.add_error_handler(error_handler)
 
-    # Run the bot
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Run TG bot + web server concurrently in a manual event loop
+    asyncio.run(_run_dual(application))
+
+
+async def _run_dual(application: Application) -> None:
+    """Run the Telegram bot and FastAPI web server concurrently."""
+    import signal
+
+    import uvicorn
+
+    from condor.web.app import create_app
+    from condor.web.ws_manager import get_ws_manager
+
+    # Initialize and start the Telegram application
+    await application.initialize()
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+    await application.start()
+
+    # Create and start the web server
+    web_app = create_app()
+    config = uvicorn.Config(
+        web_app,
+        host="0.0.0.0",
+        port=WEB_PORT,
+        log_level="info",
+        access_log=False,
+    )
+    server = uvicorn.Server(config)
+
+    # Start WebSocket manager
+    get_ws_manager().start()
+
+    logger.info("Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT)
+
+    # Handle shutdown signals
+    shutdown_event = asyncio.Event()
+
+    def _signal_handler():
+        shutdown_event.set()
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _signal_handler)
+
+    # Run uvicorn as a task
+    web_task = asyncio.create_task(server.serve())
+
+    # Wait until shutdown signal
+    await shutdown_event.wait()
+
+    logger.info("Shutting down...")
+    server.should_exit = True
+    await web_task
+
+    # Graceful Telegram shutdown
+    await application.updater.stop()
+    await application.stop()
+    await application.shutdown()
 
 
 if __name__ == "__main__":

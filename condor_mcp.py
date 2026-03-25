@@ -1,14 +1,11 @@
 """Condor MCP Server -- exposes Condor capabilities to AI agents.
 
-Provides widget tools (buttons, notifications) and Condor internals
-(routines, servers, user context) via MCP.
+Provides local-only tools for routines, servers, user context,
+trading agents, skills, and notes via MCP.
 
-Communicates with the Widget Bridge inside the Condor bot via TCP.
-Expects CONDOR_WIDGET_PORT, CONDOR_CHAT_ID, and CONDOR_USER_ID
-environment variables.
+Expects CONDOR_CHAT_ID and CONDOR_USER_ID environment variables.
 """
 
-import asyncio
 import json
 import os
 
@@ -16,213 +13,112 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("condor")
 
-WIDGET_PORT = int(os.environ.get("CONDOR_WIDGET_PORT", "0"))
 CHAT_ID = int(os.environ.get("CONDOR_CHAT_ID", "0"))
 USER_ID = int(os.environ.get("CONDOR_USER_ID", "0"))
 
-TCP_READ_LIMIT = 1_048_576  # 1 MB
-
-
-async def _bridge_request(request: dict) -> dict:
-    """Send a JSON request to the Widget Bridge and return the response."""
-    reader, writer = await asyncio.open_connection("127.0.0.1", WIDGET_PORT)
-    try:
-        writer.write(json.dumps(request).encode())
-        await writer.drain()
-        writer.write_eof()
-        data = await asyncio.wait_for(reader.read(TCP_READ_LIMIT), timeout=130)
-        return json.loads(data.decode())
-    finally:
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-
 
 # =============================================================================
-# Widget Tools (existing)
+# Routines Tools (local: list and describe only)
 # =============================================================================
 
 
-@mcp.tool()
-async def send_buttons(
-    message: str, buttons: list[list[dict]], parse_mode: str | None = None
-) -> dict:
-    """Send a message with an inline keyboard to the Telegram chat.
+def _local_manage_routines_list() -> dict:
+    from routines.base import discover_routines
 
-    Args:
-        message: The message text to display above the buttons.
-        buttons: A list of rows, where each row is a list of button objects
-                 with "label" (display text) and "value" (returned on click).
-                 Example: [[{"label": "Option A", "value": "a"}, {"label": "Option B", "value": "b"}]]
-        parse_mode: Optional Telegram parse mode: "HTML" or "MarkdownV2".
-
-    Returns:
-        {"selected": "<value>"} when the user clicks a button, or {"timeout": true} after 120s.
-    """
-    req = {
-        "method": "send_buttons",
-        "chat_id": CHAT_ID,
-        "message": message,
-        "buttons": buttons,
-    }
-    if parse_mode:
-        req["parse_mode"] = parse_mode
-    return await _bridge_request(req)
+    routines = discover_routines(force_reload=True)
+    result = []
+    for name, routine in sorted(routines.items()):
+        result.append({
+            "name": name,
+            "description": routine.description,
+            "type": "continuous" if routine.is_continuous else "one-shot",
+        })
+    return {"routines": result}
 
 
-@mcp.tool()
-async def ask_user_choice(question: str, options: list[str]) -> dict:
-    """Ask the user to choose from a list of options using inline buttons.
+def _local_manage_routines_describe(name: str) -> dict:
+    from routines.base import get_routine
 
-    This is a convenience wrapper around send_buttons that creates a single-column layout.
-
-    Args:
-        question: The question to display.
-        options: A list of option strings. Each becomes a button.
-
-    Returns:
-        {"selected": "<option text>"} when the user clicks, or {"timeout": true} after 120s.
-    """
-    buttons = [[{"label": opt, "value": opt}] for opt in options]
-    return await _bridge_request({
-        "method": "send_buttons",
-        "chat_id": CHAT_ID,
-        "message": question,
-        "buttons": buttons,
-    })
-
-
-@mcp.tool()
-async def send_notification(message: str, parse_mode: str | None = None) -> dict:
-    """Send a one-way notification message to the Telegram chat (no buttons, no waiting).
-
-    Args:
-        message: The notification text to send.
-        parse_mode: Optional Telegram parse mode: "HTML" or "MarkdownV2".
-                    If not set, the message is sent as plain text.
-
-    Returns:
-        {"sent": true} on success.
-    """
-    req = {
-        "method": "send_notification",
-        "chat_id": CHAT_ID,
-        "message": message,
-    }
-    if parse_mode:
-        req["parse_mode"] = parse_mode
-    return await _bridge_request(req)
-
-
-@mcp.tool()
-async def send_progress(message: str, percentage: int | None = None) -> dict:
-    """Send a progress notification to the Telegram chat with an optional progress bar.
-
-    Args:
-        message: The progress message to display (e.g., "Analyzing 5/12 pairs...").
-        percentage: Optional progress percentage (0-100). Shows a visual progress bar when provided.
-
-    Returns:
-        {"sent": true} on success.
-    """
-    text = message
-    if percentage is not None:
-        pct = max(0, min(100, percentage))
-        filled = pct // 5  # 20-char bar
-        bar = "\u2588" * filled + "\u2591" * (20 - filled)
-        text = f"{message}\n{bar} {pct}%"
-
-    return await _bridge_request({
-        "method": "send_notification",
-        "chat_id": CHAT_ID,
-        "message": text,
-    })
-
-
-@mcp.tool()
-async def get_session_info() -> dict:
-    """Get information about the current Telegram session.
-
-    Returns:
-        A dict with chat_id, widget_port, and connected status.
-    """
-    connected = False
-    if WIDGET_PORT:
-        try:
-            reader, writer = await asyncio.open_connection("127.0.0.1", WIDGET_PORT)
-            writer.close()
-            await writer.wait_closed()
-            connected = True
-        except Exception:
-            pass
-
+    routine = get_routine(name)
+    if not routine:
+        return {"error": f"Routine '{name}' not found"}
+    fields = routine.get_fields()
     return {
-        "chat_id": CHAT_ID,
-        "widget_port": WIDGET_PORT,
-        "connected": connected,
+        "name": name,
+        "description": routine.description,
+        "type": "continuous" if routine.is_continuous else "one-shot",
+        "fields": fields,
     }
-
-
-# =============================================================================
-# Routines Tools (new)
-# =============================================================================
 
 
 @mcp.tool()
 async def manage_routines(
     action: str,
     name: str | None = None,
-    config: dict | None = None,
-    schedule: dict | None = None,
-    instance_id: str | None = None,
 ) -> dict:
     """Manage Condor routines (auto-discoverable Python scripts).
 
     Actions:
     - "list": List all available routines with name, description, and type
     - "describe": Show config schema for a routine (requires name)
-    - "run": Execute a one-shot routine once and return the result (requires name, optional config overrides)
-    - "schedule": Start a scheduled/continuous routine (requires name, optional config and schedule)
-    - "list_active": List all currently running routine instances
-    - "stop": Stop a running routine instance (requires instance_id)
 
     Args:
-        action: The action to perform (list, describe, run, schedule, list_active, stop)
-        name: Routine name (required for describe, run, schedule)
-        config: Config overrides as key-value pairs (optional for run, schedule)
-        schedule: Schedule configuration (for schedule action). Examples:
-                  {"type": "once"} - run once
-                  {"type": "interval", "interval_sec": 60} - every 60 seconds
-                  {"type": "daily", "daily_time": "09:00"} - daily at 9am
-                  {"type": "continuous"} - for continuous routines
-        instance_id: Instance ID to stop (required for stop action)
+        action: The action to perform (list, describe)
+        name: Routine name (required for describe)
 
     Returns:
         Action-specific result dict.
     """
-    params = {"action": action}
-    if name is not None:
-        params["name"] = name
-    if config is not None:
-        params["config"] = config
-    if schedule is not None:
-        params["schedule"] = schedule
-    if instance_id is not None:
-        params["instance_id"] = instance_id
+    if action == "list":
+        return _local_manage_routines_list()
 
-    return await _bridge_request({
-        "method": "manage_routines",
-        "chat_id": CHAT_ID,
-        "user_id": USER_ID,
-        "params": params,
-    })
+    if action == "describe":
+        if not name:
+            return {"error": "name is required"}
+        return _local_manage_routines_describe(name)
+
+    return {"error": f"Unknown action: {action}"}
 
 
 # =============================================================================
-# Servers Tools (new)
+# Servers Tools (local: list and status only)
 # =============================================================================
+
+
+def _local_manage_servers_list() -> dict:
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+    accessible = cm.get_accessible_servers(USER_ID)
+    active_server = cm.get_chat_default_server(CHAT_ID)
+    servers = []
+    for name in accessible:
+        server = cm.get_server(name)
+        if not server:
+            continue
+        perm = cm.get_server_permission(USER_ID, name)
+        servers.append({
+            "name": name,
+            "host": server["host"],
+            "port": server["port"],
+            "permission": perm.value if perm else "unknown",
+            "is_active": name == active_server,
+        })
+    return {"servers": servers, "active_server": active_server}
+
+
+async def _local_manage_servers_status(name: str | None) -> dict:
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+    if not name:
+        name = cm.get_chat_default_server(CHAT_ID)
+        if not name:
+            return {"error": "No active server"}
+    if not cm.has_server_access(USER_ID, name):
+        return {"error": f"No access to server '{name}'"}
+    status = await cm.check_server_status(name)
+    return {"server": name, **status}
 
 
 @mcp.tool()
@@ -230,53 +126,31 @@ async def manage_servers(
     action: str,
     name: str | None = None,
 ) -> dict:
-    """Manage Hummingbot API servers (list, switch active, check status).
+    """Manage Hummingbot API servers (list, check status).
 
     Actions:
     - "list": List all accessible servers with permissions and active status
-    - "switch": Switch the active server for this chat (requires name)
     - "status": Check if a server is online (optional name, defaults to active server)
 
     Args:
-        action: The action to perform (list, switch, status)
-        name: Server name (required for switch, optional for status)
+        action: The action to perform (list, status)
+        name: Server name (optional for status)
 
     Returns:
         Action-specific result dict.
     """
-    params = {"action": action}
-    if name is not None:
-        params["name"] = name
+    if action == "list":
+        return _local_manage_servers_list()
 
-    return await _bridge_request({
-        "method": "manage_servers",
-        "chat_id": CHAT_ID,
-        "user_id": USER_ID,
-        "params": params,
-    })
+    if action == "status":
+        return await _local_manage_servers_status(name)
+
+    return {"error": f"Unknown action: {action}"}
 
 
 # =============================================================================
-# User Context Tool (new)
+# User Context Tools
 # =============================================================================
-
-
-@mcp.tool()
-async def get_session_usage() -> dict:
-    """Get current session token usage and context window stats.
-
-    Returns:
-        tokens_used: Total tokens used so far.
-        input_tokens: Cumulative input tokens (user messages + context).
-        output_tokens: Cumulative output tokens (assistant responses).
-        context_window: Total context window size.
-        percent_used: Percentage of context consumed.
-        cost_usd: Cumulative session cost in USD.
-    """
-    return await _bridge_request({
-        "method": "get_session_usage",
-        "chat_id": CHAT_ID,
-    })
 
 
 @mcp.tool()
@@ -288,19 +162,90 @@ async def get_user_context() -> dict:
         - active_server: Currently active Hummingbot server name
         - user_role: User's role (admin, user, pending, blocked)
         - is_admin: Whether the user is an admin
-        - active_routine_count: Number of running routine instances
-        - preferences: User's trading preferences (portfolio, CLOB, DEX, etc.)
     """
-    return await _bridge_request({
-        "method": "get_user_context",
-        "chat_id": CHAT_ID,
-        "user_id": USER_ID,
-    })
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+    active_server = cm.get_chat_default_server(CHAT_ID)
+    user_role = cm.get_user_role(USER_ID)
+    is_admin = cm.is_admin(USER_ID)
+
+    return {
+        "active_server": active_server,
+        "user_role": user_role.value if user_role else None,
+        "is_admin": is_admin,
+    }
 
 
 # =============================================================================
-# Trading Agent Tools
+# Trading Agent Tools (mostly local)
 # =============================================================================
+
+
+def _local_journal_read(params: dict) -> dict:
+    from condor.trading_agent.journal import JournalManager
+    from condor.trading_agent.engine import get_engine
+
+    agent_id = params.get("agent_id", "")
+    if not agent_id:
+        return {"error": "agent_id is required"}
+
+    engine = get_engine(agent_id)
+    session_dir = engine.session_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir)
+
+    section = params.get("section", "recent")
+    max_entries = params.get("max_entries", 30)
+
+    if section == "full":
+        return {"content": jm.read_full()}
+    elif section == "learnings":
+        return {"content": jm.read_learnings()}
+    elif section in ("state", "summary"):
+        return {"content": jm.read_state()}
+    elif section == "runs":
+        runs = jm.list_runs(limit=max_entries)
+        return {"runs": runs}
+    elif section.startswith("run:"):
+        try:
+            tick_num = int(section.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return {"error": "Invalid run format. Use 'run:N' where N is the tick number."}
+        content = jm.read_run_snapshot(tick_num)
+        if not content:
+            return {"error": f"No run snapshot found for tick #{tick_num}"}
+        return {"content": content}
+    else:
+        return {"content": jm.read_recent(max_entries=max_entries)}
+
+
+def _local_journal_write(params: dict) -> dict:
+    from condor.trading_agent.journal import JournalManager
+    from condor.trading_agent.engine import get_engine
+
+    agent_id = params.get("agent_id", "")
+    if not agent_id:
+        return {"error": "agent_id is required"}
+
+    engine = get_engine(agent_id)
+    session_dir = engine.session_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir)
+
+    entry_type = params.get("entry_type", "action")
+    text = params.get("text", "")
+    if not text:
+        return {"error": "text is required"}
+
+    if entry_type == "learning":
+        jm.append_learning(text)
+    elif entry_type == "state":
+        jm.write_state(text)
+    else:
+        tick = params.get("tick", 0)
+        reasoning = params.get("reasoning", "")
+        risk_note = params.get("risk_note", "")
+        jm.append_action(tick, text, reasoning, risk_note)
+    return {"written": True}
 
 
 @mcp.tool()
@@ -326,11 +271,9 @@ async def trading_agent_journal_read(
     Returns:
         {"content": "<journal text>"} or {"runs": [...]} for runs listing.
     """
-    return await _bridge_request({
-        "method": "trading_agent_journal",
-        "chat_id": CHAT_ID,
-        "params": {"action": "read", "agent_id": agent_id, "section": section, "max_entries": max_entries},
-    })
+    return _local_journal_read(
+        {"agent_id": agent_id, "section": section, "max_entries": max_entries}
+    )
 
 
 @mcp.tool()
@@ -359,18 +302,13 @@ async def trading_agent_journal_write(
     Returns:
         {"written": true}
     """
-    return await _bridge_request({
-        "method": "trading_agent_journal",
-        "chat_id": CHAT_ID,
-        "params": {
-            "action": "write",
-            "agent_id": agent_id,
-            "entry_type": entry_type,
-            "text": text,
-            "reasoning": reasoning,
-            "risk_note": risk_note,
-            "tick": tick,
-        },
+    return _local_journal_write({
+        "agent_id": agent_id,
+        "entry_type": entry_type,
+        "text": text,
+        "reasoning": reasoning,
+        "risk_note": risk_note,
+        "tick": tick,
     })
 
 
@@ -409,11 +347,65 @@ async def manage_notes(
     if value is not None:
         params["value"] = value
 
-    return await _bridge_request({
-        "method": "manage_notes",
-        "chat_id": CHAT_ID,
-        "params": params,
-    })
+    return _local_manage_notes(params)
+
+
+def _local_manage_notes(params: dict) -> dict:
+    """File-based notes storage."""
+    import json
+    from pathlib import Path
+
+    notes_file = Path("data") / "notes" / f"chat_{CHAT_ID}.json"
+
+    def _load() -> dict:
+        if notes_file.exists():
+            try:
+                return json.loads(notes_file.read_text())
+            except Exception:
+                return {}
+        return {}
+
+    def _save(notes: dict) -> None:
+        notes_file.parent.mkdir(parents=True, exist_ok=True)
+        notes_file.write_text(json.dumps(notes, indent=2))
+
+    action = params.get("action", "list")
+
+    if action == "list":
+        return {"notes": _load()}
+
+    elif action == "get":
+        key = params.get("key")
+        if not key:
+            return {"error": "key is required"}
+        notes = _load()
+        value = notes.get(key)
+        if value is None:
+            return {"error": f"Note '{key}' not found"}
+        return {"key": key, "value": value}
+
+    elif action == "set":
+        key = params.get("key")
+        value = params.get("value")
+        if not key or value is None:
+            return {"error": "key and value are required"}
+        notes = _load()
+        notes[key] = str(value)
+        _save(notes)
+        return {"saved": True, "key": key, "value": str(value)}
+
+    elif action == "delete":
+        key = params.get("key")
+        if not key:
+            return {"error": "key is required"}
+        notes = _load()
+        if key not in notes:
+            return {"error": f"Note '{key}' not found"}
+        del notes[key]
+        _save(notes)
+        return {"deleted": True, "key": key}
+
+    return {"error": f"Unknown action: {action}"}
 
 
 @mcp.tool()
@@ -437,49 +429,152 @@ async def manage_trading_agent(
     - "update_strategy": Update an existing strategy (requires strategy_id, plus fields to update)
     - "delete_strategy": Delete a strategy (requires strategy_id)
 
-    Actions -- Agent lifecycle:
-    - "list_agents": List running agent instances with status and PnL
-    - "start_agent": Start an agent from a strategy (requires strategy_id, optional config)
-    - "stop_agent": Stop a running agent (requires agent_id)
-    - "pause_agent": Pause a running agent (requires agent_id)
-    - "resume_agent": Resume a paused agent (requires agent_id)
-
     Actions -- Monitoring:
-    - "agent_status": Get status, PnL, tick count, risk state of an agent (requires agent_id)
     - "agent_tracker": Get the full tracker markdown (tick history, executor ledger, snapshots) (requires agent_id)
     - "agent_journal": Get recent journal entries and learnings (requires agent_id)
-    - "agent_risk": Get current risk limits and state (requires agent_id)
 
     Args:
         action: The action to perform.
-        agent_id: Agent instance ID (for agent actions).
+        agent_id: Agent instance ID (for monitoring actions).
         strategy_id: Strategy ID (for strategy actions).
         name: Strategy name (for create/update).
         description: Strategy description (for create/update).
         instructions: Strategy instructions text (for create/update).
         agent_key: Agent type "claude-code" or "gemini" (for create, default "claude-code").
         skills: List of optional skill names to enable (for create/update).
-        config: Agent config overrides (for start, or risk_limits dict).
+        config: Agent config overrides (for create/update).
 
     Returns:
         Action-specific result dict.
     """
-    params: dict = {"action": action}
-    for key, val in [
-        ("agent_id", agent_id), ("strategy_id", strategy_id),
-        ("name", name), ("description", description),
-        ("instructions", instructions), ("agent_key", agent_key),
-        ("skills", skills), ("config", config),
-    ]:
-        if val is not None:
-            params[key] = val
+    # Strategy operations work locally (file-based StrategyStore)
+    local_strategy_actions = {
+        "list_strategies", "get_strategy", "create_strategy",
+        "update_strategy", "delete_strategy",
+    }
 
-    return await _bridge_request({
-        "method": "manage_trading_agent",
-        "chat_id": CHAT_ID,
-        "user_id": USER_ID,
-        "params": params,
-    })
+    if action in local_strategy_actions:
+        return _local_manage_strategy(action, strategy_id, name, description,
+                                       instructions, agent_key, skills, config)
+
+    # Journal/monitoring that's file-based
+    if action in ("agent_tracker", "agent_journal"):
+        return _local_agent_monitoring(action, agent_id)
+
+    return {"error": f"Unknown action: {action}"}
+
+
+def _local_manage_strategy(
+    action: str, strategy_id: str | None, name: str | None,
+    description: str | None, instructions: str | None,
+    agent_key: str | None, skills: list[str] | None, config: dict | None,
+) -> dict:
+    from condor.trading_agent.strategy import StrategyStore
+
+    store = StrategyStore()
+
+    if action == "list_strategies":
+        strategies = store.list_all()
+        return {
+            "strategies": [
+                {
+                    "id": s.id,
+                    "name": s.name,
+                    "description": s.description,
+                    "agent_key": s.agent_key,
+                    "skills": s.skills,
+                    "default_config": s.default_config,
+                }
+                for s in strategies
+            ]
+        }
+
+    elif action == "get_strategy":
+        if not strategy_id:
+            return {"error": "strategy_id is required"}
+        s = store.get(strategy_id)
+        if not s:
+            return {"error": f"Strategy '{strategy_id}' not found"}
+        return {
+            "id": s.id,
+            "name": s.name,
+            "description": s.description,
+            "agent_key": s.agent_key,
+            "instructions": s.instructions,
+            "skills": s.skills,
+            "default_config": s.default_config,
+            "created_by": s.created_by,
+            "created_at": s.created_at,
+        }
+
+    elif action == "create_strategy":
+        if not name or not instructions:
+            return {"error": "name and instructions are required"}
+        strategy = store.create(
+            name=name,
+            description=description or "",
+            agent_key=agent_key or "claude-code",
+            instructions=instructions,
+            skills=skills,
+            default_config=config,
+            created_by=USER_ID,
+        )
+        return {"created": True, "strategy_id": strategy.id, "name": strategy.name}
+
+    elif action == "update_strategy":
+        if not strategy_id:
+            return {"error": "strategy_id is required"}
+        s = store.get(strategy_id)
+        if not s:
+            return {"error": f"Strategy '{strategy_id}' not found"}
+        if name:
+            s.name = name
+        if description:
+            s.description = description
+        if instructions:
+            s.instructions = instructions
+        if agent_key:
+            s.agent_key = agent_key
+        if skills is not None:
+            s.skills = skills
+        if config:
+            s.default_config = config
+        store.update(s)
+        return {"updated": True, "strategy_id": s.id, "name": s.name}
+
+    elif action == "delete_strategy":
+        if not strategy_id:
+            return {"error": "strategy_id is required"}
+        deleted = store.delete(strategy_id)
+        return {"deleted": deleted}
+
+    return {"error": f"Unknown strategy action: {action}"}
+
+
+def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
+    if not agent_id:
+        return {"error": "agent_id is required"}
+
+    from condor.trading_agent.journal import JournalManager
+    from condor.trading_agent.engine import get_engine
+
+    engine = get_engine(agent_id)
+    session_dir = engine.session_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir)
+
+    if action == "agent_tracker":
+        content = jm.read_full()
+        summary = jm.get_summary_dict()
+        return {"tracker_md": content, "summary": summary}
+
+    elif action == "agent_journal":
+        return {
+            "recent_actions": jm.read_recent(max_entries=30),
+            "learnings": jm.read_learnings(),
+            "entry_count": jm.entry_count(),
+        }
+
+    return {"error": f"Unknown monitoring action: {action}"}
 
 
 @mcp.tool()
@@ -502,18 +597,58 @@ async def manage_skills(
     Returns:
         Action-specific result dict.
     """
-    req_params: dict = {"action": action}
-    if name is not None:
-        req_params["name"] = name
-    if params is not None:
-        req_params["params"] = params
+    if action == "list":
+        return _local_manage_skills_list()
 
-    return await _bridge_request({
-        "method": "manage_skills",
-        "chat_id": CHAT_ID,
-        "user_id": USER_ID,
-        "params": req_params,
-    })
+    if action == "test":
+        if not name:
+            return {"error": "name is required"}
+        return _local_skill_test(name, params or {})
+
+    return {"error": f"Unknown action: {action}"}
+
+
+def _local_manage_skills_list() -> dict:
+    from condor.trading_agent.providers import list_providers
+    from condor.trading_agent.skill_loader import list_skills as list_skill_files
+
+    items = []
+    for p in list_providers():
+        items.append({
+            "name": p.name,
+            "is_core": p.is_core,
+            "type": "provider",
+        })
+    for s in list_skill_files():
+        items.append({
+            "name": s.name,
+            "is_core": False,
+            "type": "skill",
+            "description": s.description,
+        })
+    return {"skills": items}
+
+
+def _local_skill_test(name: str, config: dict) -> dict:
+    from condor.trading_agent.skill_loader import load_skill, _render_placeholders
+    from condor.trading_agent.providers import get_provider
+
+    # Check if it's a data provider (needs API client -- can't test locally)
+    provider = get_provider(name)
+    if provider:
+        return {"error": f"Provider '{name}' requires the Condor bot to be running for testing (needs API client)"}
+
+    # Test SKILL.md file (can render locally)
+    skill_info = load_skill(name)
+    if skill_info:
+        rendered = _render_placeholders(skill_info.body, config)
+        return {
+            "name": skill_info.name,
+            "description": skill_info.description,
+            "rendered_prompt": rendered,
+        }
+
+    return {"error": f"Skill or provider '{name}' not found"}
 
 
 if __name__ == "__main__":

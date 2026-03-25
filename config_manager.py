@@ -3,6 +3,7 @@ Unified Configuration Manager for Condor Bot.
 Manages servers, users, permissions, and settings in a single config.yml file.
 """
 
+import asyncio
 import logging
 import time
 from enum import Enum
@@ -58,6 +59,7 @@ class ConfigManager:
             {}
         )  # server_name -> (client, connect_time)
         self._client_ttl = 300  # 5 minutes
+        self._client_verify_interval = 60  # seconds between liveness checks
         self._load_config()
         self._load_audit_log()
 
@@ -334,16 +336,33 @@ class ConfigManager:
         if name not in self._data["servers"]:
             raise ValueError(f"Server '{name}' not found")
 
-        # Return cached client if fresh
+        # Return cached client if fresh and alive
         if name in self._clients:
-            client, connect_time = self._clients[name]
-            if time.time() - connect_time < self._client_ttl:
-                self._clients[name] = (client, time.time())  # Refresh
+            client, last_verified = self._clients[name]
+            if time.time() - last_verified < self._client_verify_interval:
+                # Fast path: recently verified
                 return client
+            elif time.time() - last_verified < self._client_ttl:
+                # Needs liveness check
+                try:
+                    await asyncio.wait_for(
+                        client.accounts.list_accounts(), timeout=5
+                    )
+                    self._clients[name] = (client, time.time())
+                    return client
+                except Exception:
+                    logger.warning(
+                        f"Stale connection to '{name}' detected, reconnecting"
+                    )
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
+                    del self._clients[name]
             else:
                 try:
                     await client.close()
-                except:
+                except Exception:
                     pass
                 del self._clients[name]
 
