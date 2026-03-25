@@ -246,7 +246,7 @@ class FetchSpec:
 # SERVER DATA SERVICE
 # ============================================
 
-_POLL_TICK = 1  # seconds between poll loop ticks
+_POLL_TICK = 1  # seconds between poll loop snapshots
 _CLEANUP_INTERVAL = 300  # clean stale entries every 5 min
 
 
