@@ -128,19 +128,14 @@ async def get_or_create_session(
     # Create new session
     command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
 
-    from condor.widget_bridge import get_widget_bridge
-
-    bridge = get_widget_bridge()
-
     extra_env = {
-        "CONDOR_WIDGET_PORT": str(bridge.port),
         "CONDOR_CHAT_ID": str(chat_id),
     }
 
     # Build dynamic MCP servers from user's Condor permissions
     mcp_servers: list[dict] = []
     if user_id:
-        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, bridge.port, user_data)
+        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, user_data)
 
     client = ACPClient(
         command=command,
@@ -192,11 +187,6 @@ async def destroy_session(chat_id: int) -> bool:
 async def _destroy_session_internal(chat_id: int) -> bool:
     session = _sessions.pop(chat_id, None)
     if session:
-        # Cancel any pending widget futures for this chat
-        from condor.widget_bridge import get_widget_bridge
-
-        get_widget_bridge().cancel_for_chat(chat_id)
-
         try:
             await session.client.stop()
         except Exception:

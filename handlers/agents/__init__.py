@@ -122,15 +122,6 @@ async def agent_callback_handler(
         text = "Rejected." if resolved else "Request expired."
         await query.message.edit_text(text)
 
-    # Widget callbacks
-    elif action.startswith("w:"):
-        parts = action.split(":")
-        request_id, btn_idx = parts[1], int(parts[2])
-        from condor.widget_bridge import get_widget_bridge
-
-        resolved = get_widget_bridge().resolve(request_id, btn_idx)
-        if not resolved:
-            await query.message.edit_text("Session expired.")
 
 
 async def _handle_mode_start(

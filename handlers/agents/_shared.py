@@ -54,14 +54,14 @@ DATA STRUCTURE:
 Each strategy has its own folder: data/trading_agents/{slug}/
   - agent.md: strategy definition
   - trading_sessions/session_N/: per-session data
-    - journal.md: learnings + summary + ticks + executors + snapshots
-    - runs/: per-tick snapshots (run_1.md, run_2.md, ...)
+    - journal.md: learnings + summary + snapshots + executors + snapshots
+    - runs/: per-tick snapshots (tick_1.md, tick_2.md, ...)
 
 RULES:
 - Be direct and concise. This is Telegram, keep messages short.
 - When showing agent status, use key: value format, not tables.
 - When the user asks to create a strategy, help them write good instructions \
-for the trading agent (the LLM that will execute ticks).
+for the trading agent (the LLM that will execute snapshots).
 - Always include risk limits when starting agents.
 """
 
@@ -115,7 +115,7 @@ def build_trading_context() -> str:
             info = engine.get_info()
             agent_lines.append(
                 f"- {info['strategy']} ({eid}): {info['status']}, "
-                f"PnL=${info['daily_pnl']:+.2f}, ticks={info['tick_count']}, "
+                f"PnL=${info['daily_pnl']:+.2f}, snapshots={info['tick_count']}, "
                 f"open={info['open_executors']}"
             )
         sections.append("\n".join(agent_lines))
@@ -272,7 +272,7 @@ def get_project_dir() -> str:
 
 
 def build_mcp_servers_for_session(
-    user_id: int, chat_id: int, widget_port: int, user_data: dict | None = None
+    user_id: int, chat_id: int, user_data: dict | None = None
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -291,7 +291,6 @@ def build_mcp_servers_for_session(
         "command": "uv",
         "args": ["run", "python", "condor_mcp.py"],
         "env": [
-            {"name": "CONDOR_WIDGET_PORT", "value": str(widget_port)},
             {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
             {"name": "CONDOR_USER_ID", "value": str(user_id)},
         ],
@@ -337,7 +336,7 @@ def build_mcp_servers_for_session(
 
 
 def build_mcp_servers_for_agent(
-    server_name: str, user_id: int, chat_id: int, widget_port: int
+    server_name: str, user_id: int, chat_id: int
 ) -> list[dict[str, Any]]:
     """Build MCP server configs for a trading agent bound to a specific server.
 
@@ -354,7 +353,6 @@ def build_mcp_servers_for_agent(
         "command": "uv",
         "args": ["run", "python", "condor_mcp.py"],
         "env": [
-            {"name": "CONDOR_WIDGET_PORT", "value": str(widget_port)},
             {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
             {"name": "CONDOR_USER_ID", "value": str(user_id)},
         ],
@@ -445,15 +443,14 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
         "mcp__mcp-hummingbot__search_history",
         "mcp__mcp-hummingbot__setup_connector",
         "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
-        "mcp__condor__send_buttons",
-        "mcp__condor__send_notification",
-        "mcp__condor__send_progress",
         "mcp__condor__manage_routines",
         "mcp__condor__manage_servers",
         "mcp__condor__get_user_context",
-        "mcp__condor__get_session_info",
-        "mcp__condor__get_session_usage",
-        "mcp__condor__ask_user_choice",
+        "mcp__condor__manage_trading_agent",
+        "mcp__condor__trading_agent_journal_read",
+        "mcp__condor__trading_agent_journal_write",
+        "mcp__condor__manage_notes",
+        "mcp__condor__manage_skills",
     ]
     tool_preload_hint = (
         "IMPORTANT: At the very start of the session (before your first response), "
