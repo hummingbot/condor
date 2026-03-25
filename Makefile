@@ -1,4 +1,4 @@
-.PHONY: help setup install run run-tui deploy stop test lint setup-chrome install-ai-tools
+.PHONY: help setup install run run-tui deploy stop test lint setup-chrome install-ai-tools build-frontend
 
 help:
 	@echo "Condor Bot - Available Commands"
@@ -37,7 +37,10 @@ install-ai-tools:
 	@command -v codex-acp >/dev/null 2>&1 && echo "Codex ACP already installed" || npm install -g @zed-industries/codex-acp
 	@echo "AI CLI tools ready."
 
-run:
+build-frontend:
+	cd frontend && npm run build
+
+run: build-frontend
 	uv run python main.py
 
 run-tui:
