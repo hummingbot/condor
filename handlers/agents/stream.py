@@ -97,10 +97,11 @@ def _to_telegram_markdown(text: str) -> str:
 class TelegramStreamer:
     """Consumes ACPEvents and progressively edits a Telegram message."""
 
-    def __init__(self, bot: Bot, chat_id: int, initial_message_id: int):
+    def __init__(self, bot: Bot, chat_id: int, initial_message_id: int, prefix: str = ""):
         self._bot = bot
         self._chat_id = chat_id
         self._message_id = initial_message_id
+        self._prefix = prefix
         self._buffer = ""
         self._active_tools: dict[str, str] = {}     # tool_call_id -> "title..."
         self._tool_start_times: dict[str, float] = {}  # tool_call_id -> monotonic time
@@ -237,6 +238,9 @@ class TelegramStreamer:
 
         parts: list[str] = []
         parse_mode: str | None = None
+
+        if self._prefix:
+            parts.append(self._prefix)
 
         # Tool block (always at top, never Markdown-converted —
         # _format_tool_title already strips underscores)

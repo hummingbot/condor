@@ -5,7 +5,6 @@ The ta:* inline keyboard UI for strategy browsing, agent dashboards, etc. still 
 """
 
 import logging
-import uuid
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -166,10 +165,8 @@ async def _launch_agent(query, context, strategy_id: str) -> None:
     config = context.user_data.get(TA_CONFIG_PARAMS, dict(strategy.default_config))
     chat_id = query.message.chat_id
     user_id = query.from_user.id
-    agent_id = uuid.uuid4().hex[:8]
 
     engine = TickEngine(
-        agent_id=agent_id,
         strategy=strategy,
         config=config,
         chat_id=chat_id,
@@ -180,7 +177,7 @@ async def _launch_agent(query, context, strategy_id: str) -> None:
     # Persist for auto-restore
     if "ta_instances" not in context.user_data:
         context.user_data["ta_instances"] = {}
-    context.user_data["ta_instances"][agent_id] = {
+    context.user_data["ta_instances"][engine.agent_id] = {
         "strategy_id": strategy_id,
         "config": config,
         "user_id": user_id,
@@ -190,7 +187,7 @@ async def _launch_agent(query, context, strategy_id: str) -> None:
 
     clear_ta_state(context)
     await query.edit_message_text(
-        f"🚀 Agent {agent_id} started!\n"
+        f"🚀 Agent {engine.agent_id} started!\n"
         f"Strategy: {strategy.name}\n"
         f"Frequency: {config.get('frequency_sec', 60)}s\n\n"
         f"Use /agent to monitor."

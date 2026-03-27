@@ -138,13 +138,11 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("archived_summaries", None)
     context.user_data.pop("archived_total_count", None)
 
-    # Agent states
-    context.user_data.pop("agent_state", None)
-    context.user_data.pop("agent_selected", None)
+    # Agent states — only clear transient UI states, NOT session/preference state.
+    # agent_llm, agent_mode are persistent user preferences (always-on agent).
+    # agent_state is no longer used for routing (agent is the default fallback).
     context.user_data.pop("agent_compact_custom", None)
-    context.user_data.pop("agent_mode", None)
     context.user_data.pop("agent_chat_target", None)
-    # Note: agent_llm is NOT cleared (persistent user preference)
 
     # Routines states
     context.user_data.pop("routines_state", None)

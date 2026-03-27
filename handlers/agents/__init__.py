@@ -1,6 +1,7 @@
 """Agent chat handler -- /agent command, callback router, message handler."""
 
 import logging
+import shutil
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -22,16 +23,36 @@ from ._shared import (
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
-from condor.acp import PromptDone
+from condor.acp import ACP_COMMANDS, PromptDone
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
 
 log = logging.getLogger(__name__)
 
+# Cache CLI availability checks so we only hit the filesystem once per key
+_cli_available_cache: dict[str, bool] = {}
+
+
+def _is_agent_available(agent_key: str) -> bool:
+    """Check if the CLI binary for the given agent is installed."""
+    if agent_key in _cli_available_cache:
+        return _cli_available_cache[agent_key]
+
+    cmd = ACP_COMMANDS.get(agent_key, ACP_COMMANDS.get("claude-code", ""))
+    # The command may have flags (e.g. "gemini --experimental-acp"), check the binary
+    binary = cmd.split()[0] if cmd else ""
+    available = shutil.which(binary) is not None
+    _cli_available_cache[agent_key] = available
+
+    if not available:
+        log.warning("Agent CLI %r not found in PATH (agent_key=%s)", binary, agent_key)
+
+    return available
+
 
 @restricted
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /agent command — auto-start Condor or show active session menu."""
+    """Handle /agent command — manage agent settings, mode, and session."""
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
         await update.message.reply_text(
@@ -41,19 +62,27 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     clear_all_input_states(context)
 
-    chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    # Ensure defaults are set
+    context.user_data.setdefault("agent_mode", DEFAULT_MODE)
+    context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
 
-    if session and session.client.alive:
-        # Active session exists — show menu
-        context.user_data["agent_state"] = "active"
-        await show_agent_menu(update, context)
-    else:
-        # No session — show menu with start/settings options
-        context.user_data["agent_state"] = "active"
-        context.user_data.setdefault("agent_mode", DEFAULT_MODE)
-        context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
-        await show_agent_menu(update, context)
+    # Warn if no agent CLI is available
+    agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
+    if not _is_agent_available(agent_key):
+        available = [k for k in AGENT_OPTIONS if _is_agent_available(k)]
+        if not available:
+            await update.message.reply_text(
+                "No agent CLI found.\n\n"
+                "Install one of:\n"
+                "• claude-code-acp (Claude Code)\n"
+                "• gemini (Gemini CLI)\n\n"
+                "Then restart the bot."
+            )
+            return
+        # Auto-switch to an available one
+        context.user_data["agent_llm"] = available[0]
+
+    await show_agent_menu(update, context)
 
 
 @restricted
@@ -153,9 +182,7 @@ async def _handle_mode_start(
     # Destroy existing session
     await destroy_session(chat_id)
 
-    context.user_data["agent_state"] = "active"
     context.user_data["agent_mode"] = mode
-    context.user_data["agent_selected"] = agent_key
     if agent_id:
         context.user_data["agent_chat_target"] = agent_id
 
@@ -203,10 +230,6 @@ async def _handle_mode_start(
     except Exception as e:
         log.exception("Failed to start agent session")
         await message.edit_text(f"Failed to start agent: {e}")
-        context.user_data.pop("agent_state", None)
-        context.user_data.pop("agent_mode", None)
-        context.user_data.pop("agent_selected", None)
-        context.user_data.pop("agent_chat_target", None)
 
 
 async def _handle_switch_mode_menu(
@@ -274,10 +297,6 @@ async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_id = update.effective_chat.id
 
     destroyed = await destroy_session(chat_id)
-    context.user_data.pop("agent_state", None)
-    context.user_data.pop("agent_selected", None)
-    context.user_data.pop("agent_mode", None)
-    context.user_data.pop("agent_chat_target", None)
 
     if destroyed:
         await query.message.edit_text("Agent session stopped.")
@@ -290,9 +309,6 @@ async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     query = update.callback_query
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
-
-    if not session or not session.client.alive:
-        context.user_data.pop("agent_state", None)
 
     await query.message.delete()
 
@@ -427,9 +443,6 @@ async def _handle_compact(
     except Exception as e:
         log.exception("Failed to recreate session after compact")
         await query.message.edit_text(f"Compact failed during session reset: {e}")
-        context.user_data.pop("agent_state", None)
-        context.user_data.pop("agent_selected", None)
-        context.user_data.pop("agent_mode", None)
         return
 
     word_count = len(summary.split())
@@ -541,9 +554,6 @@ async def _do_compact_from_message(
     except Exception as e:
         log.exception("Failed to recreate session after compact")
         await placeholder.edit_text(f"Compact failed during session reset: {e}")
-        context.user_data.pop("agent_state", None)
-        context.user_data.pop("agent_selected", None)
-        context.user_data.pop("agent_mode", None)
         return
 
     word_count = len(summary.split())
@@ -558,12 +568,23 @@ async def _do_compact_from_message(
 async def agent_voice_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle voice messages while agent is active — transcribe and forward as text."""
-    if context.user_data.get("agent_state") != "active":
-        return
-
+    """Handle voice messages — transcribe and forward as text to the always-on agent."""
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
+        return
+
+    # Auth check — only approved users
+    from config_manager import UserRole, get_config_manager
+
+    user_id = update.effective_user.id
+    cm = get_config_manager()
+    role = cm.get_user_role(user_id)
+    if role not in (UserRole.ADMIN, UserRole.USER):
+        return
+
+    # Skip if no agent CLI available
+    agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
+    if not get_session(update.effective_chat.id) and not _is_agent_available(agent_key):
         return
 
     voice = update.message.voice
@@ -592,24 +613,42 @@ async def agent_voice_handler(
     from utils.telegram_formatters import escape_markdown_v2
 
     escaped = escape_markdown_v2(text)
-    await status_msg.edit_text(f"🎙 _{escaped}_", parse_mode="MarkdownV2")
+    await status_msg.edit_text(
+        f"🎙 _{escaped}_\n\nThinking\\.\\.\\.", parse_mode="MarkdownV2"
+    )
 
-    # Inject the transcribed text as if the user typed it
-    update.message.text = text
+    # Store the status message so agent_message_handler reuses it as placeholder
+    context.chat_data["_voice_placeholder"] = status_msg
+    context.chat_data["_voice_transcription"] = text
+
+    # Forward to agent handler — pass transcribed text via chat_data
+    # (Message.text is read-only in python-telegram-bot)
     await agent_message_handler(update, context)
 
 
 async def agent_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle text messages while agent is active."""
+    """Handle text messages — always-on agent fallback.
+
+    This is called for any text that doesn't match a specific handler state.
+    Auto-creates an agent session with the user's preferred LLM if none exists.
+    """
     chat_type = update.effective_chat.type
     if chat_type in ("group", "supergroup"):
-        context.user_data.pop("agent_state", None)
+        return
+
+    # Auth check — only approved users can use the agent
+    from config_manager import UserRole, get_config_manager
+
+    user_id = update.effective_user.id
+    cm = get_config_manager()
+    role = cm.get_user_role(user_id)
+    if role not in (UserRole.ADMIN, UserRole.USER):
         return
 
     chat_id = update.effective_chat.id
-    text = update.message.text
+    text = context.chat_data.pop("_voice_transcription", None) or update.message.text
 
     if not text:
         return
@@ -645,10 +684,17 @@ async def agent_message_handler(
 
     session = get_session(chat_id)
 
-    # Auto-create session if agent_state is active but no session exists
+    # Auto-create session if none exists (always-on agent)
     if not session or not session.client.alive:
         agent_key = context.user_data.get("agent_llm", context.user_data.get("agent_selected", DEFAULT_AGENT))
-        user_id = update.effective_user.id if update.effective_user else None
+        context.user_data.setdefault("agent_llm", agent_key)
+        context.user_data.setdefault("agent_mode", DEFAULT_MODE)
+
+        # Check if the CLI binary is installed before attempting to spawn
+        if not _is_agent_available(agent_key):
+            log.debug("Agent CLI for %s not found, skipping auto-create", agent_key)
+            return
+
         try:
             bot = context.bot
 
@@ -691,7 +737,6 @@ async def agent_message_handler(
         except Exception as e:
             log.exception("Failed to create agent session")
             await update.message.reply_text(f"Failed to start agent: {e}")
-            context.user_data.pop("agent_state", None)
             return
 
     # Check if busy
@@ -703,14 +748,24 @@ async def agent_message_handler(
         )
         return
 
-    # Send placeholder
-    placeholder = await update.message.reply_text("Thinking...")
+    # Send placeholder (reuse voice transcription message if available)
+    voice_placeholder = context.chat_data.pop("_voice_placeholder", None)
+    voice_transcription = context.chat_data.pop("_voice_transcription", None)
+    if voice_placeholder:
+        placeholder = voice_placeholder
+    else:
+        placeholder = await update.message.reply_text("Thinking...")
 
     # Create streamer and start edit loop
+    prefix = ""
+    if voice_transcription:
+        # Use plain text prefix — underscores in transcription could break Markdown
+        prefix = f"🎙 {voice_transcription}"
     streamer = TelegramStreamer(
         bot=context.bot,
         chat_id=chat_id,
         initial_message_id=placeholder.message_id,
+        prefix=prefix,
     )
     edit_task = streamer.start_edit_loop()
 

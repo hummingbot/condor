@@ -228,7 +228,8 @@ async def show_agent_journal(query, context: ContextTypes.DEFAULT_TYPE, agent_id
 
     engine = get_engine(agent_id)
     session_dir = engine.session_dir if engine else None
-    jm = JournalManager(agent_id, session_dir=session_dir)
+    agent_dir = engine.strategy.agent_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
     summary = jm.read_state()
     learnings = jm.read_learnings()
 
@@ -269,7 +270,8 @@ async def show_agent_runs(query, context: ContextTypes.DEFAULT_TYPE, agent_id: s
 
     engine = get_engine(agent_id)
     session_dir = engine.session_dir if engine else None
-    jm = JournalManager(agent_id, session_dir=session_dir)
+    agent_dir = engine.strategy.agent_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
     runs = jm.list_runs(limit=10)
 
     if not runs:
@@ -303,7 +305,8 @@ async def show_run_detail(query, context: ContextTypes.DEFAULT_TYPE, agent_id: s
 
     engine = get_engine(agent_id)
     session_dir = engine.session_dir if engine else None
-    jm = JournalManager(agent_id, session_dir=session_dir)
+    agent_dir = engine.strategy.agent_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
     content = jm.read_run_snapshot(tick)
 
     if not content:

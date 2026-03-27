@@ -289,7 +289,7 @@ def build_mcp_servers_for_session(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "condor_mcp.py"],
+        "args": ["run", "python", "-m", "mcp_servers.condor"],
         "env": [
             {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
             {"name": "CONDOR_USER_ID", "value": str(user_id)},
@@ -324,7 +324,7 @@ def build_mcp_servers_for_session(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": ["run", "python", "-m", "hummingbot_mcp"],
+        "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
         "env": [
             {"name": "HUMMINGBOT_API_URL", "value": api_url},
             {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
@@ -351,7 +351,7 @@ def build_mcp_servers_for_agent(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "condor_mcp.py"],
+        "args": ["run", "python", "-m", "mcp_servers.condor"],
         "env": [
             {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
             {"name": "CONDOR_USER_ID", "value": str(user_id)},
@@ -372,7 +372,7 @@ def build_mcp_servers_for_agent(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": ["run", "python", "-m", "hummingbot_mcp"],
+        "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
         "env": [
             {"name": "HUMMINGBOT_API_URL", "value": api_url},
             {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
