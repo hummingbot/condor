@@ -397,20 +397,35 @@ async def post_init(application: Application) -> None:
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
+    # Clear any previously set commands for all scopes to avoid stale overrides
+    from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeDefault
+
+    for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()]:
+        try:
+            await application.bot.delete_my_commands(scope=scope)
+        except Exception:
+            pass
+
+    if ADMIN_USER_ID:
+        try:
+            await application.bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID)))
+        except Exception:
+            pass
+
     # Public commands (all users)
     commands = [
-        BotCommand("start", "Welcome message and server status"),
-        BotCommand("portfolio", "View detailed portfolio breakdown"),
-        BotCommand("bots", "Check status of all trading bots"),
-        BotCommand("new_bot", "Create and manage bot configurations"),
+        BotCommand("start", "Welcome message and setup"),
+        BotCommand("portfolio", "View balances across exchanges"),
+        BotCommand("agent", "AI trading assistant"),
         BotCommand("executors", "Deploy and manage trading executors"),
-        BotCommand("trade", "Unified trading - CEX orders and DEX swaps"),
-        BotCommand("lp", "Liquidity pool management"),
+        BotCommand("bots", "Deploy and manage trading bots"),
+        BotCommand("new_bot", "Create bot configurations"),
         BotCommand("routines", "Run configurable Python scripts"),
-        BotCommand("agent", "AI trading assistant with modes"),
+        BotCommand("trade", "Place CEX and DEX orders"),
+        BotCommand("lp", "Liquidity pool management"),
         BotCommand("servers", "Manage Hummingbot API servers"),
         BotCommand("keys", "Configure exchange API credentials"),
-        BotCommand("gateway", "Deploy Gateway for DEX trading"),
+        BotCommand("gateway", "Gateway for DEX trading"),
         BotCommand("web", "Open the web dashboard"),
     ]
     await application.bot.set_my_commands(commands)
@@ -437,7 +452,9 @@ async def post_init(application: Application) -> None:
     from condor.server_data_service import register_default_fetches as sds_register
 
     sds_register()
-    get_server_data_service().start()
+    sds = get_server_data_service()
+    sds.start()
+    await sds.auto_subscribe_servers()
 
     # Start DataManager (legacy, delegates to SDS)
     from condor.data_manager import get_data_manager, register_default_fetches
@@ -478,15 +495,18 @@ async def restore_trading_agents(application: Application) -> None:
                 continue
             try:
                 engine = TickEngine(
-                    agent_id=agent_id,
                     strategy=strategy,
                     config=inst.get("config", {}),
                     chat_id=chat_id,
                     user_id=inst.get("user_id", 0),
                 )
                 await engine.start(bot=application.bot)
+                # Update stored agent_id to the new session-based one
+                instances.pop(agent_id, None)
+                instances[engine.agent_id] = inst
+                inst["status"] = "running"
                 restored += 1
-                logger.info("Restored trading agent %s for chat %s", agent_id, chat_id)
+                logger.info("Restored trading agent %s (was %s) for chat %s", engine.agent_id, agent_id, chat_id)
             except Exception as e:
                 logger.error("Failed to restore agent %s: %s", agent_id, e)
                 inst["status"] = "error"
@@ -601,7 +621,7 @@ def main() -> None:
         await get_config_manager().close_all_clients()
 
         # Close MCP hummingbot client
-        from hummingbot_mcp.hummingbot_client import hummingbot_client
+        from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
         await hummingbot_client.close()
 
     # Create the Application with persistence enabled

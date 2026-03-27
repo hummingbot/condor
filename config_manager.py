@@ -60,6 +60,7 @@ class ConfigManager:
         )  # server_name -> (client, connect_time)
         self._client_ttl = 300  # 5 minutes
         self._client_verify_interval = 60  # seconds between liveness checks
+        self._client_locks: Dict[str, asyncio.Lock] = {}  # per-server lock for get_client
         self._load_config()
         self._load_audit_log()
 
@@ -336,7 +337,23 @@ class ConfigManager:
         if name not in self._data["servers"]:
             raise ValueError(f"Server '{name}' not found")
 
-        # Return cached client if fresh and alive
+        # Fast path (no lock): return cached client if recently verified
+        if name in self._clients:
+            client, last_verified = self._clients[name]
+            if time.time() - last_verified < self._client_verify_interval:
+                return client
+
+        # Serialize client creation/verification per server to prevent
+        # concurrent coroutines from creating duplicate sessions
+        if name not in self._client_locks:
+            self._client_locks[name] = asyncio.Lock()
+
+        async with self._client_locks[name]:
+            return await self._get_or_create_client(name, HummingbotAPIClient)
+
+    async def _get_or_create_client(self, name: str, HummingbotAPIClient):
+        """Inner client acquisition — must be called under _client_locks[name]."""
+        # Re-check under lock (another coroutine may have just created it)
         if name in self._clients:
             client, last_verified = self._clients[name]
             if time.time() - last_verified < self._client_verify_interval:

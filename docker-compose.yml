@@ -15,8 +15,6 @@ services:
       - ./config.yml:/app/config.yml
       # Mount routines for auto-discovery
       - ./routines:/app/routines
-      # Fix: mount corrected ACP client (claude-agent-acp → claude-code-acp)
-      - ./condor/acp/client.py:/app/condor/acp/client.py
     network_mode: host
     labels:
       - "com.centurylinklabs.watchtower.enable=true"

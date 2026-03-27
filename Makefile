@@ -1,41 +1,31 @@
-.PHONY: help setup install run run-tui deploy stop test lint setup-chrome install-ai-tools build-frontend
+.PHONY: help setup install run deploy deploy-full stop status logs test lint build-frontend setup-chrome
 
 help:
-	@echo "Condor Bot - Available Commands"
+	@echo "Condor - Available Commands"
 	@echo ""
-	@echo "  make setup            - Interactive setup (creates .env file)"
-	@echo "  make install          - Setup + install Python deps + AI CLI tools"
-	@echo "  make run              - Run the bot locally"
-	@echo "  make run-tui          - Run the terminal UI"
-	@echo "  make deploy           - Run with Docker Compose"
-	@echo "  make stop             - Stop Docker containers"
-	@echo "  make test             - Run tests"
-	@echo "  make lint             - Run black + isort"
-	@echo "  make install-ai-tools - Install Claude Code + Gemini CLI"
+	@echo "  make setup       - Interactive setup wizard"
+	@echo "  make install     - Setup + install all dependencies"
+	@echo "  make run         - Run locally (dev)"
+	@echo "  make deploy      - Deploy Condor (Docker)"
+	@echo "  make deploy-full - Deploy Condor + Hummingbot API (Docker)"
+	@echo "  make stop        - Stop all containers"
+	@echo "  make status      - Show container status"
+	@echo "  make logs        - Tail container logs"
+	@echo "  make test        - Run tests"
+	@echo "  make lint        - Run black + isort"
 
 setup:
-	chmod +x setup-environment.sh
-	./setup-environment.sh
+	@chmod +x setup-environment.sh && ./setup-environment.sh
 
-install:
-	$(MAKE) setup
+install: setup
 	uv sync --dev
-	$(MAKE) setup-chrome
-	$(MAKE) install-ai-tools
+	@cd frontend && npm install 2>/dev/null || true
+	@$(MAKE) setup-chrome
 
 setup-chrome:
-	@echo "Installing Chrome for Plotly image generation..."
+	@echo "Setting up Chrome for chart rendering..."
 	@uv run python -c "import kaleido; kaleido.get_chrome_sync()" 2>/dev/null || \
-		echo "Chrome installation skipped (not required for basic usage)"
-
-install-ai-tools:
-	@echo "Installing AI CLI tools..."
-	@command -v claude >/dev/null 2>&1 && echo "Claude Code already installed ($$(claude --version 2>/dev/null))" || curl -fsSL https://claude.ai/install.sh | sh
-	@command -v node >/dev/null 2>&1 || { echo "Node.js not found (needed for Gemini CLI). Install from https://nodejs.org/"; exit 1; }
-	@command -v gemini >/dev/null 2>&1 && echo "Gemini CLI already installed ($$(gemini --version 2>/dev/null))" || npm install -g @google/gemini-cli
-	@command -v claude-code-acp >/dev/null 2>&1 && echo "Claude Code ACP already installed" || npm install -g @zed-industries/claude-code-acp
-	@command -v codex-acp >/dev/null 2>&1 && echo "Codex ACP already installed" || npm install -g @zed-industries/codex-acp
-	@echo "AI CLI tools ready."
+		echo "Chrome setup skipped (not required for basic usage)"
 
 build-frontend:
 	cd frontend && npm run build
@@ -43,14 +33,41 @@ build-frontend:
 run: build-frontend
 	uv run python main.py
 
-run-tui:
-	uv run python main.py tui
-
 deploy:
+	@command -v docker >/dev/null 2>&1 || { echo "Error: Docker not installed"; exit 1; }
+	docker compose up -d
+
+deploy-full:
+	@command -v docker >/dev/null 2>&1 || { echo "Error: Docker not installed"; exit 1; }
+	@if [ -f ../hummingbot-api/docker-compose.yml ]; then \
+		echo "Starting Hummingbot API stack..."; \
+		cd ../hummingbot-api && docker compose up -d; \
+	else \
+		echo "Hummingbot API not found at ../hummingbot-api"; \
+		echo "Run 'make setup' first and choose to deploy Hummingbot API"; \
+		exit 1; \
+	fi
+	@echo "Starting Condor..."
 	docker compose up -d
 
 stop:
-	docker compose down
+	@docker compose down 2>/dev/null || true
+	@if [ -f ../hummingbot-api/docker-compose.yml ]; then \
+		echo "Stopping Hummingbot API stack..."; \
+		cd ../hummingbot-api && docker compose down 2>/dev/null || true; \
+	fi
+
+status:
+	@echo "=== Condor ==="
+	@docker compose ps 2>/dev/null || echo "Not running"
+	@if [ -f ../hummingbot-api/docker-compose.yml ]; then \
+		echo ""; \
+		echo "=== Hummingbot API ==="; \
+		cd ../hummingbot-api && docker compose ps 2>/dev/null || echo "Not running"; \
+	fi
+
+logs:
+	docker compose logs -f --tail=50
 
 test:
 	uv run pytest
