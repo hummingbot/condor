@@ -8,11 +8,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from config_manager import get_config_manager
 from condor.web.auth import get_current_user
 from condor.web.models import (
+    AvailableControllersResponse,
     BotDetailResponse,
     BotInfo,
     BotSummary,
     BotsPageResponse,
+    ControllerConfigDetail,
+    ControllerConfigSummary,
     ControllerInfo,
+    DeployBotRequest,
     WebUser,
 )
 
@@ -100,6 +104,23 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
     bots_list = _extract_bots_list(result)
     logger.info("Server '%s': found %d bot(s)", name, len(bots_list))
 
+    # Pre-fetch controller configs keyed by controller id
+    ctrl_configs: dict[str, dict] = {}
+    if client is not None:
+        for bot_data in bots_list:
+            bn = bot_data.get("bot_name", "")
+            if not bn:
+                continue
+            try:
+                configs = await client.controllers.get_bot_controller_configs(bn)
+                if isinstance(configs, list):
+                    for cfg in configs:
+                        cid = cfg.get("id") or cfg.get("controller_id", "")
+                        if cid:
+                            ctrl_configs[cid] = cfg
+            except Exception:
+                pass
+
     # Try to get bot runs for uptime/deployed_at info
     bot_runs: dict[str, str] = {}
     try:
@@ -163,24 +184,25 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 if not isinstance(positions, list):
                     positions = []
 
-                # Extract connector/pair from controller config or performance
-                ctrl_config = ctrl_info.get("config", {})
-                if not isinstance(ctrl_config, dict):
-                    ctrl_config = {}
-                connector = (
-                    ctrl_perf.get("connector", "")
-                    or ctrl_info.get("connector", "")
-                    or ctrl_perf.get("connector_name", "")
-                    or ctrl_config.get("connector_name", "")
-                    or ctrl_config.get("connector", "")
-                    or ""
-                )
-                trading_pair = (
-                    ctrl_perf.get("trading_pair", "")
-                    or ctrl_info.get("trading_pair", "")
-                    or ctrl_config.get("trading_pair", "")
-                    or ""
-                )
+                # Get config from pre-fetched configs
+                ctrl_config = ctrl_configs.get(ctrl_name, {})
+
+                # Primary: config dict (correct keys)
+                connector = ctrl_config.get("connector_name", "")
+                trading_pair = ctrl_config.get("trading_pair", "")
+
+                # Fallback: try to parse connector/pair from controller name
+                # e.g. "binance_perpetual_SOL-USDT_pmm_simple"
+                if not connector or not trading_pair:
+                    parts = ctrl_name.split("_")
+                    for i, part in enumerate(parts):
+                        if "-" in part and part[0].isupper():
+                            # Looks like a trading pair (e.g. SOL-USDT)
+                            if not trading_pair:
+                                trading_pair = part
+                            if not connector and i > 0:
+                                connector = "_".join(parts[:i])
+                            break
 
                 total_pnl += global_pnl
                 total_volume += volume
@@ -200,6 +222,7 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                         close_type_counts=close_types,
                         positions_summary=positions,
                         deployed_at=bot_runs.get(bot_name),
+                        config=ctrl_config,
                     )
                 )
 
@@ -255,3 +278,140 @@ async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_us
         pass
 
     return BotDetailResponse(bot=bot, config=config, performance=performance)
+
+
+@router.get(
+    "/servers/{name}/controllers/configs",
+    response_model=AvailableControllersResponse,
+)
+async def list_controller_configs(name: str, user: WebUser = Depends(get_current_user)):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+
+    # Fetch controller types and saved configs in parallel
+    controller_types: dict[str, list[str]] = {}
+    try:
+        types_result = await client.controllers.list_controllers()
+        if isinstance(types_result, dict):
+            controller_types = {
+                k: v for k, v in types_result.items() if isinstance(v, list)
+            }
+    except Exception as e:
+        logger.warning("Failed to list controller types from '%s': %s", name, e)
+
+    configs: list[ControllerConfigSummary] = []
+    try:
+        configs_result = await client.controllers.list_controller_configs()
+        if isinstance(configs_result, list):
+            for cfg in configs_result:
+                if not isinstance(cfg, dict):
+                    continue
+                configs.append(
+                    ControllerConfigSummary(
+                        id=str(cfg.get("id", "")),
+                        controller_name=cfg.get("controller_name", ""),
+                        controller_type=cfg.get("controller_type", ""),
+                        connector_name=cfg.get("connector_name", ""),
+                        trading_pair=cfg.get("trading_pair", ""),
+                    )
+                )
+    except Exception as e:
+        logger.warning("Failed to list controller configs from '%s': %s", name, e)
+
+    return AvailableControllersResponse(
+        configs=configs,
+        controller_types=controller_types,
+    )
+
+
+@router.get(
+    "/servers/{name}/controllers/configs/{config_id}",
+    response_model=ControllerConfigDetail,
+)
+async def get_controller_config(
+    name: str, config_id: str, user: WebUser = Depends(get_current_user)
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.controllers.get_controller_config(config_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    return ControllerConfigDetail(
+        id=str(result.get("id", config_id)),
+        controller_name=result.get("controller_name", ""),
+        controller_type=result.get("controller_type", ""),
+        config=result,
+    )
+
+
+@router.put("/servers/{name}/controllers/configs/{config_id}")
+async def update_controller_config(
+    name: str,
+    config_id: str,
+    body: dict[str, Any],
+    user: WebUser = Depends(get_current_user),
+):
+    """Update a saved controller config's parameters."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        # Fetch existing config so we preserve controller_name/type/id
+        existing = await client.controllers.get_controller_config(config_id)
+        if not isinstance(existing, dict):
+            raise HTTPException(status_code=404, detail="Config not found")
+
+        # Merge user edits into existing config
+        merged = {**existing, **body}
+        merged["id"] = config_id  # ensure id stays consistent
+
+        result = await client.controllers.create_or_update_controller_config(
+            config_id, merged
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"updated": True, "config_id": config_id, "result": result}
+
+
+@router.post("/servers/{name}/bots/deploy")
+async def deploy_bot_endpoint(
+    name: str, body: DeployBotRequest, user: WebUser = Depends(get_current_user)
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+
+    from mcp_servers.hummingbot_api.tools.controllers import deploy_bot
+
+    try:
+        result = await deploy_bot(
+            client=client,
+            bot_name=body.bot_name,
+            controllers_config=body.controllers_config,
+            account_name=body.account_name,
+            image=body.image,
+            max_global_drawdown_quote=body.max_global_drawdown_quote,
+            max_controller_drawdown_quote=body.max_controller_drawdown_quote,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return result

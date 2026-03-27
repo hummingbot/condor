@@ -5,18 +5,18 @@ Data is organized by strategy and session::
     data/trading_agents/
         {strategy_slug}/
             agent.md            # strategy definition
-            trading_sessions/
+            config.yml          # runtime config
+            learnings.md        # cross-session learnings
+            sessions/
                 session_1/
-                    journal.md  # learnings + summary + snapshots + executors + snapshots
-                    runs/
-                        tick_1.md
-
-Legacy agents (pre-session structure) are stored directly under
-``data/trading_agents/{hex_id}/`` and still work via the fallback path.
+                    journal.md  # summary + decisions + ticks + executors + snapshots
+                    snapshots/
+                        snapshot_1.md
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -28,15 +28,15 @@ log = logging.getLogger(__name__)
 _DATA_ROOT = Path(__file__).parent.parent.parent / "data" / "trading_agents"
 
 MAX_LEARNINGS = 20
-MAX_RUN_SNAPSHOTS = 100
+MAX_SNAPSHOTS = 100
 
 JOURNAL_TEMPLATE = """\
 # Journal - {agent_id}
 
-## Learnings
-
 ## Summary
-No snapshots yet.
+No ticks yet.
+
+## Decisions
 
 ## Ticks
 
@@ -45,40 +45,59 @@ No snapshots yet.
 ## Snapshots
 """
 
-RUN_SNAPSHOT_TEMPLATE = """\
-# Tick #{tick} — {timestamp}
+LEARNINGS_TEMPLATE = """\
+# Learnings
 
-## Environment
-- Pair: {pair} | Connector: {connector}
-- Frequency: {frequency}s
+## Active Insights
 
-## Market Data
-{market_data}
+## Retired Insights
+"""
+
+SNAPSHOT_TEMPLATE = """\
+# Snapshot #{tick} — {timestamp}
+
+<details><summary>System Prompt ({prompt_len} chars)</summary>
+
+{system_prompt}
+
+</details>
+
+## Executor State
+{executors_data}
 
 ## Risk State
 {risk_state}
 
-## Journal Context
-{journal_context}
+## Agent Response
+{response_text}
 
-## Decision
-{decision}
+<details><summary>Tool Calls ({tool_count})</summary>
+
+{tool_calls}
+
+</details>
 
 ## Cost
-LLM: ${cost:.4f} | Tick duration: {duration:.1f}s
+LLM: ${cost:.4f} | Duration: {duration:.1f}s | Tokens: {input_tokens} in / {output_tokens} out
 """
 
 
 def get_session_dir(strategy_slug: str, session_number: int) -> Path:
     """Build the path for a specific session directory."""
-    return _DATA_ROOT / strategy_slug / "trading_sessions" / f"session_{session_number}"
+    return _DATA_ROOT / strategy_slug / "sessions" / f"session_{session_number}"
 
 
 def next_session_number(agent_dir: Path) -> int:
     """Determine the next session number by scanning existing session_* dirs."""
-    sessions_dir = agent_dir / "trading_sessions"
+    # Check new location first
+    sessions_dir = agent_dir / "sessions"
     if not sessions_dir.exists():
-        return 1
+        # Check legacy location
+        legacy_dir = agent_dir / "trading_sessions"
+        if legacy_dir.exists():
+            sessions_dir = legacy_dir
+        else:
+            return 1
     existing = [
         int(d.name.split("_", 1)[1])
         for d in sessions_dir.iterdir()
@@ -90,9 +109,10 @@ def next_session_number(agent_dir: Path) -> int:
 class JournalManager:
     """Read/write journal + tracker for one agent session.
 
-    Combines living memory (Learnings, Summary) with execution tracking
-    (Ticks, Executors, Snapshots) in a single ``journal.md`` file.
-    Per-run detail goes into ``runs/run_N.md``.
+    Combines living memory (Summary) with execution tracking
+    (Decisions, Ticks, Executors, Snapshots) in a single ``journal.md`` file.
+    Learnings are stored separately in ``{agent_dir}/learnings.md``.
+    Full snapshots go into ``snapshots/snapshot_N.md``.
     """
 
     def __init__(
@@ -101,20 +121,123 @@ class JournalManager:
         strategy_name: str = "",
         strategy_description: str = "",
         session_dir: Path | None = None,
+        agent_dir: Path | None = None,
     ):
         self.agent_id = agent_id
-        # New path: session_dir is passed explicitly by TickEngine
-        # Legacy fallback: data/trading_agents/{agent_id}/
-        self._dir = session_dir if session_dir else _DATA_ROOT / agent_id
-        self._path = self._dir / "journal.md"
-        self._runs_dir = self._dir / "runs"
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._session_dir = session_dir if session_dir else _DATA_ROOT / agent_id
+        self._agent_dir = agent_dir  # For cross-session learnings
+        self._path = self._session_dir / "journal.md"
+        self._snapshots_dir = self._session_dir / "snapshots"
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Also support legacy runs/ dir for reading
+        self._legacy_runs_dir = self._session_dir / "runs"
 
         if not self._path.exists():
             self._path.write_text(JOURNAL_TEMPLATE.format(agent_id=agent_id))
 
-        # Cache tick count to avoid re-parsing every call
+        # Ensure learnings.md exists at agent level
+        if self._agent_dir:
+            learnings_path = self._agent_dir / "learnings.md"
+            if not learnings_path.exists():
+                learnings_path.write_text(LEARNINGS_TEMPLATE)
+
         self._tick_count = self._count_ticks()
+
+    # ------------------------------------------------------------------
+    # Learnings (cross-session, stored in agent_dir/learnings.md)
+    # ------------------------------------------------------------------
+
+    def _learnings_path(self) -> Path | None:
+        """Get the learnings file path."""
+        if self._agent_dir:
+            return self._agent_dir / "learnings.md"
+        # Fallback: try to find learnings in session dir parent
+        parent = self._session_dir.parent
+        if parent.name == "sessions" or parent.name == "trading_sessions":
+            return parent.parent / "learnings.md"
+        return None
+
+    def read_learnings(self) -> str:
+        """Return the learnings content (cross-session)."""
+        path = self._learnings_path()
+        if path and path.exists():
+            text = path.read_text()
+            # Extract Active Insights section
+            m = re.search(r"^## Active Insights\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+            if m:
+                return m.group(1).strip()
+            # Fallback: return everything after the header
+            lines = text.strip().splitlines()
+            content = [l for l in lines if not l.startswith("# ")]
+            return "\n".join(content).strip()
+        # Fallback: read from journal Learnings section (legacy)
+        return self._get_section("Learnings")
+
+    def append_learning(self, text_content: str) -> None:
+        """Add a learning, deduplicating against existing ones."""
+        path = self._learnings_path()
+        if not path:
+            # Fallback to journal section
+            self._append_learning_to_journal(text_content)
+            return
+
+        if not path.exists():
+            path.write_text(LEARNINGS_TEMPLATE)
+
+        full_text = path.read_text()
+
+        # Extract existing learnings from Active Insights
+        m = re.search(r"(^## Active Insights\n)(.*?)(?=^## |\Z)", full_text, re.MULTILINE | re.DOTALL)
+        if m:
+            section_header = m.group(1)
+            section_content = m.group(2).strip()
+            existing_lines = [l for l in section_content.splitlines() if l.startswith("- ")]
+        else:
+            existing_lines = []
+
+        # Deduplicate
+        normalized_new = _normalize(text_content)
+        for line in existing_lines:
+            existing_text = re.sub(r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?", "", line)
+            if _normalize(existing_text) == normalized_new:
+                return
+            if _word_overlap(normalized_new, _normalize(existing_text)) > 0.5:
+                return
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        existing_lines.append(f"- [{now}] {text_content}")
+
+        if len(existing_lines) > MAX_LEARNINGS:
+            existing_lines = existing_lines[-MAX_LEARNINGS:]
+
+        new_section = "\n".join(existing_lines)
+        if m:
+            new_text = full_text[:m.start(2)] + new_section + "\n\n" + full_text[m.end(2):]
+        else:
+            new_text = full_text.rstrip() + f"\n\n## Active Insights\n{new_section}\n"
+        path.write_text(new_text)
+
+    def _append_learning_to_journal(self, text_content: str) -> None:
+        """Legacy: append learning to journal's Learnings section."""
+        section = self._get_section("Learnings")
+        existing_lines = [l for l in section.splitlines() if l.startswith("- ")]
+
+        normalized_new = _normalize(text_content)
+        for line in existing_lines:
+            existing_text = re.sub(r"^- (\[\d{2}:\d{2}\] )?", "", line)
+            if _normalize(existing_text) == normalized_new:
+                return
+            if _word_overlap(normalized_new, _normalize(existing_text)) > 0.5:
+                return
+
+        now = datetime.now(timezone.utc).strftime("%H:%M")
+        existing_lines.append(f"- [{now}] {text_content}")
+
+        if len(existing_lines) > MAX_LEARNINGS:
+            existing_lines = existing_lines[-MAX_LEARNINGS:]
+
+        self._replace_section("Learnings", "\n".join(existing_lines))
 
     # ------------------------------------------------------------------
     # Reading (journal)
@@ -125,10 +248,6 @@ class JournalManager:
         if not self._path.exists():
             return ""
         return self._path.read_text()
-
-    def read_learnings(self) -> str:
-        """Return the learnings section."""
-        return self._get_section("Learnings")
 
     def read_summary(self) -> str:
         """Return the summary section."""
@@ -142,20 +261,30 @@ class JournalManager:
         return self._get_section("State")
 
     def read_recent(self, max_entries: int = 10) -> str:
-        """Return recent decisions from run snapshots.
-
-        Falls back to the old Recent Actions section for backwards compat.
-        """
-        snapshots = self.list_runs(limit=max_entries)
+        """Return recent decisions from snapshots."""
+        snapshots = self.list_snapshots(limit=max_entries)
         if snapshots:
             parts = []
             for snap in snapshots:
-                content = self.read_run_snapshot(snap["tick"])
+                content = self.read_snapshot(snap["tick"])
+                if content:
+                    m = re.search(r"^## Agent Response\n(.*?)(?=^## |\Z|^<details)", content, re.MULTILINE | re.DOTALL)
+                    if m:
+                        decision = m.group(1).strip()[:200]
+                        parts.append(f"- **#{snap['tick']}** {decision}")
+            if parts:
+                return "\n".join(parts)
+
+        # Legacy: check runs/ and Recent Actions
+        runs = self._list_legacy_runs(limit=max_entries)
+        if runs:
+            parts = []
+            for run in runs:
+                content = self._read_legacy_run(run["tick"])
                 if content:
                     m = re.search(r"^## Decision\n(.*?)(?=^## |\Z)", content, re.MULTILINE | re.DOTALL)
                     if m:
-                        decision = m.group(1).strip()
-                        parts.append(f"- **#{snap['tick']}** {decision}")
+                        parts.append(f"- **#{run['tick']}** {m.group(1).strip()}")
             if parts:
                 return "\n".join(parts)
 
@@ -165,79 +294,146 @@ class JournalManager:
         return content
 
     # ------------------------------------------------------------------
-    # Run Snapshots
+    # Snapshots (full context dumps)
     # ------------------------------------------------------------------
 
-    def save_run_snapshot(
+    def save_full_snapshot(
         self,
         tick: int,
         timestamp: str,
-        config: dict[str, Any],
-        core_data_summaries: dict[str, str],
-        risk_state: dict[str, Any],
-        learnings: str,
-        recent_actions: str,
+        system_prompt: str,
         response_text: str,
+        tool_calls: list[dict[str, Any]],
+        executors_data: str,
+        risk_state: dict[str, Any],
         cost: float,
         duration: float,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> Path:
-        """Write a per-run snapshot to runs/run_N.md."""
-        self._runs_dir.mkdir(parents=True, exist_ok=True)
+        """Write a full snapshot capturing everything."""
+        self._snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-        market_data = "\n".join(
-            f"### {name}\n{summary}" for name, summary in core_data_summaries.items()
-        ) or "No data available."
-
+        # Format risk state
         risk_lines = [
             f"- Daily PnL: ${risk_state.get('daily_pnl', 0):+.2f} / -${risk_state.get('max_daily_loss', 50):.2f} limit",
             f"- Position Size: ${risk_state.get('total_exposure', 0):.2f} / ${risk_state.get('max_position_size', 500):.2f} limit",
             f"- Open Executors: {risk_state.get('executor_count', 0)} / {risk_state.get('max_open_executors', 5)} limit",
             f"- Status: {'BLOCKED - ' + risk_state.get('block_reason', '') if risk_state.get('is_blocked') else 'ACTIVE'}",
         ]
-        risk_text = "\n".join(risk_lines)
 
-        journal_parts = []
-        if learnings:
-            journal_parts.append(f"### Learnings\n{learnings}")
-        if recent_actions:
-            journal_parts.append(f"### Recent Actions\n{recent_actions}")
-        journal_context = "\n\n".join(journal_parts) or "No prior context."
+        # Format tool calls
+        tool_parts = []
+        for i, tc in enumerate(tool_calls, 1):
+            tc_name = tc.get("name", tc.get("title", "unknown"))
+            tc_status = tc.get("status", "")
+            tool_parts.append(f"### {i}. {tc_name} ({tc_status})")
+            if tc.get("input"):
+                input_str = json.dumps(tc["input"], indent=2) if isinstance(tc["input"], dict) else str(tc["input"])
+                tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
+            if tc.get("output"):
+                output_str = str(tc["output"])[:500]
+                tool_parts.append(f"**Output:**\n```\n{output_str}\n```")
+            tool_parts.append("")
 
-        decision = response_text[:500] if response_text else "No response."
-
-        content = RUN_SNAPSHOT_TEMPLATE.format(
+        content = SNAPSHOT_TEMPLATE.format(
             tick=tick,
             timestamp=timestamp,
-            pair=config.get("trading_pair", "unknown"),
-            connector=config.get("connector_name", "unknown"),
-            frequency=config.get("frequency_sec", 60),
-            market_data=market_data,
-            risk_state=risk_text,
-            journal_context=journal_context,
-            decision=decision,
+            prompt_len=len(system_prompt),
+            system_prompt=system_prompt,
+            executors_data=executors_data or "No executors.",
+            risk_state="\n".join(risk_lines),
+            response_text=response_text or "No response.",
+            tool_count=len(tool_calls),
+            tool_calls="\n".join(tool_parts) or "No tool calls.",
             cost=cost,
             duration=duration,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
-        path = self._runs_dir / f"run_{tick}.md"
+        path = self._snapshots_dir / f"snapshot_{tick}.md"
         path.write_text(content)
-
-        self._cleanup_old_runs()
+        self._cleanup_old_snapshots()
         return path
 
-    def read_run_snapshot(self, tick: int) -> str:
-        """Read a specific run snapshot by tick number."""
-        path = self._runs_dir / f"run_{tick}.md"
+    def read_snapshot(self, tick: int) -> str:
+        """Read a specific snapshot by tick number."""
+        path = self._snapshots_dir / f"snapshot_{tick}.md"
+        if path.exists():
+            return path.read_text()
+        # Legacy fallback
+        return self._read_legacy_run(tick)
+
+    def list_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
+        """List recent snapshots, newest first."""
+        results = []
+
+        # Check new snapshots/ dir
+        if self._snapshots_dir.exists():
+            files = sorted(self._snapshots_dir.glob("snapshot_*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+            for f in files[:limit]:
+                m = re.match(r"snapshot_(\d+)\.md", f.name)
+                if m:
+                    results.append({
+                        "tick": int(m.group(1)),
+                        "file": f.name,
+                        "size": f.stat().st_size,
+                    })
+
+        # If none found, check legacy runs/
+        if not results:
+            return self._list_legacy_runs(limit=limit)
+
+        return results
+
+    def get_recent_decisions(self, count: int = 3) -> str:
+        """Get the response section from the last N snapshots."""
+        snapshots = self.list_snapshots(limit=count)
+        if not snapshots:
+            return ""
+
+        parts = []
+        for snap in reversed(snapshots):
+            content = self.read_snapshot(snap["tick"])
+            if not content:
+                continue
+            # Try new format first
+            m = re.search(r"^## Agent Response\n(.*?)(?=^## |\Z|^<details)", content, re.MULTILINE | re.DOTALL)
+            if not m:
+                # Legacy format
+                m = re.search(r"^## Decision\n(.*?)(?=^## |\Z)", content, re.MULTILINE | re.DOTALL)
+            if m:
+                decision = m.group(1).strip()
+                tm = re.search(r"^# (?:Snapshot|Tick) #\d+ — (.+)$", content, re.MULTILINE)
+                ts = tm.group(1) if tm else ""
+                parts.append(f"**#{snap['tick']}** ({ts}): {decision[:200]}")
+
+        return "\n".join(parts)
+
+    def _cleanup_old_snapshots(self) -> None:
+        """Remove oldest snapshots if over MAX_SNAPSHOTS."""
+        if not self._snapshots_dir.exists():
+            return
+        files = sorted(self._snapshots_dir.glob("snapshot_*.md"))
+        if len(files) > MAX_SNAPSHOTS:
+            for f in files[:len(files) - MAX_SNAPSHOTS]:
+                f.unlink()
+
+    # ------------------------------------------------------------------
+    # Legacy run support (reads from runs/ dir)
+    # ------------------------------------------------------------------
+
+    def _read_legacy_run(self, tick: int) -> str:
+        path = self._legacy_runs_dir / f"run_{tick}.md"
         if path.exists():
             return path.read_text()
         return ""
 
-    def list_runs(self, limit: int = 10) -> list[dict[str, Any]]:
-        """List recent run snapshots, newest first."""
-        if not self._runs_dir.exists():
+    def _list_legacy_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        if not self._legacy_runs_dir.exists():
             return []
-
-        files = sorted(self._runs_dir.glob("run_*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        files = sorted(self._legacy_runs_dir.glob("run_*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
         results = []
         for f in files[:limit]:
             m = re.match(r"run_(\d+)\.md", f.name)
@@ -249,41 +445,37 @@ class JournalManager:
                 })
         return results
 
-    def get_recent_decisions(self, count: int = 3) -> str:
-        """Get the Decision section from the last N run snapshots."""
-        snapshots = self.list_runs(limit=count)
-        if not snapshots:
-            return ""
+    # Keep for backward compat with existing code that calls these
+    def save_run_snapshot(self, **kwargs) -> Path:
+        """Legacy compat: redirect to save_full_snapshot with adapted args."""
+        return self.save_full_snapshot(
+            tick=kwargs.get("tick", 0),
+            timestamp=kwargs.get("timestamp", ""),
+            system_prompt=kwargs.get("system_prompt", ""),
+            response_text=kwargs.get("response_text", ""),
+            tool_calls=kwargs.get("tool_calls", []),
+            executors_data="\n".join(
+                f"### {name}\n{summary}" for name, summary in kwargs.get("core_data_summaries", {}).items()
+            ) or "",
+            risk_state=kwargs.get("risk_state", {}),
+            cost=kwargs.get("cost", 0),
+            duration=kwargs.get("duration", 0),
+        )
 
-        parts = []
-        for snap in reversed(snapshots):  # chronological order
-            content = self.read_run_snapshot(snap["tick"])
-            if not content:
-                continue
-            m = re.search(r"^## Decision\n(.*?)(?=^## |\Z)", content, re.MULTILINE | re.DOTALL)
-            if m:
-                decision = m.group(1).strip()
-                tm = re.search(r"^# Tick #\d+ — (.+)$", content, re.MULTILINE)
-                ts = tm.group(1) if tm else ""
-                parts.append(f"**#{snap['tick']}** ({ts}): {decision[:200]}")
+    def read_run_snapshot(self, tick: int) -> str:
+        """Legacy compat: try snapshots first, then runs."""
+        return self.read_snapshot(tick)
 
-        return "\n".join(parts)
-
-    def _cleanup_old_runs(self) -> None:
-        """Remove oldest run snapshots if over MAX_RUN_SNAPSHOTS."""
-        if not self._runs_dir.exists():
-            return
-        files = sorted(self._runs_dir.glob("run_*.md"))
-        if len(files) > MAX_RUN_SNAPSHOTS:
-            for f in files[: len(files) - MAX_RUN_SNAPSHOTS]:
-                f.unlink()
+    def list_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Legacy compat: try snapshots first, then runs."""
+        return self.list_snapshots(limit=limit)
 
     # ------------------------------------------------------------------
     # Writing (journal)
     # ------------------------------------------------------------------
 
     def write_summary(self, tick: int, status: str, pnl: float, open_count: int, last_action: str) -> None:
-        """Update the Summary section with a one-liner about the last tick."""
+        """Update the Summary section."""
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
         summary = (
             f"Last tick: #{tick} at {now}\n"
@@ -306,58 +498,44 @@ class JournalManager:
         reasoning: str,
         risk_note: str = "",
     ) -> None:
-        """Record an action. Kept for MCP tool compat."""
+        """Record an action in the Decisions section."""
         now = datetime.now(timezone.utc).strftime("%H:%M")
         parts = [f"- **#{tick}** ({now}) {action}"]
         if reasoning:
-            parts[0] += f" — {reasoning}"
+            parts[0] += f" -- {reasoning}"
         if risk_note:
             parts[0] += f" [{risk_note}]"
         entry = parts[0]
 
-        # Only write to Recent Actions if the section exists (old journals)
-        section = self._get_section("Recent Actions")
-        if section or "## Recent Actions" in self.read_full():
-            lines = [l for l in section.splitlines() if l.strip()]
-            lines.append(entry)
-            if len(lines) > 10:
-                lines = lines[-10:]
-            self._replace_section("Recent Actions", "\n".join(lines))
+        # Write to Decisions section
+        section = self._get_section("Decisions")
+        lines = [l for l in section.splitlines() if l.strip()]
+        lines.append(entry)
+        if len(lines) > 20:
+            lines = lines[-20:]
+        self._replace_section("Decisions", "\n".join(lines))
 
-    def append_learning(self, text_content: str) -> None:
-        """Add a learning, deduplicating against existing ones."""
-        section = self._get_section("Learnings")
-        existing_lines = [l for l in section.splitlines() if l.startswith("- ")]
-
-        normalized_new = _normalize(text_content)
-        for line in existing_lines:
-            existing_text = re.sub(r"^- (\[\d{2}:\d{2}\] )?", "", line)
-            if _normalize(existing_text) == normalized_new:
-                return
-            if _word_overlap(normalized_new, _normalize(existing_text)) > 0.5:
-                return
-
-        now = datetime.now(timezone.utc).strftime("%H:%M")
-        existing_lines.append(f"- [{now}] {text_content}")
-
-        if len(existing_lines) > MAX_LEARNINGS:
-            existing_lines = existing_lines[-MAX_LEARNINGS:]
-
-        self._replace_section("Learnings", "\n".join(existing_lines))
+        # Also write to Recent Actions if it exists (legacy compat)
+        if "## Recent Actions" in self.read_full():
+            ra_section = self._get_section("Recent Actions")
+            ra_lines = [l for l in ra_section.splitlines() if l.strip()]
+            ra_lines.append(entry)
+            if len(ra_lines) > 10:
+                ra_lines = ra_lines[-10:]
+            self._replace_section("Recent Actions", "\n".join(ra_lines))
 
     def append_error(self, error: str) -> None:
-        """Append an error as an action entry."""
+        """Append an error as a decision entry."""
         now = datetime.now(timezone.utc).strftime("%H:%M")
-        section = self._get_section("Recent Actions")
-        if section or "## Recent Actions" in self.read_full():
-            lines = [l for l in section.splitlines() if l.strip()]
-            lines.append(f"- **error** ({now}) {error}")
-            if len(lines) > 10:
-                lines = lines[-10:]
-            self._replace_section("Recent Actions", "\n".join(lines))
+        section = self._get_section("Decisions")
+        lines = [l for l in section.splitlines() if l.strip()]
+        lines.append(f"- **error** ({now}) {error}")
+        if len(lines) > 20:
+            lines = lines[-20:]
+        self._replace_section("Decisions", "\n".join(lines))
 
     # ------------------------------------------------------------------
-    # Tick tracking (merged from ExecutorTracker)
+    # Tick tracking
     # ------------------------------------------------------------------
 
     @property
@@ -378,7 +556,7 @@ class JournalManager:
         return self._tick_count
 
     # ------------------------------------------------------------------
-    # Executor tracking (merged from ExecutorTracker)
+    # Executor tracking
     # ------------------------------------------------------------------
 
     def track_executor(self, executor_id: str, ex_type: str, config: dict) -> None:
@@ -412,7 +590,7 @@ class JournalManager:
         self._path.write_text(text)
 
     # ------------------------------------------------------------------
-    # Snapshots (merged from ExecutorTracker)
+    # Metric snapshots (inline in journal)
     # ------------------------------------------------------------------
 
     def record_snapshot(self, total_pnl: float, total_volume: float, open_count: int, position_size: float) -> None:
@@ -424,7 +602,7 @@ class JournalManager:
         self._append_to_section("Snapshots", entry)
 
     # ------------------------------------------------------------------
-    # Queries (used by RiskEngine — previously on ExecutorTracker)
+    # Queries (used by RiskEngine)
     # ------------------------------------------------------------------
 
     def _parse_executors(self) -> list[dict]:
@@ -545,7 +723,7 @@ class JournalManager:
         return snapshots[-1].get("volume", 0.0)
 
     def get_summary_dict(self) -> dict[str, Any]:
-        """Overall summary for display (replaces ExecutorTracker.get_summary)."""
+        """Overall summary for display."""
         return {
             "total_ticks": self._tick_count,
             "daily_pnl": self.get_daily_pnl(),
@@ -602,16 +780,16 @@ class JournalManager:
     # ------------------------------------------------------------------
 
     def entry_count(self) -> int:
-        """Count run snapshots (or recent action entries for old journals)."""
-        runs = self.list_runs(limit=1000)
-        if runs:
-            return len(runs)
+        """Count snapshots."""
+        snaps = self.list_snapshots(limit=1000)
+        if snaps:
+            return len(snaps)
         section = self._get_section("Recent Actions")
         return len([l for l in section.splitlines() if l.startswith("- ")])
 
     def get_data_dir(self) -> Path:
-        """Return the agent's data directory."""
-        return self._dir
+        """Return the session data directory."""
+        return self._session_dir
 
     def size_bytes(self) -> int:
         """Current file size."""

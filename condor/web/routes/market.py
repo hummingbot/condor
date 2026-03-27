@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from config_manager import get_config_manager
+
+# Simple TTL cache for candle data
+_candle_cache: dict[tuple, tuple[float, list]] = {}  # key -> (timestamp, data)
+_CANDLE_CACHE_TTL = 5.0  # seconds
 from condor.web.auth import get_current_user
 from condor.web.models import (
     CandleData,
@@ -148,16 +154,32 @@ async def get_candles(
     connector: str = Query(...),
     trading_pair: str = Query(...),
     interval: str = Query(default="1m"),
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=1000, ge=1, le=5000),
+    start_time: int | None = Query(default=None, description="Unix epoch seconds"),
+    end_time: int | None = Query(default=None, description="Unix epoch seconds"),
     user: WebUser = Depends(get_current_user),
 ):
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    cache_key = (name, connector, trading_pair, interval, limit, start_time, end_time)
+    now = time.monotonic()
+    cached = _candle_cache.get(cache_key)
+    if cached and (now - cached[0]) < _CANDLE_CACHE_TTL:
+        return cached[1]
+
     client = await cm.get_client(name)
     try:
-        result = await client.market_data.get_candles(connector, trading_pair, interval, limit)
+        # Prefer historical candles with time range when start_time is given
+        if start_time is not None:
+            et = end_time or int(time.time())
+            result = await client.market_data.get_historical_candles(
+                connector, trading_pair, interval,
+                start_time=start_time, end_time=et,
+            )
+        else:
+            result = await client.market_data.get_candles(connector, trading_pair, interval, limit)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -187,4 +209,5 @@ async def get_candles(
                     volume=float(c[5]),
                 )
             )
+    _candle_cache[cache_key] = (now, candles)
     return candles

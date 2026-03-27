@@ -2,10 +2,10 @@
 
 One TickEngine instance per running agent.  Each tick:
 1. Pre-compute core data providers (active executors)
-2. Read journal
+2. Read journal (learnings + summary + recent decisions)
 3. Build prompt with strategy + data + risk state
-4. Spawn a fresh ACP session, send prompt, wait for completion
-5. Update tracker and notify user if needed
+4. Spawn a fresh ACP session, stream events, capture tool calls
+5. Save full snapshot and update journal
 """
 
 from __future__ import annotations
@@ -16,7 +16,16 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from condor.acp.client import ACP_COMMANDS, ACPClient, TextChunk, UsageUpdate
+from condor.acp.client import (
+    ACP_COMMANDS,
+    ACPClient,
+    Heartbeat,
+    PromptDone,
+    TextChunk,
+    ToolCallEvent,
+    ToolCallUpdate,
+    UsageUpdate,
+)
 
 from .journal import JournalManager, next_session_number
 from .prompts import build_tick_prompt
@@ -40,11 +49,14 @@ def get_all_engines() -> dict[str, "TickEngine"]:
 
 @dataclass
 class TickEngine:
-    agent_id: str
     strategy: Strategy
     config: dict[str, Any]
     chat_id: int
     user_id: int
+
+    # Derived identity (set in __post_init__)
+    agent_id: str = field(init=False)
+    session_num: int = field(init=False)
 
     # Components (created in __post_init__)
     journal: JournalManager = field(init=False)
@@ -62,17 +74,26 @@ class TickEngine:
     _pending_directives: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self):
-        # Compute session directory from strategy slug
         agent_dir = self.strategy.agent_dir
-        session_num = next_session_number(agent_dir)
-        self.session_dir = agent_dir / "trading_sessions" / f"session_{session_num}"
+        self.session_num = next_session_number(agent_dir)
+        # Agent ID = slug_sessionNum (e.g. river_scalper_v2_3)
+        self.agent_id = f"{self.strategy.slug}_{self.session_num}"
+
+        # Session directory
+        self.session_dir = agent_dir / "sessions" / f"session_{self.session_num}"
         self.session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save config per session
+        from .config import AgentConfig, save_agent_config
+        agent_config = AgentConfig.from_dict(self.config)
+        save_agent_config(self.session_dir, agent_config)
 
         self.journal = JournalManager(
             self.agent_id,
             strategy_name=self.strategy.name,
             strategy_description=self.strategy.description,
             session_dir=self.session_dir,
+            agent_dir=agent_dir,
         )
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
         self.risk = RiskEngine(risk_limits)
@@ -164,12 +185,12 @@ class TickEngine:
             self.journal.append_error("No API client available")
             return
 
-        # 2. Run core data providers (returns dict[str, ProviderResult])
+        # 2. Run core data providers (executors only -- agent uses MCP for market data)
         skill_results = await self.provider_registry.run_core_providers(
             client, self.config, agent_id=self.agent_id
         )
 
-        # Extract structured data from skills for tracking
+        # Extract structured data from providers for tracking
         executors_result = skill_results.get("executors")
         if executors_result:
             self._last_skill_data = executors_result.data
@@ -177,7 +198,7 @@ class TickEngine:
         if portfolio_result:
             self._last_skill_data["portfolio"] = portfolio_result.data
 
-        # Convert SkillResult objects to summary strings for prompt
+        # Convert provider results to summary strings
         core_data_summaries: dict[str, str] = {
             name: result.summary for name, result in skill_results.items()
         }
@@ -256,21 +277,47 @@ class TickEngine:
         )
 
         cost = 0.0
-        response_text = ""
+        input_tokens = 0
+        output_tokens = 0
+        response_chunks: list[str] = []
+        tool_calls: list[dict[str, Any]] = []
+        tool_call_map: dict[str, dict[str, Any]] = {}
 
         await acp_client.start()
         try:
-            response_text = await asyncio.wait_for(
-                acp_client.prompt(prompt),
-                timeout=300,  # 5 min max per tick
-            )
-            if acp_client.last_usage:
-                cost = acp_client.last_usage.cost_usd
+            async for event in asyncio.wait_for(
+                self._collect_stream(acp_client, prompt),
+                timeout=300,
+            ):
+                if isinstance(event, TextChunk):
+                    response_chunks.append(event.text)
+                elif isinstance(event, ToolCallEvent):
+                    tc = {
+                        "id": event.tool_call_id,
+                        "name": event.title,
+                        "status": event.status,
+                        "kind": event.kind,
+                    }
+                    tool_calls.append(tc)
+                    tool_call_map[event.tool_call_id] = tc
+                elif isinstance(event, ToolCallUpdate):
+                    if event.tool_call_id in tool_call_map:
+                        tc = tool_call_map[event.tool_call_id]
+                        if event.status:
+                            tc["status"] = event.status
+                        if event.title:
+                            tc["name"] = event.title
+                elif isinstance(event, UsageUpdate):
+                    cost = event.cost_usd
+                    input_tokens = event.input_tokens
+                    output_tokens = event.output_tokens
         except asyncio.TimeoutError:
             log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
-            response_text = "(timed out)"
+            response_chunks.append("(timed out)")
         finally:
             await acp_client.stop()
+
+        response_text = "".join(response_chunks)
 
         # 7. Record tick
         tick_duration = time.time() - self._last_tick_at
@@ -279,7 +326,7 @@ class TickEngine:
             cost=cost,
         )
 
-        # 8. Record snapshot from live skill data
+        # 8. Record metric snapshot from live skill data
         skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
         skill_volume = self._last_skill_data.get("total_volume", 0.0)
         skill_executors = len(self._last_skill_data.get("executors", []))
@@ -291,20 +338,23 @@ class TickEngine:
             position_size=skill_exposure,
         )
 
-        # 9. Save run snapshot
+        # 9. Save full snapshot with all context
         from datetime import datetime, timezone
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        self.journal.save_run_snapshot(
+
+        executors_summary = core_data_summaries.get("executors", "No executor data.")
+        self.journal.save_full_snapshot(
             tick=tick_num,
             timestamp=timestamp,
-            config=self.config,
-            core_data_summaries=core_data_summaries,
-            risk_state=risk_state.to_dict(),
-            learnings=learnings,
-            recent_actions=recent_decisions,
+            system_prompt=prompt,
             response_text=response_text,
+            tool_calls=tool_calls,
+            executors_data=executors_summary,
+            risk_state=risk_state.to_dict(),
             cost=cost,
             duration=tick_duration,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
         # 10. Update journal summary
@@ -318,20 +368,23 @@ class TickEngine:
         )
 
         log.info(
-            "TickEngine %s tick #%d complete (cost=$%.4f, response=%d chars)",
-            self.agent_id, tick_num, cost, len(response_text),
+            "TickEngine %s tick #%d complete (cost=$%.4f, tools=%d, response=%d chars)",
+            self.agent_id, tick_num, cost, len(tool_calls), len(response_text),
         )
+
+    async def _collect_stream(self, acp_client: ACPClient, prompt: str):
+        """Wrapper to make prompt_stream compatible with wait_for."""
+        async for event in acp_client.prompt_stream(prompt):
+            yield event
+            if isinstance(event, PromptDone):
+                break
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     def _resolve_server(self) -> tuple[str | None, dict | None]:
-        """Resolve the server for this agent.
-
-        If config has server_name, use that directly.
-        Otherwise fall back to chat-based resolution.
-        """
+        """Resolve the server for this agent."""
         from config_manager import get_config_manager, get_effective_server
 
         cm = get_config_manager()
@@ -353,7 +406,6 @@ class TickEngine:
         try:
             server_name, server = self._resolve_server()
             if not server:
-                # Fall back to chat-based resolution
                 from handlers.bots._shared import get_bots_client
                 client, _ = await get_bots_client(self.chat_id)
                 return client
@@ -388,11 +440,12 @@ class TickEngine:
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""
         summary = self.journal.get_summary_dict()
-        # Prefer live skill data over tracker-parsed data
         sd = self._last_skill_data
         return {
             "agent_id": self.agent_id,
             "strategy": self.strategy.name,
+            "strategy_slug": self.strategy.slug,
+            "session_num": self.session_num,
             "status": self.status,
             "tick_count": summary["total_ticks"],
             "daily_pnl": sd.get("total_pnl", summary["daily_pnl"]),

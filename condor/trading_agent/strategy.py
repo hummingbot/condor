@@ -206,6 +206,14 @@ class StrategyStore:
                 return s
         return None
 
+    def get_by_slug(self, slug: str) -> Strategy | None:
+        """Look up a strategy by its directory slug."""
+        agent_dir = _DATA_ROOT / slug
+        agent_md = agent_dir / "agent.md"
+        if not agent_md.exists():
+            return None
+        return _load_strategy_from_file(agent_md, fallback_id=slug)
+
     def list_all(self, user_id: int | None = None) -> list[Strategy]:
         strategies = []
         for agent_dir in sorted(self._iter_agent_dirs()):
@@ -231,7 +239,7 @@ class StrategyStore:
             agent_md.unlink()
             # Remove the agent dir if it's now empty (no sessions)
             agent_dir = strategy.agent_dir
-            has_sessions = (agent_dir / "trading_sessions").exists()
+            has_sessions = (agent_dir / "sessions").exists() or (agent_dir / "trading_sessions").exists()
             if not has_sessions:
                 try:
                     shutil.rmtree(agent_dir)

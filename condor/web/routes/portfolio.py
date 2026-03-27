@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -20,6 +23,33 @@ from condor.web.models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["portfolio"])
+
+# ---------------------------------------------------------------------------
+# Portfolio history cache
+# ---------------------------------------------------------------------------
+
+_RANGE_TTLS: dict[str, int] = {
+    "1D": 120,
+    "1W": 600,
+    "1M": 3600,
+    "3M": 7200,
+}
+
+_WARM_INTERVAL = 120  # Re-warm every 2 min (matches shortest TTL)
+_IDLE_TIMEOUT = 600  # Stop refresh loop after 10 min with no requests
+
+
+@dataclass
+class _CacheEntry:
+    data: Any = None
+    fetched_at: float = 0.0
+    ttl: int = 120
+
+
+# (server, range, False) -> CacheEntry  (breakdown doesn't affect fetched data)
+_history_cache: dict[tuple[str, str, bool], _CacheEntry] = {}
+_refresh_tasks: dict[str, asyncio.Task] = {}
+_last_request_time: dict[str, float] = {}  # server -> last request ts
 
 
 @router.get("/servers/{name}/portfolio", response_model=PortfolioResponse)
@@ -104,31 +134,112 @@ RANGE_CONFIG = {
 }
 
 
+async def _fetch_history(server: str, range_key: str) -> Any:
+    """Fetch portfolio history from the Hummingbot API (no caching)."""
+    cm = get_config_manager()
+    client = await cm.get_client(server)
+    range_seconds, interval = RANGE_CONFIG[range_key]
+    start_time = int(time.time()) - range_seconds
+    return await client.portfolio.get_history(
+        start_time=start_time, interval=interval, limit=500
+    )
+
+
+async def _get_cached_history(server: str, range_key: str, breakdown: bool = False) -> Any:
+    """Return cached history if fresh, otherwise fetch, cache, and return.
+
+    The raw data is the same regardless of *breakdown* (parsing happens in the
+    endpoint), so we cache without the breakdown flag to avoid duplicate fetches.
+    """
+    key = (server, range_key, False)
+    entry = _history_cache.get(key)
+    now = time.time()
+
+    if entry and entry.data is not None and (now - entry.fetched_at) < entry.ttl:
+        return entry.data
+
+    # Fetch fresh data
+    data = await _fetch_history(server, range_key)
+    _history_cache[key] = _CacheEntry(
+        data=data, fetched_at=time.time(), ttl=_RANGE_TTLS[range_key]
+    )
+    return data
+
+
+async def warm_portfolio_history(server: str) -> None:
+    """Pre-fetch all 4 history ranges into cache, then start a refresh loop."""
+    logger.info("Warming portfolio history cache for %s", server)
+    _last_request_time[server] = time.time()
+
+    # Initial warm: fetch all ranges concurrently (no breakdown)
+    tasks = []
+    for range_key in RANGE_CONFIG:
+        tasks.append(_get_cached_history(server, range_key, False))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for range_key, result in zip(RANGE_CONFIG, results):
+        if isinstance(result, Exception):
+            logger.warning("Warm cache failed for %s/%s: %s", server, range_key, result)
+
+    # Start background refresh loop if not already running
+    if server not in _refresh_tasks or _refresh_tasks[server].done():
+        _refresh_tasks[server] = asyncio.create_task(_refresh_loop(server))
+
+
+async def _refresh_loop(server: str) -> None:
+    """Periodically re-warm cache; exits after idle timeout."""
+    logger.info("Portfolio history refresh loop started for %s", server)
+    try:
+        while True:
+            await asyncio.sleep(_WARM_INTERVAL)
+            last = _last_request_time.get(server, 0)
+            if time.time() - last > _IDLE_TIMEOUT:
+                logger.info(
+                    "Portfolio history refresh loop idle for %s, stopping", server
+                )
+                return
+
+            for range_key in RANGE_CONFIG:
+                try:
+                    data = await _fetch_history(server, range_key)
+                    key = (server, range_key, False)
+                    _history_cache[key] = _CacheEntry(
+                        data=data, fetched_at=time.time(), ttl=_RANGE_TTLS[range_key]
+                    )
+                except Exception as e:
+                    logger.debug("Refresh failed for %s/%s: %s", server, range_key, e)
+    except asyncio.CancelledError:
+        logger.info("Portfolio history refresh loop cancelled for %s", server)
+
+
+def stop_history_refresh(server: str) -> None:
+    """Cancel the background refresh loop for a server."""
+    task = _refresh_tasks.pop(server, None)
+    if task and not task.done():
+        task.cancel()
+        logger.info("Stopped portfolio history refresh for %s", server)
+
+
 @router.get("/servers/{name}/portfolio/history", response_model=PortfolioHistoryResponse)
 async def get_portfolio_history(
     name: str,
     range: str = Query("1D", pattern="^(1D|1W|1M|3M)$"),
+    breakdown: bool = Query(False),
     user: WebUser = Depends(get_current_user),
 ):
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access to this server")
 
-    try:
-        client = await cm.get_client(name)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Cannot connect to server: {e}")
-
-    range_seconds, interval = RANGE_CONFIG[range]
-    start_time = int(time.time()) - range_seconds
+    _last_request_time[name] = time.time()
 
     try:
-        history = await client.portfolio.get_history(
-            start_time=start_time, interval=interval, limit=500
-        )
+        history = await _get_cached_history(name, range, breakdown)
     except Exception as e:
         logger.warning("Failed to get portfolio history: %s", e)
+        _, interval = RANGE_CONFIG[range]
         return PortfolioHistoryResponse(server=name, points=[], interval=interval)
+
+    _, interval = RANGE_CONFIG[range]
 
     logger.debug("Portfolio history response shape: %s", type(history))
     if isinstance(history, dict):
@@ -173,7 +284,74 @@ async def get_portfolio_history(
             points.append(PortfolioHistoryPoint(timestamp=_parse_timestamp(ts), total_usd=float(total)))
 
     points.sort(key=lambda p: p.timestamp)
-    return PortfolioHistoryResponse(server=name, points=points, interval=interval)
+
+    top_tokens: list[str] = []
+    if breakdown and points:
+        # Extract per-token values for each point
+        raw_snapshots = []
+        if isinstance(history, list):
+            raw_snapshots = history
+        elif isinstance(history, dict):
+            for key in ("data", "snapshots", "history", "points", "results"):
+                if key in history and isinstance(history[key], list):
+                    raw_snapshots = history[key]
+                    break
+
+        # Build token values per timestamp
+        ts_token_map: dict[float, dict[str, float]] = {}
+        for snapshot in raw_snapshots:
+            if not isinstance(snapshot, dict):
+                continue
+            ts = snapshot.get("timestamp", snapshot.get("time", snapshot.get("t", 0)))
+            if not ts:
+                continue
+            parsed_ts = _parse_timestamp(ts)
+            state = snapshot.get("state", snapshot)
+            token_vals = _extract_token_values(state)
+            if token_vals:
+                ts_token_map[parsed_ts] = token_vals
+
+        # Also handle dict-keyed timestamps
+        if not raw_snapshots and isinstance(history, dict):
+            for ts_key, snapshot_data in history.items():
+                try:
+                    ts = _parse_timestamp(ts_key)
+                except (ValueError, TypeError):
+                    continue
+                token_vals = _extract_token_values(snapshot_data)
+                if token_vals:
+                    ts_token_map[ts] = token_vals
+
+        if ts_token_map:
+            # Determine top 8 tokens by aggregate value
+            agg: dict[str, float] = {}
+            for tv in ts_token_map.values():
+                for token, val in tv.items():
+                    agg[token] = agg.get(token, 0) + val
+            sorted_tokens = sorted(agg, key=lambda t: agg[t], reverse=True)
+            top_tokens = sorted_tokens[:8]
+            top_set = set(top_tokens)
+
+            # Populate token breakdown on each point, collapsing rest into "Other"
+            for point in points:
+                tv = ts_token_map.get(point.timestamp, {})
+                if not tv:
+                    continue
+                tokens_out: dict[str, float] = {}
+                other = 0.0
+                for token, val in tv.items():
+                    if token in top_set:
+                        tokens_out[token] = val
+                    else:
+                        other += val
+                if other > 0:
+                    tokens_out["Other"] = other
+                point.tokens = tokens_out
+
+            if "Other" in {t for p in points for t in p.tokens} and "Other" not in top_tokens:
+                top_tokens.append("Other")
+
+    return PortfolioHistoryResponse(server=name, points=points, interval=interval, top_tokens=top_tokens)
 
 
 def _parse_timestamp(val: object) -> float:
@@ -193,6 +371,24 @@ def _parse_timestamp(val: object) -> float:
         except (ValueError, TypeError):
             pass
     return 0.0
+
+
+def _extract_token_values(data: object) -> dict[str, float]:
+    """Extract per-token USD values from a portfolio snapshot."""
+    tokens: dict[str, float] = {}
+    if not isinstance(data, dict):
+        return tokens
+    for val in data.values():
+        if isinstance(val, dict):
+            for inner in val.values():
+                if isinstance(inner, list):
+                    for item in inner:
+                        if isinstance(item, dict):
+                            token = item.get("token", item.get("asset", ""))
+                            usd = float(item.get("value", item.get("usd_value", 0)))
+                            if token and usd > 0:
+                                tokens[token] = tokens.get(token, 0) + usd
+    return tokens
 
 
 def _sum_snapshot_value(data: object) -> float:

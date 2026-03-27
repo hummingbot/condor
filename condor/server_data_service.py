@@ -512,6 +512,40 @@ class ServerDataService:
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info("ServerDataService started")
 
+    async def auto_subscribe_servers(self) -> None:
+        """Subscribe to core data types for all configured servers.
+
+        Called at startup so the cache is warm before any client connects.
+        Subscribes to: PORTFOLIO, EXECUTORS, BOTS_STATUS for every server.
+        """
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        servers = cm.list_servers()  # Dict[str, dict]
+        if not servers:
+            logger.info("SDS auto-subscribe: no servers configured")
+            return
+
+        core_types = [
+            ServerDataType.PORTFOLIO,
+            ServerDataType.EXECUTORS,
+            ServerDataType.BOTS_STATUS,
+        ]
+        subscriber_id = "_auto"
+        count = 0
+        for name in servers:
+            for dt in core_types:
+                try:
+                    await self.subscribe(
+                        server=name,
+                        data_type=dt,
+                        subscriber_id=subscriber_id,
+                    )
+                    count += 1
+                except Exception as e:
+                    logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
+        logger.info("SDS auto-subscribe: %d subscriptions for %d servers", count, len(servers))
+
     def stop(self) -> None:
         self._running = False
         if self._poll_task and not self._poll_task.done():

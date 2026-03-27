@@ -66,12 +66,14 @@ class PortfolioResponse(BaseModel):
 class PortfolioHistoryPoint(BaseModel):
     timestamp: float
     total_usd: float = 0.0
+    tokens: dict[str, float] = {}
 
 
 class PortfolioHistoryResponse(BaseModel):
     server: str
     points: list[PortfolioHistoryPoint]
     interval: str
+    top_tokens: list[str] = []
 
 
 # ── Bots ──
@@ -108,6 +110,7 @@ class ControllerInfo(BaseModel):
     close_type_counts: dict[str, int] = {}
     positions_summary: list[dict[str, Any]] = []
     deployed_at: Optional[str] = None
+    config: dict[str, Any] = {}
 
 
 class BotSummary(BaseModel):
@@ -130,6 +133,13 @@ class BotsPageResponse(BaseModel):
 # ── Executors ──
 
 
+class CreateExecutorRequest(BaseModel):
+    executor_type: str
+    config: dict[str, Any]
+    account_name: str = "master_account"
+    controller_id: str = "main"
+
+
 class ExecutorInfo(BaseModel):
     id: str
     type: str
@@ -141,6 +151,13 @@ class ExecutorInfo(BaseModel):
     pnl: float = 0.0
     volume: float = 0.0
     timestamp: float = 0.0
+    controller_id: str = ""
+    cum_fees_quote: float = 0.0
+    net_pnl_pct: float = 0.0
+    entry_price: float = 0.0
+    current_price: float = 0.0
+    close_timestamp: float = 0.0
+    custom_info: dict[str, Any] = {}
     config: dict[str, Any] = {}
 
 
@@ -187,3 +204,35 @@ class TradingRuleItem(BaseModel):
 class TradingRulesResponse(BaseModel):
     connector: str
     rules: list[TradingRuleItem]
+
+
+# ── Deploy Bot ──
+
+
+class ControllerConfigSummary(BaseModel):
+    id: str
+    controller_name: str
+    controller_type: str
+    connector_name: str = ""
+    trading_pair: str = ""
+
+
+class AvailableControllersResponse(BaseModel):
+    configs: list[ControllerConfigSummary]
+    controller_types: dict[str, list[str]]
+
+
+class ControllerConfigDetail(BaseModel):
+    id: str
+    controller_name: str
+    controller_type: str
+    config: dict[str, Any]
+
+
+class DeployBotRequest(BaseModel):
+    bot_name: str
+    controllers_config: list[str]
+    account_name: str = "master_account"
+    image: str = "hummingbot/hummingbot:latest"
+    max_global_drawdown_quote: float | None = None
+    max_controller_drawdown_quote: float | None = None
