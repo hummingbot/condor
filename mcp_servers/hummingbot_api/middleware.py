@@ -5,7 +5,7 @@ import functools
 import logging
 from typing import Any, Callable, Coroutine, TypeVar
 
-from hummingbot_mcp.exceptions import MaxConnectionsAttemptError as HBConnectionError, ToolError
+from mcp_servers.hummingbot_api.exceptions import MaxConnectionsAttemptError as HBConnectionError, ToolError
 
 logger = logging.getLogger("hummingbot-mcp")
 

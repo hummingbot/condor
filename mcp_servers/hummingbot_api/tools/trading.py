@@ -8,7 +8,7 @@ For order placement and cancellation, use `manage_executors` with `order_executo
 """
 from typing import Any, Literal
 
-from hummingbot_mcp.formatters import format_orders_as_table, format_positions_as_table
+from mcp_servers.hummingbot_api.formatters import format_orders_as_table, format_positions_as_table
 
 
 async def set_position_mode_and_leverage(

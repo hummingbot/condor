@@ -5,9 +5,9 @@ import asyncio
 import logging
 from typing import Any
 
-from hummingbot_mcp.exceptions import ToolError
-from hummingbot_mcp.schemas import SetupConnectorRequest
-from hummingbot_mcp.settings import settings
+from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.schemas import SetupConnectorRequest
+from mcp_servers.hummingbot_api.settings import settings
 
 logger = logging.getLogger("hummingbot-mcp")
 

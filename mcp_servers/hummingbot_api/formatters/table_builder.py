@@ -119,7 +119,7 @@ class TableBuilder:
     headers, and formatting options.
 
     Example:
-        >>> from hummingbot_mcp.formatters.base import format_number
+        >>> from mcp_servers.hummingbot_api.formatters.base import format_number
         >>> columns = [
         ...     ColumnDef(name="ID", key="id", width=12),
         ...     ColumnDef(name="Price", key="price", width=10, align="right",

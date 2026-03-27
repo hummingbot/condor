@@ -7,7 +7,7 @@ prices, candles, funding rates, and order books.
 from datetime import datetime
 from typing import Any, Literal
 
-from hummingbot_mcp.formatters import (
+from mcp_servers.hummingbot_api.formatters import (
     format_candles_as_table,
     format_order_book_as_table,
     format_prices_as_table,

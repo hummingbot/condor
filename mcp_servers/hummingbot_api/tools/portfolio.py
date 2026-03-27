@@ -10,10 +10,10 @@ import asyncio
 import logging
 from typing import Any, Literal
 
-from hummingbot_mcp.exceptions import ToolError
-from hummingbot_mcp.hummingbot_client import HummingbotClient
-from hummingbot_mcp.formatters import format_portfolio_as_table
-from hummingbot_mcp.tools import trading as trading_tools
+from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
+from mcp_servers.hummingbot_api.formatters import format_portfolio_as_table
+from mcp_servers.hummingbot_api.tools import trading as trading_tools
 
 logger = logging.getLogger("hummingbot-mcp")
 

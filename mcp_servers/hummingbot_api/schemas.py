@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from hummingbot_mcp.settings import settings
+from mcp_servers.hummingbot_api.settings import settings
 
 
 # ==============================================================================

@@ -7,7 +7,7 @@ status retrieval, log management, and execution control.
 import asyncio
 from typing import Any, Literal
 
-from hummingbot_mcp.formatters import format_active_bots_as_table, format_bot_logs_as_table
+from mcp_servers.hummingbot_api.formatters import format_active_bots_as_table, format_bot_logs_as_table
 
 
 async def get_active_bots_status(client: Any) -> dict[str, Any]:

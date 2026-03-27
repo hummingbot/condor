@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from hummingbot_mcp.formatters import (
+from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_bot_logs_as_table,
     format_connector_result,
@@ -19,9 +19,9 @@ from hummingbot_mcp.formatters import (
     format_gateway_swap_result,
     format_portfolio_as_table,
 )
-from hummingbot_mcp.hummingbot_client import hummingbot_client
-from hummingbot_mcp.middleware import GATEWAY_LOG_HINT, handle_errors
-from hummingbot_mcp.schemas import (
+from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
+from mcp_servers.hummingbot_api.schemas import (
     GatewayCLMMRequest,
     GatewayConfigRequest,
     GatewayContainerRequest,
@@ -29,22 +29,22 @@ from hummingbot_mcp.schemas import (
     ManageExecutorsRequest,
     SetupConnectorRequest,
 )
-from hummingbot_mcp.settings import settings
-from hummingbot_mcp.tools import bot_management as bot_management_tools
-from hummingbot_mcp.tools import controllers as controllers_tools
-from hummingbot_mcp.tools import market_data as market_data_tools
-from hummingbot_mcp.tools import portfolio as portfolio_tools
-from hummingbot_mcp.tools import trading as trading_tools
-from hummingbot_mcp.tools.account import setup_connector as setup_connector_impl
-from hummingbot_mcp.tools.executors import manage_executors as manage_executors_impl
-from hummingbot_mcp.tools.gateway import (
+from mcp_servers.hummingbot_api.settings import settings
+from mcp_servers.hummingbot_api.tools import bot_management as bot_management_tools
+from mcp_servers.hummingbot_api.tools import controllers as controllers_tools
+from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
+from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
+from mcp_servers.hummingbot_api.tools import trading as trading_tools
+from mcp_servers.hummingbot_api.tools.account import setup_connector as setup_connector_impl
+from mcp_servers.hummingbot_api.tools.executors import manage_executors as manage_executors_impl
+from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_config as manage_gateway_config_impl,
     manage_gateway_container as manage_gateway_container_impl,
 )
-from hummingbot_mcp.tools.gateway_clmm import explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl
-from hummingbot_mcp.tools.gateway_swap import manage_gateway_swaps as manage_gateway_swaps_impl
-from hummingbot_mcp.tools.geckoterminal import explore_geckoterminal as explore_geckoterminal_impl
-from hummingbot_mcp.tools import history as history_tools
+from mcp_servers.hummingbot_api.tools.gateway_clmm import explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl
+from mcp_servers.hummingbot_api.tools.gateway_swap import manage_gateway_swaps as manage_gateway_swaps_impl
+from mcp_servers.hummingbot_api.tools.geckoterminal import explore_geckoterminal as explore_geckoterminal_impl
+from mcp_servers.hummingbot_api.tools import history as history_tools
 
 # Configure root logger
 logging.basicConfig(
@@ -124,7 +124,7 @@ async def configure_server(
         username: API username
         password: API password
     """
-    from hummingbot_mcp.settings import ServerConfig, _load_server_config, save_server_config
+    from mcp_servers.hummingbot_api.settings import ServerConfig, _load_server_config, save_server_config
 
     # No params → show active server
     if name is None and host is None and port is None and username is None and password is None:

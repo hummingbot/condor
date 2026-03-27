@@ -11,8 +11,8 @@ Provides free, public DEX market data from GeckoTerminal API:
 import logging
 from typing import Any
 
-from hummingbot_mcp.exceptions import ToolError
-from hummingbot_mcp.formatters.base import format_currency, format_number, format_timestamp, truncate_address
+from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.formatters.base import format_currency, format_number, format_timestamp, truncate_address
 
 logger = logging.getLogger("hummingbot-mcp")
 

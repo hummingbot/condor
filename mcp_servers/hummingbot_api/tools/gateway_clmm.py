@@ -10,9 +10,9 @@ For opening/closing LP positions, use `manage_executors` with `lp_executor` type
 import logging
 from typing import Any
 
-from hummingbot_mcp.exceptions import ToolError
-from hummingbot_mcp.formatters.base import format_number, get_field
-from hummingbot_mcp.schemas import GatewayCLMMRequest
+from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.formatters.base import format_number, get_field
+from mcp_servers.hummingbot_api.schemas import GatewayCLMMRequest
 
 logger = logging.getLogger("hummingbot-mcp")
 

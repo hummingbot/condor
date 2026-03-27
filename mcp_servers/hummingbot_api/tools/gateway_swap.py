@@ -9,8 +9,8 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from hummingbot_mcp.exceptions import ToolError
-from hummingbot_mcp.schemas import GatewaySwapRequest
+from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.schemas import GatewaySwapRequest
 
 logger = logging.getLogger("hummingbot-mcp")
 

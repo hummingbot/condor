@@ -7,15 +7,15 @@ creation, viewing, stopping, and position management with progressive disclosure
 import logging
 from typing import Any
 
-from hummingbot_mcp.executor_preferences import executor_preferences
-from hummingbot_mcp.formatters.executors import (
+from mcp_servers.hummingbot_api.executor_preferences import executor_preferences
+from mcp_servers.hummingbot_api.formatters.executors import (
     format_executor_detail,
     format_executor_schema_table,
     format_executors_table,
     format_positions_held_table,
     format_positions_summary,
 )
-from hummingbot_mcp.schemas import ManageExecutorsRequest
+from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
 
 logger = logging.getLogger("hummingbot-mcp")
 

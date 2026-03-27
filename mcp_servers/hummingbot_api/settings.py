@@ -9,7 +9,7 @@ import aiohttp
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-from hummingbot_mcp.exceptions import ConfigurationError
+from mcp_servers.hummingbot_api.exceptions import ConfigurationError
 
 CONFIG_DIR = Path.home() / ".hummingbot_mcp"
 SERVER_CONFIG_PATH = CONFIG_DIR / "server.yml"

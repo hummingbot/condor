@@ -192,7 +192,8 @@ def _local_journal_read(params: dict) -> dict:
 
     engine = get_engine(agent_id)
     session_dir = engine.session_dir if engine else None
-    jm = JournalManager(agent_id, session_dir=session_dir)
+    agent_dir = engine.strategy.agent_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     section = params.get("section", "recent")
     max_entries = params.get("max_entries", 30)
@@ -229,7 +230,8 @@ def _local_journal_write(params: dict) -> dict:
 
     engine = get_engine(agent_id)
     session_dir = engine.session_dir if engine else None
-    jm = JournalManager(agent_id, session_dir=session_dir)
+    agent_dir = engine.strategy.agent_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     entry_type = params.get("entry_type", "action")
     text = params.get("text", "")
@@ -560,7 +562,8 @@ def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
 
     engine = get_engine(agent_id)
     session_dir = engine.session_dir if engine else None
-    jm = JournalManager(agent_id, session_dir=session_dir)
+    agent_dir = engine.strategy.agent_dir if engine else None
+    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     if action == "agent_tracker":
         content = jm.read_full()

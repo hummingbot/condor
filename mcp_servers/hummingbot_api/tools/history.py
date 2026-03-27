@@ -9,7 +9,7 @@ Provides access to historical data:
 import logging
 from typing import Any, Literal
 
-from hummingbot_mcp.hummingbot_client import HummingbotClient
+from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
 from . import trading as trading_tools
 from . import gateway_clmm as gateway_clmm_tools
 

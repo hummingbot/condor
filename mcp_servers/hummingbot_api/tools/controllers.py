@@ -6,6 +6,63 @@ configurations, including exploration, modification, and bot deployment.
 """
 from typing import Any, Literal
 
+# Internal/auto-managed fields that should be skipped during schema validation
+_SKIP_FIELDS = {"id", "controller_name", "controller_type", "candles_config", "initial_positions"}
+
+
+def _validate_config_against_template(
+    config_data: dict[str, Any],
+    template: dict[str, Any],
+) -> None:
+    """
+    Validate config_data covers all fields declared in the controller's template schema.
+
+    Checks that every template parameter that has no default (or defaults to None)
+    is explicitly provided in config_data. Also warns about fields in config_data
+    that don't exist in the template at all (potential typos or schema drift).
+
+    Raises:
+        ValueError: If required fields are missing or unknown fields are present.
+    """
+    missing_fields: list[str] = []
+    unknown_fields: list[str] = []
+
+    # Check all template fields are covered
+    for param_name, param_info in template.items():
+        if param_name in _SKIP_FIELDS:
+            continue
+        default = param_info.get("default")
+        has_default = default is not None
+        if not has_default and param_name not in config_data:
+            param_type = str(param_info.get("type", "unknown"))
+            param_type = param_type.replace("<class '", "").replace("'>", "")
+            missing_fields.append(f"  - {param_name} ({param_type})")
+
+    # Check for fields in config_data that aren't in the template
+    template_fields = set(template.keys()) | _SKIP_FIELDS
+    for key in config_data:
+        if key not in template_fields:
+            unknown_fields.append(f"  - {key}")
+
+    errors: list[str] = []
+    if missing_fields:
+        errors.append(
+            "Missing required fields (no default value in schema):\n" + "\n".join(missing_fields)
+        )
+    if unknown_fields:
+        errors.append(
+            "Unknown fields not in controller schema (possible typos):\n" + "\n".join(unknown_fields)
+        )
+
+    if errors:
+        raise ValueError(
+            "Config validation failed against controller template schema.\n\n"
+            + "\n\n".join(errors)
+            + "\n\nUse manage_controllers(action='describe', controller_name='"
+            + str(config_data.get("controller_name", "..."))
+            + "') to see all available parameters and their defaults."
+        )
+
 
 async def manage_controllers(
     client: Any,
@@ -302,7 +359,13 @@ async def modify_controllers(
             if not config_controller_type or not config_controller_name:
                 raise ValueError("config_data must include 'controller_type' and 'controller_name'")
 
-            # Validate config first
+            # Validate config against template schema before sending to backend
+            template = await client.controllers.get_controller_config_template(
+                config_controller_type, config_controller_name
+            )
+            _validate_config_against_template(config_data, template)
+
+            # Validate config with backend
             await client.controllers.validate_controller_config(config_controller_type, config_controller_name, config_data)
 
             # Modifying saved/global config (design-time only)

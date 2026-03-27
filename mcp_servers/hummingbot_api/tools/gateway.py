@@ -4,8 +4,8 @@ Gateway management tools for Hummingbot MCP Server
 import logging
 from typing import Any
 
-from hummingbot_mcp.exceptions import ToolError
-from hummingbot_mcp.schemas import GatewayConfigRequest, GatewayContainerRequest
+from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.schemas import GatewayConfigRequest, GatewayContainerRequest
 
 logger = logging.getLogger("hummingbot-mcp")
 

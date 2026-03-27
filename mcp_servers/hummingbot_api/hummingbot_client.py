@@ -9,8 +9,8 @@ import platform
 
 from hummingbot_api_client import HummingbotAPIClient
 
-from hummingbot_mcp.exceptions import MaxConnectionsAttemptError
-from hummingbot_mcp.settings import settings
+from mcp_servers.hummingbot_api.exceptions import MaxConnectionsAttemptError
+from mcp_servers.hummingbot_api.settings import settings
 
 logger = logging.getLogger("hummingbot-mcp")
 
