@@ -54,36 +54,64 @@ export function useCondorWebSocket(
               ["candles-status", srv, connector, pair, interval],
               { status: "connected" },
             );
-            // Update the last candle in place
+            // Update or append a single candle
             queryClient.setQueryData(
               ["candles", srv, connector, pair, interval],
               (old: Record<string, number>[] | undefined) => {
                 if (!old?.length) return old;
-                const updated = [...old];
-                const last = updated[updated.length - 1];
-                if (last && last.timestamp === payload.candle!.timestamp) {
-                  updated[updated.length - 1] = payload.candle!;
-                } else {
-                  updated.push(payload.candle!);
+                const ts = payload.candle!.timestamp;
+                const lastIdx = old.length - 1;
+                if (old[lastIdx].timestamp === ts) {
+                  // Update last candle in place
+                  const updated = [...old];
+                  updated[lastIdx] = payload.candle!;
+                  return updated;
+                } else if (ts > old[lastIdx].timestamp) {
+                  // New candle after the last one
+                  return [...old, payload.candle!];
                 }
-                return updated;
+                // Candle for an older timestamp — ignore
+                return old;
               },
             );
-          } else if (payload.type === "candles" && payload.data) {
+          } else if (payload.type === "candles" && payload.data?.length) {
             queryClient.setQueryData(
               ["candles-status", srv, connector, pair, interval],
               { status: "connected" },
             );
-            // New candle(s) arrived — append
+            // Merge candles by timestamp — keeps both old REST data and new WS data
             queryClient.setQueryData(
               ["candles", srv, connector, pair, interval],
               (old: Record<string, number>[] | undefined) => {
-                if (!old) return payload.data;
-                const lastTs = old[old.length - 1]?.timestamp ?? 0;
-                const newCandles = payload.data!.filter(
-                  (c) => c.timestamp > lastTs,
+                if (!old?.length) return payload.data;
+                // Build a map from existing candles (keyed by timestamp)
+                const map = new Map<number, Record<string, number>>();
+                for (const c of old) map.set(c.timestamp, c);
+                // Merge incoming: newer data wins for same timestamp
+                let changed = false;
+                for (const c of payload.data!) {
+                  if (!map.has(c.timestamp)) {
+                    map.set(c.timestamp, c);
+                    changed = true;
+                  } else {
+                    // Update existing candle (WS may have more recent OHLCV)
+                    const existing = map.get(c.timestamp)!;
+                    if (
+                      existing.close !== c.close ||
+                      existing.high !== c.high ||
+                      existing.low !== c.low ||
+                      existing.volume !== c.volume
+                    ) {
+                      map.set(c.timestamp, c);
+                      changed = true;
+                    }
+                  }
+                }
+                if (!changed) return old;
+                // Sort by timestamp and return
+                return Array.from(map.values()).sort(
+                  (a, b) => a.timestamp - b.timestamp,
                 );
-                return newCandles.length ? [...old, ...newCandles] : old;
               },
             );
           }

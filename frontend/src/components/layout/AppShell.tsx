@@ -2,16 +2,21 @@ import { useState } from "react";
 import {
   Activity,
   Bot,
+  Brain,
   CandlestickChart,
   LogOut,
+  Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Sun,
   Wallet,
 } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
+import { useTheme } from "@/hooks/useTheme";
 import { useAuth } from "@/lib/auth";
 
 import { ServerSelector } from "./ServerSelector";
@@ -20,6 +25,7 @@ const NAV_ITEMS = [
   { to: "/", icon: Wallet, label: "Portfolio" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
+  { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/market", icon: CandlestickChart, label: "Market" },
 ] as const;
 
@@ -27,7 +33,11 @@ export function AppShell() {
   const { user, logout } = useAuth();
   const { server } = useServer();
   const { pathname } = useLocation();
+  const { theme, toggleTheme } = useTheme();
   const [collapsed, setCollapsed] = useState(false);
+
+  // Prefetch core data (executors, bots) and subscribe to WS channels early
+  usePrefetchData();
 
   return (
     <div className="flex h-screen">
@@ -81,6 +91,13 @@ export function AppShell() {
           {collapsed ? (
             <div className="flex flex-col items-center gap-2">
               <button
+                onClick={toggleTheme}
+                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
+                title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              >
+                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+              <button
                 onClick={logout}
                 className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
                 title="Logout"
@@ -101,6 +118,13 @@ export function AppShell() {
                 {user?.first_name || user?.username || "User"}
               </span>
               <div className="flex items-center gap-1">
+                <button
+                  onClick={toggleTheme}
+                  className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
+                  title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                >
+                  {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                </button>
                 <button
                   onClick={() => setCollapsed(true)}
                   className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

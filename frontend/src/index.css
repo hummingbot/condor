@@ -1,18 +1,54 @@
 @import "tailwindcss";
 
-:root {
-  --color-bg: #0f1117;
-  --color-surface: #1a1d27;
-  --color-surface-hover: #22252f;
-  --color-border: #2a2d37;
-  --color-text: #e4e4e7;
-  --color-text-muted: #71717a;
-  --color-accent: #6366f1;
-  --color-primary: #6366f1;
-  --color-primary-hover: #818cf8;
+/* ── Dark Mode: Deep Space + Gold ── */
+:root,
+[data-theme="dark"] {
+  --color-bg: #080c18;
+  --color-surface: #0f1525;
+  --color-surface-hover: #161e34;
+  --color-border: #1c2541;
+  --color-text: #e8e6e3;
+  --color-text-muted: #6b7994;
+  --color-accent: #d4a845;
+  --color-primary: #d4a845;
+  --color-primary-hover: #e6be5a;
   --color-green: #22c55e;
   --color-red: #ef4444;
   --color-yellow: #eab308;
+
+  /* Chart-specific */
+  --chart-bg: #0f1525;
+  --chart-grid: #1c2541;
+  --chart-text: #6b7994;
+  --chart-up: #22c55e;
+  --chart-down: #ef4444;
+
+  color-scheme: dark;
+}
+
+/* ── Light Mode: Clean Tech + Gold ── */
+[data-theme="light"] {
+  --color-bg: #f5f6fa;
+  --color-surface: #ffffff;
+  --color-surface-hover: #eef0f7;
+  --color-border: #d8dce8;
+  --color-text: #141727;
+  --color-text-muted: #6b7280;
+  --color-accent: #b8860b;
+  --color-primary: #b8860b;
+  --color-primary-hover: #d4a845;
+  --color-green: #16a34a;
+  --color-red: #dc2626;
+  --color-yellow: #ca8a04;
+
+  /* Chart-specific */
+  --chart-bg: #ffffff;
+  --chart-grid: #e5e7eb;
+  --chart-text: #9ca3af;
+  --chart-up: #16a34a;
+  --chart-down: #dc2626;
+
+  color-scheme: light;
 }
 
 body {
@@ -24,8 +60,33 @@ body {
     system-ui,
     -apple-system,
     sans-serif;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* Smooth theme transitions on surfaces */
+[data-theme] * {
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
 }

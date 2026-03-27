@@ -122,16 +122,26 @@ export function PairSelector({
     );
   }
 
+  const [base, quote] = value ? value.split("-") : ["", ""];
+
   return (
     <div ref={containerRef} className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex w-52 items-center justify-between rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm hover:border-[var(--color-primary)] focus:border-[var(--color-primary)] focus:outline-none"
+        className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none"
       >
-        <span className={value ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}>
-          {isLoading ? "Loading..." : value || "Select pair"}
-        </span>
-        <ChevronDown className="ml-2 h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+        {isLoading ? (
+          <span className="text-sm text-[var(--color-text-muted)]">Loading...</span>
+        ) : value ? (
+          <>
+            <span className="text-[15px] font-semibold text-[var(--color-text)]">{base}</span>
+            <span className="text-[15px] font-semibold text-[var(--color-text-muted)]">/</span>
+            <span className="text-[15px] font-semibold text-[var(--color-text-muted)]">{quote}</span>
+          </>
+        ) : (
+          <span className="text-sm text-[var(--color-text-muted)]">Select pair</span>
+        )}
+        <ChevronDown className="ml-1 h-3.5 w-3.5 text-[var(--color-text-muted)] transition-transform group-hover:text-[var(--color-text)]" />
       </button>
 
       {open && (

@@ -1,11 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { OrderBook } from "@/components/market/OrderBook";
+import { RecentTrades } from "@/components/market/RecentTrades";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { TradingRulesInfo } from "@/components/market/TradingRulesInfo";
 import { useServer } from "@/hooks/useServer";
+import { useTheme } from "@/hooks/useTheme";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type CandleData } from "@/lib/api";
 import { createCondorDatafeed } from "@/lib/tradingview-datafeed";
@@ -22,7 +25,30 @@ const INTERVAL_TO_RESOLUTION: Record<string, string> = {
 
 const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
 
+// Lookback options: label -> seconds
+const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
+  { label: "1h", seconds: 3600 },
+  { label: "6h", seconds: 6 * 3600 },
+  { label: "1d", seconds: 86400 },
+  { label: "3d", seconds: 3 * 86400 },
+  { label: "7d", seconds: 7 * 86400 },
+  { label: "14d", seconds: 14 * 86400 },
+  { label: "30d", seconds: 30 * 86400 },
+];
+
 // ─── TradingView Chart ──────────────────────────────────────────
+
+function getChartColors() {
+  const style = getComputedStyle(document.documentElement);
+  return {
+    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
+    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
+    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
+    up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
+    down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
+    accent: style.getPropertyValue("--color-accent").trim() || "#d4a845",
+  };
+}
 
 function TradingViewChart({
   server,
@@ -38,6 +64,7 @@ function TradingViewChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const widgetRef = useRef<TradingViewWidget | null>(null);
   const readyRef = useRef(false);
+  const { theme } = useTheme();
 
   const channel = `candles:${server}:${connector}:${pair}:${interval}`;
   const channels = useMemo(() => [channel], [channel]);
@@ -46,6 +73,7 @@ function TradingViewChart({
   useEffect(() => {
     if (!containerRef.current || !window.TradingView) return;
 
+    const colors = getChartColors();
     const datafeed = createCondorDatafeed(server, connector, wsRef);
     const resolution = INTERVAL_TO_RESOLUTION[interval] || "1";
 
@@ -58,25 +86,25 @@ function TradingViewChart({
       locale: "en",
       fullscreen: false,
       autosize: true,
-      theme: "Dark",
+      theme: theme === "dark" ? "Dark" : "Light",
       timezone: "Etc/UTC",
-      toolbar_bg: "#1a1d27",
+      toolbar_bg: colors.bg,
       loading_screen: {
-        backgroundColor: "#1a1d27",
-        foregroundColor: "#6366f1",
+        backgroundColor: colors.bg,
+        foregroundColor: colors.accent,
       },
       overrides: {
-        "paneProperties.background": "#1a1d27",
+        "paneProperties.background": colors.bg,
         "paneProperties.backgroundType": "solid",
-        "paneProperties.vertGridProperties.color": "#2a2d37",
-        "paneProperties.horzGridProperties.color": "#2a2d37",
-        "scalesProperties.textColor": "#71717a",
-        "mainSeriesProperties.candleStyle.upColor": "#22c55e",
-        "mainSeriesProperties.candleStyle.downColor": "#ef4444",
-        "mainSeriesProperties.candleStyle.wickUpColor": "#22c55e",
-        "mainSeriesProperties.candleStyle.wickDownColor": "#ef4444",
-        "mainSeriesProperties.candleStyle.borderUpColor": "#22c55e",
-        "mainSeriesProperties.candleStyle.borderDownColor": "#ef4444",
+        "paneProperties.vertGridProperties.color": colors.grid,
+        "paneProperties.horzGridProperties.color": colors.grid,
+        "scalesProperties.textColor": colors.text,
+        "mainSeriesProperties.candleStyle.upColor": colors.up,
+        "mainSeriesProperties.candleStyle.downColor": colors.down,
+        "mainSeriesProperties.candleStyle.wickUpColor": colors.up,
+        "mainSeriesProperties.candleStyle.wickDownColor": colors.down,
+        "mainSeriesProperties.candleStyle.borderUpColor": colors.up,
+        "mainSeriesProperties.candleStyle.borderDownColor": colors.down,
       },
       disabled_features: ["header_symbol_search", "header_compare"],
       enabled_features: ["study_templates", "drawing_templates"],
@@ -95,7 +123,7 @@ function TradingViewChart({
       widgetRef.current = null;
       widget.remove();
     };
-  }, [server, connector]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [server, connector, theme]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!widgetRef.current || !readyRef.current) return;
@@ -118,11 +146,13 @@ function FallbackChart({
   connector,
   pair,
   interval,
+  lookbackSeconds,
 }: {
   server: string;
   connector: string;
   pair: string;
   interval: string;
+  lookbackSeconds: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(
@@ -137,9 +167,16 @@ function FallbackChart({
   const channels = useMemo(() => [channel], [channel]);
   const { wsRef, wsVersion } = useCondorWebSocket(channels, server);
 
+  const startTime = useMemo(
+    () => Math.floor(Date.now() / 1000) - lookbackSeconds,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [lookbackSeconds, pair, interval],
+  );
+
   const { data: candles } = useQuery({
     queryKey: ["candles", server, connector, pair, interval],
-    queryFn: () => api.getCandles(server, connector, pair, interval),
+    queryFn: () =>
+      api.getCandles(server, connector, pair, interval, 5000, startTime),
   });
 
   const { data: candleStatus } = useQuery<{
@@ -156,46 +193,37 @@ function FallbackChart({
       if (cancelled || !containerRef.current) return;
       chartModuleRef.current = mod;
 
+      const colors = getChartColors();
       const chart = mod.createChart(containerRef.current, {
+        autoSize: true,
         layout: {
-          background: { type: mod.ColorType.Solid, color: "#1a1d27" },
-          textColor: "#71717a",
+          background: { type: mod.ColorType.Solid, color: colors.bg },
+          textColor: colors.text,
         },
         grid: {
-          vertLines: { color: "#2a2d37" },
-          horzLines: { color: "#2a2d37" },
+          vertLines: { color: colors.grid },
+          horzLines: { color: colors.grid },
         },
         timeScale: { timeVisible: true, secondsVisible: false },
-        width: containerRef.current.clientWidth,
-        height: containerRef.current.clientHeight,
       });
       chartRef.current = chart;
 
       const series = chart.addSeries(mod.CandlestickSeries, {
-        upColor: "#22c55e",
-        downColor: "#ef4444",
-        wickUpColor: "#22c55e",
-        wickDownColor: "#ef4444",
+        upColor: colors.up,
+        downColor: colors.down,
+        wickUpColor: colors.up,
+        wickDownColor: colors.down,
         borderVisible: false,
       });
       seriesRef.current = series;
-
-      const ro = new ResizeObserver((entries) => {
-        for (const e of entries)
-          chart.applyOptions({
-            width: e.contentRect.width,
-            height: e.contentRect.height,
-          });
-      });
-      ro.observe(containerRef.current);
-
-      return () => {
-        ro.disconnect();
-        chart.remove();
-      };
     });
     return () => {
       cancelled = true;
+      if (chartRef.current) {
+        chartRef.current.remove();
+        chartRef.current = null;
+        seriesRef.current = null;
+      }
     };
   }, []);
 
@@ -293,6 +321,7 @@ export function MarketData() {
   const [connector, setConnector] = useState("binance");
   const [pair, setPair] = useState("BTC-USDT");
   const [interval, setInterval] = useState("1m");
+  const [lookbackSeconds, setLookbackSeconds] = useState(3 * 86400); // 3 days default
   const [tvAvailable, setTvAvailable] = useState(false);
   const [tvChecked, setTvChecked] = useState(false);
 
@@ -347,49 +376,71 @@ export function MarketData() {
 
   return (
     <div className="flex h-full flex-col">
-      {/* ── Top Bar: Connector + Pair Selector + Price Ticker ── */}
-      <div className="flex flex-wrap items-center gap-3 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
-        <select
-          value={connector}
-          onChange={(e) => setConnector(e.target.value)}
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm capitalize focus:border-[var(--color-primary)] focus:outline-none"
-        >
-          {(connectors ?? []).map((c: string) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>
+      {/* ── Top Bar: Exchange-style header ── */}
+      <div className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+        {/* Left: Pair selector + Exchange selector */}
+        <div className="flex items-center border-r border-[var(--color-border)]">
+          <PairSelector
+            server={server}
+            connector={connector}
+            value={pair}
+            onChange={setPair}
+          />
 
-        <PairSelector
-          server={server}
-          connector={connector}
-          value={pair}
-          onChange={setPair}
-        />
-
-        {/* Interval buttons — only for lightweight-charts fallback */}
-        {!tvAvailable && tvChecked && (
-          <div className="flex rounded-md border border-[var(--color-border)]">
-            {INTERVALS.map((iv) => (
-              <button
-                key={iv}
-                onClick={() => setInterval(iv)}
-                className={`px-2.5 py-1 text-xs ${
-                  interval === iv
-                    ? "bg-[var(--color-primary)] text-white"
-                    : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                }`}
-              >
-                {iv}
-              </button>
-            ))}
+          {/* Exchange dropdown styled as a subtle badge */}
+          <div className="relative border-l border-[var(--color-border)]">
+            <ExchangeSelector
+              connectors={connectors ?? []}
+              value={connector}
+              onChange={setConnector}
+            />
           </div>
-        )}
+        </div>
 
-        <div className="ml-auto">
+        {/* Center: Price ticker stats */}
+        <div className="flex flex-1 items-center px-4 py-2">
           <PriceTicker server={server} connector={connector} pair={pair} />
         </div>
+
+        {/* Right: Interval + Range (lightweight fallback only) */}
+        {!tvAvailable && tvChecked && (
+          <div className="flex items-center gap-3 border-l border-[var(--color-border)] px-4 py-2">
+            <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
+              {INTERVALS.map((iv) => (
+                <button
+                  key={iv}
+                  onClick={() => setInterval(iv)}
+                  className={`px-2.5 py-1 text-xs ${
+                    interval === iv
+                      ? "bg-[var(--color-primary)] text-white"
+                      : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                  }`}
+                >
+                  {iv}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-[var(--color-text-muted)]">Range:</span>
+              <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
+                {LOOKBACK_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.label}
+                    onClick={() => setLookbackSeconds(opt.seconds)}
+                    className={`px-2 py-1 text-xs ${
+                      lookbackSeconds === opt.seconds
+                        ? "bg-[var(--color-primary)] text-white"
+                        : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Main Area: Chart + Order Book ── */}
@@ -399,7 +450,7 @@ export function MarketData() {
           <div className="h-full overflow-hidden rounded-none border-0 bg-[var(--color-surface)]">
             {tvAvailable ? (
               <TradingViewChart
-                key={`${connector}:${pair}`}
+                key={`${server}:${connector}`}
                 server={server}
                 connector={connector}
                 pair={pair}
@@ -407,11 +458,12 @@ export function MarketData() {
               />
             ) : tvChecked ? (
               <FallbackChart
-                key={`${connector}:${pair}:${interval}`}
+                key={`${connector}:${pair}:${interval}:${lookbackSeconds}`}
                 server={server}
                 connector={connector}
                 pair={pair}
                 interval={interval}
+                lookbackSeconds={lookbackSeconds}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-[var(--color-text-muted)]">
@@ -421,9 +473,14 @@ export function MarketData() {
           </div>
         </div>
 
-        {/* Order Book */}
-        <div className="w-72 shrink-0 bg-[var(--color-surface)] xl:w-80">
-          <OrderBook server={server} connector={connector} pair={pair} />
+        {/* Order Book + Recent Trades */}
+        <div className="flex w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
+          <div className="flex-[3] overflow-hidden">
+            <OrderBook server={server} connector={connector} pair={pair} />
+          </div>
+          <div className="flex-[2] overflow-hidden border-t border-[var(--color-border)]">
+            <RecentTrades server={server} connector={connector} pair={pair} />
+          </div>
         </div>
       </div>
 

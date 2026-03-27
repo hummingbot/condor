@@ -101,7 +101,7 @@ export function OrderBook({ server, connector, pair }: OrderBookProps) {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex flex-col">
       {/* Header */}
       <div className="border-b border-[var(--color-border)] px-3 py-2">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
@@ -121,7 +121,7 @@ export function OrderBook({ server, connector, pair }: OrderBookProps) {
           Loading...
         </div>
       ) : (
-        <div className="mt-auto flex flex-col overflow-hidden">
+        <div className="flex flex-col overflow-hidden">
           {/* Asks (reversed: highest at top) */}
           <div className="flex flex-col justify-end overflow-hidden">
             {asks.map((level, i) => (

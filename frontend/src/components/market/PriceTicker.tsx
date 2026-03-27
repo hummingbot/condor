@@ -48,33 +48,40 @@ export function PriceTicker({ server, connector, pair }: PriceTickerProps) {
         : "text-[var(--color-text)]";
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex items-center gap-5">
+      {/* Mark price */}
       <div>
-        <p className="text-xs text-[var(--color-text-muted)]">{pair}</p>
-        <p className={`text-lg font-bold tabular-nums ${dirColor}`}>
+        <p className={`text-lg font-bold tabular-nums leading-tight ${dirColor}`}>
           {price.mid_price.toLocaleString("en-US", { maximumFractionDigits: 8 })}
         </p>
       </div>
+
       {price.best_bid > 0 && (
-        <div className="hidden text-right text-[11px] sm:block">
-          <div className="flex gap-3">
-            <span>
-              <span className="text-[var(--color-text-muted)]">Bid </span>
-              <span className="tabular-nums text-[var(--color-green)]">
-                {price.best_bid.toLocaleString("en-US", { maximumFractionDigits: 8 })}
-              </span>
-            </span>
-            <span>
-              <span className="text-[var(--color-text-muted)]">Ask </span>
-              <span className="tabular-nums text-[var(--color-red)]">
-                {price.best_ask.toLocaleString("en-US", { maximumFractionDigits: 8 })}
-              </span>
-            </span>
+        <>
+          {/* Bid */}
+          <div className="hidden sm:block">
+            <p className="text-[10px] leading-tight text-[var(--color-text-muted)]">Bid</p>
+            <p className="text-xs font-medium tabular-nums leading-tight text-[var(--color-green)]">
+              {price.best_bid.toLocaleString("en-US", { maximumFractionDigits: 8 })}
+            </p>
           </div>
-          <p className="text-[var(--color-text-muted)]">
-            Spread: {spreadPct.toFixed(3)}%
-          </p>
-        </div>
+
+          {/* Ask */}
+          <div className="hidden sm:block">
+            <p className="text-[10px] leading-tight text-[var(--color-text-muted)]">Ask</p>
+            <p className="text-xs font-medium tabular-nums leading-tight text-[var(--color-red)]">
+              {price.best_ask.toLocaleString("en-US", { maximumFractionDigits: 8 })}
+            </p>
+          </div>
+
+          {/* Spread */}
+          <div className="hidden md:block">
+            <p className="text-[10px] leading-tight text-[var(--color-text-muted)]">Spread</p>
+            <p className="text-xs font-medium tabular-nums leading-tight text-[var(--color-text)]">
+              {spreadPct.toFixed(3)}%
+            </p>
+          </div>
+        </>
       )}
     </div>
   );
