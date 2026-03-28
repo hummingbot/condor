@@ -8,11 +8,13 @@ import {
   Clock,
   Eye,
   Lightbulb,
+  MessageSquareText,
   Pause,
   Play,
   Save,
   Settings,
   Square,
+  X,
   Zap,
 } from "lucide-react";
 import { useCallback, useState } from "react";
@@ -33,13 +35,94 @@ type TabId = (typeof TABS)[number]["id"];
 
 // ── Status Controls ──
 
-function AgentControls({ slug, status }: { slug: string; status: string }) {
+function StartSessionDialog({
+  open,
+  onClose,
+  slug,
+  defaultContext,
+}: {
+  open: boolean;
+  onClose: () => void;
+  slug: string;
+  defaultContext: string;
+}) {
   const queryClient = useQueryClient();
+  const [context, setContext] = useState(defaultContext);
 
   const startMut = useMutation({
-    mutationFn: () => api.startAgent(slug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    mutationFn: () => api.startAgent(slug, {}, context),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      onClose();
+    },
   });
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-lg rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-[var(--color-text)]">Start New Session</h2>
+          <button onClick={onClose} className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <div>
+            <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+              <MessageSquareText className="h-3.5 w-3.5" />
+              Trading Context
+            </label>
+            <p className="mb-2 text-xs text-[var(--color-text-muted)]">
+              Describe what this session should focus on. This guides the agent's trading decisions.
+            </p>
+            <textarea
+              value={context}
+              onChange={(e) => setContext(e.target.value)}
+              placeholder="e.g. Focus on SOL meme coins, ride momentum for 5-10% gains, tight stops at 3%..."
+              rows={4}
+              className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/40 outline-none transition-colors focus:border-[var(--color-primary)]"
+              autoFocus
+            />
+          </div>
+        </div>
+
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            onClick={() => { setContext(""); }}
+            className="rounded-lg px-3 py-2 text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            Clear
+          </button>
+          <button
+            onClick={onClose}
+            className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => startMut.mutate()}
+            disabled={startMut.isPending}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-emerald-500 disabled:opacity-40"
+          >
+            <Play className="h-3.5 w-3.5" />
+            {startMut.isPending ? "Starting..." : "Start Session"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentControls({ slug, status, defaultContext }: { slug: string; status: string; defaultContext: string }) {
+  const queryClient = useQueryClient();
+  const [showStartDialog, setShowStartDialog] = useState(false);
+
   const stopMut = useMutation({
     mutationFn: () => api.stopAgent(slug),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
@@ -53,54 +136,62 @@ function AgentControls({ slug, status }: { slug: string; status: string }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
   });
 
-  const loading = startMut.isPending || stopMut.isPending || pauseMut.isPending || resumeMut.isPending;
+  const loading = stopMut.isPending || pauseMut.isPending || resumeMut.isPending;
 
   return (
-    <div className="flex items-center gap-2">
-      {status === "idle" || status === "stopped" ? (
-        <button
-          onClick={() => startMut.mutate()}
-          disabled={loading}
-          className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500 disabled:opacity-40"
-        >
-          <Play className="h-3.5 w-3.5" /> Start
-        </button>
-      ) : status === "running" ? (
-        <>
+    <>
+      <div className="flex items-center gap-2">
+        {status === "idle" || status === "stopped" ? (
           <button
-            onClick={() => pauseMut.mutate()}
-            disabled={loading}
-            className="flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-400 transition-all hover:bg-amber-500/20 disabled:opacity-40"
+            onClick={() => setShowStartDialog(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500"
           >
-            <Pause className="h-3.5 w-3.5" /> Pause
+            <Play className="h-3.5 w-3.5" /> Start
           </button>
-          <button
-            onClick={() => stopMut.mutate()}
-            disabled={loading}
-            className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-40"
-          >
-            <Square className="h-3.5 w-3.5" /> Stop
-          </button>
-        </>
-      ) : status === "paused" ? (
-        <>
-          <button
-            onClick={() => resumeMut.mutate()}
-            disabled={loading}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500 disabled:opacity-40"
-          >
-            <Play className="h-3.5 w-3.5" /> Resume
-          </button>
-          <button
-            onClick={() => stopMut.mutate()}
-            disabled={loading}
-            className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-40"
-          >
-            <Square className="h-3.5 w-3.5" /> Stop
-          </button>
-        </>
-      ) : null}
-    </div>
+        ) : status === "running" ? (
+          <>
+            <button
+              onClick={() => pauseMut.mutate()}
+              disabled={loading}
+              className="flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-400 transition-all hover:bg-amber-500/20 disabled:opacity-40"
+            >
+              <Pause className="h-3.5 w-3.5" /> Pause
+            </button>
+            <button
+              onClick={() => stopMut.mutate()}
+              disabled={loading}
+              className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-40"
+            >
+              <Square className="h-3.5 w-3.5" /> Stop
+            </button>
+          </>
+        ) : status === "paused" ? (
+          <>
+            <button
+              onClick={() => resumeMut.mutate()}
+              disabled={loading}
+              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500 disabled:opacity-40"
+            >
+              <Play className="h-3.5 w-3.5" /> Resume
+            </button>
+            <button
+              onClick={() => stopMut.mutate()}
+              disabled={loading}
+              className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-40"
+            >
+              <Square className="h-3.5 w-3.5" /> Stop
+            </button>
+          </>
+        ) : null}
+      </div>
+
+      <StartSessionDialog
+        open={showStartDialog}
+        onClose={() => setShowStartDialog(false)}
+        slug={slug}
+        defaultContext={defaultContext}
+      />
+    </>
   );
 }
 
@@ -109,9 +200,42 @@ function AgentControls({ slug, status }: { slug: string; status: string }) {
 function OverviewTab({ agent }: { agent: AgentDetailType }) {
   const config = agent.config as Record<string, unknown>;
   const riskLimits = (config.risk_limits || {}) as Record<string, unknown>;
+  const tradingContext = (config.trading_context as string) || "";
+  const defaultTradingContext = agent.default_trading_context || "";
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+      {/* Trading Context — full width, prominent */}
+      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 lg:col-span-2">
+        <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+          <MessageSquareText className="h-3.5 w-3.5" /> Trading Context
+        </h3>
+        {tradingContext || defaultTradingContext ? (
+          <div className="space-y-3">
+            {tradingContext && (
+              <div>
+                <span className="mb-1 block text-[10px] uppercase tracking-wider text-emerald-400">Active Session</span>
+                <p className="whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-3 text-sm leading-relaxed text-[var(--color-text)]">
+                  {tradingContext}
+                </p>
+              </div>
+            )}
+            {defaultTradingContext && (
+              <div>
+                <span className="mb-1 block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Default</span>
+                <p className="whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-3 text-sm leading-relaxed text-[var(--color-text-muted)]">
+                  {defaultTradingContext}
+                </p>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--color-text-muted)]">
+            No trading context set. Describe what the agent should focus on when starting a session.
+          </p>
+        )}
+      </div>
+
       {/* Config */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -119,7 +243,7 @@ function OverviewTab({ agent }: { agent: AgentDetailType }) {
         </h3>
         <div className="space-y-2 font-mono text-sm">
           {Object.entries(config)
-            .filter(([k]) => k !== "risk_limits")
+            .filter(([k]) => k !== "risk_limits" && k !== "trading_context")
             .map(([k, v]) => (
               <div key={k} className="flex justify-between">
                 <span className="text-[var(--color-text-muted)]">{k}</span>
@@ -433,7 +557,7 @@ export function AgentDetail() {
               <p className="mt-1 text-sm text-[var(--color-text-muted)]">{agent.description}</p>
             )}
           </div>
-          <AgentControls slug={slug!} status={agent.status} />
+          <AgentControls slug={slug!} status={agent.status} defaultContext={agent.default_trading_context || (agent.config.trading_context as string) || ""} />
         </div>
       </div>
 

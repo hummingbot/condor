@@ -263,19 +263,27 @@ export function GridChart({
       const range = endPrice - startPrice;
       const stepSize = startPrice * minSpread;
       if (stepSize > 0) {
-        const numLevels = Math.min(Math.floor(range / stepSize), 50);
-        for (let i = 1; i < numLevels; i++) {
-          const levelPrice = startPrice + stepSize * i;
-          if (levelPrice >= endPrice) break;
-          const gl = series.createPriceLine({
-            price: levelPrice,
-            color: "rgba(34, 197, 94, 0.15)",
-            lineWidth: 1,
-            lineStyle: mod.LineStyle.Dotted,
-            axisLabelVisible: false,
-            title: "",
-          });
-          gridLinesRef.current.push(gl);
+        const numLevels = Math.floor(range / stepSize);
+        // Only draw grid lines if there's a reasonable number (2-200)
+        // Skip if too many (would clutter) or too few
+        if (numLevels >= 2 && numLevels <= 200) {
+          const maxDraw = Math.min(numLevels, 50);
+          // If more levels than we can draw, sample evenly
+          const drawStep = numLevels > maxDraw ? numLevels / maxDraw : 1;
+          for (let idx = 0; idx < maxDraw; idx++) {
+            const i = Math.round((idx + 1) * drawStep);
+            const levelPrice = startPrice + stepSize * i;
+            if (levelPrice >= endPrice) break;
+            const gl = series.createPriceLine({
+              price: levelPrice,
+              color: "rgba(34, 197, 94, 0.15)",
+              lineWidth: 1,
+              lineStyle: mod.LineStyle.Dotted,
+              axisLabelVisible: false,
+              title: "",
+            });
+            gridLinesRef.current.push(gl);
+          }
         }
       }
     }

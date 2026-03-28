@@ -105,15 +105,17 @@ function CreateAgentDialog({
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [defaultContext, setDefaultContext] = useState("");
 
   const createMutation = useMutation({
     mutationFn: () =>
-      api.createAgent({ name, description }),
+      api.createAgent({ name, description, default_trading_context: defaultContext }),
     onSuccess: (agent) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       onClose();
       setName("");
       setDescription("");
+      setDefaultContext("");
       navigate(`/agents/${agent.slug}`);
     },
   });
@@ -150,9 +152,24 @@ function CreateAgentDialog({
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="What does this agent do?"
+              rows={2}
+              className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+              Default Trading Context
+            </label>
+            <textarea
+              value={defaultContext}
+              onChange={(e) => setDefaultContext(e.target.value)}
+              placeholder="e.g. Trade meme coins aggressively, focus on momentum breakouts with tight stops..."
               rows={3}
               className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
             />
+            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+              Natural language context that guides trading decisions. Can be overridden per session.
+            </p>
           </div>
         </div>
 

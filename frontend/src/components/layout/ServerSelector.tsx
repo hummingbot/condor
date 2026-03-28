@@ -26,10 +26,9 @@ export function ServerSelector() {
     [JSON.stringify(onlineServers.map((s) => s.name))],
   );
 
-  // Auto-select first online server
+  // Auto-select first online server only when no server is saved yet
   useEffect(() => {
-    if (onlineServerNames.length === 0) return;
-    if (!server || !onlineServerNames.includes(server)) {
+    if (!server && onlineServerNames.length > 0) {
       setServer(onlineServerNames[0]);
     }
   }, [server, onlineServerNames, setServer]);

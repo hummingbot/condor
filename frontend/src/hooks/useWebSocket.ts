@@ -31,7 +31,17 @@ export function useCondorWebSocket(
       } else if (prefix === "bots") {
         queryClient.setQueryData(["bots", server], data);
       } else if (prefix === "executors") {
-        queryClient.setQueryData(["executors", server], data);
+        // Set unfiltered cache (matches default queryKey with status="")
+        queryClient.setQueryData(["executors", server, ""], data);
+        // Invalidate any filtered queries so they refetch
+        queryClient.invalidateQueries({
+          queryKey: ["executors", server],
+          exact: false,
+          predicate: (query) =>
+            Array.isArray(query.queryKey) &&
+            query.queryKey.length >= 3 &&
+            query.queryKey[2] !== "",
+        });
       } else if (prefix === "candles") {
         // channel format: candles:{server}:{connector}:{pair}:{interval}
         const parts = channel.split(":");

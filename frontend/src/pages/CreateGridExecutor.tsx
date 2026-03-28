@@ -4,10 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Loader2, Rocket } from "lucide-react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
-import { OrderBook } from "@/components/market/OrderBook";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
-import { RecentTrades } from "@/components/market/RecentTrades";
 import { GridChart } from "@/components/grid/GridChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { useServer } from "@/hooks/useServer";
@@ -163,12 +161,14 @@ export function CreateGridExecutor() {
           max_orders_per_batch: state.max_orders_per_batch,
           order_frequency: state.order_frequency,
           leverage: state.leverage,
-          take_profit: state.take_profit,
-          open_order_type: state.open_order_type,
-          take_profit_order_type: state.take_profit_order_type,
           activation_bounds: state.activation_bounds,
           keep_position: state.keep_position,
           coerce_tp_to_step: state.coerce_tp_to_step,
+          triple_barrier_config: {
+            take_profit: state.take_profit,
+            open_order_type: state.open_order_type,
+            take_profit_order_type: state.take_profit_order_type,
+          },
         },
       });
     },
@@ -285,26 +285,13 @@ export function CreateGridExecutor() {
 
         {/* Right Panel */}
         <div className="flex w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
-          {/* Config Panel */}
-          <div className="flex-1 overflow-hidden border-b border-[var(--color-border)]">
-            <div className="border-b border-[var(--color-border)] px-3 py-2">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                Grid Config
-              </h3>
-            </div>
-            <div className="h-[calc(100%-33px)] overflow-y-auto">
-              <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} />
-            </div>
+          <div className="border-b border-[var(--color-border)] px-3 py-2">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+              Grid Config
+            </h3>
           </div>
-
-          {/* Order Book */}
-          <div className="h-64 shrink-0 overflow-hidden border-b border-[var(--color-border)]">
-            <OrderBook server={server} connector={state.connector} pair={state.pair} />
-          </div>
-
-          {/* Recent Trades */}
-          <div className="h-48 shrink-0 overflow-hidden">
-            <RecentTrades server={server} connector={state.connector} pair={state.pair} />
+          <div className="flex-1 overflow-y-auto">
+            <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} />
           </div>
         </div>
       </div>

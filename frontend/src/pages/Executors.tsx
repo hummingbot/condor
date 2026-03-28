@@ -910,7 +910,7 @@ export function Executors() {
     queryKey: ["executors", server, filters.status],
     queryFn: () => api.getExecutors(server!, { status: filters.status }),
     enabled: !!server,
-    refetchInterval: 15000,
+    refetchInterval: 5000,
   });
 
   const stopMutation = useMutation({

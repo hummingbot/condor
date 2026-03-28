@@ -153,6 +153,44 @@ function SelectField({
   );
 }
 
+function ToggleField({
+  label,
+  value,
+  field,
+  dispatch,
+}: {
+  label: string;
+  value: boolean;
+  field: string;
+  dispatch: React.Dispatch<GridAction>;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        onClick={() => dispatch({ type: "SET_FIELD", field, value: !value })}
+        className={`relative h-5 w-9 rounded-full transition-colors ${
+          value ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+            value ? "left-[18px]" : "left-0.5"
+          }`}
+        />
+      </button>
+      <span className="text-xs text-[var(--color-text)]">{label}</span>
+    </div>
+  );
+}
+
+function SectionHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+      {children}
+    </span>
+  );
+}
+
 const ORDER_TYPE_OPTIONS = [
   { value: 1, label: "Market" },
   { value: 2, label: "Limit" },
@@ -217,7 +255,6 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
     if (!currentPrice || currentPrice <= 0) return;
     const p = currentPrice;
     if (state.side === 1) {
-      // LONG: end=P*1.03, start=P*0.99, limit=start*0.995
       const start = p * 0.99;
       const end = p * 1.03;
       const limit = start * 0.995;
@@ -225,7 +262,6 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
       dispatch({ type: "SET_FIELD", field: "end_price", value: parseFloat(end.toPrecision(6)) });
       dispatch({ type: "SET_FIELD", field: "limit_price", value: parseFloat(limit.toPrecision(6)) });
     } else {
-      // SHORT: start=P*0.97, end=P*1.01, limit=end*1.005
       const start = p * 0.97;
       const end = p * 1.01;
       const limit = end * 1.005;
@@ -239,12 +275,10 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
-      {/* Direction */}
+      {/* ── Direction ── */}
       <div>
-        <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-          Direction
-        </label>
-        <div className="flex gap-1">
+        <SectionHeader>Direction</SectionHeader>
+        <div className="mt-1.5 flex gap-1">
           <button
             onClick={() => dispatch({ type: "SET_FIELD", field: "side", value: 1 })}
             className={`flex-1 rounded py-2 text-xs font-bold transition-colors ${
@@ -268,12 +302,10 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
         </div>
       </div>
 
-      {/* Price fields */}
+      {/* ── Prices ── */}
       <div className="space-y-2.5">
         <div className="flex items-center justify-between">
-          <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-            Prices
-          </span>
+          <SectionHeader>Prices</SectionHeader>
           <button
             onClick={handleAutoFill}
             disabled={!currentPrice}
@@ -281,7 +313,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
             title="Auto-fill from current price"
           >
             <Sparkles className="h-3 w-3" />
-            Set from market
+            Auto-fill
           </button>
         </div>
 
@@ -317,11 +349,9 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
         />
       </div>
 
-      {/* Capital */}
+      {/* ── Grid Structure ── */}
       <div className="space-y-2.5">
-        <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-          Capital
-        </span>
+        <SectionHeader>Grid Structure</SectionHeader>
         <NumberField
           label="Total Amount (quote)"
           value={state.total_amount_quote}
@@ -340,18 +370,25 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
           min={0}
           suffix="USDT"
         />
+        <NumberField
+          label="Min Spread Between Orders"
+          value={state.min_spread_between_orders}
+          field="min_spread_between_orders"
+          dispatch={dispatch}
+          step={0.01}
+          isPercent
+          suffix="%"
+        />
         {validation.levels > 0 && (
-          <p className="text-[10px] text-[var(--color-text-muted)]">
-            ~{validation.levels} levels, ~${perLevel.toFixed(2)} per level
+          <p className="rounded bg-[var(--color-bg)] px-2.5 py-1.5 text-[10px] text-[var(--color-text-muted)]">
+            ~{validation.levels} levels &middot; ~${perLevel.toFixed(2)} per level
           </p>
         )}
       </div>
 
-      {/* Take Profit */}
+      {/* ── Take Profit ── */}
       <div className="space-y-2.5">
-        <span className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-          Take Profit
-        </span>
+        <SectionHeader>Take Profit</SectionHeader>
         <NumberField
           label="Take Profit"
           value={state.take_profit}
@@ -361,24 +398,21 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
           isPercent
           suffix="%"
         />
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => dispatch({ type: "SET_FIELD", field: "keep_position", value: !state.keep_position })}
-            className={`relative h-5 w-9 rounded-full transition-colors ${
-              state.keep_position ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
-                state.keep_position ? "left-[18px]" : "left-0.5"
-              }`}
-            />
-          </button>
-          <span className="text-xs text-[var(--color-text)]">Keep Position</span>
-        </div>
+        <ToggleField
+          label="Keep Position"
+          value={state.keep_position}
+          field="keep_position"
+          dispatch={dispatch}
+        />
+        <ToggleField
+          label="Coerce TP to Step"
+          value={state.coerce_tp_to_step}
+          field="coerce_tp_to_step"
+          dispatch={dispatch}
+        />
       </div>
 
-      {/* Advanced (collapsible) */}
+      {/* ── Advanced (collapsible) ── */}
       <div>
         <button
           onClick={() => dispatch({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
@@ -390,15 +424,6 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
 
         {state.showAdvanced && (
           <div className="mt-2 space-y-2.5">
-            <NumberField
-              label="Min Spread Between Orders"
-              value={state.min_spread_between_orders}
-              field="min_spread_between_orders"
-              dispatch={dispatch}
-              step={0.01}
-              isPercent
-              suffix="%"
-            />
             <NumberField
               label="Leverage"
               value={state.leverage}
@@ -427,7 +452,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
               />
             </div>
             <NumberField
-              label="Order Frequency (seconds)"
+              label="Order Frequency"
               value={state.order_frequency}
               field="order_frequency"
               dispatch={dispatch}
@@ -458,26 +483,11 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
               dispatch={dispatch}
               options={ORDER_TYPE_OPTIONS}
             />
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => dispatch({ type: "SET_FIELD", field: "coerce_tp_to_step", value: !state.coerce_tp_to_step })}
-                className={`relative h-5 w-9 rounded-full transition-colors ${
-                  state.coerce_tp_to_step ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
-                }`}
-              >
-                <span
-                  className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
-                    state.coerce_tp_to_step ? "left-[18px]" : "left-0.5"
-                  }`}
-                />
-              </button>
-              <span className="text-xs text-[var(--color-text)]">Coerce TP to Step</span>
-            </div>
           </div>
         )}
       </div>
 
-      {/* Validation errors/warnings */}
+      {/* ── Validation ── */}
       {(validation.errors.length > 0 || validation.warnings.length > 0) && (
         <div className="space-y-1">
           {validation.errors.map((err, i) => (
