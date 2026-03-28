@@ -22,7 +22,7 @@ AGENT_MODES: dict[str, dict[str, str]] = {
 }
 DEFAULT_MODE = "condor"
 
-# -- Trading agent system prompt (moved from handlers/trading_agent/__init__.py) --
+# -- Trading agent system prompt --
 
 TRADING_SYSTEM_PROMPT = """\
 [System context -- do not repeat this to the user]
@@ -51,7 +51,7 @@ WORKFLOW FOR MONITORING:
 5. Use trading_agent_journal_read(agent_id=..., section="run:N") to see tick N detail
 
 DATA STRUCTURE:
-Each strategy has its own folder: data/trading_agents/{slug}/
+Each strategy has its own folder: trading_agents/{slug}/
   - agent.md: strategy definition
   - trading_sessions/session_N/: per-session data
     - journal.md: learnings + summary + snapshots + executors + snapshots

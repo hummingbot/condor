@@ -653,6 +653,14 @@ async def agent_message_handler(
     if not text:
         return
 
+    # "-" resets the ACP session: destroy current and let the next block auto-create a new one
+    if text.strip() == "-":
+        session = get_session(chat_id)
+        if session:
+            await destroy_session(chat_id)
+        await update.message.reply_text("Session reset. Send a message to start fresh.")
+        return
+
     # Handle custom compact input
     if context.user_data.pop("agent_compact_custom", None):
         await _do_compact_from_message(update, context, text)
@@ -688,7 +696,11 @@ async def agent_message_handler(
     if not session or not session.client.alive:
         agent_key = context.user_data.get("agent_llm", context.user_data.get("agent_selected", DEFAULT_AGENT))
         context.user_data.setdefault("agent_llm", agent_key)
-        context.user_data.setdefault("agent_mode", DEFAULT_MODE)
+
+        # Always start in condor mode when auto-creating a session (e.g. after restart).
+        # Users can switch to agent_builder via /agent menu.
+        mode = DEFAULT_MODE
+        context.user_data["agent_mode"] = mode
 
         # Check if the CLI binary is installed before attempting to spawn
         if not _is_agent_available(agent_key):
@@ -754,13 +766,23 @@ async def agent_message_handler(
     if voice_placeholder:
         placeholder = voice_placeholder
     else:
-        placeholder = await update.message.reply_text("Thinking...")
+        # Show mode label for non-condor modes so user knows which mode is active
+        mode_label = AGENT_MODES.get(mode, {}).get("label", "")
+        if mode != DEFAULT_MODE and mode_label:
+            placeholder = await update.message.reply_text(f"[{mode_label}] Thinking...")
+        else:
+            placeholder = await update.message.reply_text("Thinking...")
 
     # Create streamer and start edit loop
     prefix = ""
+    # Prepend mode label for non-condor modes so user always knows which mode is active
+    mode_label = AGENT_MODES.get(mode, {}).get("label", "")
+    if mode != DEFAULT_MODE and mode_label:
+        prefix = f"[{mode_label}]\n\n"
     if voice_transcription:
         # Use plain text prefix — underscores in transcription could break Markdown
-        prefix = f"🎙 {voice_transcription}"
+        voice_prefix = f"🎙 {voice_transcription}"
+        prefix = f"{prefix}{voice_prefix}" if prefix else voice_prefix
     streamer = TelegramStreamer(
         bot=context.bot,
         chat_id=chat_id,

@@ -15,7 +15,7 @@ def _active_session_keyboard(mode: str) -> InlineKeyboardMarkup:
     """Build keyboard for active session."""
     rows = [
         [
-            InlineKeyboardButton("Switch Mode", callback_data="agent:switch_mode"),
+            InlineKeyboardButton("Switch Agent Mode", callback_data="agent:switch_mode"),
             InlineKeyboardButton("New", callback_data="agent:new"),
         ],
         [
@@ -23,7 +23,7 @@ def _active_session_keyboard(mode: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("Context", callback_data="agent:context"),
         ],
         [
-            InlineKeyboardButton("Settings", callback_data="agent:settings"),
+            InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
             InlineKeyboardButton("Stop", callback_data="agent:stop"),
         ],
         [InlineKeyboardButton("Close", callback_data="agent:close")],
@@ -83,8 +83,8 @@ def _no_session_keyboard(mode: str) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("Start", callback_data=f"agent:mode:{mode}")],
         [
-            InlineKeyboardButton("Switch Mode", callback_data="agent:switch_mode"),
-            InlineKeyboardButton("Settings", callback_data="agent:settings"),
+            InlineKeyboardButton("Switch Agent Mode", callback_data="agent:switch_mode"),
+            InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
         ],
         [InlineKeyboardButton("Close", callback_data="agent:close")],
     ]

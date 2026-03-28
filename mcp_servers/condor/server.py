@@ -51,20 +51,70 @@ def _local_manage_routines_describe(name: str) -> dict:
     }
 
 
+async def _local_manage_routines_run(name: str, config: dict | None) -> dict:
+    """Execute a one-shot routine and return its result."""
+    import asyncio
+    from routines.base import get_routine
+
+    routine = get_routine(name)
+    if not routine:
+        return {"error": f"Routine '{name}' not found"}
+
+    if routine.is_continuous:
+        return {
+            "error": f"Routine '{name}' is continuous and cannot be run via MCP. "
+            "Use the Telegram /routines command to start/stop continuous routines."
+        }
+
+    # Build config from defaults + overrides
+    try:
+        config_obj = routine.config_class(**(config or {}))
+    except Exception as e:
+        return {"error": f"Invalid config: {e}"}
+
+    # Minimal mock context — provides _chat_id for API client resolution
+    class MCPContext:
+        def __init__(self):
+            self._chat_id = CHAT_ID
+            self._user_id = USER_ID
+            self._user_data: dict = {}
+            self.bot = None
+            self.application = None
+
+        @property
+        def user_data(self):
+            return self._user_data
+
+    context = MCPContext()
+
+    try:
+        result = await asyncio.wait_for(
+            routine.run_fn(config_obj, context), timeout=120
+        )
+        return {"name": name, "result": result}
+    except asyncio.TimeoutError:
+        return {"error": f"Routine '{name}' timed out after 120s"}
+    except Exception as e:
+        return {"error": f"Routine '{name}' failed: {e}"}
+
+
 @mcp.tool()
 async def manage_routines(
     action: str,
     name: str | None = None,
+    config: dict | None = None,
 ) -> dict:
-    """Manage Condor routines (auto-discoverable Python scripts).
+    """Manage and run Condor routines (auto-discoverable Python scripts).
 
     Actions:
     - "list": List all available routines with name, description, and type
     - "describe": Show config schema for a routine (requires name)
+    - "run": Execute a one-shot routine and return its result (requires name, optional config)
 
     Args:
-        action: The action to perform (list, describe)
-        name: Routine name (required for describe)
+        action: The action to perform (list, describe, run)
+        name: Routine name (required for describe, run)
+        config: Config overrides for run (optional, merged with defaults)
 
     Returns:
         Action-specific result dict.
@@ -76,6 +126,11 @@ async def manage_routines(
         if not name:
             return {"error": "name is required"}
         return _local_manage_routines_describe(name)
+
+    if action == "run":
+        if not name:
+            return {"error": "name is required"}
+        return await _local_manage_routines_run(name, config)
 
     return {"error": f"Unknown action: {action}"}
 
@@ -586,7 +641,10 @@ async def manage_skills(
     name: str | None = None,
     params: dict | None = None,
 ) -> dict:
-    """Manage trading agent skills (market analysis tools).
+    """(Deprecated) Use manage_routines instead.
+
+    Skills are being replaced by routines. Use manage_routines(action="run", ...)
+    to execute analysis scripts directly.
 
     Actions:
     - "list": List all available skills with descriptions
