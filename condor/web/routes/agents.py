@@ -16,7 +16,7 @@ from condor.web.models import WebUser
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/agents", tags=["agents"])
 
-_DATA_ROOT = Path(__file__).resolve().parent.parent.parent.parent / "data" / "trading_agents"
+_DATA_ROOT = Path(__file__).resolve().parent.parent.parent.parent / "trading_agents"
 
 
 # ── Request/Response Models ──
@@ -56,6 +56,7 @@ class AgentDetail(BaseModel):
     description: str
     agent_md: str
     config: dict[str, Any] = {}
+    default_trading_context: str = ""
     learnings: str = ""
     status: str = "idle"
     agent_id: str = ""
@@ -75,6 +76,7 @@ class CreateAgentRequest(BaseModel):
     description: str = ""
     instructions: str = ""
     agent_key: str = "claude-code"
+    default_trading_context: str = ""
     config: dict[str, Any] = {}
 
 
@@ -92,6 +94,7 @@ class UpdateLearningsRequest(BaseModel):
 
 class StartAgentRequest(BaseModel):
     config: dict[str, Any] = {}
+    trading_context: str = ""
 
 
 # ── Helpers ──
@@ -273,6 +276,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         description=strategy.description,
         agent_md=agent_md,
         config=config.model_dump(),
+        default_trading_context=strategy.default_trading_context,
         learnings=learnings,
         status=status,
         agent_id=agent_id,
@@ -291,6 +295,7 @@ async def create_agent(req: CreateAgentRequest, user: WebUser = Depends(get_curr
         agent_key=req.agent_key,
         instructions=req.instructions,
         default_config=req.config,
+        default_trading_context=req.default_trading_context,
         created_by=user.id,
     )
 
@@ -362,6 +367,12 @@ async def start_agent(slug: str, req: StartAgentRequest, user: WebUser = Depends
     config_dict = config.model_dump()
     if req.config:
         config_dict.update(req.config)
+
+    # Apply trading context: explicit request > strategy default
+    if req.trading_context:
+        config_dict["trading_context"] = req.trading_context
+    elif not config_dict.get("trading_context") and strategy.default_trading_context:
+        config_dict["trading_context"] = strategy.default_trading_context
 
     new_engine = TickEngine(
         strategy=strategy,

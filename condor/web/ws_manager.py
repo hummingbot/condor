@@ -251,6 +251,9 @@ class WebSocketManager:
             # Broadcast the primed data
             result = sds.get(server_name, data_type, **params)
             if result is not None:
+                # Transform executor data to match REST API format
+                if data_type.name == "EXECUTORS":
+                    result = self._transform_executors(result)
                 prev = self._last_data.get(channel)
                 if result != prev:
                     await self.broadcast(channel, result)
