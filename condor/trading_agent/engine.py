@@ -221,12 +221,8 @@ class TickEngine:
             await self._notify(f"Agent {self.agent_id} blocked: {risk_state.block_reason}")
             return
 
-        # 5. Build prompt
-        from .skill_loader import get_tick_skills
-
-        server_creds = self._get_server_credentials()
+        # 5. Build prompt (server credentials are injected via env into MCP process)
         next_tick = self.journal.tick_count + 1
-        skill_prompts = get_tick_skills(self.strategy.skills, self.config)
         prompt = build_tick_prompt(
             strategy=self.strategy,
             config=self.config,
@@ -235,10 +231,8 @@ class TickEngine:
             summary=summary,
             recent_decisions=recent_decisions,
             risk_state=risk_state.to_dict(),
-            server_credentials=server_creds,
             tick_number=next_tick,
             agent_id=self.agent_id,
-            skill_prompts=skill_prompts,
         )
 
         # Inject pending user directives
@@ -285,32 +279,42 @@ class TickEngine:
 
         await acp_client.start()
         try:
-            async for event in asyncio.wait_for(
-                self._collect_stream(acp_client, prompt),
-                timeout=300,
-            ):
-                if isinstance(event, TextChunk):
-                    response_chunks.append(event.text)
-                elif isinstance(event, ToolCallEvent):
-                    tc = {
-                        "id": event.tool_call_id,
-                        "name": event.title,
-                        "status": event.status,
-                        "kind": event.kind,
-                    }
-                    tool_calls.append(tc)
-                    tool_call_map[event.tool_call_id] = tc
-                elif isinstance(event, ToolCallUpdate):
-                    if event.tool_call_id in tool_call_map:
-                        tc = tool_call_map[event.tool_call_id]
-                        if event.status:
+            async with asyncio.timeout(300):
+                async for event in self._collect_stream(acp_client, prompt):
+                    if isinstance(event, TextChunk):
+                        response_chunks.append(event.text)
+                    elif isinstance(event, ToolCallEvent):
+                        if event.tool_call_id in tool_call_map:
+                            # Update existing entry (dedup pending→completed)
+                            tc = tool_call_map[event.tool_call_id]
                             tc["status"] = event.status
-                        if event.title:
-                            tc["name"] = event.title
-                elif isinstance(event, UsageUpdate):
-                    cost = event.cost_usd
-                    input_tokens = event.input_tokens
-                    output_tokens = event.output_tokens
+                            if event.title:
+                                tc["name"] = event.title
+                        else:
+                            tc = {
+                                "id": event.tool_call_id,
+                                "name": event.title,
+                                "status": event.status,
+                                "kind": event.kind,
+                            }
+                            tool_calls.append(tc)
+                            tool_call_map[event.tool_call_id] = tc
+                    elif isinstance(event, ToolCallUpdate):
+                        if event.tool_call_id in tool_call_map:
+                            tc = tool_call_map[event.tool_call_id]
+                            if event.status:
+                                tc["status"] = event.status
+                            if event.title:
+                                tc["name"] = event.title
+                    elif isinstance(event, UsageUpdate):
+                        # Keep highest cost (streaming sends cost, response may not)
+                        if event.cost_usd > cost:
+                            cost = event.cost_usd
+                        input_tokens = event.input_tokens or input_tokens
+                        output_tokens = event.output_tokens or output_tokens
+                        # Fallback: if we have total but no breakdown, use total
+                        if not input_tokens and not output_tokens and event.used:
+                            input_tokens = event.used
         except asyncio.TimeoutError:
             log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
             response_chunks.append("(timed out)")
@@ -416,18 +420,6 @@ class TickEngine:
         except Exception:
             log.exception("Failed to get API client for agent %s", self.agent_id)
             return None
-
-    def _get_server_credentials(self) -> dict[str, str] | None:
-        """Get server credentials for prompt injection."""
-        _, server = self._resolve_server()
-        if not server:
-            return None
-        return {
-            "host": server["host"],
-            "port": str(server["port"]),
-            "username": server["username"],
-            "password": server["password"],
-        }
 
     async def _notify(self, message: str) -> None:
         """Send a notification to the user via Telegram."""

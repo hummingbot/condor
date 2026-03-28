@@ -27,6 +27,7 @@ class AgentConfig(BaseModel):
     connector_name: str = Field(default="binance_perpetual", description="Exchange connector")
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
+    trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:

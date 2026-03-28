@@ -2,7 +2,7 @@
 
 Data is organized by strategy and session::
 
-    data/trading_agents/
+    trading_agents/
         {strategy_slug}/
             agent.md            # strategy definition
             config.yml          # runtime config
@@ -25,7 +25,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "data" / "trading_agents"
+_DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
 
 MAX_LEARNINGS = 20
 MAX_SNAPSHOTS = 100

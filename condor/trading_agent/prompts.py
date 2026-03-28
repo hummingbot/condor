@@ -1,8 +1,8 @@
-"""Prompt builder for trading agent snapshots.
+"""Prompt builder for trading agent ticks.
 
 Assembles the single prompt sent to a fresh ACP session each tick,
 combining: base rules, strategy instructions, config, risk state,
-pre-computed skill data, and journal context (learnings + recent decisions).
+pre-computed core data, and journal context (learnings + recent decisions).
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ You are an autonomous trading agent running inside Condor.
 RULES:
 - ALL trading MUST go through executors. Use manage_executors(action="create") \
 to open positions or grids. NEVER use place_order directly.
-- Before using any mcp-hummingbot tool, call configure_server with the \
-credentials provided in your config section.
+- The mcp-hummingbot server is already configured with the correct credentials. \
+Do NOT call configure_server — it's already connected.
 - Be conservative. When in doubt, take NO action and explain why in the journal.
 - Keep tool call chains short (1-5 calls per tick).
 - When creating executors, ALWAYS include controller_id in the executor_config. \
@@ -31,24 +31,34 @@ JOURNAL RULES:
 NEW that isn't already in the learnings list. Learnings are deduplicated \
 automatically -- don't repeat what's already there.
 - Keep entries short. No paragraphs. No verbose explanations.
+- Do NOT call trading_agent_journal_read — your journal context (learnings, \
+recent decisions, current status) is already included in this prompt.
+
+ROUTINES:
+- Use manage_routines(action="run", name="...", config={...}) to execute \
+analysis routines and get structured results back.
+- Use manage_routines(action="list") to discover available routines.
+- Use manage_routines(action="describe", name="...") to see a routine's \
+config schema before running it.
+- Routines are pre-built Python scripts (market scanners, arb checks, etc.) \
+that return data directly — much faster than manual tool-call chains.
 
 AVAILABLE MCP TOOLS:
-- mcp-hummingbot: configure_server, get_market_data, get_portfolio_overview, \
+- mcp-hummingbot: get_market_data, get_portfolio_overview, \
 manage_executors, manage_bots, search_history
-- condor: trading_agent_journal_write, trading_agent_journal_read, \
-send_notification
+- condor: trading_agent_journal_write, \
+send_notification, manage_routines
 """
 
 TOOL_PRELOAD_HINT = (
     "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
-    'ToolSearch(query="select:mcp__mcp-hummingbot__configure_server,'
-    "mcp__mcp-hummingbot__get_market_data,"
+    'ToolSearch(query="select:mcp__mcp-hummingbot__get_market_data,'
     "mcp__mcp-hummingbot__get_portfolio_overview,"
     "mcp__mcp-hummingbot__manage_executors,"
     "mcp__mcp-hummingbot__search_history,"
     "mcp__condor__trading_agent_journal_write,"
-    "mcp__condor__trading_agent_journal_read,"
-    'mcp__condor__send_notification")\n'
+    "mcp__condor__send_notification,"
+    'mcp__condor__manage_routines")\n'
     "Do this silently."
 )
 
@@ -61,10 +71,8 @@ def build_tick_prompt(
     summary: str,
     recent_decisions: str,
     risk_state: dict[str, Any],
-    server_credentials: dict[str, str] | None = None,
     tick_number: int = 1,
     agent_id: str = "",
-    skill_prompts: list[str] | None = None,
 ) -> str:
     """Build the full prompt for one agent tick."""
     sections: list[str] = [BASE_PROMPT, TOOL_PRELOAD_HINT]
@@ -75,23 +83,27 @@ def build_tick_prompt(
         tick_info += f"\nAgent ID: {agent_id}\nUse controller_id=\"{agent_id}\" in all executor configs."
     sections.append(tick_info)
 
-    # Server credentials
-    if server_credentials:
-        sections.append(
-            "[SERVER CREDENTIALS]\n"
-            f"host={server_credentials['host']}, "
-            f"port={server_credentials['port']}, "
-            f"username={server_credentials['username']}, "
-            f"password={server_credentials['password']}\n"
-            "Call configure_server with these values before any mcp-hummingbot tool."
-        )
+    # Server credentials are injected via env vars into the MCP process,
+    # so no need to include them in the prompt or call configure_server.
 
     # Strategy instructions
     sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
 
-    # Current config
+    # Session trading context (natural language directives for this session)
+    trading_context = config.get("trading_context", "")
+    if trading_context:
+        sections.append(
+            "[SESSION CONTEXT]\n"
+            "The user provided the following natural language context for this trading session. "
+            "Use this to guide your market selection, risk appetite, and trading style:\n\n"
+            f"{trading_context}"
+        )
+
+    # Current config (exclude trading_context)
     config_lines = [f"[CURRENT CONFIG]"]
     for k, v in config.items():
+        if k == "trading_context":
+            continue
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))
 
@@ -121,11 +133,6 @@ def build_tick_prompt(
         sections.append(f"[CURRENT STATUS]\n{summary}")
     if recent_decisions:
         sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
-
-    # Skill prompts (rendered markdown templates)
-    if skill_prompts:
-        for sp in skill_prompts:
-            sections.append(sp)
 
     # Final instruction
     sections.append(

@@ -3,7 +3,7 @@
 Each strategy is stored as ``agent.md`` (YAML frontmatter + markdown body)
 inside its own agent folder::
 
-    data/trading_agents/
+    trading_agents/
         river_scalper/
             agent.md          # strategy definition
             trading_sessions/
@@ -27,7 +27,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "data" / "trading_agents"
+_DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
 _LEGACY_STRATEGIES_DIR = _DATA_ROOT / "strategies"
 
 
@@ -83,6 +83,7 @@ def _load_strategy_from_file(path: Path, fallback_id: str = "") -> Strategy | No
             instructions=body,
             skills=meta.get("skills", []),
             default_config=meta.get("default_config", {}),
+            default_trading_context=meta.get("default_trading_context", ""),
             created_by=meta.get("created_by", 0),
             created_at=meta.get("created_at", ""),
         )
@@ -100,6 +101,7 @@ class Strategy:
     instructions: str  # The strategy logic text for the LLM
     skills: list[str] = field(default_factory=list)  # Optional skill names
     default_config: dict[str, Any] = field(default_factory=dict)
+    default_trading_context: str = ""  # Default natural language trading context for new sessions
     created_by: int = 0  # user_id
     created_at: str = ""  # ISO timestamp
 
@@ -114,14 +116,14 @@ class Strategy:
 
     @property
     def agent_dir(self) -> Path:
-        """Path to this strategy's agent folder: data/trading_agents/{slug}/."""
+        """Path to this strategy's agent folder: trading_agents/{slug}/."""
         return _DATA_ROOT / self.slug
 
 
 class StrategyStore:
     """CRUD for strategy definitions stored as agent.md in agent folders.
 
-    Primary location: ``data/trading_agents/{slug}/agent.md``
+    Primary location: ``trading_agents/{slug}/agent.md``
     We also maintain an ID-based index for fast lookup by strategy ID.
     """
 
@@ -168,7 +170,7 @@ class StrategyStore:
             pass
 
     def _agent_md_path(self, strategy: Strategy) -> Path:
-        """Primary path: data/trading_agents/{slug}/agent.md."""
+        """Primary path: trading_agents/{slug}/agent.md."""
         return strategy.agent_dir / "agent.md"
 
     def create(
@@ -179,6 +181,7 @@ class StrategyStore:
         instructions: str,
         skills: list[str] | None = None,
         default_config: dict | None = None,
+        default_trading_context: str = "",
         created_by: int = 0,
     ) -> Strategy:
         strategy = Strategy(
@@ -189,6 +192,7 @@ class StrategyStore:
             instructions=instructions,
             skills=skills or [],
             default_config=default_config or {},
+            default_trading_context=default_trading_context,
             created_by=created_by,
         )
         self._save(strategy)
@@ -257,6 +261,7 @@ class StrategyStore:
             "agent_key": strategy.agent_key,
             "skills": strategy.skills,
             "default_config": strategy.default_config,
+            "default_trading_context": strategy.default_trading_context,
             "created_by": strategy.created_by,
             "created_at": strategy.created_at,
         }
@@ -267,7 +272,7 @@ class StrategyStore:
         (agent_dir / "agent.md").write_text(content)
 
     def _iter_agent_dirs(self):
-        """Yield directories under data/trading_agents/ that could contain an agent.md."""
+        """Yield directories under trading_agents/ that could contain an agent.md."""
         if not _DATA_ROOT.exists():
             return
         for d in _DATA_ROOT.iterdir():
