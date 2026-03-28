@@ -18,7 +18,7 @@ from .jsonrpc import JSONRPCPeer
 log = logging.getLogger(__name__)
 
 ACP_COMMANDS: dict[str, str] = {
-    "claude-code": "claude-code-acp",
+    "claude-code": "claude-agent-acp",
     "gemini": "gemini --experimental-acp",
 }
 
@@ -256,13 +256,20 @@ class ACPClient:
                     usage = result["usage"]
                     total = usage.get("totalTokens", 0)
                     size = usage.get("contextWindow", 200000)
-                    input_tokens = usage.get("inputTokens", 0)
-                    output_tokens = usage.get("outputTokens", 0)
+                    input_tokens = (
+                        usage.get("inputTokens")
+                        or usage.get("input_tokens", 0)
+                    )
+                    output_tokens = (
+                        usage.get("outputTokens")
+                        or usage.get("output_tokens", 0)
+                    )
                     cost = result.get("cost", {}) or {}
                     log.debug(
                         "Usage from prompt response: totalTokens=%d, contextWindow=%d, "
-                        "input=%d, output=%d, raw_usage=%s",
+                        "input=%d, output=%d, raw_usage=%s, raw_result_keys=%s",
                         total, size, input_tokens, output_tokens, usage,
+                        list(result.keys()),
                     )
                     self._event_queue.put_nowait(
                         UsageUpdate(
@@ -340,8 +347,17 @@ class ACPClient:
             cost = update.get("cost") or {}
             used = update.get("used", 0)
             size = update.get("size", 200000)
-            input_tokens = update.get("inputTokens", 0)
-            output_tokens = update.get("outputTokens", 0)
+            # Try multiple field names — ACP implementations vary
+            input_tokens = (
+                update.get("inputTokens")
+                or update.get("input_tokens")
+                or update.get("tokensIn", 0)
+            )
+            output_tokens = (
+                update.get("outputTokens")
+                or update.get("output_tokens")
+                or update.get("tokensOut", 0)
+            )
             log.debug(
                 "Usage from session/update: used=%d, size=%d, input=%d, output=%d, raw=%s",
                 used, size, input_tokens, output_tokens, update,
