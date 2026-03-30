@@ -73,7 +73,7 @@ make_link() {
     local url="$1"
     local text="${2:-$url}"
     # Check if terminal supports hyperlinks (most modern terminals do)
-    if [ -n "$TERM" ] && [ "$TERM" != "dumb" ]; then
+    if [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
         echo -e "\033]8;;${url}\033\\${text}\033]8;;\033\\"
     else
         echo "$text ($url)"
@@ -87,6 +87,61 @@ echo -e "${BOLD}╔════════════════════�
 echo -e "${BOLD}║            Condor Setup                   ║${RESET}"
 echo -e "${BOLD}╚═══════════════════════════════════════════╝${RESET}"
 echo ""
+
+# ── Step 0: Ensure 'uv' and 'tmux' are installed ─────
+
+if ! command -v uv >/dev/null 2>&1; then
+    msg_info "'uv' not found. Installing uv (https://docs.astral.sh/uv/)..."
+    if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+        # Source the cargo env to get uv in current path immediately
+        # Usually installed to $HOME/.local/bin or $HOME/.cargo/bin
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        if ! command -v uv >/dev/null 2>&1; then
+            msg_error "uv was installed but is still not in PATH. Please install it manually."
+            exit 1
+        fi
+        msg_ok "uv installed successfully"
+    else
+        msg_error "Failed to install uv automatically."
+        exit 1
+    fi
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+    msg_info "'tmux' not found. Installing tmux..."
+
+    SUDO_CMD=""
+    if [ "${EUID:-0}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+        SUDO_CMD="sudo"
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        $SUDO_CMD apt-get update && $SUDO_CMD apt-get install -y tmux || {
+            msg_error "Failed to install tmux via apt-get. Please install it manually."
+            exit 1
+        }
+    elif command -v yum >/dev/null 2>&1; then
+        $SUDO_CMD yum install -y tmux || {
+            msg_error "Failed to install tmux via yum. Please install it manually."
+            exit 1
+        }
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO_CMD dnf install -y tmux || {
+            msg_error "Failed to install tmux via dnf. Please install it manually."
+            exit 1
+        }
+    elif command -v brew >/dev/null 2>&1; then
+        brew install tmux || {
+            msg_error "Failed to install tmux via Homebrew. Please install it manually."
+            exit 1
+        }
+    else
+        msg_error "Could not detect a supported package manager to install tmux. Please install it manually."
+        exit 1
+    fi
+else
+    msg_ok "tmux is already installed"
+fi
 
 # ── Step 1: Telegram Configuration ──────────────────
 
@@ -102,7 +157,7 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$ADMIN_USER_ID" ]; then
+if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${ADMIN_USER_ID:-}" ]; then
     msg_ok "Telegram already configured"
     telegram_configured=true
 else
@@ -182,8 +237,8 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-if [ -n "$DEPLOY_HUMMINGBOT_API" ]; then
-    if [ "$DEPLOY_HUMMINGBOT_API" = "true" ]; then
+if [ -n "${DEPLOY_HUMMINGBOT_API:-}" ]; then
+    if [ "${DEPLOY_HUMMINGBOT_API:-}" = "true" ]; then
         msg_ok "Hummingbot API already configured (enabled)"
         hb_api_deployed=true
     else
@@ -194,7 +249,7 @@ else
     echo ""
     prompt_visible "Deploy Hummingbot API locally with Docker? [Y/n]" "Y" "deploy_hb"
 
-    if [[ "$deploy_hb" =~ ^[Nn]$ ]]; then
+    if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
         echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
         msg_ok "Skipped Hummingbot API deployment"
     else
@@ -288,14 +343,14 @@ echo ""
 
 # ── Step 3: Auto-register server in config.yml ─────
 
-if [ "$hb_api_deployed" = true ]; then
+if [ "${hb_api_deployed:-}" = true ]; then
     # Determine credentials (re-read from HB API .env if we didn't just set them)
-    if [ -z "$hb_username" ] && [ -f "$HB_API_DIR/.env" ]; then
+    if [ -z "${hb_username:-}" ] && [ -f "$HB_API_DIR/.env" ]; then
         hb_username=$(grep "^USERNAME=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2)
         hb_password=$(grep "^PASSWORD=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2)
     fi
 
-    if [ -n "$hb_username" ]; then
+    if [ -n "${hb_username:-}" ]; then
         # Check if config.yml already has a server entry
         if [ -f "$CONFIG_FILE" ] && grep -q "^servers:" "$CONFIG_FILE" && grep -q "  local:" "$CONFIG_FILE"; then
             msg_ok "Server 'local' already registered in $CONFIG_FILE"
@@ -330,7 +385,7 @@ echo -e "  ${GREEN}Setup complete!${RESET}"
 echo ""
 echo -e "  ${BOLD}make run${RESET}          Run Condor locally (dev)"
 echo -e "  ${BOLD}make deploy${RESET}       Deploy Condor (Docker)"
-if [ "$hb_api_deployed" = true ]; then
+if [ "${hb_api_deployed:-}" = true ]; then
 echo -e "  ${BOLD}make deploy-full${RESET}  Deploy Condor + Hummingbot API (Docker)"
 fi
 echo -e "  ${BOLD}make stop${RESET}         Stop everything"
