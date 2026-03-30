@@ -38,6 +38,22 @@ async def get_connectors(name: str, user: WebUser = Depends(get_current_user)):
     return result
 
 
+@router.get("/servers/{name}/market/connected-exchanges")
+async def get_connected_exchanges(name: str, user: WebUser = Depends(get_current_user)):
+    """Get connectors that have credentials configured (accounts connected)."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from condor.server_data_service import ServerDataType, get_server_data_service
+
+    try:
+        result = await get_server_data_service().get_or_fetch(name, ServerDataType.CONNECTORS)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return result or []
+
+
 @router.get("/servers/{name}/market/prices", response_model=MarketPriceResponse)
 async def get_price(
     name: str,

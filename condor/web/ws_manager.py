@@ -13,10 +13,10 @@ from condor.web.auth import decode_jwt
 logger = logging.getLogger(__name__)
 
 # Mapping from WS channel prefix to ServerDataType
+# NOTE: executors now uses dedicated WS streaming (not SDS polling)
 _CHANNEL_TO_SDT = {
     "portfolio": "PORTFOLIO",
     "bots": "BOTS_STATUS",
-    "executors": "EXECUTORS",
     "prices": "PRICES",
 }
 
@@ -24,7 +24,6 @@ _CHANNEL_TO_SDT = {
 _SDT_TO_CHANNEL_PREFIX = {
     "PORTFOLIO": "portfolio",
     "BOTS_STATUS": "bots",
-    "EXECUTORS": "executors",
     "PRICES": "prices",
     "CEX_PRICES": "prices",  # Legacy DataManager name
 }
@@ -52,6 +51,7 @@ class WebSocketManager:
         self._last_data: dict[str, Any] = {}  # channel -> last broadcast payload
         self._candle_tasks: dict[str, asyncio.Task] = {}
         self._trade_tasks: dict[str, asyncio.Task] = {}
+        self._executor_tasks: dict[str, asyncio.Task] = {}
         self._sds_listener_registered = False
         # Track SDS subscriptions: channel -> CacheKey
         self._sds_subscriptions: dict[str, Any] = {}
@@ -117,6 +117,11 @@ class WebSocketManager:
                 task.cancel()
         self._trade_tasks.clear()
 
+        for task in self._executor_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._executor_tasks.clear()
+
     def _cleanup_sds_subscriptions(self) -> None:
         """Remove all SDS subscriptions."""
         from condor.server_data_service import get_server_data_service
@@ -157,6 +162,8 @@ class WebSocketManager:
                     self._maybe_stop_candle_stream(channel)
                 elif channel.startswith("trades:"):
                     self._maybe_stop_trade_stream(channel)
+                elif channel.startswith("executors:"):
+                    self._maybe_stop_executor_stream(channel)
                 else:
                     self._maybe_unsub_sds(channel)
 
@@ -202,6 +209,8 @@ class WebSocketManager:
                 self._ensure_candle_stream(channel)
             elif channel.startswith("trades:"):
                 self._ensure_trade_stream(channel)
+            elif channel.startswith("executors:"):
+                self._ensure_executor_stream(channel)
             else:
                 await self._subscribe_sds(channel)
 
@@ -211,6 +220,8 @@ class WebSocketManager:
                 self._maybe_stop_candle_stream(channel)
             elif channel.startswith("trades:"):
                 self._maybe_stop_trade_stream(channel)
+            elif channel.startswith("executors:"):
+                self._maybe_stop_executor_stream(channel)
             else:
                 self._maybe_unsub_sds(channel)
 
@@ -251,9 +262,6 @@ class WebSocketManager:
             # Broadcast the primed data
             result = sds.get(server_name, data_type, **params)
             if result is not None:
-                # Transform executor data to match REST API format
-                if data_type.name == "EXECUTORS":
-                    result = self._transform_executors(result)
                 prev = self._last_data.get(channel)
                 if result != prev:
                     await self.broadcast(channel, result)
@@ -300,10 +308,6 @@ class WebSocketManager:
         has_subscribers = any(channel in conn.channels for conn in self._connections)
         if not has_subscribers:
             return
-
-        # Transform executor data to match REST API format
-        if data_type.name == "EXECUTORS":
-            value = self._transform_executors(value)
 
         asyncio.ensure_future(self._broadcast_update(channel, value))
 
@@ -529,6 +533,88 @@ class WebSocketManager:
                     return
 
                 logger.warning("Trade stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+
+    # -- Executor streaming (via Hummingbot WS) --
+
+    def _ensure_executor_stream(self, channel: str) -> None:
+        if channel in self._executor_tasks and not self._executor_tasks[channel].done():
+            return
+        self._executor_tasks[channel] = asyncio.create_task(
+            self._executor_stream(channel)
+        )
+        logger.info("Started executor stream for %s", channel)
+
+    def _maybe_stop_executor_stream(self, channel: str) -> None:
+        for conn in self._connections:
+            if channel in conn.channels:
+                return
+        task = self._executor_tasks.pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("Stopped executor stream for %s", channel)
+
+    async def _executor_stream(self, channel: str) -> None:
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        # REST pre-fetch: broadcast current executors immediately
+        if channel not in self._last_data:
+            try:
+                client = await cm.get_client(server_name)
+                result = await client.executors.search_executors()
+                executors = self._transform_executors(result)
+                if executors:
+                    await self.broadcast(channel, executors)
+                    logger.info("Executor REST pre-fetch: %d executors for %s", len(executors), channel)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning("Executor REST pre-fetch failed for %s: %s", channel, e)
+
+        while True:
+            try:
+                client = await cm.get_client(server_name)
+                async with client.ws.executors() as ws:
+                    await ws.subscribe_executors(update_interval=2.0)
+                    logger.info("Executor WS subscribed: %s", channel)
+                    backoff = 5  # Reset on successful connection
+                    async for msg in ws:
+                        if not any(channel in c.channels for c in self._connections):
+                            logger.info("No subscribers for %s, closing executor stream", channel)
+                            return
+
+                        msg_type = msg.get("type")
+                        if msg_type == "executors":
+                            raw_data = msg.get("data", [])
+                            executors = self._transform_executors(raw_data)
+                            await self._broadcast_update(channel, executors)
+                        elif msg_type == "heartbeat":
+                            continue
+                        elif msg_type == "error":
+                            error_msg = msg.get("message", "unknown error")
+                            logger.warning("Executor stream error for %s: %s", channel, error_msg)
+                            break
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                error_str = str(e)
+                is_permanent = any(code in error_str for code in ("401", "403", "404"))
+                if is_permanent:
+                    logger.warning("Executor stream permanent error for %s: %s — giving up", channel, e)
+                    return
+
+                logger.warning("Executor stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 

@@ -11,18 +11,22 @@ router = APIRouter(tags=["executors"])
 
 
 def _build_executor_info(ex: dict) -> ExecutorInfo | None:
-    """Convert a raw executor dict to an ExecutorInfo model."""
+    """Convert a raw executor dict to an ExecutorInfo model.
+
+    Handles both REST API format (id, config.type, config.connector_name)
+    and WS format (executor_id, executor_type, connector_name at top level).
+    """
     if not isinstance(ex, dict):
         return None
     config = ex.get("config", ex)
     return ExecutorInfo(
-        id=str(ex.get("id") or ""),
+        id=str(ex.get("id") or ex.get("executor_id") or ""),
         type=get_executor_type(ex),
-        connector=config.get("connector_name") or ex.get("connector") or "",
+        connector=config.get("connector_name") or ex.get("connector_name") or ex.get("connector") or "",
         trading_pair=config.get("trading_pair") or ex.get("trading_pair") or "",
         side=str(config.get("side") or ex.get("side") or ""),
-        status=ex.get("status") or "",
-        close_type=str(ex.get("close_type") or ""),
+        status=(ex.get("status") or "").lower(),
+        close_type=str(ex.get("close_type") or "").lower(),
         pnl=get_executor_pnl(ex),
         volume=get_executor_volume(ex),
         timestamp=float(config.get("timestamp") or ex.get("timestamp") or 0),
@@ -138,4 +142,60 @@ async def stop_executor_endpoint(
     result = await stop_executor(client, executor_id, keep_position=keep_position)
     if isinstance(result, dict) and result.get("status") == "error":
         raise HTTPException(status_code=400, detail=result.get("message", "Failed to stop executor"))
+    return {"status": "ok", "result": result}
+
+
+@router.get("/servers/{name}/executors/positions")
+async def get_positions_held(
+    name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.executors.get_positions_summary()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Normalize: extract positions list from various shapes
+    if isinstance(result, dict):
+        positions = result.get("positions", [])
+        if not isinstance(positions, list):
+            positions = [positions] if positions else []
+    elif isinstance(result, list):
+        positions = result
+    else:
+        positions = []
+
+    return {"positions": positions, "summary": result if isinstance(result, dict) else {}}
+
+
+@router.delete("/servers/{name}/executors/positions/{connector}/{pair}")
+async def clear_position_held(
+    name: str,
+    connector: str,
+    pair: str,
+    controller_id: str = Query(default=""),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        kwargs: dict = {}
+        if controller_id:
+            kwargs["controller_id"] = controller_id
+        result = await client.executors.clear_position_held(
+            connector_name=connector,
+            trading_pair=pair,
+            account_name="master_account",
+            **kwargs,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
     return {"status": "ok", "result": result}
