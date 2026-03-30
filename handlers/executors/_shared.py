@@ -90,7 +90,8 @@ def get_executor_type(executor: Dict[str, Any]) -> str:
     """
     config = executor.get("config", executor)
     for source in (config, executor):
-        ex_type = source.get("type", "")
+        # Check both "type" (REST) and "executor_type" (WS) field names
+        ex_type = source.get("type", "") or source.get("executor_type", "")
         if isinstance(ex_type, str) and ex_type:
             # Strip common suffixes for a clean label
             label = ex_type.lower().replace("_executor", "").replace("executor", "").strip("_")
