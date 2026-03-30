@@ -88,6 +88,25 @@ echo -e "${BOLD}║            Condor Setup                   ║${RESET}"
 echo -e "${BOLD}╚═══════════════════════════════════════════╝${RESET}"
 echo ""
 
+# ── Step 0: Ensure 'uv' is installed ──────────────────
+
+if ! command -v uv >/dev/null 2>&1; then
+    msg_info "'uv' not found. Installing uv (https://docs.astral.sh/uv/)..."
+    if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+        # Source the cargo env to get uv in current path immediately
+        # Usually installed to $HOME/.local/bin or $HOME/.cargo/bin
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        if ! command -v uv >/dev/null 2>&1; then
+            msg_error "uv was installed but is still not in PATH. Please install it manually."
+            exit 1
+        fi
+        msg_ok "uv installed successfully"
+    else
+        msg_error "Failed to install uv automatically."
+        exit 1
+    fi
+fi
+
 # ── Step 1: Telegram Configuration ──────────────────
 
 echo -e "${BOLD}Step 1: Telegram Configuration${RESET}"
