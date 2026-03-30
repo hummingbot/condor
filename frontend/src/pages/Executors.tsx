@@ -962,7 +962,7 @@ export function Executors() {
   const [clearError, setClearError] = useState<string | null>(null);
   const clearPositionMutation = useMutation({
     mutationFn: (pos: PositionHeld) =>
-      api.clearPositionHeld(server!, pos.connector_name, pos.trading_pair),
+      api.clearPositionHeld(server!, pos.connector_name, pos.trading_pair, pos.controller_id),
     onMutate: () => setClearError(null),
     onError: (err: Error) => {
       setClearError(err.message);
