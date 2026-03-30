@@ -934,7 +934,6 @@ export function Executors() {
     key: "pnl",
     dir: "desc",
   });
-  const [statsCollapsed, setStatsCollapsed] = useState(false);
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
 
   // WebSocket for real-time updates

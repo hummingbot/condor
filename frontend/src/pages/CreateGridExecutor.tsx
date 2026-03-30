@@ -421,13 +421,22 @@ export function CreateGridExecutor() {
         </button>
       </div>
 
-      {/* Success toast */}
+      {/* Success modal */}
       {successId && (
-        <div className="absolute bottom-16 right-4 flex items-center gap-2 rounded-lg border border-[var(--color-green)]/30 bg-[var(--color-green)]/10 px-4 py-2.5 text-sm text-[var(--color-green)] animate-in fade-in slide-in-from-bottom-2">
-          <CheckCircle className="h-4 w-4 shrink-0" />
-          <div>
-            <span className="font-medium">Grid created!</span>
-            <span className="ml-1.5 font-mono text-xs opacity-75">{successId.slice(0, 8)}…</span>
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="flex flex-col items-center gap-3 rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-8 py-6 shadow-2xl shadow-black/40">
+            <CheckCircle className="h-10 w-10 text-[var(--color-green)]" />
+            <div className="text-center">
+              <p className="text-sm font-semibold text-[var(--color-text)]">Grid Executor Created</p>
+              <p className="mt-1 font-mono text-xs text-[var(--color-text-muted)]">{successId}</p>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-muted)]">Redirecting to executors...</p>
+            <button
+              onClick={() => navigate("/executors")}
+              className="mt-1 rounded-lg bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white hover:brightness-110"
+            >
+              Go now
+            </button>
           </div>
         </div>
       )}
