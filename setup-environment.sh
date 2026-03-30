@@ -88,7 +88,7 @@ echo -e "${BOLD}║            Condor Setup                   ║${RESET}"
 echo -e "${BOLD}╚═══════════════════════════════════════════╝${RESET}"
 echo ""
 
-# ── Step 0: Ensure 'uv' is installed ──────────────────
+# ── Step 0: Ensure 'uv' and 'tmux' are installed ─────
 
 if ! command -v uv >/dev/null 2>&1; then
     msg_info "'uv' not found. Installing uv (https://docs.astral.sh/uv/)..."
@@ -105,6 +105,42 @@ if ! command -v uv >/dev/null 2>&1; then
         msg_error "Failed to install uv automatically."
         exit 1
     fi
+fi
+
+if ! command -v tmux >/dev/null 2>&1; then
+    msg_info "'tmux' not found. Installing tmux..."
+
+    SUDO_CMD=""
+    if [ "${EUID:-0}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+        SUDO_CMD="sudo"
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        $SUDO_CMD apt-get update && $SUDO_CMD apt-get install -y tmux || {
+            msg_error "Failed to install tmux via apt-get. Please install it manually."
+            exit 1
+        }
+    elif command -v yum >/dev/null 2>&1; then
+        $SUDO_CMD yum install -y tmux || {
+            msg_error "Failed to install tmux via yum. Please install it manually."
+            exit 1
+        }
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO_CMD dnf install -y tmux || {
+            msg_error "Failed to install tmux via dnf. Please install it manually."
+            exit 1
+        }
+    elif command -v brew >/dev/null 2>&1; then
+        brew install tmux || {
+            msg_error "Failed to install tmux via Homebrew. Please install it manually."
+            exit 1
+        }
+    else
+        msg_error "Could not detect a supported package manager to install tmux. Please install it manually."
+        exit 1
+    fi
+else
+    msg_ok "tmux is already installed"
 fi
 
 # ── Step 1: Telegram Configuration ──────────────────
