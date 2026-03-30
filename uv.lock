@@ -381,7 +381,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "geckoterminal-py" },
-    { name = "hummingbot-api-client", specifier = "==1.3.1" },
+    { name = "hummingbot-api-client", specifier = "==1.4.0" },
     { name = "isort", marker = "extra == 'dev'" },
     { name = "kaleido" },
     { name = "mcp" },
@@ -821,14 +821,14 @@ wheels = [
 
 [[package]]
 name = "hummingbot-api-client"
-version = "1.3.1"
+version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/08/09/54f1c1c97733d424490e10a4bea8f9f3f0f3213cadfb256df6bd58527eb9/hummingbot_api_client-1.3.1.tar.gz", hash = "sha256:433748bb5a614e2eae83c79722db05f17f53dfc864554954b8f2bc74a4f5e4da", size = 37539, upload-time = "2026-03-24T00:23:32.61Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/8b/fd19169efca6e130ddba499aacb7680962dea73a9a9a2999e8def5b6dd55/hummingbot_api_client-1.4.0.tar.gz", hash = "sha256:d78f8eded862c710e53f2c3e8ad489bdca4059df046835b9048d556695bb78ef", size = 38107, upload-time = "2026-03-29T04:22:00.911Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e6/41/81d59a08b64769f01aebef78174911062c6cb806f4e68c6bd89a264c4fea/hummingbot_api_client-1.3.1-py3-none-any.whl", hash = "sha256:651df1e4fad9ff15cca6c3317b10e25c97bdb0d6cfdeb02e43dac3f63fad2ab1", size = 44170, upload-time = "2026-03-24T00:23:30.979Z" },
+    { url = "https://files.pythonhosted.org/packages/71/d5/439c720bf841fb8c0cf80f53a012edf3313de6c85923f94b146c40586683/hummingbot_api_client-1.4.0-py3-none-any.whl", hash = "sha256:ec57e1ef72ec95255772f0d1c6975a83bc55f721fe06da48eb1b7d5e220a8e8d", size = 44769, upload-time = "2026-03-29T04:21:59.53Z" },
 ]
 
 [[package]]
