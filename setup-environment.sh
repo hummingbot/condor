@@ -73,7 +73,7 @@ make_link() {
     local url="$1"
     local text="${2:-$url}"
     # Check if terminal supports hyperlinks (most modern terminals do)
-    if [ -n "$TERM" ] && [ "$TERM" != "dumb" ]; then
+    if [ -n "${TERM:-}" ] && [ "${TERM:-}" != "dumb" ]; then
         echo -e "\033]8;;${url}\033\\${text}\033]8;;\033\\"
     else
         echo "$text ($url)"
@@ -102,7 +102,7 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$ADMIN_USER_ID" ]; then
+if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${ADMIN_USER_ID:-}" ]; then
     msg_ok "Telegram already configured"
     telegram_configured=true
 else
@@ -182,8 +182,8 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-if [ -n "$DEPLOY_HUMMINGBOT_API" ]; then
-    if [ "$DEPLOY_HUMMINGBOT_API" = "true" ]; then
+if [ -n "${DEPLOY_HUMMINGBOT_API:-}" ]; then
+    if [ "${DEPLOY_HUMMINGBOT_API:-}" = "true" ]; then
         msg_ok "Hummingbot API already configured (enabled)"
         hb_api_deployed=true
     else
@@ -194,7 +194,7 @@ else
     echo ""
     prompt_visible "Deploy Hummingbot API locally with Docker? [Y/n]" "Y" "deploy_hb"
 
-    if [[ "$deploy_hb" =~ ^[Nn]$ ]]; then
+    if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
         echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
         msg_ok "Skipped Hummingbot API deployment"
     else
@@ -288,14 +288,14 @@ echo ""
 
 # ── Step 3: Auto-register server in config.yml ─────
 
-if [ "$hb_api_deployed" = true ]; then
+if [ "${hb_api_deployed:-}" = true ]; then
     # Determine credentials (re-read from HB API .env if we didn't just set them)
-    if [ -z "$hb_username" ] && [ -f "$HB_API_DIR/.env" ]; then
+    if [ -z "${hb_username:-}" ] && [ -f "$HB_API_DIR/.env" ]; then
         hb_username=$(grep "^USERNAME=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2)
         hb_password=$(grep "^PASSWORD=" "$HB_API_DIR/.env" 2>/dev/null | cut -d= -f2)
     fi
 
-    if [ -n "$hb_username" ]; then
+    if [ -n "${hb_username:-}" ]; then
         # Check if config.yml already has a server entry
         if [ -f "$CONFIG_FILE" ] && grep -q "^servers:" "$CONFIG_FILE" && grep -q "  local:" "$CONFIG_FILE"; then
             msg_ok "Server 'local' already registered in $CONFIG_FILE"
@@ -330,7 +330,7 @@ echo -e "  ${GREEN}Setup complete!${RESET}"
 echo ""
 echo -e "  ${BOLD}make run${RESET}          Run Condor locally (dev)"
 echo -e "  ${BOLD}make deploy${RESET}       Deploy Condor (Docker)"
-if [ "$hb_api_deployed" = true ]; then
+if [ "${hb_api_deployed:-}" = true ]; then
 echo -e "  ${BOLD}make deploy-full${RESET}  Deploy Condor + Hummingbot API (Docker)"
 fi
 echo -e "  ${BOLD}make stop${RESET}         Stop everything"
