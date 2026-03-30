@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -14,6 +14,7 @@ interface GridConfigPanelProps {
   state: GridState;
   dispatch: React.Dispatch<GridAction>;
   currentPrice: number | null;
+  isSpot?: boolean;
 }
 
 function PriceField({
@@ -34,6 +35,16 @@ function PriceField({
   hint?: string;
 }) {
   const isActive = activePickField === field;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [localValue, setLocalValue] = useState(value === 0 ? "" : String(value));
+
+  // Sync from parent when value changes externally (e.g. auto-fill, chart pick)
+  useEffect(() => {
+    if (document.activeElement !== inputRef.current) {
+      setLocalValue(value === 0 ? "" : String(value));
+    }
+  }, [value]);
+
   return (
     <div>
       <label className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
@@ -46,10 +57,16 @@ function PriceField({
       </label>
       <div className="flex gap-1">
         <input
+          ref={inputRef}
           type="number"
           step="any"
-          value={value || ""}
-          onChange={(e) => dispatch({ type: "SET_FIELD", field: `${field}_price`, value: parseFloat(e.target.value) || 0 })}
+          value={localValue}
+          onChange={(e) => {
+            setLocalValue(e.target.value);
+            const num = parseFloat(e.target.value);
+            dispatch({ type: "SET_FIELD", field: `${field}_price`, value: isNaN(num) ? 0 : num });
+          }}
+          onBlur={() => setLocalValue(value === 0 ? "" : String(value))}
           placeholder="0.00"
           className={`flex-1 rounded border bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:outline-none ${
             isActive
@@ -100,19 +117,31 @@ function NumberField({
   isPercent?: boolean;
 }) {
   const displayValue = isPercent ? value * 100 : value;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [localValue, setLocalValue] = useState(displayValue === 0 ? "" : String(displayValue));
+
+  useEffect(() => {
+    if (document.activeElement !== inputRef.current) {
+      setLocalValue(displayValue === 0 ? "" : String(displayValue));
+    }
+  }, [displayValue]);
+
   return (
     <div>
       <label className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
       <div className="flex items-center gap-1">
         <input
+          ref={inputRef}
           type="number"
           step={isPercent ? step * 100 : step}
           min={min !== undefined ? (isPercent ? min * 100 : min) : undefined}
-          value={displayValue || ""}
+          value={localValue}
           onChange={(e) => {
-            const raw = parseFloat(e.target.value) || 0;
-            dispatch({ type: "SET_FIELD", field, value: isPercent ? raw / 100 : raw });
+            setLocalValue(e.target.value);
+            const raw = parseFloat(e.target.value);
+            dispatch({ type: "SET_FIELD", field, value: isPercent ? (isNaN(raw) ? 0 : raw / 100) : (isNaN(raw) ? 0 : raw) });
           }}
+          onBlur={() => setLocalValue(displayValue === 0 ? "" : String(displayValue))}
           placeholder="0"
           className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
         />
@@ -197,7 +226,7 @@ const ORDER_TYPE_OPTIONS = [
   { value: 3, label: "Limit Maker" },
 ];
 
-export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPanelProps) {
+export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false }: GridConfigPanelProps) {
   const validation = useMemo(() => {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -424,15 +453,30 @@ export function GridConfigPanel({ state, dispatch, currentPrice }: GridConfigPan
 
         {state.showAdvanced && (
           <div className="mt-2 space-y-2.5">
-            <NumberField
-              label="Leverage"
-              value={state.leverage}
-              field="leverage"
-              dispatch={dispatch}
-              step={1}
-              min={1}
-              suffix="x"
-            />
+            {isSpot ? (
+              <div>
+                <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Leverage</label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    value="1"
+                    disabled
+                    className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text-muted)] opacity-60"
+                  />
+                  <span className="text-[10px] text-[var(--color-text-muted)]">x (spot)</span>
+                </div>
+              </div>
+            ) : (
+              <NumberField
+                label="Leverage"
+                value={state.leverage}
+                field="leverage"
+                dispatch={dispatch}
+                step={1}
+                min={1}
+                suffix="x"
+              />
+            )}
             <div className="grid grid-cols-2 gap-2">
               <NumberField
                 label="Max Open Orders"

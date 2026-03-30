@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
+  Anchor,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -16,14 +17,13 @@ import {
   TrendingUp,
   Volume2,
   X,
-  Zap,
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useServer } from "@/hooks/useServer";
-import { api, type ExecutorInfo } from "@/lib/api";
+import { api, type ExecutorInfo, type PositionHeld } from "@/lib/api";
 
 // ── Formatters ──
 
@@ -80,6 +80,10 @@ function formatPrice(val: number): string {
 function formatPct(val: number): string {
   if (!val) return "\u2014";
   return (val >= 0 ? "+" : "") + (val * 100).toFixed(2) + "%";
+}
+
+function isExecutorActive(status: string) {
+  return status === "active" || status === "running";
 }
 
 // ── Sort types ──
@@ -153,13 +157,13 @@ function buildControllerSummaries(executors: ExecutorInfo[]): ControllerSummary[
     const totalVolume = execs.reduce((s, e) => s + e.volume, 0);
     const totalFees = execs.reduce((s, e) => s + e.cum_fees_quote, 0);
     const activeCount = execs.filter(
-      (e) => e.status === "active" || e.status === "running",
+      (e) => isExecutorActive(e.status),
     ).length;
     const closedCount = execs.filter(
-      (e) => e.status !== "active" && e.status !== "running",
+      (e) => !isExecutorActive(e.status),
     ).length;
     const closedWithPnl = execs.filter(
-      (e) => e.status !== "active" && e.status !== "running",
+      (e) => !isExecutorActive(e.status),
     );
     const wins = closedWithPnl.filter((e) => e.pnl > 0).length;
     const winRate = closedWithPnl.length > 0 ? wins / closedWithPnl.length : 0;
@@ -220,7 +224,7 @@ function StatCard({
 
 function StatusDot({ status }: { status: string }) {
   const color =
-    status === "active" || status === "running"
+    isExecutorActive(status)
       ? "text-[var(--color-green)]"
       : status === "failed" || status === "error"
         ? "text-[var(--color-red)]"
@@ -396,6 +400,8 @@ function ExecutorTable({
   allSelected,
   onRowClick,
   selectedExecutorId,
+  onStop,
+  stoppingIds,
 }: {
   executors: ExecutorInfo[];
   sortKey: SortKey;
@@ -407,6 +413,8 @@ function ExecutorTable({
   allSelected: boolean;
   onRowClick: (ex: ExecutorInfo) => void;
   selectedExecutorId: string | null;
+  onStop: (id: string) => void;
+  stoppingIds: Set<string>;
 }) {
   const sorted = useMemo(
     () => [...executors].sort((a, b) => compareExecutors(a, b, sortKey, sortDir)),
@@ -438,6 +446,7 @@ function ExecutorTable({
               <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={onSort} align="center" />
               <SortHeader label="Close Type" sortKey="close_type" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
               <SortHeader label="Age" sortKey="timestamp" currentKey={sortKey} currentDir={sortDir} onSort={onSort} align="right" />
+              <th className="px-3 py-3 w-10" />
             </tr>
           </thead>
           <tbody>
@@ -512,6 +521,18 @@ function ExecutorTable({
                       {formatAge(ex.timestamp)}
                     </div>
                   </td>
+                  <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+                    {isExecutorActive(ex.status) && (
+                      <button
+                        onClick={() => onStop(ex.id)}
+                        disabled={stoppingIds.has(ex.id)}
+                        className="p-1 rounded hover:bg-[var(--color-red)]/10 text-[var(--color-text-muted)] hover:text-[var(--color-red)] transition-colors disabled:opacity-50"
+                        title="Stop executor"
+                      >
+                        <Square className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </td>
                 </tr>
               );
             })}
@@ -527,9 +548,13 @@ function ExecutorTable({
 function DetailPanel({
   executor,
   onClose,
+  onStop,
+  stopping,
 }: {
   executor: ExecutorInfo;
   onClose: () => void;
+  onStop: (id: string) => void;
+  stopping: boolean;
 }) {
   const [panelWidth, setPanelWidth] = useState(480);
   const isDragging = useRef(false);
@@ -582,12 +607,24 @@ function DetailPanel({
           <h2 className="text-sm font-semibold truncate pr-4 font-mono" title={executor.id}>
             {executor.id.slice(0, 12)}\u2026
           </h2>
-          <button
-            onClick={onClose}
-            className="p-1 rounded hover:bg-[var(--color-surface-hover)] transition-colors"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            {isExecutorActive(executor.status) && (
+              <button
+                onClick={() => onStop(executor.id)}
+                disabled={stopping}
+                className="flex items-center gap-1.5 rounded-md bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 transition-colors disabled:opacity-50"
+              >
+                <Square className="h-3 w-3" />
+                {stopping ? "Stopping\u2026" : "Stop"}
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="p-1 rounded hover:bg-[var(--color-surface-hover)] transition-colors"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         <div className="p-5 space-y-5">
@@ -889,8 +926,8 @@ export function Executors() {
   const [filters, setFilters] = useState({
     executor_type: "",
     trading_pair: "",
-    status: "",
   });
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [controllerSort, setControllerSort] = useState<{ key: ControllerSortKey; dir: SortDir }>({
@@ -898,6 +935,7 @@ export function Executors() {
     dir: "desc",
   });
   const [statsCollapsed, setStatsCollapsed] = useState(false);
+  const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
 
   // WebSocket for real-time updates
   const wsChannels = useMemo(
@@ -907,24 +945,58 @@ export function Executors() {
   useCondorWebSocket(wsChannels, server);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["executors", server, filters.status],
-    queryFn: () => api.getExecutors(server!, { status: filters.status }),
+    queryKey: ["executors", server],
+    queryFn: () => api.getExecutors(server!),
     enabled: !!server,
     refetchInterval: 5000,
   });
 
+  const { data: positionsData } = useQuery({
+    queryKey: ["positions-held", server],
+    queryFn: () => api.getPositionsHeld(server!),
+    enabled: !!server,
+    refetchInterval: 10000,
+  });
+
+  const positionsHeld = positionsData?.positions ?? [];
+
+  const [clearError, setClearError] = useState<string | null>(null);
+  const clearPositionMutation = useMutation({
+    mutationFn: (pos: PositionHeld) =>
+      api.clearPositionHeld(server!, pos.connector_name, pos.trading_pair),
+    onMutate: () => setClearError(null),
+    onError: (err: Error) => {
+      setClearError(err.message);
+      setTimeout(() => setClearError(null), 5000);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["positions-held", server] });
+    },
+  });
+
   const stopMutation = useMutation({
     mutationFn: async (ids: string[]) => {
+      setStoppingIds((prev) => new Set([...prev, ...ids]));
       const results = await Promise.allSettled(
         ids.map((id) => api.stopExecutor(server!, id)),
       );
       return results;
     },
-    onSuccess: () => {
+    onSettled: (_data, _error, ids) => {
+      setStoppingIds((prev) => {
+        const next = new Set(prev);
+        ids?.forEach((id) => next.delete(id));
+        return next;
+      });
       setSelectedIds(new Set());
       queryClient.invalidateQueries({ queryKey: ["executors", server] });
     },
   });
+
+  const handleStopOne = useCallback(
+    (id: string) => stopMutation.mutate([id]),
+    [stopMutation],
+  );
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
@@ -962,24 +1034,31 @@ export function Executors() {
     return result;
   }, [executors, filters.trading_pair, filters.executor_type]);
 
-  // Aggregate stats
-  const totalPnl = useMemo(() => filteredExecutors.reduce((sum, ex) => sum + ex.pnl, 0), [filteredExecutors]);
-  const totalVolume = useMemo(() => filteredExecutors.reduce((sum, ex) => sum + ex.volume, 0), [filteredExecutors]);
-  const totalFees = useMemo(() => filteredExecutors.reduce((sum, ex) => sum + ex.cum_fees_quote, 0), [filteredExecutors]);
-  const activeCount = useMemo(
-    () => filteredExecutors.filter((ex) => ex.status === "active" || ex.status === "running").length,
+  // Split into active and archived
+  const activeExecutors = useMemo(
+    () => filteredExecutors.filter((ex) => isExecutorActive(ex.status)),
     [filteredExecutors],
   );
-  const winRate = useMemo(() => {
-    const closed = filteredExecutors.filter((ex) => ex.status !== "active" && ex.status !== "running");
-    if (closed.length === 0) return 0;
-    return closed.filter((ex) => ex.pnl > 0).length / closed.length;
-  }, [filteredExecutors]);
-
-  // Controller summaries
-  const controllerSummaries = useMemo(
-    () => buildControllerSummaries(filteredExecutors),
+  const archivedExecutors = useMemo(
+    () => filteredExecutors.filter((ex) => !isExecutorActive(ex.status)),
     [filteredExecutors],
+  );
+
+  // Aggregate stats (archived only for win rate)
+  const activePnl = useMemo(() => activeExecutors.reduce((s, ex) => s + ex.pnl, 0), [activeExecutors]);
+  const activeVolume = useMemo(() => activeExecutors.reduce((s, ex) => s + ex.volume, 0), [activeExecutors]);
+  const archivedPnl = useMemo(() => archivedExecutors.reduce((s, ex) => s + ex.pnl, 0), [archivedExecutors]);
+  const archivedVolume = useMemo(() => archivedExecutors.reduce((s, ex) => s + ex.volume, 0), [archivedExecutors]);
+  const archivedFees = useMemo(() => archivedExecutors.reduce((s, ex) => s + ex.cum_fees_quote, 0), [archivedExecutors]);
+  const winRate = useMemo(() => {
+    if (archivedExecutors.length === 0) return 0;
+    return archivedExecutors.filter((ex) => ex.pnl > 0).length / archivedExecutors.length;
+  }, [archivedExecutors]);
+
+  // Controller summaries (archived only — active shown separately)
+  const controllerSummaries = useMemo(
+    () => buildControllerSummaries(archivedExecutors),
+    [archivedExecutors],
   );
 
   const sortedControllers = useMemo(() => {
@@ -1009,11 +1088,11 @@ export function Executors() {
   }, []);
 
   const currentTableExecutors = useMemo(() => {
-    if (viewMode === "flat") return filteredExecutors;
+    if (viewMode === "flat") return archivedExecutors;
     if (!expandedController) return [];
     const summary = controllerSummaries.find((s) => s.controllerId === expandedController);
     return summary?.executors ?? [];
-  }, [viewMode, filteredExecutors, expandedController, controllerSummaries]);
+  }, [viewMode, archivedExecutors, expandedController, controllerSummaries]);
 
   const allSelected = currentTableExecutors.length > 0 && currentTableExecutors.every((ex) => selectedIds.has(ex.id));
 
@@ -1028,7 +1107,7 @@ export function Executors() {
   const handleBulkStop = useCallback(() => {
     const activeIds = Array.from(selectedIds).filter((id) => {
       const ex = executors.find((e) => e.id === id);
-      return ex && (ex.status === "active" || ex.status === "running");
+      return ex && isExecutorActive(ex.status);
     });
     if (activeIds.length > 0) {
       stopMutation.mutate(activeIds);
@@ -1106,18 +1185,6 @@ export function Executors() {
           className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
         />
         <select
-          value={filters.status}
-          onChange={(e) =>
-            setFilters((f) => ({ ...f, status: e.target.value }))
-          }
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
-        >
-          <option value="">All statuses</option>
-          <option value="active">Active</option>
-          <option value="closed">Closed</option>
-          <option value="failed">Failed</option>
-        </select>
-        <select
           value={filters.executor_type}
           onChange={(e) =>
             setFilters((f) => ({ ...f, executor_type: e.target.value }))
@@ -1144,34 +1211,146 @@ export function Executors() {
         </div>
       ) : (
         <>
-          {/* Aggregate Performance Strip */}
-          <div>
-            <button
-              onClick={() => setStatsCollapsed((v) => !v)}
-              className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors mb-2"
-            >
-              {statsCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-              Performance Summary
-            </button>
-            {!statsCollapsed && (
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
-                <StatCard
-                  label="Total PnL"
-                  value={formatPnl(totalPnl)}
-                  icon={TrendingUp}
-                  valueColor={pnlColor(totalPnl)}
-                />
-                <StatCard
-                  label="Win Rate"
-                  value={winRate > 0 ? (winRate * 100).toFixed(1) + "%" : "\u2014"}
-                  icon={Percent}
-                />
-                <StatCard label="Total Volume" value={formatVolume(totalVolume)} icon={Volume2} />
-                <StatCard label="Total Fees" value={totalFees > 0 ? formatUsd(totalFees) : "\u2014"} icon={Layers} />
-                <StatCard label="Active" value={String(activeCount)} icon={Zap} />
+          {/* ── Performance Summary (always visible at top) ── */}
+          {archivedExecutors.length > 0 && (
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <StatCard
+                label="Total PnL"
+                value={formatPnl(archivedPnl)}
+                icon={TrendingUp}
+                valueColor={pnlColor(archivedPnl)}
+              />
+              <StatCard
+                label="Win Rate"
+                value={winRate > 0 ? (winRate * 100).toFixed(1) + "%" : "\u2014"}
+                icon={Percent}
+              />
+              <StatCard label="Total Volume" value={formatVolume(archivedVolume)} icon={Volume2} />
+              <StatCard label="Total Fees" value={archivedFees > 0 ? formatUsd(archivedFees) : "\u2014"} icon={Layers} />
+            </div>
+          )}
+
+          {/* ── Active Executors ── */}
+          {activeExecutors.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="h-2 w-2 rounded-full bg-[var(--color-green)] animate-pulse" />
+                  <h3 className="text-sm font-semibold">
+                    Active ({activeExecutors.length})
+                  </h3>
+                  {activePnl !== 0 && (
+                    <span className="text-sm font-medium tabular-nums" style={{ color: pnlColor(activePnl) }}>
+                      {formatPnl(activePnl)}
+                    </span>
+                  )}
+                  {activeVolume > 0 && (
+                    <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
+                      {formatVolume(activeVolume)} vol
+                    </span>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
+              <ExecutorTable
+                executors={activeExecutors}
+                sortKey={sortKey}
+                sortDir={sortDir}
+                onSort={handleSort}
+                selectedIds={selectedIds}
+                onToggleSelect={toggleSelect}
+                onSelectAll={selectAll}
+                allSelected={activeExecutors.length > 0 && activeExecutors.every((ex) => selectedIds.has(ex.id))}
+                onRowClick={setSelectedExecutor}
+                selectedExecutorId={selectedExecutor?.id ?? null}
+                onStop={handleStopOne}
+                stoppingIds={stoppingIds}
+              />
+            </div>
+          )}
+
+          {/* ── Position Hold ── */}
+          {positionsHeld.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Anchor className="h-4 w-4 text-amber-500" />
+                <h3 className="text-sm font-semibold">
+                  Held Positions ({positionsHeld.length})
+                </h3>
+              </div>
+              {clearError && (
+                <div className="rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
+                  Failed to clear position: {clearError}
+                </div>
+              )}
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {positionsHeld.map((pos) => {
+                  const side = (pos.position_side || pos.side || "").toUpperCase();
+                  const sideColor = side === "LONG" || side === "BUY" || side === "1" ? "var(--color-green)" : "var(--color-red)";
+                  const amount = pos.net_amount_base ?? pos.amount ?? 0;
+                  const entry = pos.buy_breakeven_price ?? pos.entry_price ?? 0;
+                  const current = pos.current_price ?? 0;
+                  const pnl = pos.unrealized_pnl_quote ?? pos.unrealized_pnl ?? 0;
+                  const leverage = pos.leverage ?? 1;
+                  const key = `${pos.connector_name}:${pos.trading_pair}:${pos.controller_id || ""}`;
+                  return (
+                    <div
+                      key={key}
+                      className="rounded-lg border border-amber-500/30 bg-[var(--color-surface)] p-4 transition-colors hover:border-amber-500/60"
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="h-2 w-2 rounded-full bg-amber-500" />
+                          <span className="text-sm font-medium truncate">{pos.trading_pair}</span>
+                          <span className="text-xs font-semibold uppercase" style={{ color: sideColor }}>
+                            {side === "1" ? "LONG" : side === "2" ? "SHORT" : side}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => clearPositionMutation.mutate(pos)}
+                          disabled={clearPositionMutation.isPending}
+                          className="rounded px-2 py-0.5 text-[10px] font-medium border border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-red)]/50 hover:text-[var(--color-red)] transition-colors disabled:opacity-50"
+                          title="Clear held position (mark as externally closed)"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                        <div>
+                          <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Unrealized PnL</div>
+                          <div className="font-medium tabular-nums" style={{ color: pnlColor(pnl) }}>
+                            {formatPnl(pnl)}
+                          </div>
+                        </div>
+                        {amount !== 0 && (
+                          <div>
+                            <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Size</div>
+                            <div className="font-medium tabular-nums">{Math.abs(amount).toPrecision(4)}</div>
+                          </div>
+                        )}
+                        {entry > 0 && (
+                          <div>
+                            <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Entry</div>
+                            <div className="font-medium tabular-nums">{formatPrice(entry)}</div>
+                          </div>
+                        )}
+                        {current > 0 && (
+                          <div>
+                            <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Current</div>
+                            <div className="font-medium tabular-nums">{formatPrice(current)}</div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 mt-2 text-xs text-[var(--color-text-muted)]">
+                        <span>{pos.connector_name}</span>
+                        {leverage > 1 && <span>{leverage}x</span>}
+                        {pos.controller_id && <span className="truncate">{pos.controller_id}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Bulk action bar */}
           <BulkActionBar
@@ -1182,94 +1361,130 @@ export function Executors() {
             stopping={stopMutation.isPending}
           />
 
-          {/* Controller View */}
-          {viewMode === "controllers" && (
-            <div className="space-y-4">
-              {/* Controller sort bar */}
-              <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
-                <span>Sort by:</span>
-                {(["pnl", "volume", "winRate", "activeCount"] as ControllerSortKey[]).map((key) => (
-                  <button
-                    key={key}
-                    onClick={() => handleControllerSort(key)}
-                    className={`px-2 py-1 rounded transition-colors ${
-                      controllerSort.key === key
-                        ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                        : "hover:bg-[var(--color-surface)]"
-                    }`}
-                  >
-                    {key === "pnl" ? "PnL" : key === "volume" ? "Volume" : key === "winRate" ? "Win Rate" : "Active"}
-                    {controllerSort.key === key && (controllerSort.dir === "asc" ? " \u2191" : " \u2193")}
-                  </button>
-                ))}
-              </div>
+          {/* ── History ── */}
+          {archivedExecutors.length > 0 && (
+            <div className="space-y-3">
+              <button
+                onClick={() => setHistoryCollapsed((v) => !v)}
+                className="flex items-center gap-2 hover:text-[var(--color-text)] transition-colors"
+              >
+                {historyCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                <h3 className="text-sm font-semibold">
+                  History ({archivedExecutors.length})
+                </h3>
+                <span className="text-sm font-medium tabular-nums" style={{ color: pnlColor(archivedPnl) }}>
+                  {formatPnl(archivedPnl)}
+                </span>
+                {winRate > 0 && (
+                  <span className="text-xs text-[var(--color-text-muted)]">
+                    {(winRate * 100).toFixed(0)}% WR
+                  </span>
+                )}
+              </button>
 
-              {/* Controller cards */}
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {sortedControllers.map((summary) => (
-                  <ControllerCard
-                    key={summary.controllerId}
-                    summary={summary}
-                    isExpanded={expandedController === summary.controllerId}
-                    onToggle={() =>
-                      setExpandedController((prev) =>
-                        prev === summary.controllerId ? null : summary.controllerId,
-                      )
-                    }
-                  />
-                ))}
-              </div>
+              {!historyCollapsed && (
+                <>
+                  {/* Controller View */}
+                  {viewMode === "controllers" && (
+                    <div className="space-y-4">
+                      {/* Controller sort bar */}
+                      <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+                        <span>Sort by:</span>
+                        {(["pnl", "volume", "winRate"] as ControllerSortKey[]).map((key) => (
+                          <button
+                            key={key}
+                            onClick={() => handleControllerSort(key)}
+                            className={`px-2 py-1 rounded transition-colors ${
+                              controllerSort.key === key
+                                ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                                : "hover:bg-[var(--color-surface)]"
+                            }`}
+                          >
+                            {key === "pnl" ? "PnL" : key === "volume" ? "Volume" : "Win Rate"}
+                            {controllerSort.key === key && (controllerSort.dir === "asc" ? " ↑" : " ↓")}
+                          </button>
+                        ))}
+                      </div>
 
-              {/* Expanded controller's executor table */}
-              {expandedController && (
-                <div>
-                  <div className="flex items-center gap-2 mb-2 text-sm text-[var(--color-text-muted)]">
-                    <Layers className="h-4 w-4" />
-                    <span>
-                      Executors for{" "}
-                      <span className="font-medium text-[var(--color-text)]">
-                        {controllerSummaries.find((s) => s.controllerId === expandedController)?.displayName}
-                      </span>
-                    </span>
-                  </div>
-                  <ExecutorTable
-                    executors={currentTableExecutors}
-                    sortKey={sortKey}
-                    sortDir={sortDir}
-                    onSort={handleSort}
-                    selectedIds={selectedIds}
-                    onToggleSelect={toggleSelect}
-                    onSelectAll={selectAll}
-                    allSelected={allSelected}
-                    onRowClick={setSelectedExecutor}
-                    selectedExecutorId={selectedExecutor?.id ?? null}
-                  />
-                </div>
+                      {/* Controller cards */}
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {sortedControllers.map((summary) => (
+                          <ControllerCard
+                            key={summary.controllerId}
+                            summary={summary}
+                            isExpanded={expandedController === summary.controllerId}
+                            onToggle={() =>
+                              setExpandedController((prev) =>
+                                prev === summary.controllerId ? null : summary.controllerId,
+                              )
+                            }
+                          />
+                        ))}
+                      </div>
+
+                      {/* Expanded controller's executor table */}
+                      {expandedController && (
+                        <div>
+                          <div className="flex items-center gap-2 mb-2 text-sm text-[var(--color-text-muted)]">
+                            <Layers className="h-4 w-4" />
+                            <span>
+                              Executors for{" "}
+                              <span className="font-medium text-[var(--color-text)]">
+                                {controllerSummaries.find((s) => s.controllerId === expandedController)?.displayName}
+                              </span>
+                            </span>
+                          </div>
+                          <ExecutorTable
+                            executors={currentTableExecutors}
+                            sortKey={sortKey}
+                            sortDir={sortDir}
+                            onSort={handleSort}
+                            selectedIds={selectedIds}
+                            onToggleSelect={toggleSelect}
+                            onSelectAll={selectAll}
+                            allSelected={allSelected}
+                            onRowClick={setSelectedExecutor}
+                            selectedExecutorId={selectedExecutor?.id ?? null}
+                            onStop={handleStopOne}
+                            stoppingIds={stoppingIds}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Flat View */}
+                  {viewMode === "flat" && (
+                    <ExecutorTable
+                      executors={archivedExecutors}
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                      selectedIds={selectedIds}
+                      onToggleSelect={toggleSelect}
+                      onSelectAll={selectAll}
+                      allSelected={allSelected}
+                      onRowClick={setSelectedExecutor}
+                      selectedExecutorId={selectedExecutor?.id ?? null}
+                      onStop={handleStopOne}
+                      stoppingIds={stoppingIds}
+                    />
+                  )}
+                </>
               )}
             </div>
-          )}
-
-          {/* Flat View */}
-          {viewMode === "flat" && (
-            <ExecutorTable
-              executors={filteredExecutors}
-              sortKey={sortKey}
-              sortDir={sortDir}
-              onSort={handleSort}
-              selectedIds={selectedIds}
-              onToggleSelect={toggleSelect}
-              onSelectAll={selectAll}
-              allSelected={allSelected}
-              onRowClick={setSelectedExecutor}
-              selectedExecutorId={selectedExecutor?.id ?? null}
-            />
           )}
         </>
       )}
 
       {/* Detail panel */}
       {selectedExecutor && (
-        <DetailPanel executor={selectedExecutor} onClose={() => setSelectedExecutor(null)} />
+        <DetailPanel
+          executor={selectedExecutor}
+          onClose={() => setSelectedExecutor(null)}
+          onStop={handleStopOne}
+          stopping={stoppingIds.has(selectedExecutor.id)}
+        />
       )}
     </div>
   );

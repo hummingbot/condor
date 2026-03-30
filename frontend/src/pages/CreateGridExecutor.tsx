@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Loader2, Rocket } from "lucide-react";
+import { ArrowLeft, CheckCircle, Loader2, Rocket } from "lucide-react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
@@ -44,7 +44,7 @@ export type GridAction =
   | { type: "SET_CONNECTOR"; value: string }
   | { type: "SET_PAIR"; value: string };
 
-const INITIAL_STATE: GridState = {
+const DEFAULTS: GridState = {
   connector: "binance_perpetual",
   pair: "BTC-USDT",
   interval: "5m",
@@ -70,12 +70,67 @@ const INITIAL_STATE: GridState = {
   showAdvanced: false,
 };
 
+const STORAGE_KEY = "condor_grid_defaults";
+
+/** Fields persisted across sessions (no prices — those are per-trade). */
+const PERSISTED_FIELDS: (keyof GridState)[] = [
+  "connector", "pair", "interval", "lookbackSeconds", "side",
+  "total_amount_quote", "min_order_amount_quote", "min_spread_between_orders",
+  "max_open_orders", "max_orders_per_batch", "order_frequency", "leverage",
+  "take_profit", "open_order_type", "take_profit_order_type",
+  "activation_bounds", "keep_position", "coerce_tp_to_step",
+];
+
+function loadSavedDefaults(): GridState {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return DEFAULTS;
+    const saved = JSON.parse(raw);
+    const merged = { ...DEFAULTS };
+    for (const key of PERSISTED_FIELDS) {
+      if (key in saved && saved[key] !== undefined) {
+        (merged as Record<string, unknown>)[key] = saved[key];
+      }
+    }
+    return merged;
+  } catch {
+    return DEFAULTS;
+  }
+}
+
+function saveDefaults(state: GridState) {
+  const toSave: Record<string, unknown> = {};
+  for (const key of PERSISTED_FIELDS) {
+    toSave[key] = state[key];
+  }
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+}
+
+export function isSpotConnector(connector: string): boolean {
+  return !connector.includes("perpetual");
+}
+
 function gridReducer(state: GridState, action: GridAction): GridState {
   switch (action.type) {
-    case "SET_FIELD":
-      return { ...state, [action.field]: action.value };
-    case "SET_CONNECTOR":
-      return { ...state, connector: action.value, start_price: 0, end_price: 0, limit_price: 0 };
+    case "SET_FIELD": {
+      const next = { ...state, [action.field]: action.value };
+      // Force leverage=1 for spot connectors
+      if (action.field === "leverage" && isSpotConnector(next.connector)) {
+        next.leverage = 1;
+      }
+      return next;
+    }
+    case "SET_CONNECTOR": {
+      const spot = isSpotConnector(action.value);
+      return {
+        ...state,
+        connector: action.value,
+        start_price: 0,
+        end_price: 0,
+        limit_price: 0,
+        leverage: spot ? 1 : state.leverage,
+      };
+    }
     case "SET_PAIR":
       return { ...state, pair: action.value, start_price: 0, end_price: 0, limit_price: 0 };
     default:
@@ -102,20 +157,41 @@ const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
 export function CreateGridExecutor() {
   const { server } = useServer();
   const navigate = useNavigate();
-  const [state, dispatch] = useReducer(gridReducer, INITIAL_STATE);
+  const [state, dispatch] = useReducer(gridReducer, undefined, loadSavedDefaults);
   const validation = useGridValidation(state);
+  const isSpot = isSpotConnector(state.connector);
 
-  const { data: connectors } = useQuery({
+  const [successId, setSuccessId] = useState<string | null>(null);
+  const [onlyConnected, setOnlyConnected] = useState(true);
+
+  const { data: allConnectors } = useQuery({
     queryKey: ["connectors", server],
     queryFn: () => api.getConnectors(server!),
     enabled: !!server,
   });
 
+  const { data: connectedExchanges } = useQuery({
+    queryKey: ["connected-exchanges", server],
+    queryFn: () => api.getConnectedExchanges(server!),
+    enabled: !!server,
+  });
+
+  const connectors = useMemo(() => {
+    if (!allConnectors) return [];
+    if (!onlyConnected || !connectedExchanges?.length) return allConnectors;
+    // Match connected base names to all connectors (e.g. "binance" matches "binance_perpetual")
+    const connectedBases = new Set(connectedExchanges.map((c) => c.replace(/_perpetual$/, "")));
+    return allConnectors.filter((c) => {
+      const base = c.replace(/_perpetual$/, "");
+      return connectedBases.has(base);
+    });
+  }, [allConnectors, connectedExchanges, onlyConnected]);
+
   const rulesData = useTradingRules(server ?? "", state.connector);
 
-  // Sync connector to available list
+  // Sync connector to filtered list
   useEffect(() => {
-    if (connectors?.length && !connectors.includes(state.connector)) {
+    if (connectors.length && !connectors.includes(state.connector)) {
       dispatch({ type: "SET_CONNECTOR", value: connectors[0] });
     }
   }, [connectors, state.connector]);
@@ -160,7 +236,7 @@ export function CreateGridExecutor() {
           max_open_orders: state.max_open_orders,
           max_orders_per_batch: state.max_orders_per_batch,
           order_frequency: state.order_frequency,
-          leverage: state.leverage,
+          leverage: isSpot ? 1 : state.leverage,
           activation_bounds: state.activation_bounds,
           keep_position: state.keep_position,
           coerce_tp_to_step: state.coerce_tp_to_step,
@@ -172,7 +248,11 @@ export function CreateGridExecutor() {
         },
       });
     },
-    onSuccess: () => navigate("/executors"),
+    onSuccess: (data) => {
+      saveDefaults(state);
+      setSuccessId(data.executor_id);
+      setTimeout(() => navigate("/executors"), 2500);
+    },
   });
 
   const handlePriceSet = useMemo(
@@ -209,11 +289,22 @@ export function CreateGridExecutor() {
           />
           <div className="relative border-l border-[var(--color-border)]">
             <ExchangeSelector
-              connectors={connectors ?? []}
+              connectors={connectors}
               value={state.connector}
               onChange={(v) => dispatch({ type: "SET_CONNECTOR", value: v })}
             />
           </div>
+          {connectedExchanges && connectedExchanges.length > 0 && (
+            <label className="flex cursor-pointer items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-[10px] text-[var(--color-text-muted)] select-none hover:bg-[var(--color-surface-hover)]">
+              <input
+                type="checkbox"
+                checked={onlyConnected}
+                onChange={(e) => setOnlyConnected(e.target.checked)}
+                className="h-3 w-3 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
+              />
+              Connected only
+            </label>
+          )}
         </div>
 
         {/* Price ticker */}
@@ -291,7 +382,7 @@ export function CreateGridExecutor() {
             </h3>
           </div>
           <div className="flex-1 overflow-y-auto">
-            <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} />
+            <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} isSpot={isSpot} />
           </div>
         </div>
       </div>
@@ -329,6 +420,17 @@ export function CreateGridExecutor() {
           Create Grid Executor
         </button>
       </div>
+
+      {/* Success toast */}
+      {successId && (
+        <div className="absolute bottom-16 right-4 flex items-center gap-2 rounded-lg border border-[var(--color-green)]/30 bg-[var(--color-green)]/10 px-4 py-2.5 text-sm text-[var(--color-green)] animate-in fade-in slide-in-from-bottom-2">
+          <CheckCircle className="h-4 w-4 shrink-0" />
+          <div>
+            <span className="font-medium">Grid created!</span>
+            <span className="ml-1.5 font-mono text-xs opacity-75">{successId.slice(0, 8)}…</span>
+          </div>
+        </div>
+      )}
 
       {/* Error toast */}
       {createMutation.isError && (
