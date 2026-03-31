@@ -307,7 +307,9 @@ DANGEROUS_CLMM_ACTIONS = {"open_position", "close_position"}
 
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
-    tool_name = tool_call.get("tool", "") or tool_call.get("title", "")
+    raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
+    # Normalize MCP-prefixed names (e.g. mcp__mcp-hummingbot__manage_executors → manage_executors)
+    tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
 
     # Direct dangerous tools
     if tool_name in DANGEROUS_TOOLS:
@@ -358,7 +360,8 @@ def _condor_mcp_env(chat_id: int, user_id: int, agent_slug: str | None = None) -
 
 
 def build_mcp_servers_for_session(
-    user_id: int, chat_id: int, user_data: dict | None = None
+    user_id: int, chat_id: int, user_data: dict | None = None,
+    execution_mode: str = "loop",
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -404,22 +407,28 @@ def build_mcp_servers_for_session(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
+    hummingbot_env = [
+        {"name": "HUMMINGBOT_API_URL", "value": api_url},
+        {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
+        {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
+    ]
+
+    if execution_mode == "dry_run":
+        hummingbot_env.append({"name": "DRY_RUN", "value": "1"})
+
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
-        "env": [
-            {"name": "HUMMINGBOT_API_URL", "value": api_url},
-            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
-            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
-        ],
+        "env": hummingbot_env,
     }
 
     return [mcp_hummingbot, condor]
 
 
 def build_mcp_servers_for_agent(
-    server_name: str, user_id: int, chat_id: int, agent_slug: str | None = None
+    server_name: str, user_id: int, chat_id: int, agent_slug: str | None = None,
+    execution_mode: str = "loop",
 ) -> list[dict[str, Any]]:
     """Build MCP server configs for a trading agent bound to a specific server.
 
@@ -449,15 +458,21 @@ def build_mcp_servers_for_agent(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
+    hummingbot_env = [
+        {"name": "HUMMINGBOT_API_URL", "value": api_url},
+        {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
+        {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
+    ]
+
+    # Dry-run: inject DRY_RUN=1 so MCP server blocks mutating executor actions
+    if execution_mode == "dry_run":
+        hummingbot_env.append({"name": "DRY_RUN", "value": "1"})
+
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
-        "env": [
-            {"name": "HUMMINGBOT_API_URL", "value": api_url},
-            {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
-            {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
-        ],
+        "env": hummingbot_env,
     }
 
     return [mcp_hummingbot, condor]

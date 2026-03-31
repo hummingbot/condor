@@ -84,8 +84,10 @@ def _to_telegram_markdown(text: str) -> str:
     result = _BOLD_RE.sub(r"*\1*", result)
     result = _ITALIC_RE.sub(r"_\1_", result)
 
-    # Clean up excessive blank lines left by removed elements
-    result = re.sub(r"\n{3,}", "\n\n", result)
+    # Clean up excessive blank lines (including lines with only whitespace)
+    result = re.sub(r"(\n[ \t]*){3,}", "\n\n", result)
+    # Strip leading blank lines
+    result = result.lstrip("\n")
 
     # Restore protected code spans
     for i, original in enumerate(protected):
@@ -248,14 +250,15 @@ class TelegramStreamer:
         if tool_block:
             parts.append(tool_block)
 
-        # Main text content
-        if self._buffer:
+        # Main text content — strip leading/trailing whitespace to avoid gaps
+        buf = self._buffer.strip()
+        if buf:
             # On final flush or when buffer looks stable → apply Markdown
-            if final or self._buffer_looks_stable(self._buffer):
-                converted = _to_telegram_markdown(self._buffer)
+            if final or self._buffer_looks_stable(buf):
+                converted = _to_telegram_markdown(buf)
                 parse_mode = "Markdown"
             else:
-                converted = self._buffer
+                converted = buf
             parts.append(converted)
         elif not final:
             # Thinking animation
