@@ -32,6 +32,7 @@ class RunningInstance(BaseModel):
     total_amount_quote: float = 100.0
     trading_context: str = ""
     frequency_sec: int = 60
+    execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
 
 
@@ -213,6 +214,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 total_amount_quote=info.get("total_amount_quote", 100),
                 trading_context=info.get("trading_context", ""),
                 frequency_sec=info.get("frequency_sec", 60),
+                execution_mode=info.get("execution_mode", "loop"),
                 risk_limits=info.get("risk_limits", {}),
             ))
             # Use first running instance for top-level fields
@@ -268,6 +270,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
             status=info["status"],
             tick_count=info["tick_count"],
             daily_pnl=info["daily_pnl"],
+            execution_mode=info.get("execution_mode", "loop"),
         ))
         if not agent_id:
             status = info["status"]
