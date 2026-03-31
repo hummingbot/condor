@@ -506,8 +506,12 @@ def _local_journal_read(params: dict) -> dict:
         return {"error": "agent_id is required"}
 
     engine = get_engine(agent_id)
-    session_dir = engine.session_dir if engine else None
-    agent_dir = engine.strategy.agent_dir if engine else None
+    if engine:
+        session_dir = engine.session_dir
+        agent_dir = engine.strategy.agent_dir
+    else:
+        from condor.trading_agent.journal import resolve_agent_dirs
+        session_dir, agent_dir = resolve_agent_dirs(agent_id)
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     section = params.get("section", "recent")
@@ -544,8 +548,12 @@ def _local_journal_write(params: dict) -> dict:
         return {"error": "agent_id is required"}
 
     engine = get_engine(agent_id)
-    session_dir = engine.session_dir if engine else None
-    agent_dir = engine.strategy.agent_dir if engine else None
+    if engine:
+        session_dir = engine.session_dir
+        agent_dir = engine.strategy.agent_dir
+    else:
+        from condor.trading_agent.journal import resolve_agent_dirs
+        session_dir, agent_dir = resolve_agent_dirs(agent_id)
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     entry_type = params.get("entry_type", "action")
@@ -746,6 +754,13 @@ async def manage_trading_agent(
     - "update_strategy": Update an existing strategy (requires strategy_id, plus fields to update)
     - "delete_strategy": Delete a strategy (requires strategy_id)
 
+    Actions -- Lifecycle:
+    - "list_agents": List all running agent instances with status
+    - "start_agent": Start a new agent session (requires strategy_id, optional config overrides)
+    - "stop_agent": Stop a running agent (requires agent_id)
+    - "pause_agent": Pause a running agent (requires agent_id)
+    - "resume_agent": Resume a paused agent (requires agent_id)
+
     Actions -- Routines (scoped to a strategy):
     - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
     - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
@@ -756,14 +771,14 @@ async def manage_trading_agent(
 
     Args:
         action: The action to perform.
-        agent_id: Agent instance ID (for monitoring actions).
-        strategy_id: Strategy ID (for strategy/routine actions).
+        agent_id: Agent instance ID (for lifecycle/monitoring actions).
+        strategy_id: Strategy ID (for strategy/routine/start actions).
         name: Strategy name (for create/update) or routine name (for run_routine).
         description: Strategy description (for create/update).
         instructions: Strategy instructions text (for create/update).
         agent_key: Agent type "claude-code" or "gemini" (for create, default "claude-code").
         skills: List of optional skill names to enable (for create/update).
-        config: Agent config overrides (for create/update) or routine config (for run_routine).
+        config: Agent config overrides (for create/update/start) or routine config (for run_routine).
 
     Returns:
         Action-specific result dict.
@@ -790,6 +805,11 @@ async def manage_trading_agent(
         if not name:
             return {"error": "name is required"}
         return await _local_manage_routines_run(name, config, strategy_id)
+
+    # Agent lifecycle actions
+    lifecycle_actions = {"start_agent", "stop_agent", "pause_agent", "resume_agent", "list_agents"}
+    if action in lifecycle_actions:
+        return await _local_agent_lifecycle(action, strategy_id, agent_id, config)
 
     # Journal/monitoring that's file-based
     if action in ("agent_tracker", "agent_journal"):
@@ -914,6 +934,74 @@ def _local_manage_strategy(
     return {"error": f"Unknown strategy action: {action}"}
 
 
+async def _local_agent_lifecycle(
+    action: str, strategy_id: str | None, agent_id: str | None, config: dict | None,
+) -> dict:
+    from condor.trading_agent.engine import TickEngine, get_engine, get_all_engines
+
+    if action == "list_agents":
+        engines = get_all_engines()
+        if not engines:
+            return {"agents": [], "message": "No agents running"}
+        return {
+            "agents": [e.get_info() for e in engines.values()],
+        }
+
+    if action == "start_agent":
+        if not strategy_id:
+            return {"error": "strategy_id is required"}
+        from condor.trading_agent.strategy import StrategyStore
+        from condor.trading_agent.config import load_agent_config
+        store = StrategyStore()
+        strategy = store.get(strategy_id)
+        if not strategy:
+            return {"error": f"Strategy '{strategy_id}' not found"}
+        agent_config = load_agent_config(strategy.agent_dir, strategy.default_config)
+        config_dict = agent_config.model_dump()
+        if config:
+            # Translate dry_run shorthand → execution_mode
+            if config.get("dry_run") and "execution_mode" not in config:
+                config["execution_mode"] = "dry_run"
+            config_dict.update(config)
+        engine = TickEngine(
+            strategy=strategy,
+            config=config_dict,
+            chat_id=CHAT_ID,
+            user_id=USER_ID,
+        )
+        await engine.start()
+        return {"started": True, "agent_id": engine.agent_id, "session_num": engine.session_num}
+
+    if action == "stop_agent":
+        if not agent_id:
+            return {"error": "agent_id is required"}
+        engine = get_engine(agent_id)
+        if not engine:
+            return {"error": f"Agent '{agent_id}' not found"}
+        await engine.stop()
+        return {"stopped": True, "agent_id": agent_id}
+
+    if action == "pause_agent":
+        if not agent_id:
+            return {"error": "agent_id is required"}
+        engine = get_engine(agent_id)
+        if not engine or not engine.is_running:
+            return {"error": f"Agent '{agent_id}' not found or not running"}
+        engine.pause()
+        return {"paused": True, "agent_id": agent_id}
+
+    if action == "resume_agent":
+        if not agent_id:
+            return {"error": "agent_id is required"}
+        engine = get_engine(agent_id)
+        if not engine:
+            return {"error": f"Agent '{agent_id}' not found"}
+        engine.resume()
+        return {"resumed": True, "agent_id": agent_id}
+
+    return {"error": f"Unknown lifecycle action: {action}"}
+
+
 def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
@@ -922,8 +1010,12 @@ def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
     from condor.trading_agent.engine import get_engine
 
     engine = get_engine(agent_id)
-    session_dir = engine.session_dir if engine else None
-    agent_dir = engine.strategy.agent_dir if engine else None
+    if engine:
+        session_dir = engine.session_dir
+        agent_dir = engine.strategy.agent_dir
+    else:
+        from condor.trading_agent.journal import resolve_agent_dirs
+        session_dir, agent_dir = resolve_agent_dirs(agent_id)
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     if action == "agent_tracker":
