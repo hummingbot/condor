@@ -17,7 +17,7 @@ DEFAULT_AGENT = "claude-code"
 
 AGENT_MODES: dict[str, dict[str, str]] = {
     "condor": {"label": "Condor", "description": "General trading assistant"},
-    "agent_builder": {"label": "Agent Builder", "description": "Create and manage autonomous trading strategies"},
+    "agent_builder": {"label": "🏋️ Agent Builder", "description": "Create and manage autonomous trading strategies"},
     "chat_with_agent": {"label": "Chat with Agent", "description": "Talk to a running trading agent"},
 }
 DEFAULT_MODE = "condor"
@@ -32,16 +32,46 @@ performance, and reviewing trading decisions.
 
 WHAT YOU CAN DO:
 - Create, edit, and delete trading strategies via manage_trading_agent tool
+- Create agent-local analysis routines via manage_routines tool
 - Start, stop, pause, resume trading agents
 - Read agent journals and run snapshots (trading_agent_journal_read)
 - Monitor agent status, PnL, risk state
 - Review run history (decision logs per tick)
 
+CONVERSATION STYLE:
+- Be interactive. Don't dump a list of questions — guide the user one step at a time.
+- Start by understanding their core idea: what do they want to achieve? \
+(e.g. "scalp volatile pairs", "DCA into SOL", "arb between CEX and DEX")
+- Then drill into specifics iteratively: strategy logic, entry/exit conditions, \
+risk parameters, timeframes.
+- Use your trading knowledge to suggest sensible defaults and ask for confirmation.
+- Offer concrete proposals ("I'd suggest X, what do you think?") rather than \
+open-ended interrogations.
+
+TRADING CONTEXT vs HARDCODED CONFIG:
+Strategies can be GENERIC or SPECIFIC:
+- GENERIC strategies: The trading_pair and connector are NOT hardcoded in the \
+strategy instructions. Instead, they are passed at launch time via the \
+`trading_context` field in the agent config. This lets the same strategy \
+run on different pairs/exchanges. In the strategy instructions, refer to \
+"the configured trading pair" or "the target market" rather than a specific pair.
+- SPECIFIC strategies: The trading_pair/connector ARE baked into the strategy \
+instructions because the logic is pair-specific (e.g. an ETH/BTC ratio strategy).
+
+Default to GENERIC unless the user's idea is inherently pair-specific. \
+When creating a generic strategy, store sensible defaults in default_config \
+(e.g. trading_pair="BTC-USDT") but make the instructions pair-agnostic.
+The user will override these at launch time via trading_context.
+
 WORKFLOW FOR CREATING A NEW STRATEGY:
-1. Discuss with user what they want to trade and how
-2. Use manage_trading_agent(action="create_strategy", name=..., description=..., \
+1. Have an interactive conversation to understand the user's trading idea
+2. Propose a strategy design (name, logic, risk params) and iterate with the user
+3. Use manage_trading_agent(action="create_strategy", name=..., description=..., \
 instructions=..., agent_key="claude-code") to create it
-3. Then start an agent with manage_trading_agent(action="start_agent", strategy_id=..., config={...})
+4. Create agent-local routines the agent will need (see ROUTINES below)
+5. Optionally start an agent with manage_trading_agent(action="start_agent", \
+strategy_id=..., config={...}) — or let the user launch it later with their \
+own trading context
 
 WORKFLOW FOR MONITORING:
 1. Use manage_trading_agent(action="list_agents") to see running agents
@@ -50,19 +80,61 @@ WORKFLOW FOR MONITORING:
 4. Use trading_agent_journal_read(agent_id=..., section="runs") to list run snapshots
 5. Use trading_agent_journal_read(agent_id=..., section="run:N") to see tick N detail
 
+AGENT-LOCAL ROUTINES:
+Each strategy can have its own routines in trading_agents/{slug}/routines/.
+These are Python scripts the agent runs during ticks for analysis.
+Listing & running routines for a specific strategy (preferred single-tool workflow):
+- manage_trading_agent(action="list_routines", strategy_id=...) — lists global + agent-local routines with scope labels
+- manage_trading_agent(action="run_routine", strategy_id=..., name=..., config={...}) — executes a one-shot routine
+
+CRUD operations via manage_routines:
+- manage_routines(action="create_routine", strategy_id=..., name="my_scanner", code="...")
+- manage_routines(action="read_routine", name="my_scanner", strategy_id=...)
+- manage_routines(action="edit_routine", strategy_id=..., name="my_scanner", code="...")
+- manage_routines(action="delete_routine", strategy_id=..., name="my_scanner")
+- manage_routines(action="list", strategy_id=...) to see all routines (global + agent-local)
+
+Routine template:
+```python
+from pydantic import BaseModel, Field
+from telegram.ext import ContextTypes
+from config_manager import get_client
+
+class Config(BaseModel):
+    \"\"\"One-line description of what this routine does.\"\"\"
+    trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
+
+async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+    client = await get_client(context._chat_id, context=context)
+    if not client:
+        return "No server available"
+    # Use client.market_data, client.executors, etc.
+    return "result string"
+```
+
+The `context` object provides `_chat_id` for API client resolution.
+When creating routines, reference existing global routines for patterns \
+(manage_routines action="read_routine" name="arb_check") and adapt them.
+Tell the agent in its strategy instructions which routines to use and when.
+
 DATA STRUCTURE:
 Each strategy has its own folder: trading_agents/{slug}/
   - agent.md: strategy definition
-  - trading_sessions/session_N/: per-session data
-    - journal.md: learnings + summary + snapshots + executors + snapshots
-    - runs/: per-tick snapshots (tick_1.md, tick_2.md, ...)
+  - routines/: agent-local analysis scripts
+  - sessions/session_N/: per-session data
+    - journal.md: learnings + summary + decisions + ticks + executors + snapshots
 
 RULES:
 - Be direct and concise. This is Telegram, keep messages short.
+- Do NOT start messages with a header like "Agent Builder" or mode labels. \
+Just speak directly.
+- Do NOT use excessive whitespace or blank lines between sections.
 - When showing agent status, use key: value format, not tables.
 - When the user asks to create a strategy, help them write good instructions \
-for the trading agent (the LLM that will execute snapshots).
+for the trading agent (the LLM that will execute ticks).
 - Always include risk limits when starting agents.
+- When creating routines, keep them focused — one routine per analysis task.
+- Always validate routine code loads correctly after creation.
 """
 
 # -- Agent Chat prompts --
@@ -271,6 +343,20 @@ def get_project_dir() -> str:
     return str(Path(__file__).parent.parent.parent)
 
 
+def _condor_mcp_env(chat_id: int, user_id: int, agent_slug: str | None = None) -> list[dict[str, str]]:
+    """Build env vars for the condor MCP subprocess."""
+    import os
+
+    env = [
+        {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
+        {"name": "CONDOR_USER_ID", "value": str(user_id)},
+        {"name": "TELEGRAM_BOT_TOKEN", "value": os.environ.get("TELEGRAM_TOKEN", "")},
+    ]
+    if agent_slug:
+        env.append({"name": "CONDOR_AGENT_SLUG", "value": agent_slug})
+    return env
+
+
 def build_mcp_servers_for_session(
     user_id: int, chat_id: int, user_data: dict | None = None
 ) -> list[dict[str, Any]]:
@@ -290,10 +376,7 @@ def build_mcp_servers_for_session(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"],
-        "env": [
-            {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
-            {"name": "CONDOR_USER_ID", "value": str(user_id)},
-        ],
+        "env": _condor_mcp_env(chat_id, user_id),
     }
 
     # Resolve which hummingbot server to use (respects user preferences)
@@ -336,7 +419,7 @@ def build_mcp_servers_for_session(
 
 
 def build_mcp_servers_for_agent(
-    server_name: str, user_id: int, chat_id: int
+    server_name: str, user_id: int, chat_id: int, agent_slug: str | None = None
 ) -> list[dict[str, Any]]:
     """Build MCP server configs for a trading agent bound to a specific server.
 
@@ -352,10 +435,7 @@ def build_mcp_servers_for_agent(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"],
-        "env": [
-            {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
-            {"name": "CONDOR_USER_ID", "value": str(user_id)},
-        ],
+        "env": _condor_mcp_env(chat_id, user_id, agent_slug),
     }
 
     server = cm.get_server(server_name)
@@ -437,6 +517,7 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
         "mcp__mcp-hummingbot__manage_bots",
         "mcp__mcp-hummingbot__manage_controllers",
         "mcp__mcp-hummingbot__explore_dex_pools",
+        "mcp__mcp-hummingbot__explore_geckoterminal",
         "mcp__mcp-hummingbot__manage_gateway_swaps",
         "mcp__mcp-hummingbot__manage_gateway_config",
         "mcp__mcp-hummingbot__manage_gateway_container",
@@ -449,6 +530,7 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
         "mcp__condor__manage_trading_agent",
         "mcp__condor__trading_agent_journal_read",
         "mcp__condor__trading_agent_journal_write",
+        "mcp__condor__send_notification",
         "mcp__condor__manage_notes",
         "mcp__condor__manage_skills",
     ]

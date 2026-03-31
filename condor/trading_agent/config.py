@@ -15,17 +15,12 @@ from pydantic import BaseModel, Field
 
 class RiskLimitsConfig(BaseModel):
     max_position_size_quote: float = Field(default=500.0, description="Max total position size in quote currency")
-    max_daily_loss_quote: float = Field(default=50.0, description="Max daily loss before blocking")
     max_open_executors: int = Field(default=5, description="Max simultaneous executors")
-    max_single_order_quote: float = Field(default=100.0, description="Max size per executor")
-    max_drawdown_pct: float = Field(default=10.0, description="Max drawdown percentage")
-    max_cost_per_day_usd: float = Field(default=5.0, description="Max daily LLM cost")
+    max_drawdown_pct: float = Field(default=-1.0, description="Max drawdown percentage; -1 = disabled")
 
 
 class AgentConfig(BaseModel):
     server_name: str = Field(default="", description="Hummingbot API server name")
-    connector_name: str = Field(default="binance_perpetual", description="Exchange connector")
-    trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
     trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)

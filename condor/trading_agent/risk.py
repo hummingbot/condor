@@ -17,12 +17,8 @@ log = logging.getLogger(__name__)
 @dataclass
 class RiskLimits:
     max_position_size_quote: float = 500.0
-    max_daily_loss_quote: float = 50.0
-    max_drawdown_pct: float = 10.0
     max_open_executors: int = 5
-    max_single_order_quote: float = 100.0
-    max_cost_per_day_usd: float = 5.0
-    cooldown_after_loss_sec: int = 300
+    max_drawdown_pct: float = -1.0
 
     @classmethod
     def from_dict(cls, d: dict) -> RiskLimits:
@@ -31,29 +27,23 @@ class RiskLimits:
 
 @dataclass
 class RiskState:
-    daily_pnl: float = 0.0
     total_exposure: float = 0.0
     executor_count: int = 0
     drawdown_pct: float = 0.0
-    daily_cost: float = 0.0
     is_blocked: bool = False
     block_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "daily_pnl": self.daily_pnl,
             "total_exposure": self.total_exposure,
             "executor_count": self.executor_count,
             "drawdown_pct": self.drawdown_pct,
-            "daily_cost": self.daily_cost,
             "is_blocked": self.is_blocked,
             "block_reason": self.block_reason,
             # Include limits for prompt display
-            "max_daily_loss": self._limits.max_daily_loss_quote if hasattr(self, "_limits") else 50,
             "max_position_size": self._limits.max_position_size_quote if hasattr(self, "_limits") else 500,
             "max_open_executors": self._limits.max_open_executors if hasattr(self, "_limits") else 5,
-            "max_drawdown_pct": self._limits.max_drawdown_pct if hasattr(self, "_limits") else 10,
-            "max_cost_per_day": self._limits.max_cost_per_day_usd if hasattr(self, "_limits") else 5,
+            "max_drawdown_pct": self._limits.max_drawdown_pct if hasattr(self, "_limits") else -1,
         }
 
 
@@ -69,11 +59,9 @@ class RiskEngine:
         state._limits = self.limits
 
         try:
-            state.daily_pnl = tracker.get_daily_pnl()
             state.total_exposure = tracker.get_total_exposure()
             state.executor_count = tracker.get_open_executor_count()
             state.drawdown_pct = tracker.get_drawdown_pct()
-            state.daily_cost = tracker.get_daily_cost()
         except Exception:
             log.exception("Failed to compute risk state from tracker")
             return state
@@ -81,19 +69,9 @@ class RiskEngine:
         # Check blocking conditions
         reasons = []
 
-        if state.daily_pnl < -self.limits.max_daily_loss_quote:
-            reasons.append(
-                f"Daily loss ${abs(state.daily_pnl):.2f} exceeds limit ${self.limits.max_daily_loss_quote:.2f}"
-            )
-
-        if state.drawdown_pct > self.limits.max_drawdown_pct:
+        if self.limits.max_drawdown_pct >= 0 and state.drawdown_pct > self.limits.max_drawdown_pct:
             reasons.append(
                 f"Drawdown {state.drawdown_pct:.1f}% exceeds limit {self.limits.max_drawdown_pct:.1f}%"
-            )
-
-        if state.daily_cost > self.limits.max_cost_per_day_usd:
-            reasons.append(
-                f"Daily LLM cost ${state.daily_cost:.2f} exceeds limit ${self.limits.max_cost_per_day_usd:.2f}"
             )
 
         if reasons:
@@ -121,8 +99,6 @@ class RiskEngine:
         # Check position size
         config = input_data.get("executor_config", {})
         amount = float(config.get("total_amount_quote", 0) or config.get("amount", 0) or 0)
-        if amount > self.limits.max_single_order_quote:
-            return False, f"Order size ${amount:.2f} exceeds single order limit ${self.limits.max_single_order_quote:.2f}"
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (

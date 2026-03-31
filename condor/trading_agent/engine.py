@@ -253,7 +253,8 @@ class TickEngine:
         server_name = self.config.get("server_name")
         if server_name:
             mcp_servers = build_mcp_servers_for_agent(
-                server_name, self.user_id, self.chat_id
+                server_name, self.user_id, self.chat_id,
+                agent_slug=self.strategy.slug,
             )
         else:
             mcp_servers = build_mcp_servers_for_session(
@@ -448,7 +449,5 @@ class TickEngine:
             "frequency_sec": self.config.get("frequency_sec", 60),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
-            "connector": self.config.get("connector_name", ""),
-            "pair": self.config.get("trading_pair", ""),
             "session_dir": str(self.session_dir) if self.session_dir else "",
         }

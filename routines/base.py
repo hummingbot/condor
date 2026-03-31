@@ -140,6 +140,65 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     return routines
 
 
+def discover_routines_from_path(routines_dir: Path) -> dict[str, RoutineInfo]:
+    """Discover routines from an arbitrary directory path.
+
+    Uses importlib.util for dynamic loading since agent-local routines
+    aren't on the Python module path. No global cache -- each call scans fresh.
+
+    Args:
+        routines_dir: Directory containing routine .py files.
+
+    Returns:
+        Dict mapping routine name to RoutineInfo.
+    """
+    import importlib.util
+
+    routines: dict[str, RoutineInfo] = {}
+
+    if not routines_dir.exists():
+        return routines
+
+    for file_path in routines_dir.glob("*.py"):
+        if file_path.stem.startswith("_"):
+            continue
+
+        try:
+            module_name = f"agent_routine_{file_path.stem}"
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            if not spec or not spec.loader:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            if not hasattr(module, "Config") or not hasattr(module, "run"):
+                logger.warning(f"Agent routine {file_path.stem}: missing Config or run")
+                continue
+
+            is_continuous = getattr(module, "CONTINUOUS", False)
+            callback_handler = getattr(module, "handle_callback", None)
+            message_handler = getattr(module, "handle_message", None)
+            message_states = getattr(module, "MESSAGE_STATES", None)
+            cleanup_fn = getattr(module, "cleanup", None)
+
+            routines[file_path.stem] = RoutineInfo(
+                name=file_path.stem,
+                config_class=module.Config,
+                run_fn=module.run,
+                is_continuous=is_continuous,
+                callback_handler=callback_handler,
+                message_handler=message_handler,
+                message_states=message_states,
+                cleanup_fn=cleanup_fn,
+            )
+            logger.debug(f"Discovered agent routine: {file_path.stem}")
+
+        except Exception as e:
+            logger.error(f"Failed to load agent routine {file_path.stem}: {e}")
+
+    return routines
+
+
 def get_routine(name: str) -> RoutineInfo | None:
     """Get a specific routine by name."""
     return discover_routines().get(name)

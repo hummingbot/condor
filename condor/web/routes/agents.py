@@ -39,8 +39,6 @@ class AgentSummary(BaseModel):
     session_count: int = 0
     tick_count: int = 0
     daily_pnl: float = 0.0
-    connector: str = ""
-    trading_pair: str = ""
     instances: list[RunningInstance] = []
 
 
@@ -223,8 +221,6 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
             session_count=_count_sessions(s.agent_dir),
             tick_count=tick_count,
             daily_pnl=daily_pnl,
-            connector=s.default_config.get("connector_name", ""),
-            trading_pair=s.default_config.get("trading_pair", ""),
             instances=instances,
         ))
 

@@ -15,6 +15,58 @@ mcp = FastMCP("condor")
 
 CHAT_ID = int(os.environ.get("CONDOR_CHAT_ID", "0"))
 USER_ID = int(os.environ.get("CONDOR_USER_ID", "0"))
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CONDOR_AGENT_SLUG = os.environ.get("CONDOR_AGENT_SLUG", "")
+
+
+# =============================================================================
+# Notification Tool
+# =============================================================================
+
+
+@mcp.tool()
+async def send_notification(
+    text: str,
+    parse_mode: str = "Markdown",
+) -> dict:
+    """Send a Telegram message to the user.
+
+    Args:
+        text: Message text to send.
+        parse_mode: Telegram parse mode ("Markdown" or "HTML"). Default: "Markdown".
+
+    Returns:
+        {"sent": true} on success, {"error": "..."} on failure.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        return {"error": "TELEGRAM_BOT_TOKEN not configured"}
+    if not CHAT_ID:
+        return {"error": "CONDOR_CHAT_ID not configured"}
+
+    import httpx
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": parse_mode,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, json=payload)
+            data = resp.json()
+            if data.get("ok"):
+                return {"sent": True}
+            # Retry without parse_mode if formatting fails
+            if "can't parse" in data.get("description", "").lower():
+                payload.pop("parse_mode")
+                resp = await client.post(url, json=payload)
+                data = resp.json()
+                if data.get("ok"):
+                    return {"sent": True}
+            return {"error": data.get("description", "Unknown Telegram API error")}
+    except Exception as e:
+        return {"error": f"Failed to send: {e}"}
 
 
 # =============================================================================
@@ -22,8 +74,8 @@ USER_ID = int(os.environ.get("CONDOR_USER_ID", "0"))
 # =============================================================================
 
 
-def _local_manage_routines_list() -> dict:
-    from routines.base import discover_routines
+def _local_manage_routines_list(strategy_id: str | None = None) -> dict:
+    from routines.base import discover_routines, discover_routines_from_path
 
     routines = discover_routines(force_reload=True)
     result = []
@@ -32,14 +84,46 @@ def _local_manage_routines_list() -> dict:
             "name": name,
             "description": routine.description,
             "type": "continuous" if routine.is_continuous else "one-shot",
+            "scope": "global",
         })
+
+    # Merge agent-local routines: use strategy_id if provided, else CONDOR_AGENT_SLUG
+    agent_routines_dir = _get_agent_routines_dir(strategy_id) if strategy_id else None
+    if not agent_routines_dir and CONDOR_AGENT_SLUG:
+        from pathlib import Path
+        agent_routines_dir = Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
+
+    if agent_routines_dir and agent_routines_dir.exists():
+        agent_routines = discover_routines_from_path(agent_routines_dir)
+        for name, routine in sorted(agent_routines.items()):
+            result.append({
+                "name": name,
+                "description": routine.description,
+                "type": "continuous" if routine.is_continuous else "one-shot",
+                "scope": "agent",
+            })
+
     return {"routines": result}
 
 
-def _local_manage_routines_describe(name: str) -> dict:
-    from routines.base import get_routine
+def _resolve_routine(name: str):
+    """Look up a routine: agent-local first, then global."""
+    if CONDOR_AGENT_SLUG:
+        from routines.base import discover_routines_from_path
+        from pathlib import Path
 
-    routine = get_routine(name)
+        agent_routines_dir = Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
+        if agent_routines_dir.exists():
+            agent_routines = discover_routines_from_path(agent_routines_dir)
+            if name in agent_routines:
+                return agent_routines[name]
+
+    from routines.base import get_routine
+    return get_routine(name)
+
+
+def _local_manage_routines_describe(name: str) -> dict:
+    routine = _resolve_routine(name)
     if not routine:
         return {"error": f"Routine '{name}' not found"}
     fields = routine.get_fields()
@@ -51,12 +135,24 @@ def _local_manage_routines_describe(name: str) -> dict:
     }
 
 
-async def _local_manage_routines_run(name: str, config: dict | None) -> dict:
+async def _local_manage_routines_run(name: str, config: dict | None, strategy_id: str | None = None) -> dict:
     """Execute a one-shot routine and return its result."""
     import asyncio
-    from routines.base import get_routine
 
-    routine = get_routine(name)
+    routine = None
+
+    # If strategy_id provided, look in agent-local routines first
+    if strategy_id:
+        routines_dir = _get_agent_routines_dir(strategy_id)
+        if routines_dir and routines_dir.exists():
+            from routines.base import discover_routines_from_path
+            agent_routines = discover_routines_from_path(routines_dir)
+            routine = agent_routines.get(name)
+
+    # Fall back to default resolution (CONDOR_AGENT_SLUG → global)
+    if not routine:
+        routine = _resolve_routine(name)
+
     if not routine:
         return {"error": f"Routine '{name}' not found"}
 
@@ -98,29 +194,173 @@ async def _local_manage_routines_run(name: str, config: dict | None) -> dict:
         return {"error": f"Routine '{name}' failed: {e}"}
 
 
+def _get_agent_routines_dir(strategy_id: str | None) -> "Path | None":
+    """Resolve the routines directory for a strategy."""
+    from pathlib import Path
+
+    # If strategy_id given, resolve slug from StrategyStore
+    if strategy_id:
+        from condor.trading_agent.strategy import StrategyStore
+        store = StrategyStore()
+        s = store.get(strategy_id)
+        if not s:
+            return None
+        return Path("trading_agents") / s.slug / "routines"
+
+    # Fall back to CONDOR_AGENT_SLUG env var
+    if CONDOR_AGENT_SLUG:
+        return Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
+
+    return None
+
+
+def _local_manage_routines_create(name: str, code: str, strategy_id: str | None) -> dict:
+    """Create a new agent-local routine file."""
+    import re
+    from pathlib import Path
+
+    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
+        return {"error": "name must be lowercase alphanumeric with underscores (e.g. 'my_scanner')"}
+    if not code:
+        return {"error": "code is required"}
+
+    routines_dir = _get_agent_routines_dir(strategy_id)
+    if not routines_dir:
+        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
+
+    file_path = routines_dir / f"{name}.py"
+    if file_path.exists():
+        return {"error": f"Routine '{name}' already exists. Use action='edit_routine' to update it."}
+
+    # Validate the code has required components
+    if "class Config" not in code:
+        return {"error": "Routine code must define a 'class Config(BaseModel)' class"}
+    if "async def run" not in code and "def run" not in code:
+        return {"error": "Routine code must define a 'run(config, context)' function"}
+
+    routines_dir.mkdir(parents=True, exist_ok=True)
+    file_path.write_text(code)
+
+    # Verify it loads
+    from routines.base import discover_routines_from_path
+    loaded = discover_routines_from_path(routines_dir)
+    if name not in loaded:
+        # Remove the broken file
+        file_path.unlink()
+        return {"error": "Routine file was created but failed to load. Check for syntax errors."}
+
+    routine = loaded[name]
+    return {
+        "created": True,
+        "name": name,
+        "description": routine.description,
+        "path": str(file_path),
+    }
+
+
+def _local_manage_routines_read(name: str, strategy_id: str | None) -> dict:
+    """Read the source code of a routine."""
+    from pathlib import Path
+
+    # Check agent-local first
+    routines_dir = _get_agent_routines_dir(strategy_id)
+    if routines_dir:
+        file_path = routines_dir / f"{name}.py"
+        if file_path.exists():
+            return {"name": name, "code": file_path.read_text(), "scope": "agent"}
+
+    # Check global routines
+    global_path = Path("routines") / f"{name}.py"
+    if global_path.exists():
+        return {"name": name, "code": global_path.read_text(), "scope": "global"}
+
+    return {"error": f"Routine '{name}' not found"}
+
+
+def _local_manage_routines_edit(name: str, code: str, strategy_id: str | None) -> dict:
+    """Update the source code of an agent-local routine."""
+    routines_dir = _get_agent_routines_dir(strategy_id)
+    if not routines_dir:
+        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
+
+    file_path = routines_dir / f"{name}.py"
+    if not file_path.exists():
+        return {"error": f"Agent routine '{name}' not found. Use action='create_routine' first."}
+
+    if not code:
+        return {"error": "code is required"}
+
+    # Write new code
+    old_code = file_path.read_text()
+    file_path.write_text(code)
+
+    # Verify it loads
+    from routines.base import discover_routines_from_path
+    loaded = discover_routines_from_path(routines_dir)
+    if name not in loaded:
+        # Restore old code
+        file_path.write_text(old_code)
+        return {"error": "Updated code failed to load (syntax error?). Reverted to previous version."}
+
+    routine = loaded[name]
+    return {
+        "updated": True,
+        "name": name,
+        "description": routine.description,
+    }
+
+
+def _local_manage_routines_delete(name: str, strategy_id: str | None) -> dict:
+    """Delete an agent-local routine."""
+    routines_dir = _get_agent_routines_dir(strategy_id)
+    if not routines_dir:
+        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
+
+    file_path = routines_dir / f"{name}.py"
+    if not file_path.exists():
+        return {"error": f"Agent routine '{name}' not found"}
+
+    file_path.unlink()
+    return {"deleted": True, "name": name}
+
+
 @mcp.tool()
 async def manage_routines(
     action: str,
     name: str | None = None,
     config: dict | None = None,
+    strategy_id: str | None = None,
+    code: str | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
 
-    Actions:
-    - "list": List all available routines with name, description, and type
+    Actions -- Discovery & Execution:
+    - "list": List all available routines with name, description, type, and scope
     - "describe": Show config schema for a routine (requires name)
     - "run": Execute a one-shot routine and return its result (requires name, optional config)
 
+    Actions -- Agent-Local Routine CRUD (requires strategy_id or CONDOR_AGENT_SLUG):
+    - "create_routine": Create a new agent-local routine (requires name, code)
+    - "read_routine": Read source code of a routine (requires name)
+    - "edit_routine": Update an agent-local routine (requires name, code)
+    - "delete_routine": Delete an agent-local routine (requires name)
+
+    Agent-local routines live in trading_agents/{slug}/routines/ and are only
+    visible to that strategy's agent. They follow the same pattern as global
+    routines: a Config(BaseModel) class and an async run(config, context) function.
+
     Args:
-        action: The action to perform (list, describe, run)
-        name: Routine name (required for describe, run)
-        config: Config overrides for run (optional, merged with defaults)
+        action: The action to perform.
+        name: Routine name (required for all except list).
+        config: Config overrides for run (optional, merged with defaults).
+        strategy_id: Strategy ID for agent-local routine CRUD operations.
+        code: Python source code for create_routine / edit_routine.
 
     Returns:
         Action-specific result dict.
     """
     if action == "list":
-        return _local_manage_routines_list()
+        return _local_manage_routines_list(strategy_id)
 
     if action == "describe":
         if not name:
@@ -130,7 +370,27 @@ async def manage_routines(
     if action == "run":
         if not name:
             return {"error": "name is required"}
-        return await _local_manage_routines_run(name, config)
+        return await _local_manage_routines_run(name, config, strategy_id)
+
+    if action == "create_routine":
+        if not name:
+            return {"error": "name is required"}
+        return _local_manage_routines_create(name, code or "", strategy_id)
+
+    if action == "read_routine":
+        if not name:
+            return {"error": "name is required"}
+        return _local_manage_routines_read(name, strategy_id)
+
+    if action == "edit_routine":
+        if not name:
+            return {"error": "name is required"}
+        return _local_manage_routines_edit(name, code or "", strategy_id)
+
+    if action == "delete_routine":
+        if not name:
+            return {"error": "name is required"}
+        return _local_manage_routines_delete(name, strategy_id)
 
     return {"error": f"Unknown action: {action}"}
 
@@ -486,6 +746,10 @@ async def manage_trading_agent(
     - "update_strategy": Update an existing strategy (requires strategy_id, plus fields to update)
     - "delete_strategy": Delete a strategy (requires strategy_id)
 
+    Actions -- Routines (scoped to a strategy):
+    - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
+    - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
+
     Actions -- Monitoring:
     - "agent_tracker": Get the full tracker markdown (tick history, executor ledger, snapshots) (requires agent_id)
     - "agent_journal": Get recent journal entries and learnings (requires agent_id)
@@ -493,13 +757,13 @@ async def manage_trading_agent(
     Args:
         action: The action to perform.
         agent_id: Agent instance ID (for monitoring actions).
-        strategy_id: Strategy ID (for strategy actions).
-        name: Strategy name (for create/update).
+        strategy_id: Strategy ID (for strategy/routine actions).
+        name: Strategy name (for create/update) or routine name (for run_routine).
         description: Strategy description (for create/update).
         instructions: Strategy instructions text (for create/update).
         agent_key: Agent type "claude-code" or "gemini" (for create, default "claude-code").
         skills: List of optional skill names to enable (for create/update).
-        config: Agent config overrides (for create/update).
+        config: Agent config overrides (for create/update) or routine config (for run_routine).
 
     Returns:
         Action-specific result dict.
@@ -514,11 +778,53 @@ async def manage_trading_agent(
         return _local_manage_strategy(action, strategy_id, name, description,
                                        instructions, agent_key, skills, config)
 
+    # Routine actions scoped to a strategy
+    if action == "list_routines":
+        if not strategy_id:
+            return {"error": "strategy_id is required"}
+        return _local_strategy_list_routines(strategy_id)
+
+    if action == "run_routine":
+        if not strategy_id:
+            return {"error": "strategy_id is required"}
+        if not name:
+            return {"error": "name is required"}
+        return await _local_manage_routines_run(name, config, strategy_id)
+
     # Journal/monitoring that's file-based
     if action in ("agent_tracker", "agent_journal"):
         return _local_agent_monitoring(action, agent_id)
 
     return {"error": f"Unknown action: {action}"}
+
+
+def _local_strategy_list_routines(strategy_id: str) -> dict:
+    """List global + agent-local routines for a strategy, with scope labels."""
+    from routines.base import discover_routines, discover_routines_from_path
+
+    result = []
+
+    # Global routines
+    for name, routine in sorted(discover_routines(force_reload=True).items()):
+        result.append({
+            "name": name,
+            "description": routine.description,
+            "type": "continuous" if routine.is_continuous else "one-shot",
+            "scope": "global",
+        })
+
+    # Agent-local routines
+    routines_dir = _get_agent_routines_dir(strategy_id)
+    if routines_dir and routines_dir.exists():
+        for name, routine in sorted(discover_routines_from_path(routines_dir).items()):
+            result.append({
+                "name": name,
+                "description": routine.description,
+                "type": "continuous" if routine.is_continuous else "one-shot",
+                "scope": "agent",
+            })
+
+    return {"routines": result}
 
 
 def _local_manage_strategy(

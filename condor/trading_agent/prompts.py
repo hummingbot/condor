@@ -15,47 +15,32 @@ BASE_PROMPT = """\
 You are an autonomous trading agent running inside Condor.
 
 RULES:
-- ALL trading MUST go through executors. Use manage_executors(action="create") \
-to open positions or grids. NEVER use place_order directly.
-- The mcp-hummingbot server is already configured with the correct credentials. \
-Do NOT call configure_server — it's already connected.
-- Be conservative. When in doubt, take NO action and explain why in the journal.
-- Keep tool call chains short (1-5 calls per tick).
-- When creating executors, ALWAYS include controller_id in the executor_config. \
-This tags executors as yours so the system can track which executors belong to which agent.
+- Trade ONLY via manage_executors(action="create"). NEVER use place_order.
+- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
+- Be conservative. When in doubt, hold and journal why.
+- Keep tool chains short (1-5 calls per tick).
+- ALWAYS set controller_id in executor_config to tag executors as yours.
 
-JOURNAL RULES:
-- Write ONE compact action entry per tick via trading_agent_journal_write \
-(entry_type="action"). One line: what you did and why.
-- Only write a learning (entry_type="learning") if you discovered something \
-NEW that isn't already in the learnings list. Learnings are deduplicated \
-automatically -- don't repeat what's already there.
-- Keep entries short. No paragraphs. No verbose explanations.
-- Do NOT call trading_agent_journal_read — your journal context (learnings, \
-recent decisions, current status) is already included in this prompt.
+JOURNAL:
+- Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
+- Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
+- Do NOT call trading_agent_journal_read — context is already in this prompt.
 
 ROUTINES:
-- Use manage_routines(action="run", name="...", config={...}) to execute \
-analysis routines and get structured results back.
-- Use manage_routines(action="list") to discover available routines.
-- Use manage_routines(action="describe", name="...") to see a routine's \
-config schema before running it.
-- Routines are pre-built Python scripts (market scanners, arb checks, etc.) \
-that return data directly — much faster than manual tool-call chains.
+- manage_routines(action="run", name="...", config={...}) for analysis scripts.
+- manage_routines(action="list") to discover routines.
+- Routines tagged "agent" are local to your strategy.
 
-AVAILABLE MCP TOOLS:
-- mcp-hummingbot: get_market_data, get_portfolio_overview, \
-manage_executors, manage_bots, search_history
-- condor: trading_agent_journal_write, \
-send_notification, manage_routines
+NOTIFICATIONS:
+- Use send_notification(text="...") to message the user on Telegram.
 """
 
 TOOL_PRELOAD_HINT = (
     "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
     'ToolSearch(query="select:mcp__mcp-hummingbot__get_market_data,'
-    "mcp__mcp-hummingbot__get_portfolio_overview,"
     "mcp__mcp-hummingbot__manage_executors,"
     "mcp__mcp-hummingbot__search_history,"
+    "mcp__mcp-hummingbot__explore_geckoterminal,"
     "mcp__condor__trading_agent_journal_write,"
     "mcp__condor__send_notification,"
     'mcp__condor__manage_routines")\n'
@@ -99,23 +84,23 @@ def build_tick_prompt(
             f"{trading_context}"
         )
 
-    # Current config (exclude trading_context)
+    # Current config (exclude trading_context and risk_limits -- risk is shown in RISK STATE)
     config_lines = [f"[CURRENT CONFIG]"]
     for k, v in config.items():
-        if k == "trading_context":
+        if k in ("trading_context", "risk_limits"):
             continue
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))
 
     # Risk state
     rs = risk_state
+    max_dd = rs.get('max_drawdown_pct', -1)
+    dd_display = f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit" if max_dd >= 0 else "disabled"
     risk_lines = [
         "[RISK STATE]",
-        f"Daily PnL: ${rs.get('daily_pnl', 0):+.2f} / -${rs.get('max_daily_loss', 50):.2f} limit",
         f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
         f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
-        f"Drawdown: {rs.get('drawdown_pct', 0):.1f}% / {rs.get('max_drawdown_pct', 10):.1f}% limit",
-        f"Daily LLM Cost: ${rs.get('daily_cost', 0):.2f} / ${rs.get('max_cost_per_day', 5):.2f} limit",
+        f"Drawdown: {dd_display}",
         f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}",
     ]
     sections.append("\n".join(risk_lines))
@@ -133,20 +118,5 @@ def build_tick_prompt(
         sections.append(f"[CURRENT STATUS]\n{summary}")
     if recent_decisions:
         sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
-
-    # Final instruction
-    sections.append(
-        "[INSTRUCTIONS]\n"
-        "1. Analyze current state. Decide: act or skip.\n"
-        "2. If acting, use manage_executors to create/stop executors.\n"
-        "3. Write ONE journal action entry (short, one line).\n"
-        "4. Only add a learning if it's genuinely new.\n"
-        "5. Send a short notification to the user:\n\n"
-        f"Tick #{tick_number} — {{strategy_name}}\n"
-        "• Market: <price/trend>\n"
-        "• Action: <what you did or 'Hold'>\n"
-        "• Positions: <count, PnL>\n\n"
-        "Keep the notification under 5 lines."
-    )
 
     return "\n\n".join(sections)

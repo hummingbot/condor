@@ -315,10 +315,12 @@ class JournalManager:
         self._snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Format risk state
+        max_dd = risk_state.get('max_drawdown_pct', -1)
+        dd_display = f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit" if max_dd >= 0 else "disabled"
         risk_lines = [
-            f"- Daily PnL: ${risk_state.get('daily_pnl', 0):+.2f} / -${risk_state.get('max_daily_loss', 50):.2f} limit",
             f"- Position Size: ${risk_state.get('total_exposure', 0):.2f} / ${risk_state.get('max_position_size', 500):.2f} limit",
             f"- Open Executors: {risk_state.get('executor_count', 0)} / {risk_state.get('max_open_executors', 5)} limit",
+            f"- Drawdown: {dd_display}",
             f"- Status: {'BLOCKED - ' + risk_state.get('block_reason', '') if risk_state.get('is_blocked') else 'ACTIVE'}",
         ]
 
@@ -388,28 +390,17 @@ class JournalManager:
         return results
 
     def get_recent_decisions(self, count: int = 3) -> str:
-        """Get the response section from the last N snapshots."""
-        snapshots = self.list_snapshots(limit=count)
-        if not snapshots:
+        """Get the last N decision entries from the Decisions section of journal.md.
+
+        This is much cheaper than reading snapshot files and produces compact
+        one-line entries that were already written by append_action().
+        """
+        section = self._get_section("Decisions")
+        if not section:
             return ""
 
-        parts = []
-        for snap in reversed(snapshots):
-            content = self.read_snapshot(snap["tick"])
-            if not content:
-                continue
-            # Try new format first
-            m = re.search(r"^## Agent Response\n(.*?)(?=^## |\Z|^<details)", content, re.MULTILINE | re.DOTALL)
-            if not m:
-                # Legacy format
-                m = re.search(r"^## Decision\n(.*?)(?=^## |\Z)", content, re.MULTILINE | re.DOTALL)
-            if m:
-                decision = m.group(1).strip()
-                tm = re.search(r"^# (?:Snapshot|Tick) #\d+ — (.+)$", content, re.MULTILINE)
-                ts = tm.group(1) if tm else ""
-                parts.append(f"**#{snap['tick']}** ({ts}): {decision[:200]}")
-
-        return "\n".join(parts)
+        lines = [l for l in section.splitlines() if l.startswith("- ")]
+        return "\n".join(lines[-count:])
 
     def _cleanup_old_snapshots(self) -> None:
         """Remove oldest snapshots if over MAX_SNAPSHOTS."""

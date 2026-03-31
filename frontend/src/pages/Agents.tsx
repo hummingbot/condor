@@ -52,11 +52,6 @@ function AgentCard({ agent, onClick }: { agent: AgentSummary; onClick: () => voi
             </div>
             <div>
               <h3 className="text-sm font-semibold text-[var(--color-text)]">{agent.name}</h3>
-              {agent.trading_pair && (
-                <span className="text-[11px] font-mono text-[var(--color-text-muted)]">
-                  {agent.connector && `${agent.connector} / `}{agent.trading_pair}
-                </span>
-              )}
             </div>
           </div>
           <StatusBadge status={agent.status} />
