@@ -159,6 +159,7 @@ class TickEngine:
 
     async def _loop(self) -> None:
         freq = self.config.get("frequency_sec", 60)
+        mode = self.config.get("execution_mode", "loop")
         while self._running:
             if not self._paused:
                 try:
@@ -171,6 +172,17 @@ class TickEngine:
                     log.exception("TickEngine %s tick error", self.agent_id)
                     self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
+
+                # Single-tick modes: stop after first tick
+                if mode in ("dry_run", "run_once"):
+                    label = "Dry run" if mode == "dry_run" else "Run-once"
+                    log.info("TickEngine %s: %s complete, self-stopping", self.agent_id, label)
+                    await self._notify(f"Agent {self.agent_id}: {label} complete.")
+                    self._running = False
+                    self.journal.close()
+                    _engines.pop(self.agent_id, None)
+                    return
+
             try:
                 await asyncio.sleep(freq)
             except asyncio.CancelledError:
@@ -194,9 +206,9 @@ class TickEngine:
         executors_result = skill_results.get("executors")
         if executors_result:
             self._last_skill_data = executors_result.data
-        portfolio_result = skill_results.get("portfolio")
-        if portfolio_result:
-            self._last_skill_data["portfolio"] = portfolio_result.data
+        positions_result = skill_results.get("positions")
+        if positions_result:
+            self._last_skill_data["positions"] = positions_result.data
 
         # Convert provider results to summary strings
         core_data_summaries: dict[str, str] = {
@@ -250,19 +262,22 @@ class TickEngine:
             get_project_dir,
         )
 
+        agent_cmd = ACP_COMMANDS.get(self.strategy.agent_key, ACP_COMMANDS["claude-code"])
+        mode = self.config.get("execution_mode", "loop")
+
         server_name = self.config.get("server_name")
         if server_name:
             mcp_servers = build_mcp_servers_for_agent(
                 server_name, self.user_id, self.chat_id,
                 agent_slug=self.strategy.slug,
+                execution_mode=mode,
             )
         else:
             mcp_servers = build_mcp_servers_for_session(
-                self.user_id, self.chat_id
+                self.user_id, self.chat_id,
+                execution_mode=mode,
             )
-
-        agent_cmd = ACP_COMMANDS.get(self.strategy.agent_key, ACP_COMMANDS["claude-code"])
-        permission_cb = auto_approve_with_risk_check(self.risk, risk_state)
+        permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
 
         acp_client = ACPClient(
             command=agent_cmd,
@@ -452,6 +467,7 @@ class TickEngine:
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),
             "risk_limits": risk_limits if isinstance(risk_limits, dict) else risk_limits.model_dump() if hasattr(risk_limits, "model_dump") else {},
+            "execution_mode": self.config.get("execution_mode", "loop"),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
             "session_dir": str(self.session_dir) if self.session_dir else "",

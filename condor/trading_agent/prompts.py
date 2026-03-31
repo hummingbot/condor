@@ -11,7 +11,7 @@ from typing import Any
 
 from .strategy import Strategy
 
-BASE_PROMPT = """\
+BASE_PROMPT_LIVE = """\
 You are an autonomous trading agent running inside Condor.
 
 RULES:
@@ -20,7 +20,27 @@ RULES:
 - Be conservative. When in doubt, hold and journal why.
 - Keep tool chains short (1-5 calls per tick).
 - ALWAYS set controller_id in executor_config to tag executors as yours.
+- Your executor state and positions are pre-loaded in [CORE DATA] below. Do NOT call manage_executors(action="search") or manage_executors(action="positions_summary") to check your own state — it's already here.
+"""
 
+BASE_PROMPT_DRY_RUN = """\
+You are an autonomous trading agent running inside Condor in 🧪 DRY RUN mode.
+
+RULES:
+- This is OBSERVATION ONLY. Do NOT create or stop executors.
+- manage_executors is available for read-only queries (performance_report).
+- Analyze the market and describe what you WOULD do, but take NO trading action.
+- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
+- Keep tool chains short (1-5 calls per tick).
+- Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
+
+DRY RUN MESSAGING:
+- Use conditional language: "Would place grid..." not "Grid placed"
+- Prefix actions with 🧪 to signal dry-run
+- End with: "No executors were created (dry run)"
+"""
+
+BASE_PROMPT_COMMON = """\
 JOURNAL:
 - Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
@@ -35,7 +55,7 @@ NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
 """
 
-TOOL_PRELOAD_HINT = (
+TOOL_PRELOAD_LIVE = (
     "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
     'ToolSearch(query="select:mcp__mcp-hummingbot__get_market_data,'
     "mcp__mcp-hummingbot__manage_executors,"
@@ -46,6 +66,45 @@ TOOL_PRELOAD_HINT = (
     'mcp__condor__manage_routines")\n'
     "Do this silently."
 )
+
+TOOL_PRELOAD_DRY_RUN = (
+    "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
+    'ToolSearch(query="select:mcp__mcp-hummingbot__get_market_data,'
+    "mcp__mcp-hummingbot__search_history,"
+    "mcp__mcp-hummingbot__explore_geckoterminal,"
+    "mcp__condor__trading_agent_journal_write,"
+    "mcp__condor__send_notification,"
+    'mcp__condor__manage_routines")\n'
+    "Do this silently."
+)
+
+
+def _build_routines_section(strategy: Strategy) -> str:
+    """Build an [AVAILABLE ROUTINES] section listing agent-local + global routines."""
+    from routines.base import discover_routines, discover_routines_from_path
+
+    lines = ["[AVAILABLE ROUTINES]"]
+    lines.append(f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.id}", config={{...}})')
+    lines.append("")
+
+    # Agent-local routines first
+    routines_dir = strategy.agent_dir / "routines"
+    if routines_dir.exists():
+        from routines.base import discover_routines_from_path
+        local = discover_routines_from_path(routines_dir)
+        if local:
+            lines.append("Agent-local:")
+            for name, r in sorted(local.items()):
+                lines.append(f"  - {name}: {r.description}")
+
+    # Global routines
+    global_routines = discover_routines(force_reload=False)
+    if global_routines:
+        lines.append("Global:")
+        for name, r in sorted(global_routines.items()):
+            lines.append(f"  - {name}: {r.description}")
+
+    return "\n".join(lines)
 
 
 def build_tick_prompt(
@@ -60,19 +119,41 @@ def build_tick_prompt(
     agent_id: str = "",
 ) -> str:
     """Build the full prompt for one agent tick."""
-    sections: list[str] = [BASE_PROMPT, TOOL_PRELOAD_HINT]
+    execution_mode = config.get("execution_mode", "loop")
+    is_dry_run = execution_mode == "dry_run"
+
+    # Select base prompt and tool preload based on mode
+    base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
+    tool_preload = TOOL_PRELOAD_DRY_RUN if is_dry_run else TOOL_PRELOAD_LIVE
+    sections: list[str] = [base_prompt, BASE_PROMPT_COMMON, tool_preload]
 
     # Tick identity
     tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in journal entries and notifications."
     if agent_id:
-        tick_info += f"\nAgent ID: {agent_id}\nUse controller_id=\"{agent_id}\" in all executor configs."
+        tick_info += f"\nAgent ID: {agent_id}"
+        if not is_dry_run:
+            tick_info += f"\nUse controller_id=\"{agent_id}\" in all executor configs."
     sections.append(tick_info)
+
+    # Run-once mode note
+    if execution_mode == "run_once":
+        sections.append(
+            "[EXECUTION MODE — RUN ONCE]\n"
+            "Single-tick session with LIVE execution. The engine will stop after this tick. "
+            "Make your best move now — there will be no follow-up ticks."
+        )
 
     # Server credentials are injected via env vars into the MCP process,
     # so no need to include them in the prompt or call configure_server.
 
     # Strategy instructions
     sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
+
+    # Available routines
+    try:
+        sections.append(_build_routines_section(strategy))
+    except Exception:
+        pass  # Don't fail the tick if routine discovery fails
 
     # Session trading context (natural language directives for this session)
     trading_context = config.get("trading_context", "")

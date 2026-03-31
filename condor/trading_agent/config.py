@@ -7,7 +7,7 @@ in the agent directory, editable via key=value messages or web UI.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -20,10 +20,11 @@ class RiskLimitsConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    server_name: str = Field(default="", description="Hummingbot API server name")
+    server_name: str = Field(default="local", description="Hummingbot API server name")
     total_amount_quote: float = Field(default=100.0, description="Total capital budget for this session in quote currency")
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
     trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
+    execution_mode: Literal["dry_run", "run_once", "loop"] = Field(default="loop", description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)")
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:
@@ -34,7 +35,11 @@ class AgentConfig(BaseModel):
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AgentConfig:
         """Create from a raw dict (e.g. strategy.default_config)."""
-        return cls(**{k: v for k, v in d.items() if k in cls.model_fields})
+        cleaned = {k: v for k, v in d.items() if k in cls.model_fields}
+        # Translate dry_run shorthand → execution_mode
+        if d.get("dry_run") and "execution_mode" not in d:
+            cleaned["execution_mode"] = "dry_run"
+        return cls(**cleaned)
 
 
 def load_agent_config(agent_dir: Path, defaults: dict[str, Any] | None = None) -> AgentConfig:

@@ -109,18 +109,28 @@ class RiskEngine:
         return True, ""
 
 
-def auto_approve_with_risk_check(risk_engine: RiskEngine, risk_state: RiskState):
+def auto_approve_with_risk_check(
+    risk_engine: RiskEngine,
+    risk_state: RiskState,
+    execution_mode: str = "loop",
+):
     """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones."""
     from handlers.agents._shared import is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
-            tool_name = tool_call.get("tool", "") or tool_call.get("title", "")
+            raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
+            tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
 
             # For executor actions, run risk check
             if tool_name == "manage_executors":
                 input_data = tool_call.get("input", {})
                 action = input_data.get("action", "")
+
+                # Dry-run mode: block executor creation (read-only tools still work)
+                if execution_mode == "dry_run" and action == "create":
+                    log.info("Dry-run mode: blocked executor create (recorded in snapshot)")
+                    return {"outcome": {"outcome": "cancelled"}}
 
                 # Validate controller_id on create
                 if action == "create":

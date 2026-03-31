@@ -28,6 +28,28 @@ log = logging.getLogger(__name__)
 _DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
 
 MAX_LEARNINGS = 20
+
+
+def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
+    """Derive (session_dir, agent_dir) from an agent_id like 'slug_N'.
+
+    Returns (None, None) if the path doesn't exist on disk.
+    """
+    # agent_id format: {slug}_{session_num}  e.g. "my_strategy_3"
+    # Split on last underscore to get slug and session number
+    last_sep = agent_id.rfind("_")
+    if last_sep == -1:
+        return None, None
+    slug = agent_id[:last_sep]
+    try:
+        session_num = int(agent_id[last_sep + 1:])
+    except ValueError:
+        return None, None
+    agent_dir = _DATA_ROOT / slug
+    if not agent_dir.is_dir():
+        return None, None
+    session_dir = agent_dir / "sessions" / f"session_{session_num}"
+    return session_dir, agent_dir
 MAX_SNAPSHOTS = 100
 
 JOURNAL_TEMPLATE = """\
@@ -124,7 +146,14 @@ class JournalManager:
         agent_dir: Path | None = None,
     ):
         self.agent_id = agent_id
-        self._session_dir = session_dir if session_dir else _DATA_ROOT / agent_id
+        if session_dir:
+            self._session_dir = session_dir
+        else:
+            # Try to resolve from agent_id before falling back
+            resolved_session, resolved_agent = resolve_agent_dirs(agent_id)
+            self._session_dir = resolved_session if resolved_session else _DATA_ROOT / agent_id
+            if not agent_dir and resolved_agent:
+                agent_dir = resolved_agent
         self._agent_dir = agent_dir  # For cross-session learnings
         self._path = self._session_dir / "journal.md"
         self._snapshots_dir = self._session_dir / "snapshots"
