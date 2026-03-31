@@ -19,7 +19,9 @@ setup:
 
 install: setup
 	uv sync --dev
-	@cd frontend && npm install 2>/dev/null || true
+	@command -v node >/dev/null 2>&1 || { echo "Error: Node.js not installed. Install it from https://nodejs.org"; exit 1; }
+	@command -v npm >/dev/null 2>&1 || { echo "Error: npm not installed. Install Node.js from https://nodejs.org"; exit 1; }
+	cd frontend && npm install
 	@$(MAKE) setup-chrome
 
 setup-chrome:

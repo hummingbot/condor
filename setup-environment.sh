@@ -143,6 +143,43 @@ else
     msg_ok "tmux is already installed"
 fi
 
+if ! command -v node >/dev/null 2>&1; then
+    msg_info "'node' not found. Installing Node.js..."
+
+    SUDO_CMD=""
+    if [ "${EUID:-0}" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+        SUDO_CMD="sudo"
+    fi
+
+    if command -v brew >/dev/null 2>&1; then
+        brew install node || {
+            msg_error "Failed to install Node.js via Homebrew. Please install it manually: https://nodejs.org"
+            exit 1
+        }
+    elif command -v apt-get >/dev/null 2>&1; then
+        $SUDO_CMD apt-get update && $SUDO_CMD apt-get install -y nodejs npm || {
+            msg_error "Failed to install Node.js via apt-get. Please install it manually: https://nodejs.org"
+            exit 1
+        }
+    elif command -v yum >/dev/null 2>&1; then
+        $SUDO_CMD yum install -y nodejs npm || {
+            msg_error "Failed to install Node.js via yum. Please install it manually: https://nodejs.org"
+            exit 1
+        }
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO_CMD dnf install -y nodejs npm || {
+            msg_error "Failed to install Node.js via dnf. Please install it manually: https://nodejs.org"
+            exit 1
+        }
+    else
+        msg_error "Could not detect a supported package manager to install Node.js. Please install it manually: https://nodejs.org"
+        exit 1
+    fi
+    msg_ok "Node.js installed successfully"
+else
+    msg_ok "Node.js is already installed"
+fi
+
 # ── Step 1: Telegram Configuration ──────────────────
 
 echo -e "${BOLD}Step 1: Telegram Configuration${RESET}"
