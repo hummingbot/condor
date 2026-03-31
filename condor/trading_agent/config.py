@@ -21,6 +21,7 @@ class RiskLimitsConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     server_name: str = Field(default="", description="Hummingbot API server name")
+    total_amount_quote: float = Field(default=100.0, description="Total capital budget for this session in quote currency")
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
     trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)

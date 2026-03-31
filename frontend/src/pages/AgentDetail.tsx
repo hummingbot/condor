@@ -12,6 +12,7 @@ import {
   Pause,
   Play,
   Save,
+  Server,
   Settings,
   Square,
   X,
@@ -39,18 +40,46 @@ function StartSessionDialog({
   open,
   onClose,
   slug,
+  agentConfig,
   defaultContext,
 }: {
   open: boolean;
   onClose: () => void;
   slug: string;
+  agentConfig: Record<string, unknown>;
   defaultContext: string;
 }) {
   const queryClient = useQueryClient();
+  const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
+
   const [context, setContext] = useState(defaultContext);
+  const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
+  const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
+  const [frequencySec, setFrequencySec] = useState(String(agentConfig.frequency_sec ?? 60));
+  const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
+  const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
+  const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
+
+  const { data: servers } = useQuery({
+    queryKey: ["servers"],
+    queryFn: () => api.getServers(),
+    enabled: open,
+  });
 
   const startMut = useMutation({
-    mutationFn: () => api.startAgent(slug, {}, context),
+    mutationFn: () => {
+      const config: Record<string, unknown> = {
+        server_name: serverName,
+        total_amount_quote: Number(totalAmountQuote) || 100,
+        frequency_sec: Number(frequencySec) || 60,
+        risk_limits: {
+          max_position_size_quote: Number(maxPositionSize) || 500,
+          max_open_executors: Number(maxOpenExecutors) || 5,
+          max_drawdown_pct: Number(maxDrawdown),
+        },
+      };
+      return api.startAgent(slug, config, context);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agent", slug] });
       onClose();
@@ -59,10 +88,14 @@ function StartSessionDialog({
 
   if (!open) return null;
 
+  const inputClass =
+    "w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]";
+  const labelClass = "mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="w-full max-w-lg rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
+        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
@@ -72,9 +105,10 @@ function StartSessionDialog({
           </button>
         </div>
 
-        <div className="space-y-4">
+        <div className="space-y-5">
+          {/* Trading Context */}
           <div>
-            <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            <label className={labelClass}>
               <MessageSquareText className="h-3.5 w-3.5" />
               Trading Context
             </label>
@@ -85,20 +119,103 @@ function StartSessionDialog({
               value={context}
               onChange={(e) => setContext(e.target.value)}
               placeholder="e.g. Focus on SOL meme coins, ride momentum for 5-10% gains, tight stops at 3%..."
-              rows={4}
-              className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/40 outline-none transition-colors focus:border-[var(--color-primary)]"
+              rows={3}
+              className={`${inputClass} resize-none`}
               autoFocus
             />
+          </div>
+
+          {/* Server row */}
+          <div>
+            <label className={labelClass}>
+              <Server className="h-3.5 w-3.5" />
+              Server
+            </label>
+            <select
+              value={serverName}
+              onChange={(e) => setServerName(e.target.value)}
+              className={inputClass}
+            >
+              <option value="">Auto (current default)</option>
+              {servers?.map((s) => (
+                <option key={s.name} value={s.name} disabled={!s.online}>
+                  {s.name} {s.online ? "" : "(offline)"}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Budget + Frequency row */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>
+                Budget (USDT)
+              </label>
+              <input
+                type="number"
+                min={1}
+                step={10}
+                value={totalAmountQuote}
+                onChange={(e) => setTotalAmountQuote(e.target.value)}
+                className={inputClass}
+              />
+            </div>
+            <div>
+              <label className={labelClass}>
+                <Clock className="h-3.5 w-3.5" />
+                Frequency (sec)
+              </label>
+              <input
+                type="number"
+                min={10}
+                value={frequencySec}
+                onChange={(e) => setFrequencySec(e.target.value)}
+                className={inputClass}
+              />
+            </div>
+          </div>
+
+          {/* Risk Limits */}
+          <div>
+            <label className={`${labelClass} mb-3`}>
+              <Zap className="h-3.5 w-3.5" />
+              Risk Limits
+            </label>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <span className="mb-1 block text-[10px] text-[var(--color-text-muted)]">Max Position ($)</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={maxPositionSize}
+                  onChange={(e) => setMaxPositionSize(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[10px] text-[var(--color-text-muted)]">Max Executors</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={maxOpenExecutors}
+                  onChange={(e) => setMaxOpenExecutors(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+              <div>
+                <span className="mb-1 block text-[10px] text-[var(--color-text-muted)]">Max Drawdown %</span>
+                <input
+                  type="number"
+                  value={maxDrawdown}
+                  onChange={(e) => setMaxDrawdown(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+            </div>
           </div>
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
-          <button
-            onClick={() => { setContext(""); }}
-            className="rounded-lg px-3 py-2 text-xs text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          >
-            Clear
-          </button>
           <button
             onClick={onClose}
             className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
@@ -119,7 +236,7 @@ function StartSessionDialog({
   );
 }
 
-function AgentControls({ slug, status, defaultContext }: { slug: string; status: string; defaultContext: string }) {
+function AgentControls({ slug, status, defaultContext, agentConfig }: { slug: string; status: string; defaultContext: string; agentConfig: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const [showStartDialog, setShowStartDialog] = useState(false);
 
@@ -189,6 +306,7 @@ function AgentControls({ slug, status, defaultContext }: { slug: string; status:
         open={showStartDialog}
         onClose={() => setShowStartDialog(false)}
         slug={slug}
+        agentConfig={agentConfig}
         defaultContext={defaultContext}
       />
     </>
@@ -197,49 +315,98 @@ function AgentControls({ slug, status, defaultContext }: { slug: string; status:
 
 // ── Overview Tab ──
 
+function InstanceCard({ instance }: { instance: import("@/lib/api").RunningInstance }) {
+  const riskLimits = (instance.risk_limits || {}) as Record<string, unknown>;
+  const statusColor = instance.status === "running" ? "text-emerald-400" : instance.status === "paused" ? "text-amber-400" : "text-[var(--color-text-muted)]";
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-sm font-bold text-[var(--color-text)]">{instance.agent_id}</span>
+          <span className={`text-xs font-semibold uppercase ${statusColor}`}>{instance.status}</span>
+        </div>
+        <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
+          <span>Ticks: {instance.tick_count}</span>
+          <span className={instance.daily_pnl >= 0 ? "text-emerald-400" : "text-red-400"}>
+            PnL: ${instance.daily_pnl.toFixed(2)}
+          </span>
+        </div>
+      </div>
+
+      {instance.trading_context && (
+        <p className="mb-3 whitespace-pre-wrap rounded-md bg-[var(--color-surface)] p-2 text-xs leading-relaxed text-[var(--color-text-muted)]">
+          {instance.trading_context}
+        </p>
+      )}
+
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-xs md:grid-cols-4">
+        <div className="flex justify-between">
+          <span className="text-[var(--color-text-muted)]">server</span>
+          <span className="text-[var(--color-text)]">{instance.server_name || "auto"}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-[var(--color-text-muted)]">budget</span>
+          <span className="text-[var(--color-text)]">${instance.total_amount_quote}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-[var(--color-text-muted)]">frequency</span>
+          <span className="text-[var(--color-text)]">{instance.frequency_sec}s</span>
+        </div>
+        {Object.entries(riskLimits).map(([k, v]) => (
+          <div key={k} className="flex justify-between">
+            <span className="text-[var(--color-text-muted)]">{k.replace("max_", "").replace(/_/g, " ")}</span>
+            <span className="text-[var(--color-text)]">{String(v)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function OverviewTab({ agent }: { agent: AgentDetailType }) {
   const config = agent.config as Record<string, unknown>;
   const riskLimits = (config.risk_limits || {}) as Record<string, unknown>;
-  const tradingContext = (config.trading_context as string) || "";
   const defaultTradingContext = agent.default_trading_context || "";
+  const instances = agent.instances || [];
+  const hasRunning = instances.length > 0;
 
   return (
     <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-      {/* Trading Context — full width, prominent */}
+      {/* Running Instances — shown when there are active sessions */}
+      {hasRunning && (
+        <div className="rounded-lg border border-emerald-500/20 bg-[var(--color-surface)] p-4 lg:col-span-2">
+          <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-emerald-400">
+            <Zap className="h-3.5 w-3.5" /> Active Sessions ({instances.length})
+          </h3>
+          <div className="space-y-3">
+            {instances.map((inst) => (
+              <InstanceCard key={inst.agent_id} instance={inst} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Default Trading Context */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 lg:col-span-2">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          <MessageSquareText className="h-3.5 w-3.5" /> Trading Context
+          <MessageSquareText className="h-3.5 w-3.5" /> Default Trading Context
         </h3>
-        {tradingContext || defaultTradingContext ? (
-          <div className="space-y-3">
-            {tradingContext && (
-              <div>
-                <span className="mb-1 block text-[10px] uppercase tracking-wider text-emerald-400">Active Session</span>
-                <p className="whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-3 text-sm leading-relaxed text-[var(--color-text)]">
-                  {tradingContext}
-                </p>
-              </div>
-            )}
-            {defaultTradingContext && (
-              <div>
-                <span className="mb-1 block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Default</span>
-                <p className="whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-3 text-sm leading-relaxed text-[var(--color-text-muted)]">
-                  {defaultTradingContext}
-                </p>
-              </div>
-            )}
-          </div>
+        {defaultTradingContext ? (
+          <p className="whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-3 text-sm leading-relaxed text-[var(--color-text-muted)]">
+            {defaultTradingContext}
+          </p>
         ) : (
           <p className="text-sm text-[var(--color-text-muted)]">
-            No trading context set. Describe what the agent should focus on when starting a session.
+            No default trading context set. You can set one per session when starting.
           </p>
         )}
       </div>
 
-      {/* Config */}
+      {/* Default Config */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          <Settings className="h-3.5 w-3.5" /> Configuration
+          <Settings className="h-3.5 w-3.5" /> Default Configuration
         </h3>
         <div className="space-y-2 font-mono text-sm">
           {Object.entries(config)
@@ -253,10 +420,10 @@ function OverviewTab({ agent }: { agent: AgentDetailType }) {
         </div>
       </div>
 
-      {/* Risk Limits */}
+      {/* Default Risk Limits */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          <Zap className="h-3.5 w-3.5" /> Risk Limits
+          <Zap className="h-3.5 w-3.5" /> Default Risk Limits
         </h3>
         <div className="space-y-2 font-mono text-sm">
           {Object.entries(riskLimits).map(([k, v]) => (
@@ -557,7 +724,7 @@ export function AgentDetail() {
               <p className="mt-1 text-sm text-[var(--color-text-muted)]">{agent.description}</p>
             )}
           </div>
-          <AgentControls slug={slug!} status={agent.status} defaultContext={agent.default_trading_context || (agent.config.trading_context as string) || ""} />
+          <AgentControls slug={slug!} status={agent.status} defaultContext={agent.default_trading_context || (agent.config.trading_context as string) || ""} agentConfig={agent.config} />
         </div>
       </div>
 

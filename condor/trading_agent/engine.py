@@ -434,6 +434,7 @@ class TickEngine:
         """Return a summary dict for display."""
         summary = self.journal.get_summary_dict()
         sd = self._last_skill_data
+        risk_limits = self.config.get("risk_limits", {})
         return {
             "agent_id": self.agent_id,
             "strategy": self.strategy.name,
@@ -447,6 +448,10 @@ class TickEngine:
             "daily_cost": summary["daily_cost"],
             "open_executors": len(sd.get("executors", [])) or summary["open_executors"],
             "frequency_sec": self.config.get("frequency_sec", 60),
+            "server_name": self.config.get("server_name", ""),
+            "total_amount_quote": self.config.get("total_amount_quote", 100),
+            "trading_context": self.config.get("trading_context", ""),
+            "risk_limits": risk_limits if isinstance(risk_limits, dict) else risk_limits.model_dump() if hasattr(risk_limits, "model_dump") else {},
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
             "session_dir": str(self.session_dir) if self.session_dir else "",

@@ -28,6 +28,11 @@ class RunningInstance(BaseModel):
     status: str
     tick_count: int = 0
     daily_pnl: float = 0.0
+    server_name: str = ""
+    total_amount_quote: float = 100.0
+    trading_context: str = ""
+    frequency_sec: int = 60
+    risk_limits: dict[str, Any] = {}
 
 
 class AgentSummary(BaseModel):
@@ -204,6 +209,11 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 status=info["status"],
                 tick_count=info["tick_count"],
                 daily_pnl=info["daily_pnl"],
+                server_name=info.get("server_name", ""),
+                total_amount_quote=info.get("total_amount_quote", 100),
+                trading_context=info.get("trading_context", ""),
+                frequency_sec=info.get("frequency_sec", 60),
+                risk_limits=info.get("risk_limits", {}),
             ))
             # Use first running instance for top-level fields
             if not agent_id:
