@@ -592,10 +592,8 @@ function DetailPanel({
   const isGrid = executor.type === "grid";
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/30 z-40" onClick={onClose} />
       <div
-        className="fixed top-0 right-0 h-full bg-[var(--color-bg)] border-l border-[var(--color-border)] z-50 overflow-y-auto shadow-xl"
+        className="h-full bg-[var(--color-bg)] border-l border-[var(--color-border)] overflow-y-auto shadow-xl shrink-0 relative"
         style={{ width: panelWidth }}
       >
         <div
@@ -862,7 +860,6 @@ function DetailPanel({
           )}
         </div>
       </div>
-    </>
   );
 }
 
@@ -1122,7 +1119,10 @@ export function Executors() {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
 
   return (
-    <div className="space-y-5">
+    <div className="flex gap-0 -m-6 h-[calc(100vh)] overflow-hidden">
+      {/* Main content */}
+      <div className={`flex-1 overflow-auto p-6 transition-all duration-200 ${selectedExecutor ? "min-w-0" : ""}`}>
+      <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h2 className="text-xl font-bold">Executors</h2>
@@ -1475,6 +1475,9 @@ export function Executors() {
           )}
         </>
       )}
+
+      </div>
+      </div>
 
       {/* Detail panel */}
       {selectedExecutor && (

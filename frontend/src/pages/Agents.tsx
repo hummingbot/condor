@@ -202,7 +202,7 @@ export function Agents() {
   const others = agents.filter((a) => a.status !== "running");
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto w-full max-w-7xl">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>

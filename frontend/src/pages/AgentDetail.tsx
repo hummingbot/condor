@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Activity,
   ArrowLeft,
-  BookOpen,
   Brain,
+  Camera,
   ChevronDown,
   ChevronRight,
   Clock,
-  Eye,
+  LayoutList,
   Lightbulb,
   MessageSquareText,
   Pause,
@@ -15,13 +16,15 @@ import {
   Server,
   Settings,
   Square,
+  Wrench,
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { type AgentDetail as AgentDetailType, type SessionInfo, type SnapshotSummary, api } from "@/lib/api";
+import { type AgentDetail as AgentDetailType, type SessionInfo, api } from "@/lib/api";
+import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 // ── Tabs ──
 
@@ -52,6 +55,7 @@ function StartSessionDialog({
   const queryClient = useQueryClient();
   const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
 
+  const [executionMode, setExecutionMode] = useState<"dry_run" | "run_once" | "loop">("loop");
   const [context, setContext] = useState(defaultContext);
   const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
@@ -72,6 +76,7 @@ function StartSessionDialog({
         server_name: serverName,
         total_amount_quote: Number(totalAmountQuote) || 100,
         frequency_sec: Number(frequencySec) || 60,
+        execution_mode: executionMode,
         risk_limits: {
           max_position_size_quote: Number(maxPositionSize) || 500,
           max_open_executors: Number(maxOpenExecutors) || 5,
@@ -106,6 +111,36 @@ function StartSessionDialog({
         </div>
 
         <div className="space-y-5">
+          {/* Execution Mode */}
+          <div>
+            <label className={labelClass}>Execution Mode</label>
+            <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
+              {([
+                { value: "dry_run", label: "Dry Run", desc: "Simulate" },
+                { value: "run_once", label: "Run Once", desc: "Single tick" },
+                { value: "loop", label: "Loop", desc: "Continuous" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setExecutionMode(opt.value)}
+                  className={`flex-1 rounded-md px-3 py-2 text-center text-xs font-medium transition-all ${
+                    executionMode === opt.value
+                      ? opt.value === "dry_run"
+                        ? "bg-blue-500/15 text-blue-400"
+                        : opt.value === "run_once"
+                          ? "bg-amber-500/15 text-amber-400"
+                          : "bg-emerald-500/15 text-emerald-400"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                  }`}
+                >
+                  <div>{opt.label}</div>
+                  <div className="mt-0.5 text-[10px] opacity-60">{opt.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Trading Context */}
           <div>
             <label className={labelClass}>
@@ -146,7 +181,7 @@ function StartSessionDialog({
           </div>
 
           {/* Budget + Frequency row */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className={`grid gap-4 ${executionMode === "loop" ? "grid-cols-2" : "grid-cols-1"}`}>
             <div>
               <label className={labelClass}>
                 Budget (USDT)
@@ -160,19 +195,21 @@ function StartSessionDialog({
                 className={inputClass}
               />
             </div>
-            <div>
-              <label className={labelClass}>
-                <Clock className="h-3.5 w-3.5" />
-                Frequency (sec)
-              </label>
-              <input
-                type="number"
-                min={10}
-                value={frequencySec}
-                onChange={(e) => setFrequencySec(e.target.value)}
-                className={inputClass}
-              />
-            </div>
+            {executionMode === "loop" && (
+              <div>
+                <label className={labelClass}>
+                  <Clock className="h-3.5 w-3.5" />
+                  Frequency (sec)
+                </label>
+                <input
+                  type="number"
+                  min={10}
+                  value={frequencySec}
+                  onChange={(e) => setFrequencySec(e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+            )}
           </div>
 
           {/* Risk Limits */}
@@ -225,10 +262,18 @@ function StartSessionDialog({
           <button
             onClick={() => startMut.mutate()}
             disabled={startMut.isPending}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-emerald-500 disabled:opacity-40"
+            className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white transition-all disabled:opacity-40 ${
+              executionMode === "dry_run" ? "bg-blue-600 hover:bg-blue-500" : executionMode === "run_once" ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
+            }`}
           >
             <Play className="h-3.5 w-3.5" />
-            {startMut.isPending ? "Starting..." : "Start Session"}
+            {startMut.isPending
+              ? "Starting..."
+              : executionMode === "dry_run"
+                ? "Run Dry Test"
+                : executionMode === "run_once"
+                  ? "Execute Once"
+                  : "Start Session"}
           </button>
         </div>
       </div>
@@ -318,6 +363,12 @@ function AgentControls({ slug, status, defaultContext, agentConfig }: { slug: st
 function InstanceCard({ instance }: { instance: import("@/lib/api").RunningInstance }) {
   const riskLimits = (instance.risk_limits || {}) as Record<string, unknown>;
   const statusColor = instance.status === "running" ? "text-emerald-400" : instance.status === "paused" ? "text-amber-400" : "text-[var(--color-text-muted)]";
+  const mode = instance.execution_mode || "loop";
+  const modeBadge = mode === "dry_run"
+    ? { label: "DRY RUN", cls: "border-blue-500/30 bg-blue-500/10 text-blue-400" }
+    : mode === "run_once"
+      ? { label: "RUN ONCE", cls: "border-amber-500/30 bg-amber-500/10 text-amber-400" }
+      : null;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
@@ -325,6 +376,11 @@ function InstanceCard({ instance }: { instance: import("@/lib/api").RunningInsta
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm font-bold text-[var(--color-text)]">{instance.agent_id}</span>
           <span className={`text-xs font-semibold uppercase ${statusColor}`}>{instance.status}</span>
+          {modeBadge && (
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${modeBadge.cls}`}>
+              {modeBadge.label}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>Ticks: {instance.tick_count}</span>
@@ -550,72 +606,351 @@ function LearningsTab({ slug, content }: { slug: string; content: string }) {
 
 // ── Sessions Tab ──
 
-function SessionCard({ slug, session }: { slug: string; session: SessionInfo }) {
-  const [expanded, setExpanded] = useState(false);
-  const [showSnapshots, setShowSnapshots] = useState(false);
+const SESSION_SUB_TABS = [
+  { id: "overview", label: "Overview", icon: LayoutList },
+  { id: "activity", label: "Activity", icon: Activity },
+  { id: "snapshots", label: "Snapshots", icon: Camera },
+] as const;
 
-  const { data: journal } = useQuery({
-    queryKey: ["agent", slug, "session", session.number, "journal"],
-    queryFn: () => api.getSessionJournal(slug, session.number),
-    enabled: expanded,
-  });
+type SessionSubTabId = (typeof SESSION_SUB_TABS)[number]["id"];
 
-  const { data: snapshotsData } = useQuery({
-    queryKey: ["agent", slug, "session", session.number, "snapshots"],
-    queryFn: () => api.getSessionSnapshots(slug, session.number),
-    enabled: showSnapshots,
-  });
+function SessionMetricsBar({ journal }: { journal: ParsedJournal }) {
+  const { summary, metrics, ticks } = journal;
+  const lastMetric = metrics.length > 0 ? metrics[metrics.length - 1] : null;
+  const totalCost = ticks.reduce((s, t) => s + t.cost, 0);
+
+  const stats = [
+    { label: "Ticks", value: String(summary.lastTick || ticks.length), color: "text-[var(--color-text)]" },
+    { label: "PnL", value: `$${summary.pnl >= 0 ? "+" : ""}${summary.pnl.toFixed(2)}`, color: summary.pnl >= 0 ? "text-emerald-400" : "text-red-400" },
+    { label: "Total Cost", value: `$${totalCost.toFixed(4)}`, color: "text-[var(--color-text)]" },
+    { label: "Open Executors", value: String(summary.openExecutors), color: "text-[var(--color-text)]" },
+    { label: "Exposure", value: lastMetric ? `$${lastMetric.exposure.toFixed(2)}` : "$0.00", color: "text-[var(--color-text)]" },
+  ];
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
-      >
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--color-surface-hover)] font-mono text-sm font-bold text-[var(--color-text-muted)]">
-            {session.number}
-          </div>
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+      {stats.map((s) => (
+        <div key={s.label} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+          <span className="block text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{s.label}</span>
+          <span className={`text-lg font-semibold ${s.color}`}>{s.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SessionOverview({ journal }: { journal: ParsedJournal }) {
+  const { summary, executors, metrics } = journal;
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Card */}
+      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+        <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Summary</h3>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm md:grid-cols-4">
           <div>
-            <span className="text-sm font-medium text-[var(--color-text)]">Session {session.number}</span>
-            <span className="ml-2 text-xs text-[var(--color-text-muted)]">
-              {session.snapshot_count} snapshot{session.snapshot_count !== 1 ? "s" : ""}
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Status</span>
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${
+              summary.status === "ACTIVE" || summary.status === "running"
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                : summary.status === "paused"
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                  : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+            }`}>
+              {summary.status || "idle"}
             </span>
           </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Tick</span>
+            <span className="font-mono text-sm text-[var(--color-text)]">#{summary.lastTick}</span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">PnL</span>
+            <span className={`font-mono text-sm ${summary.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              ${summary.pnl >= 0 ? "+" : ""}{summary.pnl.toFixed(2)}
+            </span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Action</span>
+            <span className="text-sm text-[var(--color-text)]">{summary.lastAction || "—"}</span>
+          </div>
         </div>
-        {expanded ? <ChevronDown className="h-4 w-4 text-[var(--color-text-muted)]" /> : <ChevronRight className="h-4 w-4 text-[var(--color-text-muted)]" />}
-      </button>
+      </div>
 
-      {expanded && (
-        <div className="border-t border-[var(--color-border)] p-4">
-          {/* Journal */}
-          <div className="mb-4">
-            <h4 className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-              <BookOpen className="h-3 w-3" /> Journal
-            </h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-3 font-mono text-xs leading-relaxed text-[var(--color-text-muted)]">
-              {journal?.content || "Loading..."}
+      {/* Executor Table */}
+      {executors.length > 0 && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+          <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Executors</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-[var(--color-border)] text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+                  <th className="pb-2 pr-3">ID</th>
+                  <th className="pb-2 pr-3">Type</th>
+                  <th className="pb-2 pr-3">Pair</th>
+                  <th className="pb-2 pr-3">Side</th>
+                  <th className="pb-2 pr-3 text-right">Amount</th>
+                  <th className="pb-2 pr-3">Status</th>
+                  <th className="pb-2 pr-3 text-right">PnL</th>
+                  <th className="pb-2 text-right">Volume</th>
+                </tr>
+              </thead>
+              <tbody>
+                {executors.map((ex, i) => (
+                  <tr key={`${ex.id}-${i}`} className="border-b border-[var(--color-border)]/30">
+                    <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{ex.id.slice(0, 8)}</td>
+                    <td className="py-2 pr-3 text-[var(--color-text-muted)]">{ex.type}</td>
+                    <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{ex.pair}</td>
+                    <td className="py-2 pr-3">
+                      <span className={ex.side.toLowerCase() === "buy" ? "text-emerald-400" : "text-red-400"}>
+                        {ex.side.toUpperCase()}
+                      </span>
+                    </td>
+                    <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${ex.amount.toFixed(2)}</td>
+                    <td className="py-2 pr-3">
+                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${
+                        ex.status === "open"
+                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                          : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+                      }`}>
+                        {ex.status}
+                      </span>
+                    </td>
+                    <td className={`py-2 pr-3 text-right font-mono ${ex.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {ex.pnl >= 0 ? "+" : ""}{ex.pnl.toFixed(2)}
+                    </td>
+                    <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{ex.volume.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Metrics Timeline */}
+      {metrics.length > 0 && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+          <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Metrics Timeline</h3>
+          <div className="max-h-60 space-y-1 overflow-y-auto font-mono text-xs">
+            {metrics.map((m, i) => (
+              <div key={i} className="flex items-center gap-4 text-[var(--color-text-muted)]">
+                <span className="w-32 shrink-0">{m.timestamp}</span>
+                <span className={`w-20 text-right ${m.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  ${m.pnl >= 0 ? "+" : ""}{m.pnl.toFixed(2)}
+                </span>
+                <span className="w-24 text-right">vol ${m.volume.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
+                <span className="w-14 text-right">open={m.open}</span>
+                <span className="w-24 text-right">exp=${m.exposure.toFixed(2)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {executors.length === 0 && metrics.length === 0 && (
+        <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No executors or metrics yet.</p>
+      )}
+    </div>
+  );
+}
+
+function SessionActivity({ journal }: { journal: ParsedJournal }) {
+  const { decisions } = journal;
+
+  if (decisions.length === 0) {
+    return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No decisions yet.</p>;
+  }
+
+  return (
+    <div className="space-y-2">
+      {decisions.map((d, i) => (
+        <div key={i} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+          <div className="flex items-start gap-3">
+            {d.tick > 0 ? (
+              <span className="mt-0.5 shrink-0 rounded-md bg-[var(--color-surface-hover)] px-2 py-0.5 font-mono text-xs font-bold text-[var(--color-text-muted)]">
+                #{d.tick}
+              </span>
+            ) : (
+              <span className="mt-0.5 shrink-0 rounded-md bg-red-500/10 px-2 py-0.5 font-mono text-xs font-bold text-red-400">
+                ERR
+              </span>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-[var(--color-text-muted)]">{d.time}</span>
+                <span className="text-sm font-medium text-[var(--color-text)]">{d.action}</span>
+                {d.riskNote && (
+                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold uppercase text-amber-400">
+                    {d.riskNote}
+                  </span>
+                )}
+              </div>
+              {d.reasoning && (
+                <p className="mt-1 text-xs leading-relaxed text-[var(--color-text-muted)]">{d.reasoning}</p>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SnapshotDetail({ slug, sessionNum, tick }: { slug: string; sessionNum: number; tick: number }) {
+  const { data, isLoading } = useQuery({
+    queryKey: ["agent", slug, "session", sessionNum, "snapshot", tick],
+    queryFn: () => api.getSnapshot(slug, sessionNum, tick),
+    enabled: tick > 0,
+  });
+
+  const parsed = useMemo<ParsedSnapshot | null>(() => {
+    if (!data?.content) return null;
+    return parseSnapshot(data.content);
+  }, [data?.content]);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-48 items-center justify-center">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+      </div>
+    );
+  }
+
+  if (!parsed) {
+    return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>;
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="font-mono text-lg font-bold text-[var(--color-text)]">#{parsed.tick}</span>
+        <span className="text-sm text-[var(--color-text-muted)]">{parsed.timestamp}</span>
+        {parsed.cost.llmCost > 0 && (
+          <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[10px] font-bold text-[var(--color-text-muted)]">
+            ${parsed.cost.llmCost.toFixed(4)}
+          </span>
+        )}
+      </div>
+
+      {/* System Prompt (collapsed by default, first for context) */}
+      {parsed.systemPrompt && (
+        <SystemPromptCard prompt={parsed.systemPrompt} charCount={parsed.systemPromptLength} />
+      )}
+
+      {/* Agent Response — primary content */}
+      {parsed.agentResponse && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+          <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Agent Response</h4>
+          <div className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--color-text)]">
+            {parsed.agentResponse}
+          </div>
+        </div>
+      )}
+
+      {/* Tool Calls */}
+      {parsed.toolCalls.length > 0 && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+          <h4 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+            <Wrench className="h-3 w-3" /> Tool Calls ({parsed.toolCalls.length})
+          </h4>
+          <div className="flex flex-wrap gap-2">
+            {parsed.toolCalls.map((tc) => (
+              <ToolCallChip key={tc.number} tc={tc} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Risk + Executor side by side */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {parsed.riskState && (
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+            <h4 className="mb-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Risk State</h4>
+            <div className="space-y-1 font-mono text-xs leading-relaxed text-[var(--color-text-muted)]">
+              {parsed.riskState.split("\n").map((line, i) => {
+                const isBlocked = line.includes("BLOCKED");
+                const isActive = line.includes("ACTIVE");
+                return (
+                  <div key={i} className={isBlocked ? "text-red-400" : isActive ? "text-emerald-400" : ""}>
+                    {line.replace(/^- /, "")}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {parsed.executorState && (
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+            <h4 className="mb-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Executor State</h4>
+            <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-[var(--color-text-muted)]">
+              {parsed.executorState}
             </pre>
           </div>
+        )}
+      </div>
 
-          {/* Snapshots toggle */}
-          <button
-            onClick={() => setShowSnapshots(!showSnapshots)}
-            className="flex items-center gap-2 text-xs font-semibold text-[var(--color-primary)] transition-colors hover:text-[var(--color-primary)]/80"
-          >
-            <Eye className="h-3.5 w-3.5" />
-            {showSnapshots ? "Hide Snapshots" : `View Snapshots (${session.snapshot_count})`}
-          </button>
+      {/* Cost Footer */}
+      {parsed.cost.llmCost > 0 && (
+        <div className="flex flex-wrap gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-text-muted)]">
+          <span>LLM: <strong className="text-[var(--color-text)]">${parsed.cost.llmCost.toFixed(4)}</strong></span>
+          <span>Duration: <strong className="text-[var(--color-text)]">{parsed.cost.duration.toFixed(1)}s</strong></span>
+          <span>Tokens: <strong className="text-[var(--color-text)]">{parsed.cost.inputTokens.toLocaleString()}</strong> in / <strong className="text-[var(--color-text)]">{parsed.cost.outputTokens.toLocaleString()}</strong> out</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
-          {showSnapshots && snapshotsData && (
-            <div className="mt-3 space-y-2">
-              {snapshotsData.snapshots.length === 0 ? (
-                <p className="text-xs text-[var(--color-text-muted)]">No snapshots yet.</p>
-              ) : (
-                snapshotsData.snapshots.map((snap) => (
-                  <SnapshotItem key={snap.tick} slug={slug} sessionNum={session.number} snapshot={snap} />
-                ))
-              )}
+function ToolCallChip({ tc }: { tc: import("@/lib/parse-agent").ToolCall }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = tc.input || tc.output;
+  const isOk = tc.status === "success" || tc.status === "completed";
+  const isErr = tc.status === "error";
+  const dotColor = isOk ? "bg-emerald-400" : isErr ? "bg-red-400" : "bg-[var(--color-text-muted)]";
+
+  // Shorten tool name: remove mcp__ prefixes for readability
+  const shortName = tc.name.replace(/^mcp__\w+__/, "");
+
+  if (!hasDetails) {
+    return (
+      <div className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)]/50 bg-[var(--color-bg)] px-2.5 py-1.5">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotColor}`} />
+        <span className="font-mono text-[11px] text-[var(--color-text)]">{shortName}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full rounded-md border border-[var(--color-border)]/50 bg-[var(--color-bg)]">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full items-center justify-between px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+      >
+        <div className="flex items-center gap-1.5">
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotColor}`} />
+          <span className="font-mono text-[11px] text-[var(--color-text)]">{shortName}</span>
+        </div>
+        {expanded ? <ChevronDown className="h-3 w-3 text-[var(--color-text-muted)]" /> : <ChevronRight className="h-3 w-3 text-[var(--color-text-muted)]" />}
+      </button>
+      {expanded && (
+        <div className="space-y-2 border-t border-[var(--color-border)]/30 p-3">
+          {tc.input && (
+            <div>
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">Input</span>
+              <pre className="max-h-40 overflow-auto rounded-md bg-[var(--color-surface)] p-2 font-mono text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                {tc.input}
+              </pre>
+            </div>
+          )}
+          {tc.output && (
+            <div>
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">Output</span>
+              <pre className="max-h-40 overflow-auto rounded-md bg-[var(--color-surface)] p-2 font-mono text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                {tc.output}
+              </pre>
             </div>
           )}
         </div>
@@ -624,48 +959,101 @@ function SessionCard({ slug, session }: { slug: string; session: SessionInfo }) 
   );
 }
 
-function SnapshotItem({
-  slug,
-  sessionNum,
-  snapshot,
-}: {
-  slug: string;
-  sessionNum: number;
-  snapshot: SnapshotSummary;
-}) {
+function SystemPromptCard({ prompt, charCount }: { prompt: string; charCount: number }) {
   const [expanded, setExpanded] = useState(false);
-
-  const { data } = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshot", snapshot.tick],
-    queryFn: () => api.getSnapshot(slug, sessionNum, snapshot.tick),
-    enabled: expanded,
-  });
-
   return (
-    <div className="rounded-md border border-[var(--color-border)]/50 bg-[var(--color-bg)]">
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center justify-between px-3 py-2 text-left"
+        className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
       >
         <div className="flex items-center gap-2">
-          <span className="font-mono text-xs font-bold text-[var(--color-text)]">#{snapshot.tick}</span>
-          <span className="text-xs text-[var(--color-text-muted)]">{snapshot.timestamp}</span>
-          {snapshot.cost > 0 && (
-            <span className="text-xs text-[var(--color-text-muted)]">${snapshot.cost.toFixed(4)}</span>
-          )}
+          <h4 className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">System Prompt</h4>
+          <span className="text-[10px] text-[var(--color-text-muted)]">({charCount.toLocaleString()} chars)</span>
         </div>
         {expanded ? <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" /> : <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />}
       </button>
-      {expanded && data && (
-        <pre className="max-h-96 overflow-auto border-t border-[var(--color-border)]/30 p-3 font-mono text-[11px] leading-relaxed text-[var(--color-text-muted)]">
-          {data.content}
+      {expanded && (
+        <pre className="max-h-96 overflow-auto border-t border-[var(--color-border)] p-4 font-mono text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+          {prompt}
         </pre>
       )}
     </div>
   );
 }
 
+function SessionSnapshots({ slug, sessionNum }: { slug: string; sessionNum: number }) {
+  const [selectedTick, setSelectedTick] = useState<number>(0);
+
+  const { data: snapshotsData } = useQuery({
+    queryKey: ["agent", slug, "session", sessionNum, "snapshots"],
+    queryFn: () => api.getSessionSnapshots(slug, sessionNum),
+  });
+
+  const snapshots = snapshotsData?.snapshots || [];
+
+  if (snapshots.length === 0) {
+    return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No snapshots yet.</p>;
+  }
+
+  return (
+    <div className="flex flex-col gap-4 lg:flex-row">
+      {/* Snapshot list */}
+      <div className="w-full shrink-0 lg:w-72">
+        <div className="max-h-[600px] space-y-1 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2">
+          {snapshots.map((snap) => (
+            <button
+              key={snap.tick}
+              onClick={() => setSelectedTick(snap.tick)}
+              className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left transition-colors ${
+                selectedTick === snap.tick
+                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs font-bold">#{snap.tick}</span>
+                <span className="text-[10px]">{snap.timestamp}</span>
+              </div>
+              {snap.cost > 0 && (
+                <span className="text-[10px] opacity-60">${snap.cost.toFixed(4)}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Snapshot detail */}
+      <div className="min-w-0 flex-1">
+        {selectedTick > 0 ? (
+          <SnapshotDetail slug={slug} sessionNum={sessionNum} tick={selectedTick} />
+        ) : (
+          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SessionsTab({ slug, sessions }: { slug: string; sessions: SessionInfo[] }) {
+  const [selectedSessionNum, setSelectedSessionNum] = useState<number>(
+    sessions.length > 0 ? sessions[sessions.length - 1].number : 0
+  );
+  const [activeSubTab, setActiveSubTab] = useState<SessionSubTabId>("overview");
+
+  const selectedSession = sessions.find((s) => s.number === selectedSessionNum);
+
+  const { data: journalData } = useQuery({
+    queryKey: ["agent", slug, "session", selectedSessionNum, "journal"],
+    queryFn: () => api.getSessionJournal(slug, selectedSessionNum),
+    enabled: selectedSessionNum > 0,
+  });
+
+  const parsedJournal = useMemo<ParsedJournal | null>(() => {
+    if (!journalData?.content) return null;
+    return parseJournal(journalData.content);
+  }, [journalData?.content]);
+
   if (sessions.length === 0) {
     return (
       <div className="flex h-48 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-text-muted)]">
@@ -676,10 +1064,56 @@ function SessionsTab({ slug, sessions }: { slug: string; sessions: SessionInfo[]
   }
 
   return (
-    <div className="space-y-3">
-      {sessions.map((session) => (
-        <SessionCard key={session.number} slug={slug} session={session} />
-      ))}
+    <div className="space-y-4">
+      {/* Session selector + metrics */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-4">
+        <select
+          value={selectedSessionNum}
+          onChange={(e) => { setSelectedSessionNum(Number(e.target.value)); setActiveSubTab("overview"); }}
+          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)] sm:w-auto"
+        >
+          {sessions.map((s) => (
+            <option key={s.number} value={s.number}>
+              Session {s.number}{s.created_at ? ` — ${s.created_at}` : ""} — {s.snapshot_count} tick{s.snapshot_count !== 1 ? "s" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {parsedJournal && <SessionMetricsBar journal={parsedJournal} />}
+
+      {/* Sub-tab bar */}
+      <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
+        {SESSION_SUB_TABS.map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => setActiveSubTab(id)}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+              activeSubTab === id
+                ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            <Icon className="h-3.5 w-3.5" />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Sub-tab content */}
+      {!parsedJournal ? (
+        <div className="flex h-32 items-center justify-center">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+        </div>
+      ) : (
+        <>
+          {activeSubTab === "overview" && <SessionOverview journal={parsedJournal} />}
+          {activeSubTab === "activity" && <SessionActivity journal={parsedJournal} />}
+          {activeSubTab === "snapshots" && selectedSession && (
+            <SessionSnapshots slug={slug} sessionNum={selectedSession.number} />
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -707,7 +1141,7 @@ export function AgentDetail() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="mx-auto w-full max-w-7xl">
       {/* Header */}
       <div className="mb-6">
         <button
