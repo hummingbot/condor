@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import re
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -41,7 +42,7 @@ def _fmt(n: float, decimals: int = 2) -> str:
 
 
 def _sign(n: float) -> str:
-    return "+" if n >= 0 else ""
+    return "+" if n >= 0 else "-"
 
 
 def _emoji(n: float) -> str:
@@ -443,6 +444,40 @@ def _build_report(
 
 
 # ---------------------------------------------------------------------------
+# Telegram HTTP fallback (when context.bot is unavailable)
+# ---------------------------------------------------------------------------
+
+
+async def _send_telegram_http(chat_id: int, text: str, parse_mode: str = "MarkdownV2") -> bool:
+    """Send a message via Telegram HTTP API directly. Used as fallback."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        logger.error("TELEGRAM_BOT_TOKEN not set, cannot send via HTTP fallback")
+        return False
+    try:
+        import httpx
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+        async with httpx.AsyncClient(timeout=10) as http_client:
+            resp = await http_client.post(url, json=payload)
+            data = resp.json()
+            if data.get("ok"):
+                return True
+            # Retry without parse_mode if formatting fails
+            if "can't parse" in data.get("description", "").lower():
+                payload.pop("parse_mode")
+                resp = await http_client.post(url, json=payload)
+                data = resp.json()
+                if data.get("ok"):
+                    return True
+            logger.error(f"Telegram HTTP send failed: {data.get('description')}")
+    except Exception as e:
+        logger.error(f"Telegram HTTP fallback error: {e}")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -468,7 +503,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         except Exception:
             pass
     if not send_to:
-        send_to = chat_id
+        # Fallback to CONDOR_CHAT_ID env var (the invoking user's chat)
+        env_chat = os.environ.get("CONDOR_CHAT_ID", "")
+        send_to = int(env_chat) if env_chat else chat_id
 
     client = await get_client(chat_id, context=context)
     if not client:
@@ -592,7 +629,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     wait = int(match.group(1)) + 1 if match else 10
                     await asyncio.sleep(wait)
                 else:
-                    logger.error(f"Failed to send msg {i}: {e}")
+                    logger.error(f"Failed to send msg {i} via bot: {e}")
+                    # Fallback: send via HTTP directly to Telegram API
+                    if await _send_telegram_http(send_to, msg):
+                        sent += 1
                     break
 
     # Strip MarkdownV2 escaping for plain-text return
