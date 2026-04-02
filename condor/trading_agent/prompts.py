@@ -155,6 +155,15 @@ def build_tick_prompt(
     except Exception:
         pass  # Don't fail the tick if routine discovery fails
 
+    # Strategy skills (injected from SKILL.md files)
+    if strategy.skills:
+        try:
+            from .skill_loader import get_tick_skills
+            skill_sections = get_tick_skills(strategy.skills, config)
+            sections.extend(skill_sections)
+        except Exception:
+            pass  # Don't fail the tick if skill loading fails
+
     # Session trading context (natural language directives for this session)
     trading_context = config.get("trading_context", "")
     if trading_context:

@@ -111,6 +111,7 @@ class TelegramStreamer:
         self._needs_edit = False
         self._edit_task: asyncio.Task | None = None
         self._done = False
+        self._stop_reason: str | None = None
         self._tick = 0
         self._continuation_ids: list[int] = []
 
@@ -166,6 +167,7 @@ class TelegramStreamer:
         elif isinstance(event, Heartbeat):
             self._needs_edit = True
         elif isinstance(event, PromptDone):
+            self._stop_reason = event.stop_reason
             self._done = True
 
     def start_edit_loop(self) -> asyncio.Task:
@@ -266,10 +268,20 @@ class TelegramStreamer:
             parts.append(frame)
         elif self._finished_tools:
             # Tools ran but no text response
-            parts.append("_(done — no additional response)_")
+            reason = f" [{self._stop_reason}]" if self._stop_reason else ""
+            parts.append(f"_(done — no additional response{reason})_")
             parse_mode = "Markdown"
         else:
-            parts.append("_(no response)_")
+            reason = f" (stop reason: {self._stop_reason})" if self._stop_reason else ""
+            parts.append(f"_(no response{reason})_")
+            log.warning(
+                "Empty agent response for chat %s — stop_reason=%s, "
+                "tools_ran=%d, buffer_len=%d",
+                self._chat_id,
+                self._stop_reason,
+                len(self._finished_tools),
+                len(self._buffer),
+            )
 
         text = "\n\n".join(parts)
 

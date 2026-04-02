@@ -36,7 +36,7 @@ class AgentSession:
     chat_id: int
     agent_key: str  # "claude-code", "gemini", "codex"
     client: ACPClient
-    mode: str = "condor"  # "condor", "agent_builder", "chat_with_agent"
+    mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False
     tokens_used: int = 0
     input_tokens: int = 0

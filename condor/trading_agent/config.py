@@ -25,6 +25,7 @@ class AgentConfig(BaseModel):
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
     trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
     execution_mode: Literal["dry_run", "run_once", "loop"] = Field(default="loop", description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)")
+    max_ticks: int = Field(default=0, description="Max ticks before auto-stop; 0 = unlimited")
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:

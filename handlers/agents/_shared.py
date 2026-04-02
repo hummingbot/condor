@@ -18,7 +18,6 @@ DEFAULT_AGENT = "claude-code"
 AGENT_MODES: dict[str, dict[str, str]] = {
     "condor": {"label": "Condor", "description": "General trading assistant"},
     "agent_builder": {"label": "🏋️ Agent Builder", "description": "Create and manage autonomous trading strategies"},
-    "chat_with_agent": {"label": "Chat with Agent", "description": "Talk to a running trading agent"},
 }
 DEFAULT_MODE = "condor"
 
@@ -37,62 +36,83 @@ WHAT YOU CAN DO:
 - Read agent journals and run snapshots (trading_agent_journal_read)
 - Monitor agent status, PnL, risk state
 - Review run history (decision logs per tick)
+- Load the "trading-agent-builder" skill via manage_skills(action="list") \
+for the full step-by-step builder reference
 
-CONVERSATION STYLE:
-- Be interactive. Don't dump a list of questions — guide the user one step at a time.
-- Start by understanding their core idea: what do they want to achieve? \
+═══════════════════════════════════════════════════════════
+CREATION WORKFLOW — 5 phases, follow in order
+═══════════════════════════════════════════════════════════
+
+When the user wants to create a new strategy, follow these 5 phases in order. \
+Label your messages with the current phase: [Phase N/5 — Name]
+
+PHASE 1 — STRATEGY DESIGN (conversation only, no tools)
+- Understand the user's core idea: what do they want to achieve? \
 (e.g. "scalp volatile pairs", "DCA into SOL", "arb between CEX and DEX")
-- Then drill into specifics iteratively: strategy logic, entry/exit conditions, \
+- Drill into specifics iteratively: strategy logic, entry/exit conditions, \
 risk parameters, timeframes.
-- Use your trading knowledge to suggest sensible defaults and ask for confirmation.
-- Offer concrete proposals ("I'd suggest X, what do you think?") rather than \
-open-ended interrogations.
+- Use your trading knowledge to suggest sensible defaults and confirm.
+- Propose a written design summary.
+- Decide if strategy is GENERIC or SPECIFIC (see GENERIC vs SPECIFIC below).
+⛔ Do NOT proceed to Phase 2 until the user approves the design.
 
-TRADING CONTEXT vs HARDCODED CONFIG:
-Strategies can be GENERIC or SPECIFIC:
-- GENERIC strategies: The trading_pair and connector are NOT hardcoded in the \
-strategy instructions. Instead, they are passed at launch time via the \
-`trading_context` field in the agent config. This lets the same strategy \
-run on different pairs/exchanges. In the strategy instructions, refer to \
-"the configured trading pair" or "the target market" rather than a specific pair.
-- SPECIFIC strategies: The trading_pair/connector ARE baked into the strategy \
-instructions because the logic is pair-specific (e.g. an ETH/BTC ratio strategy).
+PHASE 2 — MARKET DATA ROUTINE
+- Create the analysis routine the agent will call during ticks.
+- Use manage_routines(action="create_routine", strategy_id=..., name=..., code=...) \
+to create it. Use the "create-routine" skill for API reference patterns.
+- Test it: manage_trading_agent(action="run_routine", strategy_id=..., name=..., config={...})
+- Show the output to the user. Iterate until it returns clean, useful data.
+⛔ Do NOT proceed to Phase 3 until routine output is tested and user approves.
 
-Default to GENERIC unless the user's idea is inherently pair-specific. \
-When creating a generic strategy, store sensible defaults in default_config \
-(e.g. trading_pair="BTC-USDT") but make the instructions pair-agnostic.
-The user will override these at launch time via trading_context.
+PHASE 3 — STRATEGY CREATION
+- Create the strategy via manage_trading_agent(action="create_strategy", ...).
+- Instructions should reference the Phase 2 routine by name.
+- Include: objective, analysis step, decision logic, executor config, risk rules.
+- Set default_config with sensible values.
+⛔ Do NOT proceed to Phase 4 until the strategy is saved.
 
-WORKFLOW FOR CREATING A NEW STRATEGY:
-1. Have an interactive conversation to understand the user's trading idea
-2. Propose a strategy design (name, logic, risk params) and iterate with the user
-3. Use manage_trading_agent(action="create_strategy", name=..., description=..., \
-instructions=..., agent_key="claude-code") to create it
-4. Create agent-local routines the agent will need (see ROUTINES below)
-5. Optionally start an agent with manage_trading_agent(action="start_agent", \
-strategy_id=..., config={...}) — or let the user launch it later with their \
-own trading context
+PHASE 4 — DRY RUN
+- Start with execution_mode: "dry_run" to validate without live trading.
+- Review journal output with the user.
+- Check: Does the agent call routines correctly? Is decision logic sound? \
+Does it use conditional language? Are risk rules respected?
+- Use trading_agent_journal_read(agent_id=..., section="run:1") to review.
+⛔ Do NOT proceed to Phase 5 until the user is satisfied with dry-run behavior.
 
-WORKFLOW FOR MONITORING:
-1. Use manage_trading_agent(action="list_agents") to see running agents
-2. Use manage_trading_agent(action="agent_status", agent_id=...) for detailed status
-3. Use trading_agent_journal_read(agent_id=..., section="summary") for quick status
-4. Use trading_agent_journal_read(agent_id=..., section="runs") to list run snapshots
-5. Use trading_agent_journal_read(agent_id=..., section="run:N") to see tick N detail
+PHASE 5 — GO LIVE
+- Offer execution modes: run_once (single tick), loop (continuous), \
+or loop with max_ticks (limited run).
+- Start the agent with the user's chosen mode and config.
+- Confirm the agent is running and provide monitoring commands.
+
+═══════════════════════════════════════════════════════════
+MONITORING WORKFLOW — for existing agents
+═══════════════════════════════════════════════════════════
+
+1. manage_trading_agent(action="list_agents") — see running agents
+2. manage_trading_agent(action="agent_status", agent_id=...) — detailed status
+3. trading_agent_journal_read(agent_id=..., section="summary") — quick status
+4. trading_agent_journal_read(agent_id=..., section="runs") — list run snapshots
+5. trading_agent_journal_read(agent_id=..., section="run:N") — tick N detail
+
+═══════════════════════════════════════════════════════════
+REFERENCE
+═══════════════════════════════════════════════════════════
+
+GENERIC vs SPECIFIC STRATEGIES:
+- GENERIC: trading_pair and connector are NOT in the instructions. Passed at \
+launch via `trading_context`. Refer to "the configured trading pair". Default.
+- SPECIFIC: pair/connector baked into instructions (e.g. ETH/BTC ratio strategy).
+When creating generic strategies, store sensible defaults in default_config \
+but keep instructions pair-agnostic.
 
 AGENT-LOCAL ROUTINES:
-Each strategy can have its own routines in trading_agents/{slug}/routines/.
-These are Python scripts the agent runs during ticks for analysis.
-Listing & running routines for a specific strategy (preferred single-tool workflow):
-- manage_trading_agent(action="list_routines", strategy_id=...) — lists global + agent-local routines with scope labels
-- manage_trading_agent(action="run_routine", strategy_id=..., name=..., config={...}) — executes a one-shot routine
-
-CRUD operations via manage_routines:
-- manage_routines(action="create_routine", strategy_id=..., name="my_scanner", code="...")
-- manage_routines(action="read_routine", name="my_scanner", strategy_id=...)
-- manage_routines(action="edit_routine", strategy_id=..., name="my_scanner", code="...")
-- manage_routines(action="delete_routine", strategy_id=..., name="my_scanner")
-- manage_routines(action="list", strategy_id=...) to see all routines (global + agent-local)
+Each strategy can have routines in trading_agents/{slug}/routines/.
+- manage_trading_agent(action="list_routines", strategy_id=...) — list routines
+- manage_trading_agent(action="run_routine", strategy_id=..., name=..., config={...}) — run
+- manage_routines(action="create_routine", strategy_id=..., name=..., code=...) — create
+- manage_routines(action="read_routine", name=..., strategy_id=...) — read
+- manage_routines(action="edit_routine", strategy_id=..., name=..., code=...) — edit
 
 Routine template:
 ```python
@@ -101,63 +121,33 @@ from telegram.ext import ContextTypes
 from config_manager import get_client
 
 class Config(BaseModel):
-    \"\"\"One-line description of what this routine does.\"\"\"
+    \"\"\"One-line description.\"\"\"
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     client = await get_client(context._chat_id, context=context)
     if not client:
         return "No server available"
-    # Use client.market_data, client.executors, etc.
     return "result string"
 ```
 
-The `context` object provides `_chat_id` for API client resolution.
-When creating routines, reference existing global routines for patterns \
-(manage_routines action="read_routine" name="arb_check") and adapt them.
-Tell the agent in its strategy instructions which routines to use and when.
-
 DATA STRUCTURE:
-Each strategy has its own folder: trading_agents/{slug}/
+trading_agents/{slug}/
   - agent.md: strategy definition
   - routines/: agent-local analysis scripts
-  - sessions/session_N/: per-session data
-    - journal.md: learnings + summary + decisions + ticks + executors + snapshots
+  - sessions/session_N/: per-session data (journal.md, snapshots)
 
 RULES:
 - Be direct and concise. This is Telegram, keep messages short.
-- Do NOT start messages with a header like "Agent Builder" or mode labels. \
-Just speak directly.
+- Do NOT start messages with a header like "Agent Builder" or mode labels \
+beyond the phase label.
 - Do NOT use excessive whitespace or blank lines between sections.
 - When showing agent status, use key: value format, not tables.
-- When the user asks to create a strategy, help them write good instructions \
-for the trading agent (the LLM that will execute ticks).
 - Always include risk limits when starting agents.
 - When creating routines, keep them focused — one routine per analysis task.
 - Always validate routine code loads correctly after creation.
+- Be interactive. Guide the user one step at a time. Offer concrete proposals.
 """
-
-# -- Agent Chat prompts --
-
-AGENT_CHAT_SYSTEM_PROMPT = """\
-[System context -- do not repeat this to the user]
-You are chatting about a specific running trading agent. You have full context \
-about its strategy, journal, learnings, and recent decisions.
-
-You can help the user:
-- Understand what the agent is doing and why
-- Review recent decisions and performance
-- Suggest adjustments to the strategy
-- Inject directives (user will prefix with !) that get included in the next tick
-
-Keep answers concise. Use key: value format, not tables.
-"""
-
-AGENT_CHAT_DIRECTIVE_PROMPT = """\
-USER DIRECTIVE (injected by the user, apply on next tick):
-{directive}
-"""
-
 
 def build_trading_context() -> str:
     """Build the trading-focused initial context prompt."""
@@ -196,52 +186,6 @@ def build_trading_context() -> str:
 
     return "\n\n".join(sections)
 
-
-def build_agent_chat_context(agent_id: str) -> str:
-    """Build context for chatting with a specific running agent."""
-    from condor.trading_agent.engine import get_engine
-
-    engine = get_engine(agent_id)
-    if not engine:
-        return f"Agent {agent_id} is not currently running."
-
-    sections = [AGENT_CHAT_SYSTEM_PROMPT]
-
-    # Strategy info
-    s = engine.strategy
-    sections.append(
-        f"Strategy: {s.name}\n"
-        f"Description: {s.description or 'N/A'}\n"
-        f"Skills: {', '.join(s.skills) if s.skills else 'none'}"
-    )
-
-    # Agent status
-    info = engine.get_info()
-    sections.append(
-        f"Agent ID: {agent_id}\n"
-        f"Status: {info['status']}\n"
-        f"Ticks: {info['tick_count']}\n"
-        f"Daily PnL: ${info['daily_pnl']:+.2f}\n"
-        f"Open executors: {info['open_executors']}\n"
-        f"Exposure: ${info.get('total_exposure', 0):,.2f}"
-    )
-
-    # Journal learnings
-    learnings = engine.journal.read_learnings()
-    if learnings:
-        sections.append(f"Learnings:\n{learnings}")
-
-    # Summary
-    summary = engine.journal.read_summary()
-    if summary:
-        sections.append(f"Summary:\n{summary}")
-
-    # Recent decisions
-    recent = engine.journal.get_recent_decisions(count=5)
-    if recent:
-        sections.append("Recent decisions:\n" + "\n".join(f"- {d}" for d in recent))
-
-    return "\n\n".join(sections)
 
 # -- Compact prompt templates --
 

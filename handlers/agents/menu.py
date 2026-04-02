@@ -58,26 +58,6 @@ def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def _running_agents_keyboard() -> InlineKeyboardMarkup:
-    """Build keyboard listing running TickEngine instances for Chat with Agent."""
-    from condor.trading_agent.engine import get_all_engines
-
-    engines = get_all_engines()
-    rows = []
-    for eid, engine in engines.items():
-        info = engine.get_info()
-        label = f"{info['strategy']} ({eid})"
-        rows.append(
-            [InlineKeyboardButton(label, callback_data=f"agent:chat_target:{eid}")]
-        )
-    if not rows:
-        rows.append(
-            [InlineKeyboardButton("No running agents", callback_data="agent:menu")]
-        )
-    rows.append([InlineKeyboardButton("Back", callback_data="agent:switch_mode")])
-    return InlineKeyboardMarkup(rows)
-
-
 def _no_session_keyboard(mode: str) -> InlineKeyboardMarkup:
     """Build keyboard when no session is active."""
     rows = [

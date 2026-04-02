@@ -183,6 +183,16 @@ class TickEngine:
                     _engines.pop(self.agent_id, None)
                     return
 
+                # max_ticks limit (loop mode only)
+                max_ticks = self.config.get("max_ticks", 0)
+                if max_ticks > 0 and self.journal.tick_count >= max_ticks:
+                    log.info("TickEngine %s: reached max_ticks=%d, self-stopping", self.agent_id, max_ticks)
+                    await self._notify(f"Agent {self.agent_id}: completed {max_ticks} ticks (max_ticks limit).")
+                    self._running = False
+                    self.journal.close()
+                    _engines.pop(self.agent_id, None)
+                    return
+
             try:
                 await asyncio.sleep(freq)
             except asyncio.CancelledError:
@@ -468,6 +478,7 @@ class TickEngine:
             "trading_context": self.config.get("trading_context", ""),
             "risk_limits": risk_limits if isinstance(risk_limits, dict) else risk_limits.model_dump() if hasattr(risk_limits, "model_dump") else {},
             "execution_mode": self.config.get("execution_mode", "loop"),
+            "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
             "session_dir": str(self.session_dir) if self.session_dir else "",

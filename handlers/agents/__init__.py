@@ -17,7 +17,6 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     DEFAULT_MODE,
-    build_agent_chat_context,
     build_trading_context,
     get_project_dir,
 )
@@ -74,7 +73,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_text(
                 "No agent CLI found.\n\n"
                 "Install one of:\n"
-                "• claude-code-acp (Claude Code)\n"
+                "• claude-agent-acp (Claude Agent)\n"
                 "• gemini (Gemini CLI)\n\n"
                 "Then restart the bot."
             )
@@ -104,13 +103,7 @@ async def agent_callback_handler(
     # Mode switching
     if action.startswith("mode:"):
         mode = action.split(":", 1)[1]
-        if mode == "chat_with_agent":
-            await _handle_chat_with_agent_menu(update, context)
-        else:
-            await _handle_mode_start(update, context, mode)
-    elif action.startswith("chat_target:"):
-        agent_id = action.split(":", 1)[1]
-        await _handle_mode_start(update, context, "chat_with_agent", agent_id=agent_id)
+        await _handle_mode_start(update, context, mode)
     elif action == "switch_mode":
         await _handle_switch_mode_menu(update, context)
 
@@ -157,7 +150,6 @@ async def _handle_mode_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     mode: str,
-    agent_id: str | None = None,
 ) -> None:
     """Start a session in the given mode."""
     query = update.callback_query
@@ -183,8 +175,6 @@ async def _handle_mode_start(
     await destroy_session(chat_id)
 
     context.user_data["agent_mode"] = mode
-    if agent_id:
-        context.user_data["agent_chat_target"] = agent_id
 
     try:
         bot = context.bot
@@ -207,8 +197,6 @@ async def _handle_mode_start(
         extra_context = None
         if mode == "agent_builder":
             extra_context = build_trading_context()
-        elif mode == "chat_with_agent" and agent_id:
-            extra_context = build_agent_chat_context(agent_id)
 
         if extra_context:
             try:
@@ -244,19 +232,6 @@ async def _handle_switch_mode_menu(
         lines.append(f"• {info['label']} — {info['description']}")
     await query.message.edit_text(
         "\n".join(lines), reply_markup=_mode_selection_keyboard()
-    )
-
-
-async def _handle_chat_with_agent_menu(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Show list of running agents to chat with."""
-    from .menu import _running_agents_keyboard
-
-    query = update.callback_query
-    await query.message.edit_text(
-        "Select a running agent to chat with:",
-        reply_markup=_running_agents_keyboard(),
     )
 
 
@@ -486,8 +461,7 @@ async def _handle_new_session(
         return
 
     mode = session.mode
-    agent_id = context.user_data.get("agent_chat_target")
-    await _handle_mode_start(update, context, mode, agent_id=agent_id)
+    await _handle_mode_start(update, context, mode)
 
 
 async def _do_compact_from_message(
@@ -666,29 +640,10 @@ async def agent_message_handler(
         await _do_compact_from_message(update, context, text)
         return
 
-    # Directive injection for Chat with Agent mode
-    mode = context.user_data.get("agent_mode", DEFAULT_MODE)
     # Backward compat
+    mode = context.user_data.get("agent_mode", DEFAULT_MODE)
     if mode == "trading":
         mode = "agent_builder"
-
-    if mode == "chat_with_agent" and text.startswith("!"):
-        agent_id = context.user_data.get("agent_chat_target")
-        if agent_id:
-            from condor.trading_agent.engine import get_engine
-
-            engine = get_engine(agent_id)
-            if engine:
-                directive = text[1:].strip()
-                engine.inject_directive(directive)
-                await update.message.reply_text(
-                    f"Directive injected for agent {agent_id}. "
-                    "It will be applied on the next tick."
-                )
-                return
-            else:
-                await update.message.reply_text(f"Agent {agent_id} is no longer running.")
-                return
 
     session = get_session(chat_id)
 
@@ -728,10 +683,6 @@ async def agent_message_handler(
             extra_context = None
             if mode == "agent_builder":
                 extra_context = build_trading_context()
-            elif mode == "chat_with_agent":
-                target = context.user_data.get("agent_chat_target")
-                if target:
-                    extra_context = build_agent_chat_context(target)
 
             if extra_context:
                 try:
@@ -769,7 +720,7 @@ async def agent_message_handler(
         # Show mode label for non-condor modes so user knows which mode is active
         mode_label = AGENT_MODES.get(mode, {}).get("label", "")
         if mode != DEFAULT_MODE and mode_label:
-            placeholder = await update.message.reply_text(f"[{mode_label}] Thinking...")
+            placeholder = await update.message.reply_text(f"{mode_label} Thinking...")
         else:
             placeholder = await update.message.reply_text("Thinking...")
 
@@ -778,7 +729,7 @@ async def agent_message_handler(
     # Prepend mode label for non-condor modes so user always knows which mode is active
     mode_label = AGENT_MODES.get(mode, {}).get("label", "")
     if mode != DEFAULT_MODE and mode_label:
-        prefix = f"[{mode_label}]\n\n"
+        prefix = f"{mode_label}\n\n"
     if voice_transcription:
         # Use plain text prefix — underscores in transcription could break Markdown
         voice_prefix = f"🎙 {voice_transcription}"

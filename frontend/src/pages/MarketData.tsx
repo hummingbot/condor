@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
@@ -179,11 +179,14 @@ function FallbackChart({
       api.getCandles(server, connector, pair, interval, 5000, startTime),
   });
 
+  const queryClient = useQueryClient();
+  const candleStatusKey = ["candles-status", server, connector, pair, interval];
+
   const { data: candleStatus } = useQuery<{
     status: string;
     message?: string;
   }>({
-    queryKey: ["candles-status", server, connector, pair, interval],
+    queryKey: candleStatusKey,
     enabled: false,
   });
 
@@ -299,9 +302,14 @@ function FallbackChart({
           tools)
         </p>
         {candleStatus?.status === "error" && (
-          <span className="rounded bg-red-500/20 px-2 py-0.5 text-xs text-red-400">
+          <button
+            onClick={() => queryClient.removeQueries({ queryKey: candleStatusKey })}
+            className="flex items-center gap-1 rounded bg-red-500/20 px-2 py-0.5 text-xs text-red-400 hover:bg-red-500/30"
+            title="Click to dismiss"
+          >
             {candleStatus.message ?? "Stream error"}
-          </span>
+            <span className="ml-1 text-[10px] opacity-60">✕</span>
+          </button>
         )}
         {candleStatus?.status === "connected" && (
           <span className="rounded bg-green-500/20 px-2 py-0.5 text-xs text-green-400">
