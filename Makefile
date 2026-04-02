@@ -1,4 +1,18 @@
+# Ensure tools are in PATH
+SHELL := /bin/bash
+export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
+
 .PHONY: help setup install run deploy deploy-full stop status logs test lint build-frontend setup-chrome
+
+# Helper function to find node/npm via nvm or system
+define find_node
+	@(export NVM_DIR="$HOME/.nvm"; \
+	if [ -s "$NVM_DIR/nvm.sh" ]; then \
+		. "$NVM_DIR/nvm.sh" >/dev/null 2>&1; \
+		nvm use default >/dev/null 2>&1 || nvm use node >/dev/null 2>&1 || true; \
+	fi; \
+	$(1))
+endef
 
 help:
 	@echo "Condor - Available Commands"
@@ -19,9 +33,11 @@ setup:
 
 install: setup
 	uv sync --dev
-	@command -v node >/dev/null 2>&1 || { echo "Error: Node.js not installed. Install it from https://nodejs.org"; exit 1; }
-	@command -v npm >/dev/null 2>&1 || { echo "Error: npm not installed. Install Node.js from https://nodejs.org"; exit 1; }
-	cd frontend && npm install
+	@bash -c ' \
+		export NVM_DIR="$$HOME/.nvm"; \
+		[ -s "$$NVM_DIR/nvm.sh" ] && . "$$NVM_DIR/nvm.sh"; \
+		cd frontend && npm install \
+	'
 	@$(MAKE) setup-chrome
 
 setup-chrome:
@@ -30,7 +46,11 @@ setup-chrome:
 		echo "Chrome setup skipped (not required for basic usage)"
 
 build-frontend:
-	cd frontend && npm run build
+	@bash -c ' \
+		export NVM_DIR="$$HOME/.nvm"; \
+		[ -s "$$NVM_DIR/nvm.sh" ] && . "$$NVM_DIR/nvm.sh"; \
+		cd frontend && npm run build \
+	'
 
 run: build-frontend
 	uv run python main.py
