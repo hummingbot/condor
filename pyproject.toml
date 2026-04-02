@@ -19,6 +19,7 @@ dependencies = [
     "uvicorn[standard]",
     "python-jose[cryptography]",
     "faster-whisper",
+    "matplotlib>=3.10.8",
 ]
 
 [project.optional-dependencies]
