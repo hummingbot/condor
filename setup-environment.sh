@@ -368,6 +368,13 @@ else
     done
     ADMIN_USER_ID="$admin_id"
 
+    # Prompt for Server IP (optional - for VPS deployments)
+    echo ""
+    msg_info "If running on a VPS, enter the server's IP address."
+    msg_info "Otherwise, press Enter to use localhost."
+    prompt_visible "Server IP address (or press Enter for localhost)" "" "server_ip"
+    SERVER_IP="$server_ip"
+
     # Write .env (preserve extra vars if file exists)
     if [ -f "$ENV_FILE" ]; then
         # Update existing values
@@ -383,14 +390,38 @@ else
         else
             echo "ADMIN_USER_ID=$(escape_env_value "$ADMIN_USER_ID")" >> "$ENV_FILE"
         fi
+        
+        # Add WEB_URL and WEB_PORT if server IP was provided
+        if [ -n "$SERVER_IP" ]; then
+            if grep -q "^WEB_URL=" "$ENV_FILE"; then
+                sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$(escape_env_value "$SERVER_IP")|" "$ENV_FILE"
+                rm -f "$ENV_FILE.bak"
+            else
+                echo "WEB_URL=http://$(escape_env_value "$SERVER_IP")" >> "$ENV_FILE"
+            fi
+            
+            if grep -q "^WEB_PORT=" "$ENV_FILE"; then
+                sed -i.bak "s|^WEB_PORT=.*|WEB_PORT=8088|" "$ENV_FILE"
+                rm -f "$ENV_FILE.bak"
+            else
+                echo "WEB_PORT=8088" >> "$ENV_FILE"
+            fi
+        fi
     else
         {
             echo "TELEGRAM_TOKEN=$(escape_env_value "$TELEGRAM_TOKEN")"
             echo "ADMIN_USER_ID=$(escape_env_value "$ADMIN_USER_ID")"
+            if [ -n "$SERVER_IP" ]; then
+                echo "WEB_URL=http://$(escape_env_value "$SERVER_IP")"
+                echo "WEB_PORT=8088"
+            fi
         } > "$ENV_FILE"
     fi
 
     msg_ok ".env created"
+    if [ -n "$SERVER_IP" ]; then
+        msg_ok "Web server configured: http://$SERVER_IP:8088"
+    fi
     telegram_configured=true
 fi
 
@@ -514,8 +545,73 @@ fi
 
 echo ""
 
-# ── Step 3: Auto-register server in config.yml ─────
+# ── Step 3: Create/Update config.yml ─────────────────
 
+echo -e "${BOLD}Step 3: Configuration Files${RESET}"
+echo ""
+
+# Get current date
+current_date=$(date "+%Y-%m-%d")
+
+# Source .env to get ADMIN_USER_ID
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    source "$ENV_FILE" 2>/dev/null
+    set +a
+fi
+
+# Always create/update config.yml with template
+if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
+    msg_info "Creating $CONFIG_FILE with template..."
+    cat > "$CONFIG_FILE" << 'CONFIGEOF'
+# Telegram user IDs allowed to access the bot
+authorized_users:
+  - ADMIN_USER_ID_PLACEHOLDER  # Replace with your Telegram user ID
+
+# Hummingbot API server configurations
+servers:
+  local:
+    host: localhost
+    port: 8000
+    username: admin
+    password: admin
+
+# Controller configurations (loaded at startup)
+controllers:
+  # Example configuration file entries (created: DATE_PLACEHOLDER):
+  # main:
+  #   type: directional_strategy_vwap
+  #   connector: binance
+  #   trading_pair: BTC-USDT
+  #   leverage: 20
+  #   total_amount_quote: 100
+  #   ...
+CONFIGEOF
+    msg_ok "Created $CONFIG_FILE with template"
+fi
+
+# Replace placeholders if they exist and we have values
+config_updated=false
+
+if [ -n "${ADMIN_USER_ID:-}" ]; then
+    if grep -q "ADMIN_USER_ID_PLACEHOLDER" "$CONFIG_FILE" 2>/dev/null; then
+        sed -i.bak "s/ADMIN_USER_ID_PLACEHOLDER/$ADMIN_USER_ID/g" "$CONFIG_FILE"
+        rm -f "$CONFIG_FILE.bak"
+        msg_ok "Set authorized user ID in $CONFIG_FILE"
+        config_updated=true
+    fi
+fi
+
+if grep -q "DATE_PLACEHOLDER" "$CONFIG_FILE" 2>/dev/null; then
+    sed -i.bak "s/DATE_PLACEHOLDER/$current_date/g" "$CONFIG_FILE"
+    rm -f "$CONFIG_FILE.bak"
+    if [ "$config_updated" = false ]; then
+        msg_ok "Updated $CONFIG_FILE with current date"
+    fi
+    config_updated=true
+fi
+
+# If API was deployed, sync credentials to config.yml
 if [ "${hb_api_deployed:-}" = true ]; then
     # Determine credentials (re-read from HB API .env if we didn't just set them)
     if [ -z "${hb_username:-}" ] && [ -f "$HB_API_DIR/.env" ]; then
@@ -524,31 +620,31 @@ if [ "${hb_api_deployed:-}" = true ]; then
     fi
 
     if [ -n "${hb_username:-}" ]; then
-        # Check if config.yml already has a server entry
-        if [ -f "$CONFIG_FILE" ] && grep -q "^servers:" "$CONFIG_FILE" && grep -q "  local:" "$CONFIG_FILE"; then
-            msg_ok "Server 'local' already registered in $CONFIG_FILE"
-        else
-            cat > "$CONFIG_FILE" << CFGEOF
-servers:
-  local:
-    host: localhost
-    port: 8000
-    username: ${hb_username}
-    password: ${hb_password}
-CFGEOF
-            msg_ok "Registered 'local' server in $CONFIG_FILE"
+        # Update config.yml 'local' server credentials using sed
+        if grep -A5 "servers:" "$CONFIG_FILE" | grep -q "username:"; then
+            sed -i.bak "/servers:/,/^[^ ]/ s/username: .*/username: $hb_username/" "$CONFIG_FILE"
+            rm -f "$CONFIG_FILE.bak"
         fi
+
+        if grep -A5 "servers:" "$CONFIG_FILE" | grep -q "password:"; then
+            sed -i.bak "/servers:/,/^[^ ]/ s/password: .*/password: $hb_password/" "$CONFIG_FILE"
+            rm -f "$CONFIG_FILE.bak"
+        fi
+        
+        msg_ok "Synced API credentials to $CONFIG_FILE"
     fi
 fi
+
+if [ "$config_updated" = false ] && [ -f "$CONFIG_FILE" ]; then
+    msg_ok "$CONFIG_FILE exists and is configured"
+fi
+
+echo ""
 
 # ── Step 4: Data directory ──────────────────────────
 
 if [ ! -d "$DATA_DIR" ]; then
     mkdir -p "$DATA_DIR"
-fi
-
-if [ ! -f "$CONFIG_FILE" ]; then
-    touch "$CONFIG_FILE"
 fi
 
 # ── Step 5: Summary ────────────────────────────────
