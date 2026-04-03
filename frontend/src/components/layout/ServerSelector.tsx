@@ -13,7 +13,7 @@ export function ServerSelector() {
   const { data: servers } = useQuery({
     queryKey: ["servers"],
     queryFn: api.getServers,
-    refetchInterval: 30000,
+    refetchInterval: 10000,
   });
 
   const onlineServers = servers?.filter((s) => s.online) ?? [];

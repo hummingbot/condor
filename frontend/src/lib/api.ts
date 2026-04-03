@@ -248,6 +248,7 @@ export interface AgentSummary {
   status: string;
   agent_id: string;
   session_count: number;
+  experiment_count: number;
   tick_count: number;
   daily_pnl: number;
   instances: RunningInstance[];
@@ -255,6 +256,13 @@ export interface AgentSummary {
 
 export interface SessionInfo {
   number: number;
+  snapshot_count: number;
+  created_at: string;
+}
+
+export interface ExperimentInfo {
+  number: number;
+  execution_mode: string;
   snapshot_count: number;
   created_at: string;
 }
@@ -270,13 +278,13 @@ export interface AgentDetail {
   status: string;
   agent_id: string;
   sessions: SessionInfo[];
+  experiments: ExperimentInfo[];
   instances: RunningInstance[];
 }
 
 export interface SnapshotSummary {
   tick: number;
   timestamp: string;
-  cost: number;
   file: string;
 }
 
@@ -487,5 +495,15 @@ export const api = {
   getSnapshot: (slug: string, sessionNum: number, tick: number) =>
     apiFetch<{ content: string; tick: number }>(
       `/api/v1/agents/${slug}/sessions/${sessionNum}/snapshots/${tick}`,
+    ),
+
+  // ── Experiments ──
+
+  getAgentExperiments: (slug: string) =>
+    apiFetch<{ experiments: ExperimentInfo[] }>(`/api/v1/agents/${slug}/experiments`),
+
+  getExperiment: (slug: string, expNum: number) =>
+    apiFetch<{ content: string; number: number }>(
+      `/api/v1/agents/${slug}/experiments/${expNum}`,
     ),
 };

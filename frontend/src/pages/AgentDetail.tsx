@@ -16,14 +16,15 @@ import {
   Server,
   Settings,
   Square,
+  FlaskConical,
   Wrench,
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { type AgentDetail as AgentDetailType, type SessionInfo, api } from "@/lib/api";
+import { type AgentDetail as AgentDetailType, type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 // ── Tabs ──
@@ -33,6 +34,7 @@ const TABS = [
   { id: "strategy", label: "Strategy", icon: Brain },
   { id: "learnings", label: "Learnings", icon: Lightbulb },
   { id: "sessions", label: "Sessions", icon: Clock },
+  { id: "experiments", label: "Dry-Run", icon: FlaskConical },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -604,6 +606,90 @@ function LearningsTab({ slug, content }: { slug: string; content: string }) {
   );
 }
 
+// ── Session Selector ──
+
+function SessionSelector({
+  sessions,
+  selectedSessionNum,
+  onSelect,
+}: {
+  sessions: SessionInfo[];
+  selectedSessionNum: number;
+  onSelect: (num: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const selected = sessions.find((s) => s.number === selectedSessionNum);
+  const sortedSessions = [...sessions].reverse();
+
+  return (
+    <div ref={ref} className="relative sm:w-72">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 text-left text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
+      >
+        <div className="flex items-center gap-2.5 overflow-hidden">
+          <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-[var(--color-primary)]/10 text-xs font-bold text-[var(--color-primary)]">
+            {selected?.number ?? "–"}
+          </div>
+          <div className="min-w-0">
+            <div className="truncate font-medium text-[var(--color-text)]">
+              Session {selected?.number}
+            </div>
+            <div className="truncate text-xs text-[var(--color-text-muted)]">
+              {selected?.created_at ?? "Unknown"} · {selected?.snapshot_count ?? 0} tick{selected?.snapshot_count !== 1 ? "s" : ""}
+            </div>
+          </div>
+        </div>
+        <ChevronDown className={`h-4 w-4 flex-shrink-0 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 z-50 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
+          {sortedSessions.map((s) => {
+            const isActive = s.number === selectedSessionNum;
+            return (
+              <button
+                key={s.number}
+                type="button"
+                onClick={() => { onSelect(s.number); setOpen(false); }}
+                className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left text-sm transition-colors ${
+                  isActive
+                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                    : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                <div className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-xs font-bold ${
+                  isActive ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)]" : "bg-[var(--color-border)]/50 text-[var(--color-text-muted)]"
+                }`}>
+                  {s.number}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">Session {s.number}</div>
+                  <div className="truncate text-xs text-[var(--color-text-muted)]">
+                    {s.created_at ?? "Unknown"} · {s.snapshot_count} tick{s.snapshot_count !== 1 ? "s" : ""}
+                  </div>
+                </div>
+                {isActive && <div className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--color-primary)]" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Sessions Tab ──
 
 const SESSION_SUB_TABS = [
@@ -617,12 +703,9 @@ type SessionSubTabId = (typeof SESSION_SUB_TABS)[number]["id"];
 function SessionMetricsBar({ journal }: { journal: ParsedJournal }) {
   const { summary, metrics, ticks } = journal;
   const lastMetric = metrics.length > 0 ? metrics[metrics.length - 1] : null;
-  const totalCost = ticks.reduce((s, t) => s + t.cost, 0);
-
   const stats = [
     { label: "Ticks", value: String(summary.lastTick || ticks.length), color: "text-[var(--color-text)]" },
     { label: "PnL", value: `$${summary.pnl >= 0 ? "+" : ""}${summary.pnl.toFixed(2)}`, color: summary.pnl >= 0 ? "text-emerald-400" : "text-red-400" },
-    { label: "Total Cost", value: `$${totalCost.toFixed(4)}`, color: "text-[var(--color-text)]" },
     { label: "Open Executors", value: String(summary.openExecutors), color: "text-[var(--color-text)]" },
     { label: "Exposure", value: lastMetric ? `$${lastMetric.exposure.toFixed(2)}` : "$0.00", color: "text-[var(--color-text)]" },
   ];
@@ -827,11 +910,6 @@ function SnapshotDetail({ slug, sessionNum, tick }: { slug: string; sessionNum: 
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-mono text-lg font-bold text-[var(--color-text)]">#{parsed.tick}</span>
         <span className="text-sm text-[var(--color-text-muted)]">{parsed.timestamp}</span>
-        {parsed.cost.llmCost > 0 && (
-          <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[10px] font-bold text-[var(--color-text-muted)]">
-            ${parsed.cost.llmCost.toFixed(4)}
-          </span>
-        )}
       </div>
 
       {/* System Prompt (collapsed by default, first for context) */}
@@ -892,12 +970,10 @@ function SnapshotDetail({ slug, sessionNum, tick }: { slug: string; sessionNum: 
         )}
       </div>
 
-      {/* Cost Footer */}
-      {parsed.cost.llmCost > 0 && (
+      {/* Stats Footer */}
+      {parsed.stats.duration > 0 && (
         <div className="flex flex-wrap gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-text-muted)]">
-          <span>LLM: <strong className="text-[var(--color-text)]">${parsed.cost.llmCost.toFixed(4)}</strong></span>
-          <span>Duration: <strong className="text-[var(--color-text)]">{parsed.cost.duration.toFixed(1)}s</strong></span>
-          <span>Tokens: <strong className="text-[var(--color-text)]">{parsed.cost.inputTokens.toLocaleString()}</strong> in / <strong className="text-[var(--color-text)]">{parsed.cost.outputTokens.toLocaleString()}</strong> out</span>
+          <span>Duration: <strong className="text-[var(--color-text)]">{parsed.stats.duration.toFixed(1)}s</strong></span>
         </div>
       )}
     </div>
@@ -1015,9 +1091,6 @@ function SessionSnapshots({ slug, sessionNum }: { slug: string; sessionNum: numb
                 <span className="font-mono text-xs font-bold">#{snap.tick}</span>
                 <span className="text-[10px]">{snap.timestamp}</span>
               </div>
-              {snap.cost > 0 && (
-                <span className="text-[10px] opacity-60">${snap.cost.toFixed(4)}</span>
-              )}
             </button>
           ))}
         </div>
@@ -1067,17 +1140,11 @@ function SessionsTab({ slug, sessions }: { slug: string; sessions: SessionInfo[]
     <div className="space-y-4">
       {/* Session selector + metrics */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-4">
-        <select
-          value={selectedSessionNum}
-          onChange={(e) => { setSelectedSessionNum(Number(e.target.value)); setActiveSubTab("overview"); }}
-          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)] sm:w-auto"
-        >
-          {sessions.map((s) => (
-            <option key={s.number} value={s.number}>
-              Session {s.number}{s.created_at ? ` — ${s.created_at}` : ""} — {s.snapshot_count} tick{s.snapshot_count !== 1 ? "s" : ""}
-            </option>
-          ))}
-        </select>
+        <SessionSelector
+          sessions={sessions}
+          selectedSessionNum={selectedSessionNum}
+          onSelect={(num) => { setSelectedSessionNum(num); setActiveSubTab("overview"); }}
+        />
       </div>
 
       {parsedJournal && <SessionMetricsBar journal={parsedJournal} />}
@@ -1114,6 +1181,122 @@ function SessionsTab({ slug, sessions }: { slug: string; sessions: SessionInfo[]
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// ── Experiments Tab ──
+
+function ExperimentsTab({ slug, experiments }: { slug: string; experiments: ExperimentInfo[] }) {
+  const [selectedExpNum, setSelectedExpNum] = useState<number>(
+    experiments.length > 0 ? experiments[0].number : 0
+  );
+
+  const { data: snapshotData, isLoading } = useQuery({
+    queryKey: ["agent", slug, "experiment", selectedExpNum],
+    queryFn: () => api.getExperiment(slug, selectedExpNum),
+    enabled: selectedExpNum > 0,
+  });
+
+  const parsed = useMemo<ParsedSnapshot | null>(() => {
+    if (!snapshotData?.content) return null;
+    return parseSnapshot(snapshotData.content);
+  }, [snapshotData?.content]);
+
+  if (experiments.length === 0) {
+    return (
+      <div className="flex h-48 flex-col items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] text-[var(--color-text-muted)]">
+        <FlaskConical className="mb-2 h-8 w-8 opacity-30" />
+        <p className="text-sm">No experiments yet. Run a dry-run or run-once to create one.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4 lg:flex-row">
+      {/* Experiment list */}
+      <div className="w-full shrink-0 lg:w-80">
+        <div className="max-h-[700px] space-y-1 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-2">
+          {experiments.map((exp) => {
+            const isActive = exp.number === selectedExpNum;
+            const modeLabel = exp.execution_mode === "dry_run" ? "Dry Run" : exp.execution_mode === "run_once" ? "Run Once" : exp.execution_mode;
+            const modeColor = exp.execution_mode === "dry_run"
+              ? "bg-amber-500/10 text-amber-400"
+              : "bg-blue-500/10 text-blue-400";
+            return (
+              <button
+                key={exp.number}
+                onClick={() => setSelectedExpNum(exp.number)}
+                className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors ${
+                  isActive
+                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                <div className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-xs font-bold ${
+                  isActive ? "bg-[var(--color-primary)]/20 text-[var(--color-primary)]" : "bg-[var(--color-border)]/50 text-[var(--color-text-muted)]"
+                }`}>
+                  {exp.number}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-sm font-medium">Experiment {exp.number}</span>
+                    <span className={`inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-medium ${modeColor}`}>
+                      {modeLabel}
+                    </span>
+                  </div>
+                </div>
+                {isActive && <div className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--color-primary)]" />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Snapshot detail */}
+      <div className="min-w-0 flex-1">
+        {isLoading ? (
+          <div className="flex h-48 items-center justify-center">
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+          </div>
+        ) : parsed ? (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="font-mono text-lg font-bold text-[var(--color-text)]">Experiment #{selectedExpNum}</span>
+              <span className="text-sm text-[var(--color-text-muted)]">{parsed.timestamp}</span>
+            </div>
+            {parsed.agentResponse && (
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Agent Response</h3>
+                <div className="whitespace-pre-wrap text-sm text-[var(--color-text)]">{parsed.agentResponse}</div>
+              </div>
+            )}
+            {parsed.toolCalls.length > 0 && (
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                  Tool Calls ({parsed.toolCalls.length})
+                </h3>
+                <div className="space-y-2">
+                  {parsed.toolCalls.map((tc, i) => (
+                    <div key={i} className="rounded-md bg-[var(--color-bg)]/50 px-3 py-2 text-xs">
+                      <span className="font-medium text-[var(--color-primary)]">{tc.name}</span>
+                      <span className="ml-2 text-[var(--color-text-muted)]">({tc.status})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {parsed.riskState && (
+              <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Risk State</h3>
+                <div className="whitespace-pre-wrap text-xs text-[var(--color-text-muted)]">{parsed.riskState}</div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select an experiment to view its snapshot.</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -1185,6 +1368,7 @@ export function AgentDetail() {
       {activeTab === "strategy" && <StrategyTab slug={slug!} content={agent.agent_md} />}
       {activeTab === "learnings" && <LearningsTab slug={slug!} content={agent.learnings} />}
       {activeTab === "sessions" && <SessionsTab slug={slug!} sessions={agent.sessions} />}
+      {activeTab === "experiments" && <ExperimentsTab slug={slug!} experiments={agent.experiments || []} />}
     </div>
   );
 }

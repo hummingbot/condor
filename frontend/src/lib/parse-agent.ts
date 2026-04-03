@@ -20,7 +20,6 @@ export interface Decision {
 export interface TickEntry {
   tick: number;
   timestamp: string;
-  cost: number;
   actions: number;
   summary: string;
 }
@@ -63,11 +62,8 @@ export interface ToolCall {
   output: string;
 }
 
-export interface SnapshotCost {
-  llmCost: number;
+export interface SnapshotStats {
   duration: number;
-  inputTokens: number;
-  outputTokens: number;
 }
 
 export interface ParsedSnapshot {
@@ -79,7 +75,7 @@ export interface ParsedSnapshot {
   riskState: string;
   agentResponse: string;
   toolCalls: ToolCall[];
-  cost: SnapshotCost;
+  stats: SnapshotStats;
 }
 
 // ── Section extraction helper ──
@@ -195,13 +191,11 @@ function parseTicks(text: string): TickEntry[] {
   for (const line of text.split("\n")) {
     if (!line.startsWith("- tick#")) continue;
     const parts = line.slice(2).split(" | ");
-    const entry: TickEntry = { tick: 0, timestamp: "", cost: 0, actions: 0, summary: "" };
+    const entry: TickEntry = { tick: 0, timestamp: "", actions: 0, summary: "" };
     for (const part of parts) {
       const p = part.trim();
       if (p.startsWith("tick#")) {
         entry.tick = parseInt(p.replace("tick#", ""));
-      } else if (p.startsWith("cost=$")) {
-        entry.cost = parseFloat(p.replace("cost=$", ""));
       } else if (p.startsWith("actions=")) {
         entry.actions = parseInt(p.replace("actions=", ""));
       } else if (/^\d{4}-\d{2}-\d{2}/.test(p)) {
@@ -290,11 +284,11 @@ export function parseSnapshot(content: string): ParsedSnapshot {
     riskState: "",
     agentResponse: "",
     toolCalls: [],
-    cost: { llmCost: 0, duration: 0, inputTokens: 0, outputTokens: 0 },
+    stats: { duration: 0 },
   };
 
-  // Header: # Snapshot #N — timestamp
-  const headerMatch = content.match(/^# Snapshot #(\d+)\s*[—–-]\s*(.+)/m);
+  // Header: # Snapshot #N — timestamp  OR  # Experiment #N — timestamp
+  const headerMatch = content.match(/^# (?:Snapshot|Experiment) #(\d+)\s*[—–-]\s*(.+)/m);
   if (headerMatch) {
     result.tick = parseInt(headerMatch[1]);
     result.timestamp = headerMatch[2].trim();
@@ -321,18 +315,11 @@ export function parseSnapshot(content: string): ParsedSnapshot {
     result.toolCalls = parseToolCalls(toolDetailsMatch[1]);
   }
 
-  // Cost: LLM: $N | Duration: Ns | Tokens: N in / N out
-  const costSection = getSection(content, "Cost");
-  const costMatch = costSection.match(
-    /LLM:\s*\$([\d.]+)\s*\|\s*Duration:\s*([\d.]+)s\s*\|\s*Tokens:\s*(\d+)\s*in\s*\/\s*(\d+)\s*out/
-  );
-  if (costMatch) {
-    result.cost = {
-      llmCost: parseFloat(costMatch[1]),
-      duration: parseFloat(costMatch[2]),
-      inputTokens: parseInt(costMatch[3]),
-      outputTokens: parseInt(costMatch[4]),
-    };
+  // Stats: Duration: Ns
+  const statsSection = getSection(content, "Stats") || getSection(content, "Cost");
+  const durationMatch = statsSection.match(/Duration:\s*([\d.]+)s/);
+  if (durationMatch) {
+    result.stats = { duration: parseFloat(durationMatch[1]) };
   }
 
   return result;
