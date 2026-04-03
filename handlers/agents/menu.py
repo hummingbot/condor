@@ -20,7 +20,6 @@ def _active_session_keyboard(mode: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("Compact", callback_data="agent:compact"),
-            InlineKeyboardButton("Context", callback_data="agent:context"),
         ],
         [
             InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
@@ -98,24 +97,12 @@ async def show_agent_menu(
             "label", session.agent_key
         )
         status = "busy" if session.is_busy else "ready"
-        # Context usage
-        if session.context_window > 0 and session.tokens_used > 0:
-            pct = round(session.tokens_used / session.context_window * 100)
-            used_k = round(session.tokens_used / 1000)
-            total_k = round(session.context_window / 1000)
-            usage_line = f"Context: {used_k}k / {total_k}k ({pct}%)"
-        else:
-            usage_line = "Context: no usage data yet"
-        cost_line = f"Cost: ${session.cost_usd:.4f}" if session.cost_usd > 0 else ""
         lines = [
             f"Mode: {mode_label}",
             f"LLM: {agent_label}",
             f"Status: {status}",
-            usage_line,
+            "\nSend a message to chat, or use the buttons below.",
         ]
-        if cost_line:
-            lines.append(cost_line)
-        lines.append("\nSend a message to chat, or use the buttons below.")
         text = "\n".join(lines)
         keyboard = _active_session_keyboard(session.mode)
     else:

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from telegram import Bot
 
-from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone, UsageUpdate
+from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone
 from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -38,11 +38,6 @@ class AgentSession:
     client: ACPClient
     mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False
-    tokens_used: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    context_window: int = 200000
-    cost_usd: float = 0.0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def prompt_stream(self, text: str):
@@ -67,25 +62,6 @@ class AgentSession:
             loop = asyncio.get_event_loop()
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
             async for event in self.client.prompt_stream(text):
-                if isinstance(event, UsageUpdate):
-                    # Only accept values that increase (avoid spurious drops
-                    # from per-turn vs cumulative mismatch between sources).
-                    if event.used >= self.tokens_used:
-                        self.tokens_used = event.used
-                    else:
-                        log.debug(
-                            "Ignoring lower usage %d (current %d)",
-                            event.used,
-                            self.tokens_used,
-                        )
-                    self.context_window = event.size
-                    if event.cost_usd >= self.cost_usd:
-                        self.cost_usd = event.cost_usd
-                    # Track input/output tokens (cumulative, always increasing)
-                    if event.input_tokens >= self.input_tokens:
-                        self.input_tokens = event.input_tokens
-                    if event.output_tokens >= self.output_tokens:
-                        self.output_tokens = event.output_tokens
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -162,13 +138,6 @@ async def get_or_create_session(
         client=client,
         mode=mode,
     )
-    # Seed usage from initial prompt if available
-    if client.last_usage:
-        session.tokens_used = client.last_usage.used
-        session.context_window = client.last_usage.size
-        session.cost_usd = client.last_usage.cost_usd
-        session.input_tokens = client.last_usage.input_tokens
-        session.output_tokens = client.last_usage.output_tokens
     _sessions[chat_id] = session
     log.info("Created agent session for chat %d: %s", chat_id, agent_key)
     return session

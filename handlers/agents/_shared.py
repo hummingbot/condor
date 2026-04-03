@@ -65,9 +65,15 @@ to create it. Use the "create-routine" skill for API reference patterns.
 ⛔ Do NOT proceed to Phase 3 until routine output is tested and user approves.
 
 PHASE 3 — STRATEGY CREATION
+- BEFORE writing the strategy instructions, fetch the executor/controller schema \
+the agent will use. Call manage_executors(executor_type="<type>") to get the full \
+config schema (e.g. executor_type="grid_strike", "dca_executor", etc.). \
+Embed the required fields and their types directly in the strategy instructions \
+so the tick agent knows exactly what parameters to pass.
 - Create the strategy via manage_trading_agent(action="create_strategy", ...).
 - Instructions should reference the Phase 2 routine by name.
-- Include: objective, analysis step, decision logic, executor config, risk rules.
+- Include: objective, analysis step, decision logic, executor config WITH full \
+schema (all required fields, types, defaults), risk rules.
 - Set default_config with sensible values.
 ⛔ Do NOT proceed to Phase 4 until the strategy is saved.
 
@@ -289,18 +295,24 @@ def get_project_dir() -> str:
     return str(Path(__file__).parent.parent.parent)
 
 
-def _condor_mcp_env(chat_id: int, user_id: int, agent_slug: str | None = None) -> list[dict[str, str]]:
-    """Build env vars for the condor MCP subprocess."""
+def _condor_mcp_args(
+    chat_id: int, user_id: int,
+    agent_slug: str | None = None,
+    server_name: str | None = None,
+) -> list[str]:
+    """Build CLI args for the condor MCP subprocess."""
     import os
 
-    env = [
-        {"name": "CONDOR_CHAT_ID", "value": str(chat_id)},
-        {"name": "CONDOR_USER_ID", "value": str(user_id)},
-        {"name": "TELEGRAM_BOT_TOKEN", "value": os.environ.get("TELEGRAM_TOKEN", "")},
+    args = [
+        "--chat-id", str(chat_id),
+        "--user-id", str(user_id),
+        "--bot-token", os.environ.get("TELEGRAM_TOKEN", ""),
     ]
     if agent_slug:
-        env.append({"name": "CONDOR_AGENT_SLUG", "value": agent_slug})
-    return env
+        args.extend(["--agent-slug", agent_slug])
+    if server_name:
+        args.extend(["--server-name", server_name])
+    return args
 
 
 def build_mcp_servers_for_session(
@@ -318,19 +330,20 @@ def build_mcp_servers_for_session(
 
     cm = get_config_manager()
 
-    # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
-    condor = {
-        "name": "condor",
-        "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"],
-        "env": _condor_mcp_env(chat_id, user_id),
-    }
-
     # Resolve which hummingbot server to use (respects user preferences)
     server_name = get_effective_server(chat_id, user_data)
     if not server_name:
         accessible = cm.get_accessible_servers(user_id)
         server_name = accessible[0] if accessible else None
+
+    # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
+    # Pass resolved server_name so start_agent uses the correct server
+    condor = {
+        "name": "condor",
+        "command": "uv",
+        "args": ["run", "python", "-m", "mcp_servers.condor"] + _condor_mcp_args(chat_id, user_id, server_name=server_name),
+        "env": [],
+    }
 
     if not server_name:
         log.warning(
@@ -351,20 +364,16 @@ def build_mcp_servers_for_session(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
-    hummingbot_env = [
-        {"name": "HUMMINGBOT_API_URL", "value": api_url},
-        {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
-        {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
-    ]
-
-    if execution_mode == "dry_run":
-        hummingbot_env.append({"name": "DRY_RUN", "value": "1"})
-
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
-        "env": hummingbot_env,
+        "args": [
+            "run", "python", "-m", "mcp_servers.hummingbot_api",
+            "--url", api_url,
+            "--username", server["username"],
+            "--password", server["password"],
+        ],
+        "env": [],
     }
 
     return [mcp_hummingbot, condor]
@@ -387,8 +396,8 @@ def build_mcp_servers_for_agent(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"],
-        "env": _condor_mcp_env(chat_id, user_id, agent_slug),
+        "args": ["run", "python", "-m", "mcp_servers.condor"] + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
+        "env": [],
     }
 
     server = cm.get_server(server_name)
@@ -402,21 +411,16 @@ def build_mcp_servers_for_agent(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
-    hummingbot_env = [
-        {"name": "HUMMINGBOT_API_URL", "value": api_url},
-        {"name": "HUMMINGBOT_USERNAME", "value": server["username"]},
-        {"name": "HUMMINGBOT_PASSWORD", "value": server["password"]},
-    ]
-
-    # Dry-run: inject DRY_RUN=1 so MCP server blocks mutating executor actions
-    if execution_mode == "dry_run":
-        hummingbot_env.append({"name": "DRY_RUN", "value": "1"})
-
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
-        "env": hummingbot_env,
+        "args": [
+            "run", "python", "-m", "mcp_servers.hummingbot_api",
+            "--url", api_url,
+            "--username", server["username"],
+            "--password", server["password"],
+        ],
+        "env": [],
     }
 
     return [mcp_hummingbot, condor]
