@@ -7,6 +7,7 @@ Data is organized by strategy and session::
             agent.md            # strategy definition
             config.yml          # runtime config
             learnings.md        # cross-session learnings
+            dry_runs/           # experiment snapshots (experiment_N.md)
             sessions/
                 session_1/
                     journal.md  # summary + decisions + ticks + executors + snapshots
@@ -138,16 +139,20 @@ def next_session_number(agent_dir: Path) -> int:
 
 
 def next_experiment_number(agent_dir: Path) -> int:
-    """Determine the next experiment number by scanning experiment_*.md files."""
-    experiments_dir = agent_dir / "experiments"
-    if not experiments_dir.exists():
-        return 1
+    """Determine the next experiment number by scanning experiment_*.md files.
+
+    Checks both dry_runs/ (new) and experiments/ (legacy) directories.
+    """
     existing = []
-    for f in experiments_dir.iterdir():
-        if f.is_file() and f.suffix == ".md":
-            m = re.match(r"experiment_(\d+)\.md", f.name)
-            if m:
-                existing.append(int(m.group(1)))
+    for dir_name in ("dry_runs", "experiments"):
+        d = agent_dir / dir_name
+        if not d.exists():
+            continue
+        for f in d.iterdir():
+            if f.is_file() and f.suffix == ".md":
+                m = re.match(r"experiment_(\d+)\.md", f.name)
+                if m:
+                    existing.append(int(m.group(1)))
     return max(existing, default=0) + 1
 
 
@@ -194,7 +199,7 @@ def save_experiment_snapshot(
     duration: float,
 ) -> Path:
     """Save a single experiment snapshot as a flat .md file."""
-    experiments_dir = agent_dir / "experiments"
+    experiments_dir = agent_dir / "dry_runs"
     experiments_dir.mkdir(parents=True, exist_ok=True)
 
     # Format risk state
