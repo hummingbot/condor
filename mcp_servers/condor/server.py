@@ -3,9 +3,11 @@
 Provides local-only tools for routines, servers, user context,
 trading agents, skills, and notes via MCP.
 
-Expects CONDOR_CHAT_ID and CONDOR_USER_ID environment variables.
+Accepts CLI args (--chat-id, --user-id, --agent-slug) or falls back to
+CONDOR_CHAT_ID / CONDOR_USER_ID / CONDOR_AGENT_SLUG env vars.
 """
 
+import argparse
 import json
 import os
 
@@ -13,10 +15,20 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("condor")
 
-CHAT_ID = int(os.environ.get("CONDOR_CHAT_ID", "0"))
-USER_ID = int(os.environ.get("CONDOR_USER_ID", "0"))
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CONDOR_AGENT_SLUG = os.environ.get("CONDOR_AGENT_SLUG", "")
+# Parse CLI args, fall back to env vars
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--chat-id", type=int, default=None)
+_parser.add_argument("--user-id", type=int, default=None)
+_parser.add_argument("--agent-slug", default=None)
+_parser.add_argument("--bot-token", default=None)
+_parser.add_argument("--server-name", default=None)
+_args, _ = _parser.parse_known_args()
+
+CHAT_ID = _args.chat_id if _args.chat_id is not None else int(os.environ.get("CONDOR_CHAT_ID", "0"))
+USER_ID = _args.user_id if _args.user_id is not None else int(os.environ.get("CONDOR_USER_ID", "0"))
+TELEGRAM_BOT_TOKEN = _args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CONDOR_AGENT_SLUG = _args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", "")
+ACTIVE_SERVER = _args.server_name or os.environ.get("CONDOR_SERVER_NAME", "")
 
 
 # =============================================================================
@@ -952,6 +964,7 @@ async def _local_agent_lifecycle(
             return {"error": "strategy_id is required"}
         from condor.trading_agent.strategy import StrategyStore
         from condor.trading_agent.config import load_agent_config
+        from config_manager import get_config_manager, get_effective_server
         store = StrategyStore()
         strategy = store.get(strategy_id)
         if not strategy:
@@ -963,6 +976,17 @@ async def _local_agent_lifecycle(
             if config.get("dry_run") and "execution_mode" not in config:
                 config["execution_mode"] = "dry_run"
             config_dict.update(config)
+        # Enforce the active server if not explicitly overridden.
+        # ACTIVE_SERVER is passed via --server-name from the session that spawned
+        # this MCP subprocess, so it reflects the user's actual server selection.
+        if not config or "server_name" not in config:
+            effective = ACTIVE_SERVER or get_effective_server(CHAT_ID)
+            if not effective:
+                cm = get_config_manager()
+                accessible = cm.get_accessible_servers(USER_ID)
+                effective = accessible[0] if accessible else None
+            if effective:
+                config_dict["server_name"] = effective
         engine = TickEngine(
             strategy=strategy,
             config=config_dict,

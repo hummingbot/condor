@@ -52,9 +52,17 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = update.effective_user
     token = create_login_token(user.id, user.username or "", user.first_name or "")
 
-    if WEB_URL:
-        base = WEB_URL.rstrip("/")
-        url = f"{base}/login?token={token}"
+    url = f"{WEB_URL}/login?token={token}"
+    is_localhost = "localhost" in WEB_URL or "127.0.0.1" in WEB_URL
+
+    if is_localhost:
+        await update.message.reply_text(
+            f"🌐 *Web Dashboard*\n\n"
+            f"Open this link in your browser:\n`{url}`\n\n"
+            f"_Link valid for 5 minutes\\._",
+            parse_mode="MarkdownV2",
+        )
+    else:
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🌐 Open Dashboard", url=url)]]
         )
@@ -63,14 +71,6 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Tap the button below to open the dashboard\\.\n"
             "_Link valid for 5 minutes\\._",
             reply_markup=keyboard,
-            parse_mode="MarkdownV2",
-        )
-    else:
-        url = f"http://localhost:{WEB_PORT}/login?token={token}"
-        await update.message.reply_text(
-            f"🌐 *Web Dashboard*\n\n"
-            f"Open this link in your browser:\n`{url}`\n\n"
-            f"_Link valid for 5 minutes\\._",
             parse_mode="MarkdownV2",
         )
 

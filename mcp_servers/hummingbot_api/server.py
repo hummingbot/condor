@@ -895,8 +895,31 @@ async def explore_geckoterminal(
     return result.get("formatted_output", str(result))
 
 
+def _apply_cli_args():
+    """Parse CLI args and override settings if provided."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--url")
+    parser.add_argument("--username")
+    parser.add_argument("--password")
+    parser.add_argument("--server-name")
+    args, _ = parser.parse_known_args()
+
+    if args.url:
+        settings.api_url = args.url
+    if args.username:
+        settings.api_username = args.username
+    if args.password:
+        settings.api_password = args.password
+    if args.server_name:
+        settings.server_name = args.server_name
+
+
 async def _run():
     """Run the MCP server"""
+    _apply_cli_args()
+
     # Setup logging once at application start
     logger.info("Starting Hummingbot MCP Server")
     logger.info(f"Configured API URL: {settings.api_url}")
