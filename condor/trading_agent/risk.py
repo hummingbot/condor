@@ -122,15 +122,22 @@ def auto_approve_with_risk_check(
             raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
             tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
 
+            # Dry-run mode: block ALL mutating actions
+            if execution_mode == "dry_run":
+                if tool_name == "manage_executors":
+                    input_data = tool_call.get("input", {})
+                    action = input_data.get("action", "")
+                    if action in ("create", "stop"):
+                        log.info("Dry-run mode: blocked manage_executors(%s)", action)
+                        return {"outcome": {"outcome": "cancelled"}}
+                elif tool_name in ("place_order", "manage_gateway_swaps", "manage_gateway_clmm"):
+                    log.info("Dry-run mode: blocked %s", tool_name)
+                    return {"outcome": {"outcome": "cancelled"}}
+
             # For executor actions, run risk check
             if tool_name == "manage_executors":
                 input_data = tool_call.get("input", {})
                 action = input_data.get("action", "")
-
-                # Dry-run mode: block executor creation (read-only tools still work)
-                if execution_mode == "dry_run" and action == "create":
-                    log.info("Dry-run mode: blocked executor create (recorded in snapshot)")
-                    return {"outcome": {"outcome": "cancelled"}}
 
                 # Validate controller_id on create
                 if action == "create":

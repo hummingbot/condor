@@ -31,22 +31,31 @@ MAX_LEARNINGS = 20
 
 
 def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
-    """Derive (session_dir, agent_dir) from an agent_id like 'slug_N'.
+    """Derive (session_dir, agent_dir) from an agent_id like 'slug_N' or 'slug_eN'.
+
+    Experiment IDs use the format 'slug_eN' (e.g. 'my_strategy_e3').
+    Session IDs use the format 'slug_N' (e.g. 'my_strategy_3').
 
     Returns (None, None) if the path doesn't exist on disk.
     """
-    # agent_id format: {slug}_{session_num}  e.g. "my_strategy_3"
-    # Split on last underscore to get slug and session number
+    # agent_id format: {slug}_{session_num} or {slug}_e{experiment_num}
     last_sep = agent_id.rfind("_")
     if last_sep == -1:
         return None, None
     slug = agent_id[:last_sep]
-    try:
-        session_num = int(agent_id[last_sep + 1:])
-    except ValueError:
-        return None, None
+    num_part = agent_id[last_sep + 1:]
+
     agent_dir = _DATA_ROOT / slug
     if not agent_dir.is_dir():
+        return None, None
+
+    # Experiments (e.g. "e3") are flat files, not directories
+    if num_part.startswith("e"):
+        return None, agent_dir
+
+    try:
+        session_num = int(num_part)
+    except ValueError:
         return None, None
     session_dir = agent_dir / "sessions" / f"session_{session_num}"
     return session_dir, agent_dir
@@ -99,8 +108,8 @@ SNAPSHOT_TEMPLATE = """\
 
 </details>
 
-## Cost
-LLM: ${cost:.4f} | Duration: {duration:.1f}s | Tokens: {input_tokens} in / {output_tokens} out
+## Stats
+Duration: {duration:.1f}s
 """
 
 
@@ -126,6 +135,110 @@ def next_session_number(agent_dir: Path) -> int:
         if d.is_dir() and d.name.startswith("session_")
     ]
     return max(existing, default=0) + 1
+
+
+def next_experiment_number(agent_dir: Path) -> int:
+    """Determine the next experiment number by scanning experiment_*.md files."""
+    experiments_dir = agent_dir / "experiments"
+    if not experiments_dir.exists():
+        return 1
+    existing = []
+    for f in experiments_dir.iterdir():
+        if f.is_file() and f.suffix == ".md":
+            m = re.match(r"experiment_(\d+)\.md", f.name)
+            if m:
+                existing.append(int(m.group(1)))
+    return max(existing, default=0) + 1
+
+
+EXPERIMENT_TEMPLATE = """\
+# Experiment #{num} — {timestamp}
+Mode: {execution_mode}
+
+<details><summary>System Prompt ({prompt_len} chars)</summary>
+
+{system_prompt}
+
+</details>
+
+## Executor State
+{executors_data}
+
+## Risk State
+{risk_state}
+
+## Agent Response
+{response_text}
+
+<details><summary>Tool Calls ({tool_count})</summary>
+
+{tool_calls}
+
+</details>
+
+## Stats
+Duration: {duration:.1f}s
+"""
+
+
+def save_experiment_snapshot(
+    agent_dir: Path,
+    experiment_num: int,
+    execution_mode: str,
+    timestamp: str,
+    system_prompt: str,
+    response_text: str,
+    tool_calls: list[dict],
+    executors_data: str,
+    risk_state: dict,
+    duration: float,
+) -> Path:
+    """Save a single experiment snapshot as a flat .md file."""
+    experiments_dir = agent_dir / "experiments"
+    experiments_dir.mkdir(parents=True, exist_ok=True)
+
+    # Format risk state
+    max_dd = risk_state.get("max_drawdown_pct", -1)
+    dd_display = f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit" if max_dd >= 0 else "disabled"
+    risk_lines = [
+        f"- Position Size: ${risk_state.get('total_exposure', 0):.2f} / ${risk_state.get('max_position_size', 500):.2f} limit",
+        f"- Open Executors: {risk_state.get('executor_count', 0)} / {risk_state.get('max_open_executors', 5)} limit",
+        f"- Drawdown: {dd_display}",
+        f"- Status: {'BLOCKED - ' + risk_state.get('block_reason', '') if risk_state.get('is_blocked') else 'ACTIVE'}",
+    ]
+
+    # Format tool calls
+    import json
+    tool_parts = []
+    for i, tc in enumerate(tool_calls, 1):
+        tc_name = tc.get("name", tc.get("title", "unknown"))
+        tc_status = tc.get("status", "")
+        tool_parts.append(f"### {i}. {tc_name} ({tc_status})")
+        if tc.get("input"):
+            input_str = json.dumps(tc["input"], indent=2) if isinstance(tc["input"], dict) else str(tc["input"])
+            tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
+        if tc.get("output"):
+            output_str = str(tc["output"])[:500]
+            tool_parts.append(f"**Output:**\n```\n{output_str}\n```")
+        tool_parts.append("")
+
+    content = EXPERIMENT_TEMPLATE.format(
+        num=experiment_num,
+        timestamp=timestamp,
+        execution_mode=execution_mode,
+        prompt_len=len(system_prompt),
+        system_prompt=system_prompt,
+        executors_data=executors_data or "No executors.",
+        risk_state="\n".join(risk_lines),
+        response_text=response_text or "No response.",
+        tool_count=len(tool_calls),
+        tool_calls="\n".join(tool_parts) or "No tool calls.",
+        duration=duration,
+    )
+
+    path = experiments_dir / f"experiment_{experiment_num}.md"
+    path.write_text(content)
+    return path
 
 
 class JournalManager:
@@ -335,10 +448,7 @@ class JournalManager:
         tool_calls: list[dict[str, Any]],
         executors_data: str,
         risk_state: dict[str, Any],
-        cost: float,
         duration: float,
-        input_tokens: int = 0,
-        output_tokens: int = 0,
     ) -> Path:
         """Write a full snapshot capturing everything."""
         self._snapshots_dir.mkdir(parents=True, exist_ok=True)
@@ -377,10 +487,7 @@ class JournalManager:
             response_text=response_text or "No response.",
             tool_count=len(tool_calls),
             tool_calls="\n".join(tool_parts) or "No tool calls.",
-            cost=cost,
             duration=duration,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
         )
 
         path = self._snapshots_dir / f"snapshot_{tick}.md"
@@ -478,7 +585,6 @@ class JournalManager:
                 f"### {name}\n{summary}" for name, summary in kwargs.get("core_data_summaries", {}).items()
             ) or "",
             risk_state=kwargs.get("risk_state", {}),
-            cost=kwargs.get("cost", 0),
             duration=kwargs.get("duration", 0),
         )
 
@@ -566,12 +672,12 @@ class JournalManager:
         section = self._get_section("Ticks")
         return len([l for l in section.splitlines() if l.startswith("- tick#")])
 
-    def record_tick(self, response_summary: str = "", cost: float = 0, actions: int = 0) -> int:
+    def record_tick(self, response_summary: str = "", actions: int = 0) -> int:
         """Record a tick entry. Returns the new tick number."""
         self._tick_count += 1
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         summary = response_summary[:200].replace("\n", " ")
-        entry = f"- tick#{self._tick_count} | {now} | cost=${cost:.4f} | actions={actions} | {summary}"
+        entry = f"- tick#{self._tick_count} | {now} | actions={actions} | {summary}"
         self._append_to_section("Ticks", entry)
         return self._tick_count
 
@@ -650,8 +756,6 @@ class JournalManager:
             for part in parts:
                 if part.startswith("tick#"):
                     entry["tick"] = int(part.replace("tick#", ""))
-                elif part.startswith("cost=$"):
-                    entry["cost"] = float(part.replace("cost=$", ""))
                 elif part.startswith("actions="):
                     entry["actions"] = int(part.replace("actions=", ""))
                 else:
@@ -721,15 +825,6 @@ class JournalManager:
             return 0.0
         return max(0, (peak - current) / peak * 100)
 
-    def get_daily_cost(self) -> float:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        total = 0.0
-        for tick in self._parse_ticks():
-            ts = tick.get("timestamp", "")
-            if ts.startswith(today):
-                total += tick.get("cost", 0)
-        return total
-
     def get_pnl_series(self, hours: int = 24) -> list[dict]:
         return [
             {"timestamp": s.get("timestamp", ""), "pnl": s.get("pnl", 0)}
@@ -750,7 +845,6 @@ class JournalManager:
             "total_volume": self.get_total_volume(),
             "total_exposure": self.get_total_exposure(),
             "open_executors": self.get_open_executor_count(),
-            "daily_cost": self.get_daily_cost(),
             "drawdown_pct": self.get_drawdown_pct(),
         }
 

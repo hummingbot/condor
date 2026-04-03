@@ -24,10 +24,9 @@ from condor.acp.client import (
     TextChunk,
     ToolCallEvent,
     ToolCallUpdate,
-    UsageUpdate,
 )
 
-from .journal import JournalManager, next_session_number
+from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .risk import RiskEngine, RiskLimits, auto_approve_with_risk_check
 from .strategy import Strategy
@@ -37,6 +36,13 @@ log = logging.getLogger(__name__)
 
 # Module-level registry of running engines
 _engines: dict[str, "TickEngine"] = {}
+
+
+class _NullTracker:
+    """Stub tracker for experiments (no journal)."""
+    def get_total_exposure(self) -> float: return 0.0
+    def get_open_executor_count(self) -> int: return 0
+    def get_drawdown_pct(self) -> float: return 0.0
 
 
 def get_engine(agent_id: str) -> TickEngine | None:
@@ -57,6 +63,7 @@ class TickEngine:
     # Derived identity (set in __post_init__)
     agent_id: str = field(init=False)
     session_num: int = field(init=False)
+    is_experiment: bool = field(default=False, init=False)
 
     # Components (created in __post_init__)
     journal: JournalManager = field(init=False)
@@ -75,26 +82,34 @@ class TickEngine:
 
     def __post_init__(self):
         agent_dir = self.strategy.agent_dir
-        self.session_num = next_session_number(agent_dir)
-        # Agent ID = slug_sessionNum (e.g. river_scalper_v2_3)
-        self.agent_id = f"{self.strategy.slug}_{self.session_num}"
+        mode = self.config.get("execution_mode", "loop")
+        self.is_experiment = mode in ("dry_run", "run_once")
 
-        # Session directory
-        self.session_dir = agent_dir / "sessions" / f"session_{self.session_num}"
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+        if self.is_experiment:
+            self.session_num = next_experiment_number(agent_dir)
+            self.agent_id = f"{self.strategy.slug}_e{self.session_num}"
+            # Experiments: flat folder, no session dir or journal
+            self.session_dir = None
+            self.journal = None
+        else:
+            self.session_num = next_session_number(agent_dir)
+            self.agent_id = f"{self.strategy.slug}_{self.session_num}"
+            self.session_dir = agent_dir / "sessions" / f"session_{self.session_num}"
+            self.session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save config per session
-        from .config import AgentConfig, save_agent_config
-        agent_config = AgentConfig.from_dict(self.config)
-        save_agent_config(self.session_dir, agent_config)
+            # Save config per session
+            from .config import AgentConfig, save_agent_config
+            agent_config = AgentConfig.from_dict(self.config)
+            save_agent_config(self.session_dir, agent_config)
 
-        self.journal = JournalManager(
-            self.agent_id,
-            strategy_name=self.strategy.name,
-            strategy_description=self.strategy.description,
-            session_dir=self.session_dir,
-            agent_dir=agent_dir,
-        )
+            self.journal = JournalManager(
+                self.agent_id,
+                strategy_name=self.strategy.name,
+                strategy_description=self.strategy.description,
+                session_dir=self.session_dir,
+                agent_dir=agent_dir,
+            )
+
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
         self.risk = RiskEngine(risk_limits)
         self.provider_registry = ProviderRegistry()
@@ -122,7 +137,8 @@ class TickEngine:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        self.journal.close()
+        if self.journal:
+            self.journal.close()
         _engines.pop(self.agent_id, None)
         log.info("TickEngine %s stopped", self.agent_id)
 
@@ -179,7 +195,6 @@ class TickEngine:
                     log.info("TickEngine %s: %s complete, self-stopping", self.agent_id, label)
                     await self._notify(f"Agent {self.agent_id}: {label} complete.")
                     self._running = False
-                    self.journal.close()
                     _engines.pop(self.agent_id, None)
                     return
 
@@ -204,7 +219,8 @@ class TickEngine:
         # 1. Get API client
         client = await self._get_client()
         if not client:
-            self.journal.append_error("No API client available")
+            if self.journal:
+                self.journal.append_error("No API client available")
             return
 
         # 2. Run core data providers (executors only -- agent uses MCP for market data)
@@ -225,15 +241,15 @@ class TickEngine:
             name: result.summary for name, result in skill_results.items()
         }
 
-        # 3. Read journal
-        learnings = self.journal.read_learnings()
-        recent_decisions = self.journal.get_recent_decisions(count=3)
-        summary = self.journal.read_summary()
+        # 3. Read journal context (sessions only)
+        learnings = self.journal.read_learnings() if self.journal else ""
+        recent_decisions = self.journal.get_recent_decisions(count=3) if self.journal else ""
+        summary = self.journal.read_summary() if self.journal else ""
 
-        # 4. Get risk state
-        risk_state = self.risk.get_state(self.journal)
+        # 4. Get risk state (experiments pass None — returns clean state)
+        risk_state = self.risk.get_state(self.journal or _NullTracker())
 
-        if risk_state.is_blocked:
+        if risk_state.is_blocked and not self.is_experiment:
             self.journal.append_action(
                 self.journal.tick_count + 1,
                 "tick_blocked",
@@ -244,7 +260,7 @@ class TickEngine:
             return
 
         # 5. Build prompt (server credentials are injected via env into MCP process)
-        next_tick = self.journal.tick_count + 1
+        next_tick = self.journal.tick_count + 1 if self.journal else 1
         prompt = build_tick_prompt(
             strategy=self.strategy,
             config=self.config,
@@ -296,9 +312,6 @@ class TickEngine:
             permission_callback=permission_cb,
         )
 
-        cost = 0.0
-        input_tokens = 0
-        output_tokens = 0
         response_chunks: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         tool_call_map: dict[str, dict[str, Any]] = {}
@@ -311,11 +324,12 @@ class TickEngine:
                         response_chunks.append(event.text)
                     elif isinstance(event, ToolCallEvent):
                         if event.tool_call_id in tool_call_map:
-                            # Update existing entry (dedup pending→completed)
                             tc = tool_call_map[event.tool_call_id]
                             tc["status"] = event.status
                             if event.title:
                                 tc["name"] = event.title
+                            if event.input:
+                                tc["input"] = event.input
                         else:
                             tc = {
                                 "id": event.tool_call_id,
@@ -323,6 +337,8 @@ class TickEngine:
                                 "status": event.status,
                                 "kind": event.kind,
                             }
+                            if event.input:
+                                tc["input"] = event.input
                             tool_calls.append(tc)
                             tool_call_map[event.tool_call_id] = tc
                     elif isinstance(event, ToolCallUpdate):
@@ -332,15 +348,6 @@ class TickEngine:
                                 tc["status"] = event.status
                             if event.title:
                                 tc["name"] = event.title
-                    elif isinstance(event, UsageUpdate):
-                        # Keep highest cost (streaming sends cost, response may not)
-                        if event.cost_usd > cost:
-                            cost = event.cost_usd
-                        input_tokens = event.input_tokens or input_tokens
-                        output_tokens = event.output_tokens or output_tokens
-                        # Fallback: if we have total but no breakdown, use total
-                        if not input_tokens and not output_tokens and event.used:
-                            input_tokens = event.used
         except asyncio.TimeoutError:
             log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
             response_chunks.append("(timed out)")
@@ -348,59 +355,72 @@ class TickEngine:
             await acp_client.stop()
 
         response_text = "".join(response_chunks)
-
-        # 7. Record tick
         tick_duration = time.time() - self._last_tick_at
-        tick_num = self.journal.record_tick(
-            response_summary=response_text[:500],
-            cost=cost,
-        )
 
-        # 8. Record metric snapshot from live skill data
-        skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
-        skill_volume = self._last_skill_data.get("total_volume", 0.0)
-        skill_executors = len(self._last_skill_data.get("executors", []))
-        skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
-        self.journal.record_snapshot(
-            total_pnl=skill_pnl,
-            total_volume=skill_volume,
-            open_count=skill_executors,
-            position_size=skill_exposure,
-        )
-
-        # 9. Save full snapshot with all context
         from datetime import datetime, timezone
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
         executors_summary = core_data_summaries.get("executors", "No executor data.")
-        self.journal.save_full_snapshot(
-            tick=tick_num,
-            timestamp=timestamp,
-            system_prompt=prompt,
-            response_text=response_text,
-            tool_calls=tool_calls,
-            executors_data=executors_summary,
-            risk_state=risk_state.to_dict(),
-            cost=cost,
-            duration=tick_duration,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-        )
 
-        # 10. Update journal summary
-        action_brief = response_text[:100].replace("\n", " ") if response_text else "No response"
-        self.journal.write_summary(
-            tick=tick_num,
-            status="Running",
-            pnl=skill_pnl,
-            open_count=skill_executors,
-            last_action=action_brief,
-        )
+        if self.is_experiment:
+            # Experiments: save a single snapshot file, no journal
+            from .journal import save_experiment_snapshot
+            save_experiment_snapshot(
+                agent_dir=self.strategy.agent_dir,
+                experiment_num=self.session_num,
+                execution_mode=mode,
+                timestamp=timestamp,
+                system_prompt=prompt,
+                response_text=response_text,
+                tool_calls=tool_calls,
+                executors_data=executors_summary,
+                risk_state=risk_state.to_dict(),
+                duration=tick_duration,
+            )
+            log.info(
+                "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
+                self.agent_id, self.session_num, len(tool_calls), len(response_text),
+            )
+        else:
+            # Sessions: full journal tracking
+            tick_num = self.journal.record_tick(
+                response_summary=response_text[:500],
+            )
 
-        log.info(
-            "TickEngine %s tick #%d complete (cost=$%.4f, tools=%d, response=%d chars)",
-            self.agent_id, tick_num, cost, len(tool_calls), len(response_text),
-        )
+            skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
+            skill_volume = self._last_skill_data.get("total_volume", 0.0)
+            skill_executors = len(self._last_skill_data.get("executors", []))
+            skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
+            self.journal.record_snapshot(
+                total_pnl=skill_pnl,
+                total_volume=skill_volume,
+                open_count=skill_executors,
+                position_size=skill_exposure,
+            )
+
+            self.journal.save_full_snapshot(
+                tick=tick_num,
+                timestamp=timestamp,
+                system_prompt=prompt,
+                response_text=response_text,
+                tool_calls=tool_calls,
+                executors_data=executors_summary,
+                risk_state=risk_state.to_dict(),
+                duration=tick_duration,
+            )
+
+            action_brief = response_text[:100].replace("\n", " ") if response_text else "No response"
+            self.journal.write_summary(
+                tick=tick_num,
+                status="Running",
+                pnl=skill_pnl,
+                open_count=skill_executors,
+                last_action=action_brief,
+            )
+
+            log.info(
+                "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
+                self.agent_id, tick_num, len(tool_calls), len(response_text),
+            )
 
     async def _collect_stream(self, acp_client: ACPClient, prompt: str):
         """Wrapper to make prompt_stream compatible with wait_for."""
@@ -457,9 +477,15 @@ class TickEngine:
 
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""
-        summary = self.journal.get_summary_dict()
         sd = self._last_skill_data
         risk_limits = self.config.get("risk_limits", {})
+
+        if self.journal:
+            summary = self.journal.get_summary_dict()
+        else:
+            summary = {"total_ticks": 0, "daily_pnl": 0, "total_volume": 0,
+                       "total_exposure": 0, "open_executors": 0}
+
         return {
             "agent_id": self.agent_id,
             "strategy": self.strategy.name,
@@ -470,7 +496,6 @@ class TickEngine:
             "daily_pnl": sd.get("total_pnl", summary["daily_pnl"]),
             "total_volume": sd.get("total_volume", summary.get("total_volume", 0)),
             "total_exposure": sd.get("total_exposure", summary["total_exposure"]),
-            "daily_cost": summary["daily_cost"],
             "open_executors": len(sd.get("executors", [])) or summary["open_executors"],
             "frequency_sec": self.config.get("frequency_sec", 60),
             "server_name": self.config.get("server_name", ""),
@@ -482,4 +507,5 @@ class TickEngine:
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
             "session_dir": str(self.session_dir) if self.session_dir else "",
+            "is_experiment": self.is_experiment,
         }

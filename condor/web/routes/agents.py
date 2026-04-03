@@ -43,6 +43,7 @@ class AgentSummary(BaseModel):
     status: str  # running, paused, stopped, idle
     agent_id: str = ""
     session_count: int = 0
+    experiment_count: int = 0
     tick_count: int = 0
     daily_pnl: float = 0.0
     instances: list[RunningInstance] = []
@@ -50,6 +51,13 @@ class AgentSummary(BaseModel):
 
 class SessionInfo(BaseModel):
     number: int
+    snapshot_count: int = 0
+    created_at: str = ""
+
+
+class ExperimentInfo(BaseModel):
+    number: int
+    execution_mode: str = ""  # dry_run or run_once
     snapshot_count: int = 0
     created_at: str = ""
 
@@ -65,13 +73,13 @@ class AgentDetail(BaseModel):
     status: str = "idle"
     agent_id: str = ""
     sessions: list[SessionInfo] = []
+    experiments: list[ExperimentInfo] = []
     instances: list[RunningInstance] = []
 
 
 class SnapshotSummary(BaseModel):
     tick: int
     timestamp: str = ""
-    cost: float = 0.0
     file: str = ""
 
 
@@ -148,6 +156,13 @@ def _count_sessions(agent_dir: Path) -> int:
     return 0
 
 
+def _count_experiments(agent_dir: Path) -> int:
+    experiments_dir = agent_dir / "experiments"
+    if experiments_dir.exists():
+        return len([f for f in experiments_dir.iterdir() if f.is_file() and f.suffix == ".md" and f.name.startswith("experiment_")])
+    return 0
+
+
 def _list_sessions(agent_dir: Path) -> list[SessionInfo]:
     sessions = []
     for dirname in ("sessions", "trading_sessions"):
@@ -176,11 +191,46 @@ def _list_sessions(agent_dir: Path) -> list[SessionInfo]:
     return sessions
 
 
+def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
+    experiments = []
+    experiments_dir = agent_dir / "experiments"
+    if not experiments_dir.exists():
+        return experiments
+    for f in sorted(experiments_dir.glob("experiment_*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
+        m = re.match(r"experiment_(\d+)\.md", f.name)
+        if not m:
+            continue
+        num = int(m.group(1))
+        # Extract mode from file header
+        execution_mode = ""
+        content = f.read_text(errors="replace")
+        mode_match = re.search(r"^Mode:\s*(\S+)", content, re.MULTILINE)
+        if mode_match:
+            execution_mode = mode_match.group(1)
+        # Extract timestamp
+        created = ""
+        ts_match = re.search(r"^# Experiment #\d+ — (.+)$", content, re.MULTILINE)
+        if ts_match:
+            created = ts_match.group(1)
+        experiments.append(ExperimentInfo(
+            number=num, execution_mode=execution_mode,
+            snapshot_count=1, created_at=created,
+        ))
+    return experiments
+
+
 def _get_session_dir(agent_dir: Path, session_num: int) -> Path | None:
     for dirname in ("sessions", "trading_sessions"):
         path = agent_dir / dirname / f"session_{session_num}"
         if path.exists():
             return path
+    return None
+
+
+def _get_experiment_file(agent_dir: Path, experiment_num: int) -> Path | None:
+    path = agent_dir / "experiments" / f"experiment_{experiment_num}.md"
+    if path.exists():
+        return path
     return None
 
 
@@ -231,6 +281,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
             status=status,
             agent_id=agent_id,
             session_count=_count_sessions(s.agent_dir),
+            experiment_count=_count_experiments(s.agent_dir),
             tick_count=tick_count,
             daily_pnl=daily_pnl,
             instances=instances,
@@ -276,8 +327,9 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
             status = info["status"]
             agent_id = info["agent_id"]
 
-    # List sessions
+    # List sessions and experiments
     sessions = _list_sessions(agent_dir)
+    experiments = _list_experiments(agent_dir)
 
     return AgentDetail(
         slug=slug,
@@ -290,6 +342,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         status=status,
         agent_id=agent_id,
         sessions=sessions,
+        experiments=experiments,
         instances=instances,
     )
 
@@ -512,14 +565,10 @@ async def list_snapshots(slug: str, session_num: int, user: WebUser = Depends(ge
                 content = f.read_text()
                 ts_match = re.search(r"^# (?:Snapshot|Tick) #\d+ — (.+)$", content, re.MULTILINE)
                 timestamp = ts_match.group(1) if ts_match else ""
-                # Extract cost
-                cost_match = re.search(r"LLM: \$([0-9.]+)", content)
-                cost = float(cost_match.group(1)) if cost_match else 0.0
 
                 snapshots.append(SnapshotSummary(
                     tick=tick,
                     timestamp=timestamp,
-                    cost=cost,
                     file=f.name,
                 ))
         break  # Use whichever dir exists first
@@ -542,3 +591,24 @@ async def get_snapshot(slug: str, session_num: int, tick: int, user: WebUser = D
             return {"content": path.read_text(), "tick": tick}
 
     raise HTTPException(status_code=404, detail=f"Snapshot {tick} not found")
+
+
+# ── Experiments ──
+
+
+@router.get("/{slug}/experiments")
+async def list_experiments(slug: str, user: WebUser = Depends(get_current_user)):
+    """List experiments for an agent."""
+    strategy = _get_strategy_by_slug(slug)
+    experiments = _list_experiments(strategy.agent_dir)
+    return {"experiments": [e.model_dump() for e in experiments]}
+
+
+@router.get("/{slug}/experiments/{exp_num}")
+async def get_experiment(slug: str, exp_num: int, user: WebUser = Depends(get_current_user)):
+    """Read an experiment snapshot."""
+    strategy = _get_strategy_by_slug(slug)
+    path = _get_experiment_file(strategy.agent_dir, exp_num)
+    if not path:
+        raise HTTPException(status_code=404, detail=f"Experiment {exp_num} not found")
+    return {"content": path.read_text(), "number": exp_num}

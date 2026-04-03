@@ -42,6 +42,7 @@ class ToolCallEvent:
     title: str
     status: str  # pending, in_progress, completed, failed
     kind: str = "other"
+    input: dict | None = None
 
 
 @dataclass
@@ -57,20 +58,11 @@ class PromptDone:
 
 
 @dataclass
-class UsageUpdate:
-    used: int  # cumulative tokens consumed in the conversation context
-    size: int  # total context window size
-    cost_usd: float  # cumulative cost in USD
-    input_tokens: int = 0  # cumulative input tokens
-    output_tokens: int = 0  # cumulative output tokens
-
-
-@dataclass
 class Heartbeat:
     elapsed_seconds: float
 
 
-ACPEvent = TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat | UsageUpdate
+ACPEvent = TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat
 
 
 # Type alias for the permission callback
@@ -99,7 +91,6 @@ class ACPClient:
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
-        self.last_usage: UsageUpdate | None = None  # Updated by non-streaming prompt()
         self._peer.register_handler("session/update", self._on_session_update)
         self._peer.register_handler("session/request_permission", self._on_request_permission)
 
@@ -200,17 +191,11 @@ class ACPClient:
     # --- Prompt ---
 
     async def prompt(self, text: str) -> str:
-        """One-shot prompt: send text, collect all agent message chunks, return joined.
-
-        Also stores the last UsageUpdate in ``self.last_usage`` so callers
-        (e.g. AgentSession) can read token stats after a non-streaming call.
-        """
+        """One-shot prompt: send text, collect all agent message chunks, return joined."""
         chunks: list[str] = []
         async for event in self.prompt_stream(text):
             if isinstance(event, TextChunk):
                 chunks.append(event.text)
-            elif isinstance(event, UsageUpdate):
-                self.last_usage = event
         return "".join(chunks)
 
     async def prompt_stream(self, text: str) -> AsyncIterator[ACPEvent]:
@@ -251,35 +236,6 @@ class ACPClient:
                     if isinstance(result, dict)
                     else "end_turn"
                 )
-                # Extract accumulated token usage from prompt response
-                if isinstance(result, dict) and "usage" in result:
-                    usage = result["usage"]
-                    total = usage.get("totalTokens", 0)
-                    size = usage.get("contextWindow", 200000)
-                    input_tokens = (
-                        usage.get("inputTokens")
-                        or usage.get("input_tokens", 0)
-                    )
-                    output_tokens = (
-                        usage.get("outputTokens")
-                        or usage.get("output_tokens", 0)
-                    )
-                    cost = result.get("cost", {}) or {}
-                    log.debug(
-                        "Usage from prompt response: totalTokens=%d, contextWindow=%d, "
-                        "input=%d, output=%d, raw_usage=%s, raw_result_keys=%s",
-                        total, size, input_tokens, output_tokens, usage,
-                        list(result.keys()),
-                    )
-                    self._event_queue.put_nowait(
-                        UsageUpdate(
-                            used=total,
-                            size=size,
-                            cost_usd=cost.get("amount", 0.0),
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                        )
-                    )
                 self._event_queue.put_nowait(PromptDone(stop_reason=reason))
 
         future.add_done_callback(_on_response)
@@ -331,6 +287,7 @@ class ACPClient:
                     title=update.get("title", ""),
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
+                    input=update.get("input"),
                 )
             )
         elif kind == "tool_call_update":
@@ -339,36 +296,6 @@ class ACPClient:
                     tool_call_id=update.get("toolCallId", ""),
                     status=update.get("status"),
                     title=update.get("title"),
-                )
-            )
-        elif kind == "usage_update":
-            # NOTE: UsageUpdate may also fire from _on_response (prompt result).
-            # AgentSession keeps the highest value seen.
-            cost = update.get("cost") or {}
-            used = update.get("used", 0)
-            size = update.get("size", 200000)
-            # Try multiple field names — ACP implementations vary
-            input_tokens = (
-                update.get("inputTokens")
-                or update.get("input_tokens")
-                or update.get("tokensIn", 0)
-            )
-            output_tokens = (
-                update.get("outputTokens")
-                or update.get("output_tokens")
-                or update.get("tokensOut", 0)
-            )
-            log.debug(
-                "Usage from session/update: used=%d, size=%d, input=%d, output=%d, raw=%s",
-                used, size, input_tokens, output_tokens, update,
-            )
-            self._event_queue.put_nowait(
-                UsageUpdate(
-                    used=used,
-                    size=size,
-                    cost_usd=cost.get("amount", 0.0),
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
                 )
             )
 
