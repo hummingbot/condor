@@ -163,7 +163,16 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
             pass  # If schema fetch fails, skip validation
 
         account = request.account_name or "master_account"
-        controller_id = request.controller_id or "main"
+        # Check both top-level param and executor_config (agents sometimes put it in the wrong place)
+        controller_id = request.controller_id or merged_config.pop("controller_id", None) or "main"
+
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "create_executor: controller_id=%r (request=%r, config_had=%r), type=%s, account=%s",
+            controller_id, request.controller_id,
+            "controller_id" in (request.executor_config or {}),
+            executor_type, account,
+        )
 
         try:
             result = await client.executors.create_executor(

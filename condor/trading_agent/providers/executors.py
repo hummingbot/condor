@@ -31,20 +31,43 @@ class ExecutorsProvider(BaseProvider):
 
         # Filter to this agent's executors if agent_id is provided
         if agent_id and executors:
-            executors = [
-                ex for ex in executors
-                if ex.get("config", {}).get("controller_id") == agent_id
-            ]
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            filtered = []
+            for ex in executors:
+                # controller_id can be top-level or nested inside config
+                cid = (
+                    ex.get("controller_id")
+                    or ex.get("config", {}).get("controller_id")
+                )
+                eid = ex.get("id", ex.get("executor_id", "?"))
+                _log.info(
+                    "executor %s controller_id=%r (want %r) [top=%r, config=%r]",
+                    eid, cid, agent_id,
+                    ex.get("controller_id"),
+                    ex.get("config", {}).get("controller_id"),
+                )
+                if cid == agent_id:
+                    filtered.append(ex)
+            executors = filtered
 
         # Fetch authoritative PnL from performance report API
         perf_data = {}
         if agent_id:
             try:
-                perf_data = await client.executors.get_performance_report(controller_id=agent_id)
-                if not isinstance(perf_data, dict):
-                    perf_data = {}
-            except Exception:
-                pass
+                raw = await client.executors.get_performance_report(controller_id=agent_id)
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    "performance_report for %s: type=%s, value=%s",
+                    agent_id, type(raw).__name__, str(raw)[:500],
+                )
+                if isinstance(raw, dict):
+                    perf_data = raw
+            except Exception as e:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "performance_report for %s failed: %s", agent_id, e,
+                )
 
         if not executors and not perf_data:
             return ProviderResult(

@@ -148,6 +148,69 @@ def _get_engines_for_slug(slug: str) -> list:
     return [e for e in get_all_engines().values() if e.strategy.slug == slug]
 
 
+def _infer_latest_session_status(agent_dir: Path, slug: str) -> dict[str, Any] | None:
+    """When no engine is in memory, infer status from the latest session on disk.
+
+    Returns a dict with agent_id, status, tick_count, daily_pnl if a recent
+    session exists, or None.
+    """
+    import time
+
+    sessions_dir = agent_dir / "sessions"
+    if not sessions_dir.exists():
+        return None
+
+    # Find the latest session directory
+    session_dirs = sorted(
+        [d for d in sessions_dir.iterdir() if d.is_dir() and d.name.startswith("session_")],
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    if not session_dirs:
+        return None
+
+    latest = session_dirs[0]
+    try:
+        num = int(latest.name.split("_", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+    # Check if the session has recent activity (snapshot written in last 5 min)
+    snap_dir = latest / "snapshots"
+    last_activity = latest.stat().st_mtime
+    if snap_dir.exists():
+        snaps = list(snap_dir.glob("snapshot_*.md"))
+        if snaps:
+            last_activity = max(f.stat().st_mtime for f in snaps)
+
+    age_sec = time.time() - last_activity
+    status = "running" if age_sec < 300 else "idle"
+
+    # Read basic stats from journal
+    tick_count = 0
+    daily_pnl = 0.0
+    journal_path = latest / "journal.md"
+    if journal_path.exists():
+        import re as _re
+        text = journal_path.read_text(errors="replace")
+        tick_count = len(_re.findall(r"^- tick#", text, _re.MULTILINE))
+        # Extract latest PnL from snapshots section
+        pnl_matches = _re.findall(r"pnl=\$([+-]?\d+\.?\d*)", text)
+        if pnl_matches:
+            try:
+                daily_pnl = float(pnl_matches[-1])
+            except ValueError:
+                pass
+
+    return {
+        "agent_id": f"{slug}_{num}",
+        "session_num": num,
+        "status": status,
+        "tick_count": tick_count,
+        "daily_pnl": daily_pnl,
+    }
+
+
 def _count_sessions(agent_dir: Path) -> int:
     for dirname in ("sessions", "trading_sessions"):
         sessions_dir = agent_dir / dirname
@@ -157,10 +220,12 @@ def _count_sessions(agent_dir: Path) -> int:
 
 
 def _count_experiments(agent_dir: Path) -> int:
-    experiments_dir = agent_dir / "experiments"
-    if experiments_dir.exists():
-        return len([f for f in experiments_dir.iterdir() if f.is_file() and f.suffix == ".md" and f.name.startswith("experiment_")])
-    return 0
+    count = 0
+    for dirname in ("dry_runs", "experiments"):
+        d = agent_dir / dirname
+        if d.exists():
+            count += len([f for f in d.iterdir() if f.is_file() and f.suffix == ".md" and f.name.startswith("experiment_")])
+    return count
 
 
 def _list_sessions(agent_dir: Path) -> list[SessionInfo]:
@@ -193,10 +258,12 @@ def _list_sessions(agent_dir: Path) -> list[SessionInfo]:
 
 def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
     experiments = []
-    experiments_dir = agent_dir / "experiments"
-    if not experiments_dir.exists():
-        return experiments
-    for f in sorted(experiments_dir.glob("experiment_*.md"), key=lambda x: x.stat().st_mtime, reverse=True):
+    all_files = []
+    for dirname in ("dry_runs", "experiments"):
+        d = agent_dir / dirname
+        if d.exists():
+            all_files.extend(d.glob("experiment_*.md"))
+    for f in sorted(all_files, key=lambda x: x.stat().st_mtime, reverse=True):
         m = re.match(r"experiment_(\d+)\.md", f.name)
         if not m:
             continue
@@ -228,9 +295,10 @@ def _get_session_dir(agent_dir: Path, session_num: int) -> Path | None:
 
 
 def _get_experiment_file(agent_dir: Path, experiment_num: int) -> Path | None:
-    path = agent_dir / "experiments" / f"experiment_{experiment_num}.md"
-    if path.exists():
-        return path
+    for dirname in ("dry_runs", "experiments"):
+        path = agent_dir / dirname / f"experiment_{experiment_num}.md"
+        if path.exists():
+            return path
     return None
 
 
@@ -273,6 +341,15 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 agent_id = info["agent_id"]
                 tick_count = info["tick_count"]
                 daily_pnl = info["daily_pnl"]
+
+        # Fallback: infer from latest session on disk when no engine in memory
+        if not engines:
+            disk_info = _infer_latest_session_status(s.agent_dir, s.slug)
+            if disk_info:
+                status = disk_info["status"]
+                agent_id = disk_info["agent_id"]
+                tick_count = disk_info["tick_count"]
+                daily_pnl = disk_info["daily_pnl"]
 
         results.append(AgentSummary(
             slug=s.slug,
@@ -326,6 +403,13 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         if not agent_id:
             status = info["status"]
             agent_id = info["agent_id"]
+
+    # Fallback: infer from latest session on disk when no engine in memory
+    if not engines:
+        disk_info = _infer_latest_session_status(agent_dir, slug)
+        if disk_info:
+            status = disk_info["status"]
+            agent_id = disk_info["agent_id"]
 
     # List sessions and experiments
     sessions = _list_sessions(agent_dir)

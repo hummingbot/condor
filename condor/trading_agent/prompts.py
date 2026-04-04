@@ -19,7 +19,7 @@ RULES:
 - The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
 - Be conservative. When in doubt, hold and journal why.
 - Keep tool chains short (1-5 calls per tick).
-- ALWAYS set controller_id in executor_config to YOUR agent_id (shown in [TICK INFO]). NEVER use "main" or any other value.
+- ALWAYS pass controller_id=YOUR_AGENT_ID as a top-level argument to manage_executors(action="create", controller_id="..."). It is NOT inside executor_config — it is a separate parameter. NEVER omit it or use "main".
 - Your executor state and positions are pre-loaded in [CORE DATA] below. Do NOT call manage_executors(action="search") or manage_executors(action="positions_summary") to check your own state — it's already here.
 
 ERROR RECOVERY:
@@ -137,7 +137,7 @@ def build_tick_prompt(
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
         if not is_dry_run:
-            tick_info += f"\nUse controller_id=\"{agent_id}\" in all executor configs."
+            tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
     sections.append(tick_info)
 
     # Run-once mode note
@@ -182,7 +182,7 @@ def build_tick_prompt(
     # Current config (exclude trading_context and risk_limits -- risk is shown in RISK STATE)
     config_lines = [f"[CURRENT CONFIG]"]
     if agent_id:
-        config_lines.append(f"controller_id: {agent_id}  ← USE THIS in all executor configs")
+        config_lines.append(f"controller_id: {agent_id}  ← pass as top-level arg to manage_executors, NOT inside executor_config")
     for k, v in config.items():
         if k in ("trading_context", "risk_limits"):
             continue

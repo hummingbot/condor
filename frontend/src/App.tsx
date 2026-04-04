@@ -4,7 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { ServerContext } from "@/hooks/useServer";
-import { AuthContext, useAuthState } from "@/lib/auth";
+import { AuthContext, useAuth, useAuthState } from "@/lib/auth";
 import { AgentDetail } from "@/pages/AgentDetail";
 import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
@@ -25,7 +25,7 @@ const queryClient = new QueryClient({
 });
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated } = useAuthState();
+  const { isAuthenticated } = useAuth();
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }

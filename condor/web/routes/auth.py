@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -8,6 +10,13 @@ from condor.web.auth import create_jwt, get_current_user, redeem_login_token
 from condor.web.models import LoginResponse, WebUser
 
 router = APIRouter(tags=["auth"])
+
+
+@router.get("/auth/bot-info")
+async def bot_info():
+    """Return the Telegram bot username for the login page."""
+    username = os.environ.get("BOT_USERNAME", "condor_tg_bot")
+    return {"username": username}
 
 
 class TokenLoginRequest(BaseModel):

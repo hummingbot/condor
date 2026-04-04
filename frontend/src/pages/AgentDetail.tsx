@@ -629,7 +629,7 @@ function SessionSelector({
   }, []);
 
   const selected = sessions.find((s) => s.number === selectedSessionNum);
-  const sortedSessions = [...sessions].reverse();
+  const sortedSessions = sessions; // Backend already returns newest-first
 
   return (
     <div ref={ref} className="relative sm:w-72">
@@ -1110,7 +1110,7 @@ function SessionSnapshots({ slug, sessionNum }: { slug: string; sessionNum: numb
 
 function SessionsTab({ slug, sessions }: { slug: string; sessions: SessionInfo[] }) {
   const [selectedSessionNum, setSelectedSessionNum] = useState<number>(
-    sessions.length > 0 ? sessions[sessions.length - 1].number : 0
+    sessions.length > 0 ? sessions[0].number : 0
   );
   const [activeSubTab, setActiveSubTab] = useState<SessionSubTabId>("overview");
 
