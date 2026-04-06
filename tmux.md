@@ -1,4 +1,4 @@
 # Tmux
 ```
-tmux new-session -d -s condor "uv run python main.py
+tmux new-session -d -s condor "uv run python main.py"
 ```
