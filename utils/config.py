@@ -25,8 +25,20 @@ _web_url_raw = os.environ.get("WEB_URL", "").strip()
 _web_port_raw = os.environ.get("WEB_PORT", "").strip()
 
 if _web_url_raw:
-    WEB_URL = _web_url_raw.rstrip("/").split(":")[0]
-    WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
+    parsed = urlparse(_web_url_raw)
+    if parsed.scheme and parsed.netloc:
+        WEB_URL = _web_url_raw.rstrip("/")
+        if _web_port_raw:
+            WEB_PORT = int(_web_port_raw)
+        elif parsed.port:
+            WEB_PORT = parsed.port
+        elif parsed.scheme == "https":
+            WEB_PORT = 443
+        else:
+            WEB_PORT = 80
+    else:
+        WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
+        WEB_URL = f"http://{_web_url_raw.rstrip('/')}"
 else:
     WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
     WEB_URL = f"http://localhost:{WEB_PORT}"
