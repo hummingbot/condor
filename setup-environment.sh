@@ -564,11 +564,6 @@ fi
 if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
     msg_info "Creating $CONFIG_FILE with template..."
     cat > "$CONFIG_FILE" << 'CONFIGEOF'
-# Telegram user IDs allowed to access the bot
-authorized_users:
-  - ADMIN_USER_ID_PLACEHOLDER  # Replace with your Telegram user ID
-
-# Hummingbot API server configurations
 servers:
   local:
     host: localhost
@@ -576,16 +571,22 @@ servers:
     username: admin
     password: admin
 
-# Controller configurations (loaded at startup)
-controllers:
-  # Example configuration file entries (created: DATE_PLACEHOLDER):
-  # main:
-  #   type: directional_strategy_vwap
-  #   connector: binance
-  #   trading_pair: BTC-USDT
-  #   leverage: 20
-  #   total_amount_quote: 100
-  #   ...
+default_server: local
+
+admin_id: ADMIN_USER_ID_PLACEHOLDER
+
+users: {}
+
+server_access:
+  local:
+    owner_id: ADMIN_USER_ID_PLACEHOLDER
+    created_at: null
+    shared_with: {}
+
+chat_defaults: 
+    ADMIN_USER_ID_PLACEHOLDER: local
+
+version: 1
 CONFIGEOF
     msg_ok "Created $CONFIG_FILE with template"
 fi
