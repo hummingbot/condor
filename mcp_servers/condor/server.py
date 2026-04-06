@@ -424,10 +424,11 @@ def _local_manage_servers_list() -> dict:
         if not server:
             continue
         perm = cm.get_server_permission(USER_ID, name)
+        resolved_host, resolved_port = cm.get_server_host_and_port(server)
         servers.append({
             "name": name,
-            "host": server["host"],
-            "port": server["port"],
+            "host": resolved_host,
+            "port": resolved_port,
             "permission": perm.value if perm else "unknown",
             "is_active": name == active_server,
         })

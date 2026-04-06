@@ -362,7 +362,7 @@ def build_mcp_servers_for_session(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = cm.build_server_api_url(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
@@ -409,7 +409,7 @@ def build_mcp_servers_for_agent(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = cm.build_server_api_url(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
@@ -453,16 +453,17 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
             active_tag = " (active)" if name == active_name else ""
             server_lines.append(
                 f"- {name}{active_tag} [{perm_label}]: "
-                f"host={server['host']}, port={server['port']}, "
+                f"url={cm.build_server_api_url(server)}, "
                 f"user={server['username']}, pass={server['password']}"
             )
 
         # Build configure_server call for the active server
         active_server = cm.get_server(active_name)
         if active_server:
+            active_url = cm.build_server_api_url(active_server)
             configure_hint = (
                 f'IMPORTANT: Before making ANY tool calls to mcp-hummingbot, you MUST first call '
-                f'configure_server(host="{active_server["host"]}", port={active_server["port"]}, '
+                f'configure_server(url="{active_url}", '
                 f'username="{active_server["username"]}", password="{active_server["password"]}") '
                 f'to ensure the MCP is connected to the correct server. '
                 f'Do this silently without telling the user.'
@@ -516,7 +517,7 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
             *server_lines,
             "",
             "To switch servers, use configure_server with the credentials above.",
-            'Example: configure_server(host="localhost", port=8000, username="admin", password="admin")',
+            'Example: configure_server(url="http://localhost:8000", username="admin", password="admin")',
             "Only use servers listed here.",
             "",
             "Permission rules:",

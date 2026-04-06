@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sys
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 
@@ -104,6 +105,7 @@ async def setup_connector(
 @handle_errors("configure server")
 async def configure_server(
         name: str | None = None,
+        url: str | None = None,
         host: str | None = None,
         port: int | None = None,
         username: str | None = None,
@@ -119,6 +121,7 @@ async def configure_server(
 
     Args:
         name: Server label (e.g., 'macmini', 'production')
+        url: Full API URL (e.g., 'https://api.example.com:443')
         host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42')
         port: API port (e.g., 8000)
         username: API username
@@ -127,7 +130,7 @@ async def configure_server(
     from mcp_servers.hummingbot_api.settings import ServerConfig, _load_server_config, save_server_config
 
     # No params → show active server
-    if name is None and host is None and port is None and username is None and password is None:
+    if name is None and url is None and host is None and port is None and username is None and password is None:
         current = _load_server_config()
         return (
             f"Active Server:\n\n"
@@ -139,20 +142,34 @@ async def configure_server(
     # Build new config with partial updates
     current = _load_server_config()
 
-    from urllib.parse import urlparse
     parsed = urlparse(current.url)
+    current_scheme = parsed.scheme or "http"
     current_host = parsed.hostname or "localhost"
     current_port = parsed.port or 8000
 
     final_name = name if name is not None else current.name
-    final_host = host if host is not None else current_host
-    final_port = port if port is not None else current_port
     final_username = username if username is not None else current.username
     final_password = password if password is not None else current.password
 
+    if url is not None:
+        final_url = url.rstrip("/")
+    else:
+        final_host = host if host is not None else current_host
+        final_port = port if port is not None else current_port
+
+        if final_host.startswith(("http://", "https://")):
+            parsed_host = urlparse(final_host)
+            final_scheme = parsed_host.scheme or current_scheme
+            final_host = parsed_host.hostname or current_host
+            final_port = port if port is not None else parsed_host.port or current_port
+        else:
+            final_scheme = current_scheme
+
+        final_url = f"{final_scheme}://{final_host}:{final_port}"
+
     new_config = ServerConfig(
         name=final_name,
-        url=f"http://{final_host}:{final_port}",
+        url=final_url,
         username=final_username,
         password=final_password,
     )

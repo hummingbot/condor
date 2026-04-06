@@ -135,7 +135,7 @@ async def show_api_servers(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 }
                 perm_badge = perm_badges.get(perm, "") + " " if perm else ""
 
-                url = f"{server_config['host']}:{server_config['port']}"
+                url = cm.build_server_api_url(server_config)
                 url_escaped = escape_markdown_v2(url)
                 name_escaped = escape_markdown_v2(server_name)
 
@@ -345,8 +345,10 @@ async def _show_server_details(
         status_text = f"*\\[Error\\]*\n_{escape_markdown_v2(message)}_"
 
     name_escaped = escape_markdown_v2(server_name)
-    host_escaped = escape_markdown_v2(server["host"])
-    port_escaped = escape_markdown_v2(str(server["port"]))
+    resolved_host, resolved_port = cm.get_server_host_and_port(server)
+    host_escaped = escape_markdown_v2(resolved_host or str(server.get("host", "")))
+    port_escaped = escape_markdown_v2(str(resolved_port if resolved_port is not None else "N/A"))
+    url_escaped = escape_markdown_v2(cm.build_server_api_url(server))
 
     # Permission badge
     perm_labels = {
@@ -358,6 +360,7 @@ async def _show_server_details(
     message_text = (
         f"🔌 *Server: {name_escaped}*\n\n"
         f"*Status:* {status_text}\n"
+        f"*URL:* `{url_escaped}`\n"
         f"*Host:* `{host_escaped}`\n"
         f"*Port:* `{port_escaped}`\n"
         f"*Access:* {escape_markdown_v2(perm_label)}\n"

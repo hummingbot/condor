@@ -9,6 +9,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse
 
 import yaml
 from aiohttp import ClientTimeout
@@ -98,6 +99,7 @@ class ConfigManager:
             self._data.setdefault("users", {})
             self._data.setdefault("server_access", {})
             self._data.setdefault("chat_defaults", {})
+            self._normalize_server_configs()
             # Migrate audit_log from config.yml to separate file (one-time)
             if "audit_log" in self._data:
                 self._audit_log = self._data.pop("audit_log")
@@ -169,6 +171,79 @@ class ConfigManager:
             logger.error(f"Failed to save config: {e}")
             raise
 
+    def _normalize_server_configs(self) -> None:
+        """Normalize server entries so legacy and URL-based configs both work."""
+        servers = self._data.get("servers", {})
+        changed = False
+
+        for server in servers.values():
+            if not isinstance(server, dict):
+                continue
+
+            url = str(server.get("url", "")).strip()
+            host = str(server.get("host", "")).strip()
+            port = server.get("port")
+
+            if url and (not host or port in (None, "")):
+                parsed = urlparse(url)
+                if parsed.hostname and not host:
+                    server["host"] = parsed.hostname
+                    changed = True
+                resolved_port = parsed.port or self._default_port_for_scheme(parsed.scheme)
+                if resolved_port and port in (None, ""):
+                    server["port"] = resolved_port
+                    changed = True
+
+            if host.startswith(("http://", "https://")):
+                parsed = urlparse(host)
+                if parsed.hostname:
+                    server["host"] = parsed.hostname
+                    changed = True
+                parsed_port = parsed.port or self._default_port_for_scheme(parsed.scheme)
+                if parsed_port and server.get("port") != parsed_port:
+                    server["port"] = parsed_port
+                    changed = True
+                if not server.get("url"):
+                    normalized_url = host.rstrip("/")
+                    if parsed_port is None and server.get("port"):
+                        normalized_url = (
+                            f"{parsed.scheme or 'http'}://{parsed.hostname}:{server['port']}"
+                        )
+                    server["url"] = normalized_url
+                    changed = True
+
+            if server.get("host") and server.get("port") and not server.get("url"):
+                server["url"] = self.build_server_api_url(server)
+                changed = True
+
+        if changed:
+            logger.info("Normalized server configuration entries")
+
+    @staticmethod
+    def _default_port_for_scheme(scheme: str | None) -> Optional[int]:
+        """Return the default port for a URL scheme when omitted."""
+        if scheme == "https":
+            return 443
+        if scheme == "http":
+            return 80
+        return None
+
+    def get_server_host_and_port(self, server: dict) -> tuple[str, Optional[int]]:
+        """Resolve host and port from any supported server config shape."""
+        raw_url = str(server.get("url", "")).strip()
+        raw_host = str(server.get("host", "")).strip()
+        port = server.get("port")
+
+        if raw_url:
+            parsed = urlparse(raw_url)
+            return parsed.hostname or raw_host, parsed.port or port or self._default_port_for_scheme(parsed.scheme)
+
+        if raw_host.startswith(("http://", "https://")):
+            parsed = urlparse(raw_host)
+            return parsed.hostname or "", parsed.port or port or self._default_port_for_scheme(parsed.scheme)
+
+        return raw_host, port
+
     def _load_audit_log(self):
         """Load audit log from separate file."""
         if not self.audit_log_path.exists():
@@ -224,6 +299,44 @@ class ConfigManager:
     def get_server(self, name: str) -> Optional[dict]:
         """Get a specific server configuration."""
         return self._data.get("servers", {}).get(name)
+
+    def build_server_api_url(self, server: dict) -> str:
+        """Build the API base URL from a server config.
+
+        Supports legacy host/port entries plus URL-based configs.
+        """
+        raw_url = str(server.get("url", "")).strip()
+        raw_host = str(server.get("host", "")).strip()
+        port = server.get("port")
+
+        if raw_url:
+            parsed = urlparse(raw_url)
+            scheme = parsed.scheme or "http"
+            hostname = parsed.hostname or ""
+            final_port = parsed.port or port or self._default_port_for_scheme(scheme)
+            path = (parsed.path or "").rstrip("/")
+            if final_port:
+                return f"{scheme}://{hostname}:{final_port}{path}"
+            return f"{scheme}://{hostname}{path}"
+
+        if raw_host.startswith(("http://", "https://")):
+            parsed = urlparse(raw_host)
+            scheme = parsed.scheme or "http"
+            hostname = parsed.hostname or ""
+            final_port = parsed.port or port or self._default_port_for_scheme(scheme)
+            path = (parsed.path or "").rstrip("/")
+            if final_port:
+                return f"{scheme}://{hostname}:{final_port}{path}"
+            return f"{scheme}://{hostname}{path}"
+
+        return f"http://{raw_host}:{port}"
+
+    def get_server_api_url(self, name: str) -> Optional[str]:
+        """Return the normalized API base URL for a named server."""
+        server = self.get_server(name)
+        if not server:
+            return None
+        return self.build_server_api_url(server)
 
     def add_server(
         self,
@@ -385,7 +498,7 @@ class ConfigManager:
 
         # Create new client
         server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
+        base_url = self.build_server_api_url(server)
         client = HummingbotAPIClient(
             base_url=base_url,
             username=server["username"],
@@ -448,7 +561,7 @@ class ConfigManager:
             return {"status": "error", "message": "Server not found"}
 
         server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
+        base_url = self.build_server_api_url(server)
 
         client = HummingbotAPIClient(
             base_url=base_url,

@@ -599,6 +599,7 @@ async def _run_dual(application: Application) -> None:
 
     # Initialize and start the Telegram application
     await application.initialize()
+    await post_init(application)
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     await application.start()
 
