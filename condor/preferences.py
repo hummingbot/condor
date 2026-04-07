@@ -158,7 +158,7 @@ class TradingAgentPrefs(TypedDict, total=False):
 
 
 class AgentPrefs(TypedDict, total=False):
-    default_agent: str       # "claude-code", "gemini", "codex"
+    default_agent: str       # "claude-code", "gemini", or "codex"
     show_tool_calls: bool    # Show tool call indicators (default True)
 
 

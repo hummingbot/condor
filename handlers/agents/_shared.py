@@ -16,6 +16,7 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "lmstudio:default": {"label": "LM Studio — Default Model"},
     "openai:gpt-4o": {"label": "OpenAI — GPT-4o"},
     "groq:llama-3.3-70b-versatile": {"label": "Groq — Llama 3.3 70B"},
+    "codex": {"label": "ChatGPT Codex"},
 }
 
 DEFAULT_AGENT = "claude-code"
