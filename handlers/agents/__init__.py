@@ -74,7 +74,8 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "No agent CLI found.\n\n"
                 "Install one of:\n"
                 "• claude-agent-acp (Claude Agent)\n"
-                "• gemini (Gemini CLI)\n\n"
+                "• gemini (Gemini CLI)\n"
+                "• npx @zed-industries/codex-acp (ChatGPT Codex ACP bridge)\n\n"
                 "Then restart the bot."
             )
             return

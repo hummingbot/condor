@@ -9,6 +9,7 @@ log = logging.getLogger(__name__)
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
+    "codex": {"label": "ChatGPT Codex"},
 }
 
 DEFAULT_AGENT = "claude-code"
