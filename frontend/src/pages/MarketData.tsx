@@ -326,10 +326,10 @@ function FallbackChart({
 
 export function MarketData() {
   const { server } = useServer();
-  const [connector, setConnector] = useState("binance");
-  const [pair, setPair] = useState("BTC-USDT");
-  const [interval, setInterval] = useState("1m");
-  const [lookbackSeconds, setLookbackSeconds] = useState(3 * 86400); // 3 days default
+  const [connector, setConnector] = useState("mexc");
+  const [pair, setPair] = useState("BTC-USDC");
+  const [interval, setInterval] = useState("1h");
+  const [lookbackSeconds, setLookbackSeconds] = useState(7 * 86400); // 3 days default
   const [tvAvailable, setTvAvailable] = useState(false);
   const [tvChecked, setTvChecked] = useState(false);
 
