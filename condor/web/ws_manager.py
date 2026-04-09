@@ -567,19 +567,59 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
-        # REST pre-fetch: broadcast current executors immediately
+        # Progressive pre-fetch: send first page fast, then accumulate the rest
         if channel not in self._last_data:
             try:
-                client = await cm.get_client(server_name)
-                result = await client.executors.search_executors()
-                executors = self._transform_executors(result)
-                if executors:
-                    await self.broadcast(channel, executors)
-                    logger.info("Executor REST pre-fetch: %d executors for %s", len(executors), channel)
+                from config_manager import get_config_manager as _get_cm
+                from condor.server_data_service import ServerDataType, get_server_data_service
+                from condor.web.routes.executors import _extract_executors_list
+
+                client = await _get_cm().get_client(server_name)
+                all_raw: list[dict] = []
+                cursor: str | None = None
+                page_num = 0
+                FIRST_PAGE = 50
+                NEXT_PAGE = 500
+
+                while True:
+                    page_size = FIRST_PAGE if page_num == 0 else NEXT_PAGE
+                    kwargs: dict = {"limit": page_size}
+                    if cursor:
+                        kwargs["cursor"] = cursor
+                    result = await client.executors.search_executors(**kwargs)
+                    page = _extract_executors_list(result)
+                    all_raw.extend(page)
+
+                    # Transform and broadcast accumulated results after each page
+                    executors = self._transform_executors(all_raw)
+                    if executors:
+                        await self.broadcast(channel, executors)
+                        logger.info(
+                            "Executor pre-fetch page %d: %d executors (total %d) for %s",
+                            page_num, len(page), len(executors), channel,
+                        )
+
+                    # Determine next cursor
+                    next_cursor = None
+                    if isinstance(result, dict):
+                        next_cursor = result.get("next_cursor") or result.get("cursor")
+                        pagination = result.get("pagination")
+                        if not next_cursor and isinstance(pagination, dict):
+                            next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
+                    if not next_cursor or len(page) < page_size:
+                        break
+                    if len(all_raw) >= 5000:
+                        break
+                    cursor = next_cursor
+                    page_num += 1
+
+                # Cache in SDS so other consumers benefit
+                sds = get_server_data_service()
+                sds.put(server_name, ServerDataType.EXECUTORS, all_raw)
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.warning("Executor REST pre-fetch failed for %s: %s", channel, e)
+                logger.warning("Executor pre-fetch failed for %s: %s", channel, e)
 
         while True:
             try:
