@@ -779,7 +779,9 @@ def register_default_fetches() -> None:
 
     # --- EXECUTORS ---
     async def _fetch_executors(client, **_kw):
-        return await client.executors.search_executors()
+        from condor.web.routes.executors import fetch_all_executors
+
+        return await fetch_all_executors(client)
 
     sds.register_fetch(ServerDataType.EXECUTORS, _fetch_executors)
 
