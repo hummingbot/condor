@@ -46,6 +46,116 @@ def _get_position_tokens(pos: dict, token_cache: dict) -> tuple[str, str, str]:
     return base_symbol, quote_symbol, pair
 
 
+def _get_price(symbol: str, prices: dict, default: float = 0) -> float:
+    if symbol in prices:
+        return prices[symbol]
+    for k, v in prices.items():
+        if k.lower() == symbol.lower():
+            return v
+    variants = {"sol": "wsol", "wsol": "sol", "eth": "weth", "weth": "eth"}
+    alt = variants.get(symbol.lower())
+    if alt:
+        for k, v in prices.items():
+            if k.lower() == alt:
+                return v
+    return default
+
+
+def format_position_detail_view(
+    pos: dict,
+    token_cache: dict,
+    token_prices: dict,
+    index: int,
+    total: int,
+    instance_id: str,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Format a single position detail view with navigation + action buttons."""
+    base_sym, quote_sym, pair = _get_position_tokens(pos, token_cache)
+    connector = pos.get("connector", "unknown")
+    fee = pos.get("fee_tier", pos.get("fee", ""))
+    fee_str = f" {fee}%" if fee else ""
+
+    in_range = pos.get("in_range", "")
+    status = (
+        "🟢" if in_range == "IN_RANGE" else "🔴" if in_range == "OUT_OF_RANGE" else "⚪"
+    )
+
+    lower = float(pos.get("lower_price", pos.get("price_lower", 0)) or 0)
+    upper = float(pos.get("upper_price", pos.get("price_upper", 0)) or 0)
+    current = float(pos.get("current_price", 0) or 0)
+    width_pct = ((upper - lower) / lower * 100) if lower > 0 else 0
+
+    quote_price = _get_price(quote_sym, token_prices, 1.0)
+    base_price = _get_price(base_sym, token_prices, 0)
+
+    pnl_summary = pos.get("pnl_summary", {})
+    pnl_usd = float(pnl_summary.get("total_pnl_quote", 0) or 0) * quote_price
+    value_usd = float(pnl_summary.get("current_lp_value_quote", 0) or 0) * quote_price
+
+    base_fee = float(pos.get("base_fee_pending", 0) or 0)
+    quote_fee = float(pos.get("quote_fee_pending", 0) or 0)
+    fees_usd = (base_fee * base_price) + (quote_fee * quote_price)
+
+    pnl_sign = "\\+" if pnl_usd >= 0 else "\\-"
+
+    lines = [
+        f"📍 *Position {index + 1}/{total}*",
+        "",
+        f"*{escape_markdown_v2(pair)}{escape_markdown_v2(fee_str)}* \\({escape_markdown_v2(connector.capitalize())}\\)",
+        f"{status} \\[{escape_markdown_v2(_format_price(lower))} \\- {escape_markdown_v2(_format_price(upper))}\\] \\({escape_markdown_v2(f'{width_pct:.0f}')}% width\\)",
+        f"Price: {escape_markdown_v2(_format_price(current))}",
+        f"💰 ${escape_markdown_v2(f'{value_usd:.2f}')} \\| PnL: {pnl_sign}${escape_markdown_v2(f'{abs(pnl_usd):.2f}')} \\| 🎁 ${escape_markdown_v2(f'{fees_usd:.2f}')}",
+    ]
+    text = "\n".join(lines)
+
+    cache_key = f"lpm_{instance_id}_{index}"
+    keyboard = []
+
+    if total > 1:
+        nav_row = []
+        if index > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "◀️ Prev",
+                    callback_data=f"dex:lpm_detail:{instance_id}:{index - 1}",
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(f"{index + 1}/{total}", callback_data="dex:lpm_noop")
+        )
+        if index < total - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    "Next ▶️",
+                    callback_data=f"dex:lpm_detail:{instance_id}:{index + 1}",
+                )
+            )
+        keyboard.append(nav_row)
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "💰 Collect Fees", callback_data=f"dex:lpm_collect:{cache_key}"
+            ),
+            InlineKeyboardButton(
+                "❌ Close", callback_data=f"dex:pos_close:{cache_key}"
+            ),
+        ]
+    )
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "🔄 Rebalance", callback_data=f"dex:lpm_rebalance:{cache_key}"
+            ),
+            InlineKeyboardButton(
+                "✅ Dismiss", callback_data=f"dex:lpm_dismiss:{instance_id}"
+            ),
+        ]
+    )
+
+    return text, InlineKeyboardMarkup(keyboard)
+
+
 def _get_positions_for_instance(positions_cache: dict, instance_id: str) -> list[dict]:
     """Get all cached positions for a given LP monitor instance."""
     positions = []
@@ -205,8 +315,6 @@ async def handle_lpm_oor_navigation(
     update: Update, context: ContextTypes.DEFAULT_TYPE, instance_id: str, index: int
 ) -> None:
     """Navigate only out-of-range positions."""
-    from routines.lp_monitor import format_position_detail_view
-
     query = update.callback_query
     positions_cache = context.user_data.get("positions_cache", {})
     token_cache = context.user_data.get("token_cache", {})
@@ -309,8 +417,6 @@ async def handle_lpm_detail(
     update: Update, context: ContextTypes.DEFAULT_TYPE, instance_id: str, index: int
 ) -> None:
     """Handle position detail view with actions."""
-    from routines.lp_monitor import format_position_detail_view
-
     query = update.callback_query
     positions_cache = context.user_data.get("positions_cache", {})
     token_cache = context.user_data.get("token_cache", {})

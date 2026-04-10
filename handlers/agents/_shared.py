@@ -9,6 +9,13 @@ log = logging.getLogger(__name__)
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
+    "ollama:llama3.1": {"label": "Ollama — Llama 3.1"},
+    "ollama:qwen3:32b": {"label": "Ollama — Qwen 3 32B"},
+    "ollama:qwen2.5:72b": {"label": "Ollama — Qwen 2.5 72B"},
+    "ollama:deepseek-r1:32b": {"label": "Ollama — DeepSeek R1 32B"},
+    "lmstudio:default": {"label": "LM Studio — Default Model"},
+    "openai:gpt-4o": {"label": "OpenAI — GPT-4o"},
+    "groq:llama-3.3-70b-versatile": {"label": "Groq — Llama 3.3 70B"},
 }
 
 DEFAULT_AGENT = "claude-code"
@@ -79,6 +86,8 @@ schema (all required fields, types, defaults), risk rules.
 
 PHASE 4 — DRY RUN
 - Start with execution_mode: "dry_run" to validate without live trading.
+- The user can choose which model to dry-run with by passing agent_key in config \
+(e.g. config={"execution_mode": "dry_run", "agent_key": "ollama:llama3.1"}).
 - Review journal output with the user.
 - Check: Does the agent call routines correctly? Is decision logic sound? \
 Does it use conditional language? Are risk rules respected?
@@ -88,6 +97,8 @@ Does it use conditional language? Are risk rules respected?
 PHASE 5 — GO LIVE
 - Offer execution modes: run_once (single tick), loop (continuous), \
 or loop with max_ticks (limited run).
+- Ask which model to use for live trading — the user can pick a different model \
+than the one used in dry-run (e.g. dry-run with ollama, go live with claude-code).
 - Start the agent with the user's chosen mode and config.
 - Confirm the agent is running and provide monitoring commands.
 
@@ -104,6 +115,22 @@ MONITORING WORKFLOW — for existing agents
 ═══════════════════════════════════════════════════════════
 REFERENCE
 ═══════════════════════════════════════════════════════════
+
+MODEL SELECTION:
+The model (agent_key) is set per SESSION, not per strategy. The strategy's \
+agent_key is just the default. Override it at launch via config:
+  manage_trading_agent(action="start_agent", strategy_id=..., \
+config={"agent_key": "ollama:qwen3:32b", "execution_mode": "dry_run"})
+
+Available models:
+- ACP (subprocess CLI): "claude-code", "gemini"
+- Pydantic AI (local): "ollama:llama3.1", "ollama:qwen3:32b", \
+"ollama:qwen2.5:72b", "ollama:deepseek-r1:32b", "lmstudio:<model-name>"
+- Pydantic AI (cloud): "openai:gpt-4o", "groq:llama-3.3-70b-versatile"
+- Custom endpoint: use "openai:<model-name>" + model_base_url in config
+
+Default URLs (no config needed): Ollama=localhost:11434, LM Studio=localhost:1234. \
+Override with model_base_url in config if running on a different host/port.
 
 GENERIC vs SPECIFIC STRATEGIES:
 - GENERIC: trading_pair and connector are NOT in the instructions. Passed at \

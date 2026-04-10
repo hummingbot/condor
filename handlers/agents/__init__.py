@@ -23,6 +23,7 @@ from ._shared import (
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from condor.acp import ACP_COMMANDS, PromptDone
+from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
 
@@ -33,7 +34,16 @@ _cli_available_cache: dict[str, bool] = {}
 
 
 def _is_agent_available(agent_key: str) -> bool:
-    """Check if the CLI binary for the given agent is installed."""
+    """Check if the agent backend is available.
+
+    For ACP agents (claude-code, gemini): checks if the CLI binary is in PATH.
+    For pydantic-ai agents (ollama:*, openai:*, etc.): always available
+    (pydantic-ai handles connection errors at runtime).
+    """
+    # Pydantic-ai models don't need a CLI binary
+    if is_pydantic_ai_model(agent_key):
+        return True
+
     if agent_key in _cli_available_cache:
         return _cli_available_cache[agent_key]
 
