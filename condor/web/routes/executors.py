@@ -68,12 +68,28 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
     if not isinstance(ex, dict):
         return None
     config = ex.get("config", ex)
+    custom_info = ex.get("custom_info") or {}
+
+    # Entry price: top-level > config > custom_info (position executors store it there)
+    entry_price = float(
+        config.get("entry_price")
+        or ex.get("entry_price")
+        or custom_info.get("current_position_average_price")
+        or 0
+    )
+    # Current/close price: top-level > custom_info.close_price
+    current_price = float(
+        ex.get("current_price")
+        or custom_info.get("close_price")
+        or 0
+    )
+
     return ExecutorInfo(
         id=str(ex.get("id") or ex.get("executor_id") or ""),
         type=get_executor_type(ex),
         connector=config.get("connector_name") or ex.get("connector_name") or ex.get("connector") or "",
         trading_pair=config.get("trading_pair") or ex.get("trading_pair") or "",
-        side=str(config.get("side") or ex.get("side") or ""),
+        side=str(custom_info.get("side") or config.get("side") or ex.get("side") or ""),
         status=(ex.get("status") or "").lower(),
         close_type=str(ex.get("close_type") or "").lower(),
         pnl=get_executor_pnl(ex),
@@ -82,10 +98,10 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
         controller_id=str(config.get("controller_id") or ex.get("controller_id") or ""),
         cum_fees_quote=get_executor_fees(ex),
         net_pnl_pct=float(ex.get("net_pnl_pct") or 0),
-        entry_price=float(config.get("entry_price") or ex.get("entry_price") or 0),
-        current_price=float(ex.get("current_price") or 0),
+        entry_price=entry_price,
+        current_price=current_price,
         close_timestamp=float(ex.get("close_timestamp") or 0),
-        custom_info=ex.get("custom_info") or {},
+        custom_info=custom_info,
         config=ex.get("config", {}),
     )
 
@@ -172,14 +188,61 @@ async def list_executors_page(
 
     Designed for the frontend to stream executors in chunks (e.g. 50 at a time)
     and render them as they arrive instead of waiting for the full dataset.
+
+    First page with no filters: served from SDS cache if available (instant).
     """
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    has_filters = bool(executor_type or trading_pair or status or controller_id)
+
+    # First page, no filters → try SDS cache for instant response
+    if not cursor and not has_filters:
+        from condor.server_data_service import ServerDataType, get_server_data_service
+
+        sds = get_server_data_service()
+        cached = sds.get(name, ServerDataType.EXECUTORS)
+        if cached is not None:
+            all_executors = _extract_executors_list(cached)
+            page = all_executors[:limit]
+            items: list[ExecutorInfo] = []
+            for ex in page:
+                info = _build_executor_info(ex)
+                if info:
+                    items.append(info)
+            has_more = len(all_executors) > limit
+            return {
+                "executors": items,
+                "next_cursor": "__sds_offset__" + str(limit) if has_more else None,
+            }
+
+    # Handle SDS-based pagination for subsequent pages
+    if cursor and cursor.startswith("__sds_offset__"):
+        from condor.server_data_service import ServerDataType, get_server_data_service
+
+        sds = get_server_data_service()
+        cached = sds.get(name, ServerDataType.EXECUTORS)
+        if cached is not None:
+            all_executors = _extract_executors_list(cached)
+            offset = int(cursor.replace("__sds_offset__", ""))
+            page = all_executors[offset : offset + limit]
+            items = []
+            for ex in page:
+                info = _build_executor_info(ex)
+                if info:
+                    items.append(info)
+            next_offset = offset + limit
+            has_more = next_offset < len(all_executors)
+            return {
+                "executors": items,
+                "next_cursor": "__sds_offset__" + str(next_offset) if has_more else None,
+            }
+        # Cache expired, fall through to API
+
     client = await cm.get_client(name)
     kwargs: dict = {"limit": limit}
-    if cursor:
+    if cursor and not cursor.startswith("__sds_offset__"):
         kwargs["cursor"] = cursor
     if executor_type:
         kwargs["executor_types"] = [executor_type]
@@ -206,7 +269,7 @@ async def list_executors_page(
     if len(page) < limit:
         next_cursor = None
 
-    items: list[ExecutorInfo] = []
+    items = []
     for ex in page:
         info = _build_executor_info(ex)
         if info:

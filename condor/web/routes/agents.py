@@ -47,6 +47,7 @@ class RunningInstance(BaseModel):
     agent_id: str
     session_num: int
     status: str
+    agent_key: str = ""
     tick_count: int = 0
     daily_pnl: float = 0.0
     realized_pnl: float = 0.0
@@ -113,6 +114,7 @@ class SessionInfo(BaseModel):
 class ExperimentInfo(BaseModel):
     number: int
     execution_mode: str = ""  # dry_run or run_once
+    agent_key: str = ""
     snapshot_count: int = 0
     created_at: str = ""
 
@@ -246,8 +248,11 @@ def _infer_latest_session_status(agent_dir: Path, slug: str) -> dict[str, Any] |
         if snaps:
             last_activity = max(f.stat().st_mtime for f in snaps)
 
-    age_sec = time.time() - last_activity
-    status = "running" if age_sec < 300 else "idle"
+    # If no engine is in memory, the agent is not running.
+    # Only mark as "running" if a TickEngine is actively processing
+    # (handled by the caller via get_engines_for_slug).
+    # This function just provides fallback metadata for idle agents.
+    status = "idle"
 
     # Tick count from journal (PnL now comes from backend performance data)
     tick_count = 0
@@ -340,12 +345,16 @@ def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
         if not m:
             continue
         num = int(m.group(1))
-        # Extract mode from file header
+        # Extract mode, model, and timestamp from file header
         execution_mode = ""
+        agent_key = ""
         content = f.read_text(errors="replace")
         mode_match = re.search(r"^Mode:\s*(\S+)", content, re.MULTILINE)
         if mode_match:
             execution_mode = mode_match.group(1)
+        model_match = re.search(r"^Model:\s*(\S+)", content, re.MULTILINE)
+        if model_match:
+            agent_key = model_match.group(1)
         # Extract timestamp
         created = ""
         ts_match = re.search(r"^# Experiment #\d+ — (.+)$", content, re.MULTILINE)
@@ -355,6 +364,7 @@ def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
             ExperimentInfo(
                 number=num,
                 execution_mode=execution_mode,
+                agent_key=agent_key,
                 snapshot_count=1,
                 created_at=created,
             )
@@ -554,6 +564,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                     total_amount_quote=info.get("total_amount_quote", 100),
                     trading_context=info.get("trading_context", ""),
                     frequency_sec=info.get("frequency_sec", 60),
+                    agent_key=info.get("agent_key", ""),
                     execution_mode=info.get("execution_mode", "loop"),
                     risk_limits=info.get("risk_limits", {}),
                 )

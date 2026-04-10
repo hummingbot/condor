@@ -567,14 +567,28 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
-        # Progressive pre-fetch: send first page fast, then accumulate the rest
+        # Try SDS cache first (pre-warmed by auto_subscribe_servers on startup)
+        if channel not in self._last_data:
+            from condor.server_data_service import ServerDataType, get_server_data_service
+
+            sds = get_server_data_service()
+            cached = sds.get(server_name, ServerDataType.EXECUTORS)
+            if cached is not None:
+                executors = self._transform_executors(cached)
+                if executors:
+                    await self.broadcast(channel, executors)
+                    logger.info(
+                        "Executor SDS cache hit: %d executors for %s",
+                        len(executors), channel,
+                    )
+
+        # Progressive pre-fetch only if we still have no data
         if channel not in self._last_data:
             try:
-                from config_manager import get_config_manager as _get_cm
-                from condor.server_data_service import ServerDataType, get_server_data_service
                 from condor.web.routes.executors import _extract_executors_list
 
-                client = await _get_cm().get_client(server_name)
+                sds = get_server_data_service()
+                client = await cm.get_client(server_name)
                 all_raw: list[dict] = []
                 cursor: str | None = None
                 page_num = 0
@@ -614,7 +628,6 @@ class WebSocketManager:
                     page_num += 1
 
                 # Cache in SDS so other consumers benefit
-                sds = get_server_data_service()
                 sds.put(server_name, ServerDataType.EXECUTORS, all_raw)
             except asyncio.CancelledError:
                 return

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from config_manager import get_config_manager
+
+logger = logging.getLogger(__name__)
 
 # Simple TTL cache for candle data
 _candle_cache: dict[tuple, tuple[float, list]] = {}  # key -> (timestamp, data)
@@ -171,8 +174,8 @@ async def get_candles(
     trading_pair: str = Query(...),
     interval: str = Query(default="1m"),
     limit: int = Query(default=1000, ge=1, le=5000),
-    start_time: int | None = Query(default=None, description="Unix epoch seconds"),
-    end_time: int | None = Query(default=None, description="Unix epoch seconds"),
+    start_time: float | None = Query(default=None, description="Unix epoch seconds"),
+    end_time: float | None = Query(default=None, description="Unix epoch seconds"),
     user: WebUser = Depends(get_current_user),
 ):
     cm = get_config_manager()
@@ -186,18 +189,33 @@ async def get_candles(
         return cached[1]
 
     client = await cm.get_client(name)
+    result = None
     try:
         # Prefer historical candles with time range when start_time is given
         if start_time is not None:
-            et = end_time or int(time.time())
+            st = int(start_time)
+            et = int(end_time) if end_time else int(time.time())
+            logger.info(
+                "Fetching historical candles: connector=%s pair=%s interval=%s start=%s end=%s",
+                connector, trading_pair, interval, st, et,
+            )
             result = await client.market_data.get_historical_candles(
                 connector, trading_pair, interval,
-                start_time=start_time, end_time=et,
+                start_time=st, end_time=et,
             )
-        else:
-            result = await client.market_data.get_candles(connector, trading_pair, interval, limit)
+            logger.info("Historical candles result: type=%s len=%s", type(result).__name__, len(result) if isinstance(result, (list, dict)) else "?")
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.warning("get_historical_candles failed: %s — falling back to get_candles", e)
+        result = None
+
+    # Fallback: if historical returned nothing usable, use regular candles
+    candles_raw = result if isinstance(result, list) else result.get("data", []) if isinstance(result, dict) else []
+    if not candles_raw:
+        try:
+            logger.info("Falling back to get_candles: connector=%s pair=%s interval=%s limit=%s", connector, trading_pair, interval, limit)
+            result = await client.market_data.get_candles(connector, trading_pair, interval, limit)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
 
     candles_raw = result if isinstance(result, list) else result.get("data", []) if isinstance(result, dict) else []
 
