@@ -10,3 +10,4 @@ from .client import (
     Heartbeat,
     ACPEvent,
 )
+from .pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model

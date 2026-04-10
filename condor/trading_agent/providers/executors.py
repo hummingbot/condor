@@ -1,4 +1,8 @@
-"""Core data provider: active executors with PnL and volume."""
+"""Core data provider: active executors with PnL and volume.
+
+Delegates number-crunching to ``condor.trading_agent.performance`` so that
+live ticks and the web API always agree.
+"""
 
 from __future__ import annotations
 
@@ -12,16 +16,20 @@ class ExecutorsProvider(BaseProvider):
     name = "executors"
     is_core = True
 
-    async def execute(self, client: Any, config: dict, agent_id: str = "") -> ProviderResult:
-        from handlers.executors._shared import (
-            format_executor_status_line,
-            get_executor_pnl,
-            get_executor_volume,
-            search_running_executors,
-        )
+    async def execute(
+        self, client: Any, config: dict, agent_id: str = ""
+    ) -> ProviderResult:
+        from condor.trading_agent.performance import fetch_agent_performance
+
+        if not agent_id:
+            return ProviderResult(
+                name=self.name,
+                data={"executors": [], "total_pnl": 0, "total_volume": 0},
+                summary="Active Executors: no agent_id provided",
+            )
 
         try:
-            executors = await search_running_executors(client, status="RUNNING", limit=50)
+            perf = await fetch_agent_performance(client, agent_id)
         except Exception as e:
             return ProviderResult(
                 name=self.name,
@@ -29,115 +37,42 @@ class ExecutorsProvider(BaseProvider):
                 summary=f"Active Executors: failed to fetch ({e})",
             )
 
-        # Filter to this agent's executors if agent_id is provided
-        if agent_id and executors:
-            import logging as _logging
-            _log = _logging.getLogger(__name__)
-            filtered = []
-            for ex in executors:
-                # controller_id can be top-level or nested inside config
-                cid = (
-                    ex.get("controller_id")
-                    or ex.get("config", {}).get("controller_id")
-                )
-                eid = ex.get("id", ex.get("executor_id", "?"))
-                _log.info(
-                    "executor %s controller_id=%r (want %r) [top=%r, config=%r]",
-                    eid, cid, agent_id,
-                    ex.get("controller_id"),
-                    ex.get("config", {}).get("controller_id"),
-                )
-                if cid == agent_id:
-                    filtered.append(ex)
-            executors = filtered
-
-        # Fetch authoritative PnL from performance report API
-        perf_data = {}
-        if agent_id:
-            try:
-                raw = await client.executors.get_performance_report(controller_id=agent_id)
-                import logging as _logging
-                _logging.getLogger(__name__).info(
-                    "performance_report for %s: type=%s, value=%s",
-                    agent_id, type(raw).__name__, str(raw)[:500],
-                )
-                if isinstance(raw, dict):
-                    perf_data = raw
-            except Exception as e:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "performance_report for %s failed: %s", agent_id, e,
-                )
-
-        if not executors and not perf_data:
-            return ProviderResult(
-                name=self.name,
-                data={"executors": [], "total_pnl": 0, "total_volume": 0},
-                summary="Active Executors: none running" + (f" (filtered by agent {agent_id})" if agent_id else ""),
+        running = [e for e in perf.executors if e["status"] == "RUNNING"]
+        lines = [
+            (
+                f"Active Executors ({len(running)}) [agent: {agent_id}]:"
+                if running
+                else f"Active Executors: none running (agent: {agent_id})"
             )
-
-        # Compute running executor PnL (unrealized)
-        running_pnl = 0.0
-        running_volume = 0.0
-        lines = [f"Active Executors ({len(executors)})" + (f" [agent: {agent_id}]" if agent_id else "") + ":"]
-
-        for ex in executors:
-            pnl = get_executor_pnl(ex)
-            vol = get_executor_volume(ex)
-            running_pnl += pnl
-            running_volume += vol
-            lines.append(f"  {format_executor_status_line(ex)}")
-
-        # Use performance report as authoritative PnL source
-        if perf_data:
-            # Try known keys for PnL
-            total_pnl = float(
-                perf_data.get("net_pnl_quote")
-                or perf_data.get("realized_pnl_quote")
-                or perf_data.get("total_pnl")
-                or perf_data.get("net_pnl")
-                or 0
+        ]
+        for r in running:
+            side = r.get("side") or ""
+            lines.append(
+                f"  {r['pair']} {side} ${r['pnl']:+.2f} (V:${r['volume']:,.0f})"
             )
-            total_volume = float(
-                perf_data.get("total_volume")
-                or perf_data.get("volume_traded")
-                or perf_data.get("total_volume_quote")
-                or 0
-            )
-            # Add unrealized PnL from currently running executors
-            total_pnl += running_pnl
-            total_volume = max(total_volume, running_volume)
-            lines.append(f"  Performance report PnL: ${total_pnl - running_pnl:+.2f} (realized)")
-        else:
-            total_pnl = running_pnl
-            total_volume = running_volume
+        lines.append(
+            f"  Realized: ${perf.realized_pnl:+.2f} | "
+            f"Unrealized: ${perf.unrealized_pnl:+.2f} | "
+            f"Total PnL: ${perf.total_pnl:+.2f} | "
+            f"Volume: ${perf.volume:,.0f}"
+        )
 
-        lines.append(f"  Total PnL: ${total_pnl:+.2f} | Volume: ${total_volume:,.0f}")
-
-        total_exposure = 0.0
-        executor_data = []
-        for ex in executors:
-            cfg = ex.get("config", ex)
-            amount = float(cfg.get("total_amount_quote", 0) or cfg.get("amount", 0) or 0)
-            total_exposure += amount
-            executor_data.append({
-                "id": ex.get("id", ex.get("executor_id", "")),
-                "type": cfg.get("type", ""),
-                "pair": cfg.get("trading_pair", ""),
-                "pnl": get_executor_pnl(ex),
-                "volume": get_executor_volume(ex),
-                "amount": amount,
-                "status": ex.get("status", ""),
-            })
+        total_exposure = sum(r.get("amount", 0) for r in running)
 
         return ProviderResult(
             name=self.name,
             data={
-                "executors": executor_data,
-                "total_pnl": total_pnl,
-                "total_volume": total_volume,
+                "executors": running,
+                "all_executors": perf.executors,
+                "total_pnl": perf.total_pnl,
+                "realized_pnl": perf.realized_pnl,
+                "unrealized_pnl": perf.unrealized_pnl,
+                "total_volume": perf.volume,
+                "total_fees": perf.fees,
                 "total_exposure": total_exposure,
-                "performance_report": perf_data if perf_data else None,
+                "open_count": perf.open_count,
+                "closed_count": perf.closed_count,
+                "win_rate": perf.win_rate,
             },
             summary="\n".join(lines),
         )

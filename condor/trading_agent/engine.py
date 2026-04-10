@@ -25,6 +25,7 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
+from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
@@ -281,14 +282,13 @@ class TickEngine:
             )
             self._pending_directives.clear()
 
-        # 6. Create ACP session
+        # 6. Create agent client (ACP for Claude/Gemini, PydanticAI for open-source models)
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
             build_mcp_servers_for_session,
             get_project_dir,
         )
 
-        agent_cmd = ACP_COMMANDS.get(self.strategy.agent_key, ACP_COMMANDS["claude-code"])
         mode = self.config.get("execution_mode", "loop")
 
         server_name = self.config.get("server_name")
@@ -305,12 +305,26 @@ class TickEngine:
             )
         permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
 
-        acp_client = ACPClient(
-            command=agent_cmd,
-            working_dir=get_project_dir(),
-            mcp_servers=mcp_servers,
-            permission_callback=permission_cb,
-        )
+        # Session config overrides strategy default for agent_key
+        agent_key = self.config.get("agent_key") or self.strategy.agent_key
+        use_pydantic_ai = is_pydantic_ai_model(agent_key)
+
+        if use_pydantic_ai:
+            base_url = self.config.get("model_base_url") or None
+            acp_client = PydanticAIClient(
+                model=agent_key,
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+                base_url=base_url,
+            )
+        else:
+            agent_cmd = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
+            acp_client = ACPClient(
+                command=agent_cmd,
+                working_dir=get_project_dir(),
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+            )
 
         response_chunks: list[str] = []
         tool_calls: list[dict[str, Any]] = []
@@ -375,6 +389,7 @@ class TickEngine:
                 executors_data=executors_summary,
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
+                agent_key=agent_key,
             )
             log.info(
                 "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
@@ -502,6 +517,7 @@ class TickEngine:
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),
             "risk_limits": risk_limits if isinstance(risk_limits, dict) else risk_limits.model_dump() if hasattr(risk_limits, "model_dump") else {},
+            "agent_key": self.config.get("agent_key") or self.strategy.agent_key,
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,

@@ -159,6 +159,7 @@ def next_experiment_number(agent_dir: Path) -> int:
 EXPERIMENT_TEMPLATE = """\
 # Experiment #{num} — {timestamp}
 Mode: {execution_mode}
+Model: {agent_key}
 
 <details><summary>System Prompt ({prompt_len} chars)</summary>
 
@@ -197,6 +198,7 @@ def save_experiment_snapshot(
     executors_data: str,
     risk_state: dict,
     duration: float,
+    agent_key: str = "",
 ) -> Path:
     """Save a single experiment snapshot as a flat .md file."""
     experiments_dir = agent_dir / "dry_runs"
@@ -231,6 +233,7 @@ def save_experiment_snapshot(
         num=experiment_num,
         timestamp=timestamp,
         execution_mode=execution_mode,
+        agent_key=agent_key or "unknown",
         prompt_len=len(system_prompt),
         system_prompt=system_prompt,
         executors_data=executors_data or "No executors.",

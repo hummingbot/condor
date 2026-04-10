@@ -124,13 +124,27 @@ def build_tick_prompt(
     agent_id: str = "",
 ) -> str:
     """Build the full prompt for one agent tick."""
+    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
+    agent_key = config.get("agent_key") or strategy.agent_key
+    use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     # Select base prompt and tool preload based on mode
     base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
-    tool_preload = TOOL_PRELOAD_DRY_RUN if is_dry_run else TOOL_PRELOAD_LIVE
-    sections: list[str] = [base_prompt, BASE_PROMPT_COMMON, tool_preload]
+    sections: list[str] = [base_prompt, BASE_PROMPT_COMMON]
+
+    # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
+    if not use_pydantic_ai:
+        tool_preload = TOOL_PRELOAD_DRY_RUN if is_dry_run else TOOL_PRELOAD_LIVE
+        sections.append(tool_preload)
+    else:
+        sections.append(
+            "TOOLS:\n"
+            "All MCP tools are pre-loaded and available. Call them directly by name.\n"
+            "Do NOT call configure_server — the server is pre-configured."
+        )
 
     # Tick identity
     tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in journal entries and notifications."
@@ -159,15 +173,6 @@ def build_tick_prompt(
         sections.append(_build_routines_section(strategy))
     except Exception:
         pass  # Don't fail the tick if routine discovery fails
-
-    # Strategy skills (injected from SKILL.md files)
-    if strategy.skills:
-        try:
-            from .skill_loader import get_tick_skills
-            skill_sections = get_tick_skills(strategy.skills, config)
-            sections.extend(skill_sections)
-        except Exception:
-            pass  # Don't fail the tick if skill loading fails
 
     # Session trading context (natural language directives for this session)
     trading_context = config.get("trading_context", "")
