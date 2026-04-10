@@ -130,8 +130,8 @@ def _resolve_routine(name: str):
             if name in agent_routines:
                 return agent_routines[name]
 
-    from routines.base import get_routine
-    return get_routine(name)
+    from routines.base import discover_routines
+    return discover_routines(force_reload=True).get(name)
 
 
 def _local_manage_routines_describe(name: str) -> dict:
@@ -519,11 +519,15 @@ def _local_journal_read(params: dict) -> dict:
 
     engine = get_engine(agent_id)
     if engine:
+        if engine.is_experiment:
+            return {"content": "(experiment mode — no journal, results saved to dry_runs/)"}
         session_dir = engine.session_dir
         agent_dir = engine.strategy.agent_dir
     else:
         from condor.trading_agent.journal import resolve_agent_dirs
         session_dir, agent_dir = resolve_agent_dirs(agent_id)
+    if not session_dir:
+        return {"content": "(no journal available for this agent)"}
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     section = params.get("section", "recent")
@@ -561,11 +565,15 @@ def _local_journal_write(params: dict) -> dict:
 
     engine = get_engine(agent_id)
     if engine:
+        if engine.is_experiment:
+            return {"error": "experiments don't have a journal — use dry_runs/ for results"}
         session_dir = engine.session_dir
         agent_dir = engine.strategy.agent_dir
     else:
         from condor.trading_agent.journal import resolve_agent_dirs
         session_dir, agent_dir = resolve_agent_dirs(agent_id)
+    if not session_dir:
+        return {"error": "no journal available for this agent"}
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     entry_type = params.get("entry_type", "action")
@@ -788,9 +796,11 @@ async def manage_trading_agent(
         name: Strategy name (for create/update) or routine name (for run_routine).
         description: Strategy description (for create/update).
         instructions: Strategy instructions text (for create/update).
-        agent_key: Agent type "claude-code" or "gemini" (for create, default "claude-code").
+        agent_key: Default LLM for the strategy (for create/update). Examples: "claude-code", "gemini", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Default "claude-code".
         skills: List of optional skill names to enable (for create/update).
         config: Agent config overrides (for create/update/start) or routine config (for run_routine).
+            For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
+            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
 
     Returns:
         Action-specific result dict.
@@ -1035,11 +1045,15 @@ def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
 
     engine = get_engine(agent_id)
     if engine:
+        if engine.is_experiment:
+            return {"error": "experiments don't have a journal — use dry_runs/ for results"}
         session_dir = engine.session_dir
         agent_dir = engine.strategy.agent_dir
     else:
         from condor.trading_agent.journal import resolve_agent_dirs
         session_dir, agent_dir = resolve_agent_dirs(agent_id)
+    if not session_dir:
+        return {"error": "no journal available for this agent"}
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     if action == "agent_tracker":
@@ -1093,7 +1107,6 @@ async def manage_skills(
 
 def _local_manage_skills_list() -> dict:
     from condor.trading_agent.providers import list_providers
-    from condor.trading_agent.skill_loader import list_skills as list_skill_files
 
     items = []
     for p in list_providers():
@@ -1102,36 +1115,17 @@ def _local_manage_skills_list() -> dict:
             "is_core": p.is_core,
             "type": "provider",
         })
-    for s in list_skill_files():
-        items.append({
-            "name": s.name,
-            "is_core": False,
-            "type": "skill",
-            "description": s.description,
-        })
     return {"skills": items}
 
 
 def _local_skill_test(name: str, config: dict) -> dict:
-    from condor.trading_agent.skill_loader import load_skill, _render_placeholders
     from condor.trading_agent.providers import get_provider
 
-    # Check if it's a data provider (needs API client -- can't test locally)
     provider = get_provider(name)
     if provider:
         return {"error": f"Provider '{name}' requires the Condor bot to be running for testing (needs API client)"}
 
-    # Test SKILL.md file (can render locally)
-    skill_info = load_skill(name)
-    if skill_info:
-        rendered = _render_placeholders(skill_info.body, config)
-        return {
-            "name": skill_info.name,
-            "description": skill_info.description,
-            "rendered_prompt": rendered,
-        }
-
-    return {"error": f"Skill or provider '{name}' not found"}
+    return {"error": f"Skills have been removed; use manage_routines instead. Provider '{name}' not found."}
 
 
 if __name__ == "__main__":
