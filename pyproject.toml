@@ -20,6 +20,8 @@ dependencies = [
     "python-jose[cryptography]",
     "faster-whisper",
     "matplotlib>=3.10.8",
+    "scipy>=1.17.1",
+    "pydantic-ai[mcp]",
 ]
 
 [project.optional-dependencies]
