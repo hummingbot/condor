@@ -27,7 +27,7 @@ import { api, type ExecutorInfo } from "@/lib/api";
 
 // ── Formatters ──
 
-function formatUsd(val: number) {
+export function formatUsd(val: number) {
   if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
   if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
   return val.toLocaleString("en-US", {
@@ -37,22 +37,22 @@ function formatUsd(val: number) {
   });
 }
 
-function formatVolume(val: number) {
+export function formatVolume(val: number) {
   if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(1) + "M";
   if (Math.abs(val) >= 1_000) return "$" + (val / 1_000).toFixed(1) + "K";
   return "$" + val.toFixed(0);
 }
 
-function formatPnl(val: number) {
+export function formatPnl(val: number) {
   const prefix = val >= 0 ? "+" : "";
   return prefix + formatUsd(val);
 }
 
-function pnlColor(val: number) {
+export function pnlColor(val: number) {
   return val >= 0 ? "var(--color-green)" : "var(--color-red)";
 }
 
-function formatAge(timestamp: number): string {
+export function formatAge(timestamp: number): string {
   if (!timestamp) return "\u2014";
   try {
     const now = Date.now();
@@ -70,25 +70,25 @@ function formatAge(timestamp: number): string {
   }
 }
 
-function formatPrice(val: number): string {
+export function formatPrice(val: number): string {
   if (!val) return "\u2014";
   if (val >= 1000) return val.toLocaleString("en-US", { maximumFractionDigits: 2 });
   if (val >= 1) return val.toFixed(4);
   return val.toPrecision(4);
 }
 
-function formatPct(val: number): string {
+export function formatPct(val: number): string {
   if (!val) return "\u2014";
   return (val >= 0 ? "+" : "") + (val * 100).toFixed(2) + "%";
 }
 
-function isExecutorActive(status: string) {
+export function isExecutorActive(status: string) {
   return status === "active" || status === "running";
 }
 
 // ── Sort types ──
 
-type SortKey =
+export type SortKey =
   | "id"
   | "type"
   | "connector"
@@ -102,7 +102,7 @@ type SortKey =
   | "close_type"
   | "timestamp";
 
-type SortDir = "asc" | "desc";
+export type SortDir = "asc" | "desc";
 
 function compareExecutors(a: ExecutorInfo, b: ExecutorInfo, key: SortKey, dir: SortDir): number {
   let cmp = 0;
@@ -224,7 +224,7 @@ function StatCard({
 
 // ── Status Dot ──
 
-function StatusDot({ status }: { status: string }) {
+export function StatusDot({ status }: { status: string }) {
   const color =
     isExecutorActive(status)
       ? "text-[var(--color-green)]"
@@ -236,7 +236,7 @@ function StatusDot({ status }: { status: string }) {
 
 // ── Sortable Header ──
 
-function SortHeader({
+export function SortHeader({
   label,
   sortKey,
   currentKey,
@@ -391,7 +391,7 @@ function ControllerCard({
 
 // ── Executor Table ──
 
-function ExecutorTable({
+export function ExecutorTable({
   executors,
   sortKey,
   sortDir,
@@ -551,7 +551,7 @@ function ExecutorTable({
 
 // ── Detail Panel ──
 
-function DetailPanel({
+export function DetailPanel({
   executor,
   server,
   onClose,

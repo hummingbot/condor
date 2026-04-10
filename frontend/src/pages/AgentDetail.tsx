@@ -27,6 +27,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { type AgentDetail as AgentDetailType, type AgentExecutorRow, type ExperimentInfo, type ExecutorInfo, type SessionInfo, api } from "@/lib/api";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
+import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/pages/Executors";
 
 // ── Tabs ──
 
@@ -1220,7 +1221,7 @@ function agentRowToExecutorInfo(row: AgentExecutorRow): ExecutorInfo {
   return {
     id: row.id,
     type: row.type,
-    connector: row.connector || "",
+    connector: row.connector || "unknown",
     trading_pair: row.pair,
     side: row.side,
     status: row.status,
@@ -1234,8 +1235,8 @@ function agentRowToExecutorInfo(row: AgentExecutorRow): ExecutorInfo {
     entry_price: row.entry_price,
     current_price: row.current_price,
     close_timestamp: row.close_timestamp,
-    custom_info: {},
-    config: {},
+    custom_info: row.custom_info ?? {},
+    config: row.config ?? {},
   };
 }
 
@@ -1248,20 +1249,54 @@ function SessionExecutors({ slug, sessionNum, serverName }: { slug: string; sess
 
   const executors = sessionDetail?.executors ?? [];
 
+  // Convert rows to ExecutorInfo for table & chart
+  const executorInfos = useMemo(
+    () => executors.map(agentRowToExecutorInfo),
+    [executors],
+  );
+
   // Group executors by connector:pair for charts
   const chartGroups = useMemo(() => {
-    if (!serverName || executors.length === 0) return [];
+    if (!serverName || executorInfos.length === 0) return [];
     const groups = new Map<string, ExecutorInfo[]>();
-    for (const ex of executors) {
-      if (!ex.connector || !ex.pair) continue;
-      const key = `${ex.connector}:${ex.pair}`;
+    for (const ex of executorInfos) {
+      if (!ex.trading_pair) continue;
+      const key = `${ex.connector}:${ex.trading_pair}`;
       const arr = groups.get(key);
-      const info = agentRowToExecutorInfo(ex);
-      if (arr) arr.push(info);
-      else groups.set(key, [info]);
+      if (arr) arr.push(ex);
+      else groups.set(key, [ex]);
     }
     return Array.from(groups.entries());
-  }, [executors, serverName]);
+  }, [executorInfos, serverName]);
+
+  // Table state
+  const [sortKey, setSortKey] = useState<SortKey>("timestamp");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [selectedExecutor, setSelectedExecutor] = useState<ExecutorInfo | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const stoppingIds = useMemo(() => new Set<string>(), []);
+
+  const handleSort = useCallback((key: SortKey) => {
+    setSortDir((prev) => (sortKey === key ? (prev === "asc" ? "desc" : "asc") : "desc"));
+    setSortKey(key);
+  }, [sortKey]);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAll = useCallback(() => {
+    setSelectedIds((prev) =>
+      prev.size === executorInfos.length ? new Set() : new Set(executorInfos.map((e) => e.id)),
+    );
+  }, [executorInfos]);
+
+  const allSelected = selectedIds.size === executorInfos.length && executorInfos.length > 0;
 
   if (!sessionDetail) {
     return (
@@ -1289,52 +1324,34 @@ function SessionExecutors({ slug, sessionNum, serverName }: { slug: string; sess
         />
       ))}
 
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-        <Server className="h-3.5 w-3.5" /> Executors ({executors.length})
-      </h3>
-      <div className="overflow-x-auto">
-        <table className="w-full font-mono text-[11px]">
-          <thead>
-            <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-              <th className="px-2 py-1">ID</th>
-              <th className="px-2 py-1">Pair</th>
-              <th className="px-2 py-1">Side</th>
-              <th className="px-2 py-1">Status</th>
-              <th className="px-2 py-1 text-right">Entry</th>
-              <th className="px-2 py-1 text-right">Current</th>
-              <th className="px-2 py-1 text-right">PnL</th>
-              <th className="px-2 py-1 text-right">Volume</th>
-            </tr>
-          </thead>
-          <tbody>
-            {executors.map((e) => {
-              const col = e.pnl >= 0 ? "text-emerald-400" : "text-red-400";
-              return (
-                <tr key={e.id} className="border-t border-[var(--color-border)]/30">
-                  <td className="px-2 py-1 text-[var(--color-text-muted)]">{e.id.slice(0, 8)}</td>
-                  <td className="px-2 py-1 text-[var(--color-text)]">{e.pair}</td>
-                  <td className={`px-2 py-1 ${e.side.toLowerCase() === "buy" ? "text-emerald-400" : "text-red-400"}`}>
-                    {e.side.toUpperCase()}
-                  </td>
-                  <td className={`px-2 py-1 ${e.status === "RUNNING" ? "text-emerald-400" : "text-[var(--color-text-muted)]"}`}>
-                    {e.status}
-                  </td>
-                  <td className="px-2 py-1 text-right text-[var(--color-text-muted)]">{e.entry_price || "—"}</td>
-                  <td className="px-2 py-1 text-right text-[var(--color-text-muted)]">{e.current_price || "—"}</td>
-                  <td className={`px-2 py-1 text-right ${col}`}>
-                    ${e.pnl >= 0 ? "+" : ""}{e.pnl.toFixed(2)}
-                  </td>
-                  <td className="px-2 py-1 text-right text-[var(--color-text-muted)]">
-                    ${e.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      {/* Executor table + detail panel */}
+      <div className="flex">
+        <div className={`min-w-0 ${selectedExecutor ? "flex-1" : "w-full"}`}>
+          <ExecutorTable
+            executors={executorInfos}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={handleSort}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+            onSelectAll={selectAll}
+            allSelected={allSelected}
+            onRowClick={setSelectedExecutor}
+            selectedExecutorId={selectedExecutor?.id ?? null}
+            onStop={() => {}}
+            stoppingIds={stoppingIds}
+          />
+        </div>
+        {selectedExecutor && serverName && (
+          <DetailPanel
+            executor={selectedExecutor}
+            server={serverName}
+            onClose={() => setSelectedExecutor(null)}
+            onStop={() => {}}
+            stopping={false}
+          />
+        )}
       </div>
-    </div>
     </div>
   );
 }

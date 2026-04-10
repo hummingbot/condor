@@ -302,6 +302,8 @@ export interface AgentExecutorRow {
   timestamp: number;
   close_timestamp: number;
   controller_id: string;
+  custom_info?: Record<string, unknown>;
+  config?: Record<string, unknown>;
 }
 
 export interface AgentPerformance {
