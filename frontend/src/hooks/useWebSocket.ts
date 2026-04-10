@@ -33,15 +33,29 @@ export function useCondorWebSocket(
       } else if (prefix === "executors") {
         // Set unfiltered cache (matches default queryKey with status="")
         queryClient.setQueryData(["executors", server, ""], data);
-        // Invalidate any filtered queries so they refetch
-        queryClient.invalidateQueries({
-          queryKey: ["executors", server],
-          exact: false,
-          predicate: (query) =>
-            Array.isArray(query.queryKey) &&
-            query.queryKey.length >= 3 &&
-            query.queryKey[2] !== "",
-        });
+        // NOTE: do NOT invalidate ["executors-infinite", server] here.
+        // The Executors page loads pages progressively; invalidating on every
+        // WS tick (every ~2s) restarts pagination and the page never finishes
+        // loading. The infinite query has its own refetchInterval, and we
+        // prime its first page from WS data below so updates still flow.
+        const execs = data as unknown[];
+        if (Array.isArray(execs)) {
+          queryClient.setQueryData(
+            ["executors-infinite", server, ""],
+            (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
+              if (!old?.pages?.length) return old;
+              const firstPage = old.pages[0];
+              // Replace first page contents with the live WS snapshot (capped
+              // to the same page size) so the top of the list stays fresh.
+              const limit = firstPage.executors.length || 50;
+              const nextFirst = {
+                ...firstPage,
+                executors: execs.slice(0, limit),
+              };
+              return { ...old, pages: [nextFirst, ...old.pages.slice(1)] };
+            },
+          );
+        }
       } else if (prefix === "candles") {
         // channel format: candles:{server}:{connector}:{pair}:{interval}
         const parts = channel.split(":");

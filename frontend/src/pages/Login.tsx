@@ -9,15 +9,7 @@ export function Login() {
   const [searchParams] = useSearchParams();
   const [error, setError] = useState("");
   const [loggingIn, setLoggingIn] = useState(false);
-  const [botUsername, setBotUsername] = useState("condor_tg_bot");
   const attempted = useRef(false);
-
-  useEffect(() => {
-    fetch("/api/v1/auth/bot-info")
-      .then((r) => r.json())
-      .then((d) => { if (d.username) setBotUsername(d.username); })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -52,16 +44,7 @@ export function Login() {
         ) : (
           <>
             <p className="mb-6 text-sm text-[var(--color-text-muted)]">
-              Send <code className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-xs">/web</code> to{" "}
-              <a
-                href={`https://t.me/${botUsername}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[var(--color-primary)] hover:underline"
-              >
-                @{botUsername}
-              </a>{" "}
-              on Telegram to get a login link.
+              Run the <code className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-xs">/web</code> command in your Telegram bot to get a login link.
             </p>
           </>
         )}

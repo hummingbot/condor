@@ -152,6 +152,25 @@ export interface PositionsResponse {
   summary: Record<string, unknown>;
 }
 
+export interface ConsolidatedPosition {
+  connector_name: string;
+  trading_pair: string;
+  position_side: string;
+  amount: number;
+  entry_price: number;
+  current_price: number;
+  unrealized_pnl: number;
+  leverage: number;
+  controller_id: string;
+  source: "executor" | "bot";
+  source_name: string;
+}
+
+export interface ConsolidatedPositionsResponse {
+  executor_positions: ConsolidatedPosition[];
+  bot_positions: ConsolidatedPosition[];
+}
+
 export interface CandleData {
   timestamp: number;
   open: number;
@@ -231,8 +250,17 @@ export interface RunningInstance {
   agent_id: string;
   session_num: number;
   status: string;
+  agent_key: string;
   tick_count: number;
   daily_pnl: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  total_pnl: number;
+  volume: number;
+  fees: number;
+  open_count: number;
+  closed_count: number;
+  win_rate: number;
   server_name: string;
   total_amount_quote: number;
   trading_context: string;
@@ -251,7 +279,52 @@ export interface AgentSummary {
   experiment_count: number;
   tick_count: number;
   daily_pnl: number;
+  total_pnl: number;
+  total_volume: number;
+  open_positions: number;
   instances: RunningInstance[];
+}
+
+export interface AgentExecutorRow {
+  id: string;
+  type: string;
+  connector: string;
+  pair: string;
+  side: string;
+  status: string;
+  close_type: string;
+  pnl: number;
+  volume: number;
+  fees: number;
+  entry_price: number;
+  current_price: number;
+  amount: number;
+  timestamp: number;
+  close_timestamp: number;
+  controller_id: string;
+}
+
+export interface AgentPerformance {
+  agent_id: string;
+  session_num: number;
+  kind: "session" | "experiment";
+  status: string;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  total_pnl: number;
+  volume: number;
+  fees: number;
+  trade_count: number;
+  win_rate: number;
+  open_count: number;
+  closed_count: number;
+  executors: AgentExecutorRow[];
+}
+
+export interface AgentPerformanceResponse {
+  slug: string;
+  sessions: AgentPerformance[];
+  totals: Record<string, number>;
 }
 
 export interface SessionInfo {
@@ -263,6 +336,7 @@ export interface SessionInfo {
 export interface ExperimentInfo {
   number: number;
   execution_mode: string;
+  agent_key: string;
   snapshot_count: number;
   created_at: string;
 }
@@ -336,15 +410,40 @@ export const api = {
 
   getExecutors: (
     server: string,
-    params?: { executor_type?: string; trading_pair?: string; status?: string },
+    params?: { executor_type?: string; trading_pair?: string; status?: string; controller_id?: string; limit?: number },
   ) => {
     const qs = new URLSearchParams();
     if (params?.executor_type) qs.set("executor_type", params.executor_type);
     if (params?.trading_pair) qs.set("trading_pair", params.trading_pair);
     if (params?.status) qs.set("status", params.status);
+    if (params?.controller_id) qs.set("controller_id", params.controller_id);
+    if (params?.limit) qs.set("limit", String(params.limit));
     const q = qs.toString();
     return apiFetch<ExecutorInfo[]>(
       `/api/v1/servers/${server}/executors${q ? `?${q}` : ""}`,
+    );
+  },
+
+  getExecutorsPage: (
+    server: string,
+    params: {
+      cursor?: string;
+      limit?: number;
+      executor_type?: string;
+      trading_pair?: string;
+      status?: string;
+      controller_id?: string;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.cursor) qs.set("cursor", params.cursor);
+    qs.set("limit", String(params.limit ?? 50));
+    if (params.executor_type) qs.set("executor_type", params.executor_type);
+    if (params.trading_pair) qs.set("trading_pair", params.trading_pair);
+    if (params.status) qs.set("status", params.status);
+    if (params.controller_id) qs.set("controller_id", params.controller_id);
+    return apiFetch<{ executors: ExecutorInfo[]; next_cursor: string | null }>(
+      `/api/v1/servers/${server}/executors/page?${qs.toString()}`,
     );
   },
 
@@ -373,6 +472,9 @@ export const api = {
       { method: "DELETE" },
     );
   },
+
+  getConsolidatedPositions: (server: string) =>
+    apiFetch<ConsolidatedPositionsResponse>(`/api/v1/servers/${server}/positions`),
 
   getConnectors: (server: string) =>
     apiFetch<string[]>(`/api/v1/servers/${server}/market/connectors`),
@@ -407,15 +509,25 @@ export const api = {
     interval = "1m",
     limit = 1000,
     startTime?: number,
+    endTime?: number,
   ) => {
     let url = `/api/v1/servers/${server}/market/candles?connector=${connector}&trading_pair=${pair}&interval=${interval}&limit=${limit}`;
     if (startTime) url += `&start_time=${startTime}`;
+    if (endTime) url += `&end_time=${endTime}`;
     return apiFetch<CandleData[]>(url);
   },
 
   // ── Agents ──
 
   getAgents: () => apiFetch<AgentSummary[]>("/api/v1/agents"),
+
+  getAgentPerformance: (slug: string) =>
+    apiFetch<AgentPerformanceResponse>(`/api/v1/agents/${slug}/performance`),
+
+  getAgentSessionExecutors: (slug: string, sessionNum: number) =>
+    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
+      `/api/v1/agents/${slug}/sessions/${sessionNum}/executors`,
+    ),
 
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${slug}`),

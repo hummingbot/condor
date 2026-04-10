@@ -30,7 +30,10 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function AgentCard({ agent, onClick }: { agent: AgentSummary; onClick: () => void }) {
-  const pnlColor = agent.daily_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+  const totalPnl = agent.total_pnl ?? 0;
+  const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+  const dayPnl = agent.daily_pnl ?? 0;
+  const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
   const isLive = agent.status === "running";
 
   return (
@@ -63,16 +66,22 @@ function AgentCard({ agent, onClick }: { agent: AgentSummary; onClick: () => voi
           </p>
         )}
 
-        <div className="grid grid-cols-3 gap-3 border-t border-[var(--color-border)]/50 pt-3">
+        <div className="grid grid-cols-4 gap-2 border-t border-[var(--color-border)]/50 pt-3">
           <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">PnL</span>
-            <span className={`text-sm font-mono font-semibold ${pnlColor}`}>
-              ${agent.daily_pnl >= 0 ? "+" : ""}{agent.daily_pnl.toFixed(2)}
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
+            <span className={`text-sm font-mono font-semibold ${totalPnlColor}`}>
+              ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
             </span>
           </div>
           <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Ticks</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{agent.tick_count}</span>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Session</span>
+            <span className={`text-sm font-mono ${dayPnlColor}`}>
+              ${dayPnl >= 0 ? "+" : ""}{dayPnl.toFixed(2)}
+            </span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
+            <span className="text-sm font-mono text-[var(--color-text)]">{agent.open_positions ?? 0}</span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Sessions</span>
@@ -195,11 +204,16 @@ export function Agents() {
   const { data: agents = [], isLoading } = useQuery({
     queryKey: ["agents"],
     queryFn: api.getAgents,
-    refetchInterval: 5000,
+    refetchInterval: 10000,
   });
 
   const running = agents.filter((a) => a.status === "running");
   const others = agents.filter((a) => a.status !== "running");
+
+  const aggTotalPnl = agents.reduce((sum, a) => sum + (a.total_pnl ?? 0), 0);
+  const aggVolume = agents.reduce((sum, a) => sum + (a.total_volume ?? 0), 0);
+  const aggOpen = agents.reduce((sum, a) => sum + (a.open_positions ?? 0), 0);
+  const aggTotalColor = aggTotalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 
   return (
     <div className="mx-auto w-full max-w-7xl">
@@ -225,6 +239,32 @@ export function Agents() {
           New Agent
         </button>
       </div>
+
+      {/* Aggregate strip */}
+      {!isLoading && agents.length > 0 && (
+        <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
+            <span className={`text-lg font-mono font-semibold ${aggTotalColor}`}>
+              ${aggTotalPnl >= 0 ? "+" : ""}{aggTotalPnl.toFixed(2)}
+            </span>
+          </div>
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">
+              ${aggVolume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </span>
+          </div>
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open Positions</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">{aggOpen}</span>
+          </div>
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Live Agents</span>
+            <span className="text-lg font-mono text-emerald-400">{running.length} / {agents.length}</span>
+          </div>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="flex h-64 items-center justify-center text-[var(--color-text-muted)]">

@@ -1,7 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
-  Anchor,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -18,12 +17,13 @@ import {
   Volume2,
   X,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useServer } from "@/hooks/useServer";
-import { api, type ExecutorInfo, type PositionHeld } from "@/lib/api";
+import { api, type ExecutorInfo } from "@/lib/api";
 
 // ── Formatters ──
 
@@ -89,6 +89,7 @@ function isExecutorActive(status: string) {
 // ── Sort types ──
 
 type SortKey =
+  | "id"
   | "type"
   | "connector"
   | "trading_pair"
@@ -106,6 +107,7 @@ type SortDir = "asc" | "desc";
 function compareExecutors(a: ExecutorInfo, b: ExecutorInfo, key: SortKey, dir: SortDir): number {
   let cmp = 0;
   switch (key) {
+    case "id":
     case "type":
     case "connector":
     case "trading_pair":
@@ -435,6 +437,7 @@ function ExecutorTable({
                   className="rounded border-[var(--color-border)]"
                 />
               </th>
+              <SortHeader label="ID" sortKey="id" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
               <SortHeader label="Type" sortKey="type" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
               <SortHeader label="Connector" sortKey="connector" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
               <SortHeader label="Pair" sortKey="trading_pair" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
@@ -469,6 +472,9 @@ function ExecutorTable({
                       onChange={() => onToggleSelect(ex.id)}
                       className="rounded border-[var(--color-border)]"
                     />
+                  </td>
+                  <td className="px-4 py-2.5 text-xs font-mono text-[var(--color-text-muted)]" title={ex.id}>
+                    {ex.id.slice(0, 8)}
                   </td>
                   <td className="px-4 py-2.5">
                     <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
@@ -547,11 +553,13 @@ function ExecutorTable({
 
 function DetailPanel({
   executor,
+  server,
   onClose,
   onStop,
   stopping,
 }: {
   executor: ExecutorInfo;
+  server: string;
   onClose: () => void;
   onStop: (id: string) => void;
   stopping: boolean;
@@ -653,6 +661,17 @@ function DetailPanel({
               </h3>
               <div className="text-sm font-medium font-mono">{executor.controller_id}</div>
             </div>
+          )}
+
+          {/* Executor Chart */}
+          {server && executor.connector && executor.trading_pair && (
+            <ExecutorChart
+              server={server}
+              executors={[executor]}
+              connector={executor.connector}
+              tradingPair={executor.trading_pair}
+              height={300}
+            />
           )}
 
           {/* Price Info */}
@@ -923,7 +942,10 @@ export function Executors() {
   const [filters, setFilters] = useState({
     executor_type: "",
     trading_pair: "",
+    controller_id: "",
   });
+  const [maxPages, setMaxPages] = useState<number>(40); // 40 * 50 = 2000 cap by default
+  const PAGE_SIZE = 50;
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -940,35 +962,36 @@ export function Executors() {
   );
   useCondorWebSocket(wsChannels, server);
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["executors", server],
-    queryFn: () => api.getExecutors(server!),
+  const {
+    data,
+    isLoading,
+    error,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    refetch,
+  } = useInfiniteQuery({
+    queryKey: ["executors-infinite", server, filters.controller_id],
     enabled: !!server,
-    refetchInterval: 5000,
-  });
-
-  const { data: positionsData } = useQuery({
-    queryKey: ["positions-held", server],
-    queryFn: () => api.getPositionsHeld(server!),
-    enabled: !!server,
+    initialPageParam: "" as string,
+    queryFn: ({ pageParam }) =>
+      api.getExecutorsPage(server!, {
+        cursor: pageParam || undefined,
+        limit: PAGE_SIZE,
+        controller_id: filters.controller_id || undefined,
+      }),
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: 10000,
+    refetchOnWindowFocus: false,
   });
 
-  const positionsHeld = positionsData?.positions ?? [];
-
-  const [clearError, setClearError] = useState<string | null>(null);
-  const clearPositionMutation = useMutation({
-    mutationFn: (pos: PositionHeld) =>
-      api.clearPositionHeld(server!, pos.connector_name, pos.trading_pair, pos.controller_id),
-    onMutate: () => setClearError(null),
-    onError: (err: Error) => {
-      setClearError(err.message);
-      setTimeout(() => setClearError(null), 5000);
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["positions-held", server] });
-    },
-  });
+  // Progressive loading: auto-fetch next chunk as soon as current arrives.
+  const loadedPages = data?.pages.length ?? 0;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage && loadedPages < maxPages) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, loadedPages, maxPages, fetchNextPage]);
 
   const stopMutation = useMutation({
     mutationFn: async (ids: string[]) => {
@@ -985,7 +1008,7 @@ export function Executors() {
         return next;
       });
       setSelectedIds(new Set());
-      queryClient.invalidateQueries({ queryKey: ["executors", server] });
+      queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
     },
   });
 
@@ -1011,11 +1034,23 @@ export function Executors() {
     );
   };
 
-  const executors = data ?? [];
+  const executors = useMemo(
+    () => (data?.pages.flatMap((p) => p?.executors ?? []) ?? []) as ExecutorInfo[],
+    [data],
+  );
+  const reachedCap = loadedPages >= maxPages && hasNextPage;
 
   const executorTypes = useMemo(() => {
     const types = new Set(executors.map((ex) => ex.type));
     return Array.from(types).sort();
+  }, [executors]);
+
+  const controllerOptions = useMemo(() => {
+    const ids = new Set<string>();
+    for (const ex of executors) {
+      if (ex.controller_id) ids.add(ex.controller_id);
+    }
+    return Array.from(ids).sort();
   }, [executors]);
 
   const filteredExecutors = useMemo(() => {
@@ -1195,6 +1230,39 @@ export function Executors() {
             <option key={t} value={t}>{t}</option>
           ))}
         </select>
+        <select
+          value={filters.controller_id}
+          onChange={(e) =>
+            setFilters((f) => ({ ...f, controller_id: e.target.value }))
+          }
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none max-w-[220px] truncate"
+        >
+          <option value="">All controllers</option>
+          {controllerOptions.map((id) => (
+            <option key={id} value={id}>{id}</option>
+          ))}
+        </select>
+        <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
+          {executors.length} loaded
+          {isFetchingNextPage && " · loading…"}
+          {!hasNextPage && !isFetchingNextPage && executors.length > 0 && " · done"}
+          {reachedCap && " · cap reached"}
+        </span>
+        {reachedCap && (
+          <button
+            onClick={() => setMaxPages((p) => p + 40)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+          >
+            Load more
+          </button>
+        )}
+        <button
+          onClick={() => refetch()}
+          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+          title="Refresh"
+        >
+          Refresh
+        </button>
       </div>
 
       {isLoading ? (
@@ -1264,90 +1332,6 @@ export function Executors() {
                 onStop={handleStopOne}
                 stoppingIds={stoppingIds}
               />
-            </div>
-          )}
-
-          {/* ── Position Hold ── */}
-          {positionsHeld.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <Anchor className="h-4 w-4 text-amber-500" />
-                <h3 className="text-sm font-semibold">
-                  Held Positions ({positionsHeld.length})
-                </h3>
-              </div>
-              {clearError && (
-                <div className="rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
-                  Failed to clear position: {clearError}
-                </div>
-              )}
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {positionsHeld.map((pos) => {
-                  const side = (pos.position_side || pos.side || "").toUpperCase();
-                  const sideColor = side === "LONG" || side === "BUY" || side === "1" ? "var(--color-green)" : "var(--color-red)";
-                  const amount = pos.net_amount_base ?? pos.amount ?? 0;
-                  const entry = pos.buy_breakeven_price ?? pos.entry_price ?? 0;
-                  const current = pos.current_price ?? 0;
-                  const pnl = pos.unrealized_pnl_quote ?? pos.unrealized_pnl ?? 0;
-                  const leverage = pos.leverage ?? 1;
-                  const key = `${pos.connector_name}:${pos.trading_pair}:${pos.controller_id || ""}`;
-                  return (
-                    <div
-                      key={key}
-                      className="rounded-lg border border-amber-500/30 bg-[var(--color-surface)] p-4 transition-colors hover:border-amber-500/60"
-                    >
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <div className="h-2 w-2 rounded-full bg-amber-500" />
-                          <span className="text-sm font-medium truncate">{pos.trading_pair}</span>
-                          <span className="text-xs font-semibold uppercase" style={{ color: sideColor }}>
-                            {side === "1" ? "LONG" : side === "2" ? "SHORT" : side}
-                          </span>
-                        </div>
-                        <button
-                          onClick={() => clearPositionMutation.mutate(pos)}
-                          disabled={clearPositionMutation.isPending}
-                          className="rounded px-2 py-0.5 text-[10px] font-medium border border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-red)]/50 hover:text-[var(--color-red)] transition-colors disabled:opacity-50"
-                          title="Clear held position (mark as externally closed)"
-                        >
-                          Clear
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-                        <div>
-                          <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Unrealized PnL</div>
-                          <div className="font-medium tabular-nums" style={{ color: pnlColor(pnl) }}>
-                            {formatPnl(pnl)}
-                          </div>
-                        </div>
-                        {amount !== 0 && (
-                          <div>
-                            <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Size</div>
-                            <div className="font-medium tabular-nums">{Math.abs(amount).toPrecision(4)}</div>
-                          </div>
-                        )}
-                        {entry > 0 && (
-                          <div>
-                            <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Entry</div>
-                            <div className="font-medium tabular-nums">{formatPrice(entry)}</div>
-                          </div>
-                        )}
-                        {current > 0 && (
-                          <div>
-                            <div className="text-[var(--color-text-muted)] text-[10px] uppercase">Current</div>
-                            <div className="font-medium tabular-nums">{formatPrice(current)}</div>
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 mt-2 text-xs text-[var(--color-text-muted)]">
-                        <span>{pos.connector_name}</span>
-                        {leverage > 1 && <span>{leverage}x</span>}
-                        {pos.controller_id && <span className="truncate">{pos.controller_id}</span>}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
             </div>
           )}
 
@@ -1433,6 +1417,34 @@ export function Executors() {
                               </span>
                             </span>
                           </div>
+                          {/* Controller executor chart overlay */}
+                          {(() => {
+                            const summary = controllerSummaries.find((s) => s.controllerId === expandedController);
+                            const execs = summary?.executors ?? [];
+                            const first = execs[0];
+                            if (first && server) {
+                              // Group by trading pair for multi-pair controllers
+                              const pairGroups = new Map<string, ExecutorInfo[]>();
+                              for (const ex of execs) {
+                                const key = `${ex.connector}:${ex.trading_pair}`;
+                                const arr = pairGroups.get(key);
+                                if (arr) arr.push(ex);
+                                else pairGroups.set(key, [ex]);
+                              }
+                              return Array.from(pairGroups.entries()).map(([key, group]) => (
+                                <div key={key} className="mb-3">
+                                  <ExecutorChart
+                                    server={server}
+                                    executors={group}
+                                    connector={group[0].connector}
+                                    tradingPair={group[0].trading_pair}
+                                    height={280}
+                                  />
+                                </div>
+                              ));
+                            }
+                            return null;
+                          })()}
                           <ExecutorTable
                             executors={currentTableExecutors}
                             sortKey={sortKey}
@@ -1483,6 +1495,7 @@ export function Executors() {
       {selectedExecutor && (
         <DetailPanel
           executor={selectedExecutor}
+          server={server!}
           onClose={() => setSelectedExecutor(null)}
           onStop={handleStopOne}
           stopping={stoppingIds.has(selectedExecutor.id)}

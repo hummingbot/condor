@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Activity,
+  Anchor,
   Bot,
   Brain,
   CandlestickChart,
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { to: "/", icon: Wallet, label: "Portfolio" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
+  { to: "/positions", icon: Anchor, label: "Positions" },
   { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/market", icon: CandlestickChart, label: "Market" },
 ] as const;
