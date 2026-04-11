@@ -44,15 +44,14 @@ def _mode_selection_keyboard() -> InlineKeyboardMarkup:
 
 def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
     """Build LLM picker keyboard."""
-    buttons = []
+    keyboard = []
     for key, info in AGENT_OPTIONS.items():
         label = info["label"]
         if key == current_llm:
             label = f"• {label}"
-        buttons.append(
-            InlineKeyboardButton(label, callback_data=f"agent:set_llm:{key}")
+        keyboard.append(
+            [InlineKeyboardButton(label, callback_data=f"agent:set_llm:{key}")]
         )
-    keyboard = [buttons]
     keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
     return InlineKeyboardMarkup(keyboard)
 
