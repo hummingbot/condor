@@ -1,6 +1,7 @@
 """Agent chat handler -- /agent command, callback router, message handler."""
 
 import logging
+import random
 import shutil
 
 from telegram import Update
@@ -650,33 +651,34 @@ async def agent_message_handler(
         )
         return
 
-    # Send placeholder (reuse voice transcription message if available)
-    voice_placeholder = context.chat_data.pop("_voice_placeholder", None)
-    voice_transcription = context.chat_data.pop("_voice_transcription", None)
-    if voice_placeholder:
-        placeholder = voice_placeholder
-    else:
-        # Show mode label for non-condor modes so user knows which mode is active
-        mode_label = AGENT_MODES.get(mode, {}).get("label", "")
-        if mode != DEFAULT_MODE and mode_label:
-            placeholder = await update.message.reply_text(f"{mode_label} Thinking...")
-        else:
-            placeholder = await update.message.reply_text("Thinking...")
-
-    # Create streamer and start edit loop
+    # Create streamer prefix
     prefix = ""
-    # Prepend mode label for non-condor modes so user always knows which mode is active
     mode_label = AGENT_MODES.get(mode, {}).get("label", "")
     if mode != DEFAULT_MODE and mode_label:
         prefix = f"{mode_label}\n\n"
+
+    # Fetch voice data if this was a transcription
+    voice_placeholder = context.chat_data.pop("_voice_placeholder", None)
+    voice_transcription = context.chat_data.pop("_voice_transcription", None)
+
     if voice_transcription:
-        # Use plain text prefix — underscores in transcription could break Markdown
         voice_prefix = f"🎙 {voice_transcription}"
         prefix = f"{prefix}{voice_prefix}" if prefix else voice_prefix
+
+    # Delete placeholder if it exists (we use native streaming drafts now)
+    if voice_placeholder:
+        try:
+            await voice_placeholder.delete()
+        except Exception:
+            pass
+
+    # Generate a unique draft ID for streaming (native Telegram feature in v22.7)
+    draft_id = random.randint(1, 2**31 - 1)
+
     streamer = TelegramStreamer(
         bot=context.bot,
         chat_id=chat_id,
-        initial_message_id=placeholder.message_id,
+        draft_id=draft_id,
         prefix=prefix,
     )
     edit_task = streamer.start_edit_loop()
@@ -689,9 +691,8 @@ async def agent_message_handler(
     except Exception as e:
         log.exception("Agent prompt error")
         await streamer.finalize()
-        await context.bot.edit_message_text(
+        await context.bot.send_message(
             chat_id=chat_id,
-            message_id=placeholder.message_id,
             text=f"Agent error: {e}",
         )
         await destroy_session(chat_id)
