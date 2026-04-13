@@ -97,7 +97,7 @@ class Strategy:
     id: str
     name: str
     description: str
-    agent_key: str  # "claude-code", "gemini", or pydantic-ai model like "ollama:llama3.1"
+    agent_key: str  # "claude-code", "gemini", "copilot" or pydantic-ai model like "ollama:llama3.1"
     instructions: str  # The strategy logic text for the LLM
     skills: list[str] = field(default_factory=list)  # Optional skill names
     default_config: dict[str, Any] = field(default_factory=dict)

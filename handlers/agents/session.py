@@ -34,7 +34,7 @@ _health_bot: Bot | None = None
 @dataclass
 class AgentSession:
     chat_id: int
-    agent_key: str  # "claude-code", "gemini", "codex"
+    agent_key: str  # "claude-code", "gemini", "codex", "copilot"
     client: ACPClient
     mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False

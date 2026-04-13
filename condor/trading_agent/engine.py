@@ -282,7 +282,7 @@ class TickEngine:
             )
             self._pending_directives.clear()
 
-        # 6. Create agent client (ACP for Claude/Gemini, PydanticAI for open-source models)
+        # 6. Create agent client (ACP for Claude/Gemini/Copilot, PydanticAI for open-source models)
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
             build_mcp_servers_for_session,

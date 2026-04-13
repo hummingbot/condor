@@ -9,6 +9,7 @@ log = logging.getLogger(__name__)
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
+    "copilot": {"label": "GitHub Copilot CLI"},
     "ollama:llama3.1": {"label": "Ollama — Llama 3.1"},
     "ollama:qwen3:32b": {"label": "Ollama — Qwen 3 32B"},
     "ollama:qwen2.5:72b": {"label": "Ollama — Qwen 2.5 72B"},
