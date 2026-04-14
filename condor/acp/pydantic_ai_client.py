@@ -100,6 +100,10 @@ class PydanticAIClient:
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
+            # If no model specified (e.g., "lmstudio:" or "ollama:"), use a generic placeholder
+            # The local server will use its default/loaded model
+            if not model_id:
+                model_id = "local-model"
             provider = OpenAIProvider(base_url=base_url, api_key="not-needed")
             return OpenAIModel(model_id, provider=provider)
 

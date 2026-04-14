@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from telegram import Bot
 
 from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone
+from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -34,8 +35,8 @@ _health_bot: Bot | None = None
 @dataclass
 class AgentSession:
     chat_id: int
-    agent_key: str  # "claude-code", "gemini", "codex"
-    client: ACPClient
+    agent_key: str  # "claude-code", "gemini", "codex", "ollama:model", "lmstudio:model", etc.
+    client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -101,9 +102,6 @@ async def get_or_create_session(
     if session:
         await _destroy_session_internal(chat_id)
 
-    # Create new session
-    command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
-
     extra_env = {
         "CONDOR_CHAT_ID": str(chat_id),
     }
@@ -113,13 +111,27 @@ async def get_or_create_session(
     if user_id:
         mcp_servers = build_mcp_servers_for_session(user_id, chat_id, user_data)
 
-    client = ACPClient(
-        command=command,
-        working_dir=get_project_dir(),
-        mcp_servers=mcp_servers,
-        permission_callback=permission_callback,
-        extra_env=extra_env,
-    )
+    # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
+    use_pydantic_ai = is_pydantic_ai_model(agent_key)
+
+    if use_pydantic_ai:
+        # For Pydantic AI models: ollama:model, lmstudio:model, openai:model, etc.
+        client = PydanticAIClient(
+            model=agent_key,
+            mcp_servers=mcp_servers,
+            permission_callback=permission_callback,
+            extra_env=extra_env,
+        )
+    else:
+        # For ACP subprocess models: claude-code, gemini, codex
+        command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
+        client = ACPClient(
+            command=command,
+            working_dir=get_project_dir(),
+            mcp_servers=mcp_servers,
+            permission_callback=permission_callback,
+            extra_env=extra_env,
+        )
 
     await client.start()
 

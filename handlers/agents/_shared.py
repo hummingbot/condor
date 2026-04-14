@@ -9,13 +9,11 @@ log = logging.getLogger(__name__)
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
-    "ollama:llama3.1": {"label": "Ollama — Llama 3.1"},
-    "ollama:qwen3:32b": {"label": "Ollama — Qwen 3 32B"},
-    "ollama:qwen2.5:72b": {"label": "Ollama — Qwen 2.5 72B"},
-    "ollama:deepseek-r1:32b": {"label": "Ollama — DeepSeek R1 32B"},
-    "lmstudio:default": {"label": "LM Studio — Default Model"},
-    "openai:gpt-4o": {"label": "OpenAI — GPT-4o"},
-    "groq:llama-3.3-70b-versatile": {"label": "Groq — Llama 3.3 70B"},
+    "codex": {"label": "ChatGPT Codex"},
+    "ollama:": {"label": "Ollama — Default Model "},
+    "lmstudio:": {"label": "LM Studio — Default Model"},
+    "openai:": {"label": "OpenAI — GPT-4o"},
+    "groq:": {"label": "Groq — Llama 3.3"},
 }
 
 DEFAULT_AGENT = "claude-code"

@@ -99,10 +99,10 @@ def _to_telegram_markdown(text: str) -> str:
 class TelegramStreamer:
     """Consumes ACPEvents and progressively edits a Telegram message."""
 
-    def __init__(self, bot: Bot, chat_id: int, initial_message_id: int, prefix: str = ""):
+    def __init__(self, bot: Bot, chat_id: int, draft_id: int, prefix: str = ""):
         self._bot = bot
         self._chat_id = chat_id
-        self._message_id = initial_message_id
+        self._draft_id = draft_id
         self._prefix = prefix
         self._buffer = ""
         self._active_tools: dict[str, str] = {}     # tool_call_id -> "title..."
@@ -113,7 +113,8 @@ class TelegramStreamer:
         self._done = False
         self._stop_reason: str | None = None
         self._tick = 0
-        self._continuation_ids: list[int] = []
+        self._tool_msg_id: int | None = None
+        self._last_tool_text: str = ""
 
     @staticmethod
     def _format_tool_title(title: str) -> str:
@@ -237,25 +238,31 @@ class TelegramStreamer:
         return False
 
     async def _flush_edit(self, final: bool = False) -> None:
-        """Edit the message with current buffer content."""
+        """Update message draft for text, and a separate message for tools."""
         self._needs_edit = False
 
+        # --- Part 1: Tool Updates (Separate standard message) ---
+        tool_text = self._build_tool_block()
+        if tool_text != self._last_tool_text:
+            if not self._tool_msg_id and tool_text:
+                # First time seeing tools, send a new message
+                msg_id = await self._safe_send(tool_text)
+                if msg_id:
+                    self._tool_msg_id = msg_id
+            elif self._tool_msg_id:
+                if tool_text:
+                    await self._safe_edit_tools(self._tool_msg_id, tool_text)
+            self._last_tool_text = tool_text
+
+        # --- Part 2: Main Text Content (sendMessageDraft) ---
         parts: list[str] = []
         parse_mode: str | None = None
 
         if self._prefix:
             parts.append(self._prefix)
 
-        # Tool block (always at top, never Markdown-converted —
-        # _format_tool_title already strips underscores)
-        tool_block = self._build_tool_block()
-        if tool_block:
-            parts.append(tool_block)
-
-        # Main text content — strip leading/trailing whitespace to avoid gaps
         buf = self._buffer.strip()
         if buf:
-            # On final flush or when buffer looks stable → apply Markdown
             if final or self._buffer_looks_stable(buf):
                 converted = _to_telegram_markdown(buf)
                 parse_mode = "Markdown"
@@ -263,50 +270,56 @@ class TelegramStreamer:
                 converted = buf
             parts.append(converted)
         elif not final:
-            # Thinking animation
-            frame = _THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)]
-            parts.append(frame)
-        elif self._finished_tools:
-            # Tools ran but no text response
-            reason = f" [{self._stop_reason}]" if self._stop_reason else ""
-            parts.append(f"_(done — no additional response{reason})_")
-            parse_mode = "Markdown"
+            parts.append(_THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)])
         else:
-            reason = f" (stop reason: {self._stop_reason})" if self._stop_reason else ""
+            reason = f" (stop: {self._stop_reason})" if self._stop_reason else ""
             parts.append(f"_(no response{reason})_")
-            log.warning(
-                "Empty agent response for chat %s — stop_reason=%s, "
-                "tools_ran=%d, buffer_len=%d",
-                self._chat_id,
-                self._stop_reason,
-                len(self._finished_tools),
-                len(self._buffer),
+
+        full_text = "\n\n".join(parts)
+        chunks = self._split_text(full_text, MAX_MESSAGE_LEN)
+        text_to_stream = chunks[0]
+
+        if final:
+            # Convert draft to real message
+            await self._safe_send_final(text_to_stream, parse_mode=parse_mode)
+            for chunk in chunks[1:]:
+                await self._safe_send(chunk, parse_mode=parse_mode)
+        else:
+            # Use native streaming draft
+            await self._safe_update_draft(text_to_stream, parse_mode=parse_mode)
+
+    async def _safe_update_draft(self, text: str, parse_mode: str | None = None) -> None:
+        try:
+            await self._bot.send_message_draft(
+                chat_id=self._chat_id,
+                draft_id=self._draft_id,
+                text=text,
+                parse_mode=parse_mode,
             )
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                log.debug("Draft update skipped: %s", e)
 
-        text = "\n\n".join(parts)
+    async def _safe_send_final(self, text: str, parse_mode: str | None = None) -> None:
+        try:
+            await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                api_kwargs={"draft_id": self._draft_id},
+            )
+        except Exception:
+            log.exception("Final send failed")
 
-        if len(text) > MAX_MESSAGE_LEN:
-            await self._handle_overflow(text, final, parse_mode)
-            return
-
-        await self._safe_edit(self._message_id, text, parse_mode=parse_mode)
-
-    async def _handle_overflow(
-        self, text: str, final: bool, parse_mode: str | None = None
-    ) -> None:
-        """Split long messages across multiple Telegram messages."""
-        chunks = self._split_text(text, MAX_MESSAGE_LEN)
-        await self._safe_edit(self._message_id, chunks[0], parse_mode=parse_mode)
-
-        for i, chunk in enumerate(chunks[1:]):
-            if i < len(self._continuation_ids):
-                await self._safe_edit(
-                    self._continuation_ids[i], chunk, parse_mode=parse_mode
-                )
-            else:
-                msg_id = await self._safe_send(chunk, parse_mode=parse_mode)
-                if msg_id:
-                    self._continuation_ids.append(msg_id)
+    async def _safe_edit_tools(self, message_id: int, text: str) -> None:
+        try:
+            await self._bot.edit_message_text(
+                chat_id=self._chat_id,
+                message_id=message_id,
+                text=text,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _split_text(text: str, max_len: int) -> list[str]:
@@ -323,41 +336,6 @@ class TelegramStreamer:
         if text:
             chunks.append(text)
         return chunks
-
-    async def _safe_edit(
-        self, message_id: int, text: str, parse_mode: str | None = None
-    ) -> None:
-        """Edit a message with retry-after handling."""
-        try:
-            await self._bot.edit_message_text(
-                chat_id=self._chat_id,
-                message_id=message_id,
-                text=text,
-                parse_mode=parse_mode,
-            )
-        except BadRequest as e:
-            if "not modified" not in str(e).lower():
-                if parse_mode:
-                    # Markdown parse failed — fall back to plain text
-                    await self._safe_edit(message_id, text, parse_mode=None)
-                else:
-                    log.warning("Failed to edit message: %s", e)
-        except RetryAfter as e:
-            log.warning("Rate limited, waiting %s seconds", e.retry_after)
-            await asyncio.sleep(e.retry_after)
-            try:
-                await self._bot.edit_message_text(
-                    chat_id=self._chat_id,
-                    message_id=message_id,
-                    text=text,
-                    parse_mode=parse_mode,
-                )
-            except Exception:
-                pass
-        except TimedOut:
-            pass
-        except Exception:
-            log.exception("Unexpected error editing message")
 
     async def _safe_send(self, text: str, parse_mode: str | None = None) -> int | None:
         """Send a new message, return message_id."""
@@ -384,5 +362,5 @@ class TelegramStreamer:
             except Exception:
                 return None
         except Exception:
-            log.exception("Failed to send continuation message")
+            log.exception("Failed to send message")
             return None

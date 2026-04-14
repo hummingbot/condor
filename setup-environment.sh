@@ -273,6 +273,27 @@ if ! command_exists npm; then
     fi
 fi
 
+# ── Install Claude ACP globally ─────────────────────
+
+# Ensure shell environment is refreshed so npm is available after node install.
+refresh_path
+hash -r
+
+if ! npm list -g @agentclientprotocol/claude-agent-acp >/dev/null 2>&1; then
+    msg_info "Installing @agentclientprotocol/claude-agent-acp globally..."
+    if npm install -g @agentclientprotocol/claude-agent-acp; then
+        msg_ok "@agentclientprotocol/claude-agent-acp installed successfully"
+        NEEDS_RESTART=true
+        refresh_path
+    else
+        msg_error "Failed to install @agentclientprotocol/claude-agent-acp globally."
+        msg_info "You can install it later with: npm install -g @agentclientprotocol/claude-agent-acp"
+        # Don't exit - this dependency is optional for core setup flow
+    fi
+else
+    msg_ok "@agentclientprotocol/claude-agent-acp is already installed"
+fi
+
 # ── Install TypeScript globally ─────────────────────
 
 if ! command_exists tsc && ! npm list -g typescript >/dev/null 2>&1; then
