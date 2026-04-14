@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from .client import (
     ACPEvent,
@@ -100,10 +103,8 @@ class PydanticAIClient:
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
-            # If no model specified (e.g., "lmstudio:" or "ollama:"), use a generic placeholder
-            # The local server will use its default/loaded model
             if not model_id:
-                model_id = "local-model"
+                model_id = self._resolve_default_local_model(prefix=prefix, base_url=base_url)
             provider = OpenAIProvider(base_url=base_url, api_key="not-needed")
             return OpenAIModel(model_id, provider=provider)
 
@@ -115,6 +116,82 @@ class PydanticAIClient:
         # Standard pydantic-ai resolution (openai, groq, anthropic, google)
         from pydantic_ai.models import infer_model
         return infer_model(self.model_name)
+
+    def _resolve_default_local_model(self, prefix: str, base_url: str) -> str:
+        """Resolve a usable default model for local providers.
+
+        For ollama/lmstudio with model strings like "ollama:" (no explicit model),
+        prefer an env override and then probe known model-list endpoints.
+        """
+        env_override = os.environ.get("CONDOR_DEFAULT_LOCAL_MODEL") or os.environ.get(
+            "OLLAMA_MODEL"
+        )
+        if env_override:
+            return env_override
+
+        model_id = self._fetch_openai_compatible_model(base_url)
+        if model_id:
+            return model_id
+
+        if prefix == "ollama":
+            model_id = self._fetch_ollama_native_model(base_url)
+            if model_id:
+                return model_id
+
+        raise RuntimeError(
+            f"No local model found for '{prefix}'. "
+            f"Use an explicit key like '{prefix}:<model-name>' (e.g. ollama:llama3.1) "
+            "or set CONDOR_DEFAULT_LOCAL_MODEL."
+        )
+
+    def _fetch_openai_compatible_model(self, base_url: str) -> str | None:
+        """Try GET {base_url}/models and return the first model id."""
+        url = f"{base_url.rstrip('/')}/models"
+        try:
+            req = Request(url, method="GET")
+            with urlopen(req, timeout=2) as resp:
+                if resp.status != 200:
+                    return None
+                import json
+
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+        data = payload.get("data")
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                model_id = first.get("id")
+                if isinstance(model_id, str) and model_id.strip():
+                    return model_id.strip()
+        return None
+
+    def _fetch_ollama_native_model(self, base_url: str) -> str | None:
+        """Try GET /api/tags from the Ollama host and return first model name."""
+        parsed = urlparse(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        native_url = f"{parsed.scheme}://{parsed.netloc}/api/tags"
+        try:
+            req = Request(native_url, method="GET")
+            with urlopen(req, timeout=2) as resp:
+                if resp.status != 200:
+                    return None
+                import json
+
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+        models = payload.get("models")
+        if isinstance(models, list) and models:
+            first = models[0]
+            if isinstance(first, dict):
+                name = first.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        return None
 
     async def start(self) -> None:
         """Initialize MCP servers and create the pydantic-ai agent."""
