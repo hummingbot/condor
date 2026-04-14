@@ -115,13 +115,24 @@ async def get_or_create_session(
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     if use_pydantic_ai:
-        # For Pydantic AI models: use deferred loading to avoid overwhelming local models
-        # Tools are hidden until the model searches for them via tool discovery
+        # For Pydantic AI models: auto-detect or use configured filter mode
+        import os
+        from condor.preferences import get_agent_prefs
+
+        # Priority: user preference > env variable > auto-detect (None)
+        agent_prefs = get_agent_prefs(user_data) if user_data else {}
+        tool_filter_mode = (
+            agent_prefs.get("tool_filter_mode") or
+            os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
+            None  # None triggers auto-detection based on model size
+        )
+
         client = PydanticAIClient(
             model=agent_key,
-            mcp_servers=mcp_servers,  # Using deferred loading inside PydanticAIClient
+            mcp_servers=mcp_servers,
             permission_callback=permission_callback,
             extra_env=extra_env,
+            tool_filter_mode=tool_filter_mode,  # Auto-detects if None
         )
     else:
         # For ACP subprocess models: claude-code, gemini, codex

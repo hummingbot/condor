@@ -31,6 +31,64 @@ from .client import (
 
 log = logging.getLogger(__name__)
 
+
+def _infer_tool_filter_mode(model_name: str) -> str:
+    """Automatically detect the best tool filter mode based on model name.
+
+    Analyzes model size and family to determine capability:
+    - Small models (≤8B): essential (minimal tools)
+    - Medium models (9B-32B): moderate (common operations)
+    - Large models (>32B) or cloud APIs: full (all tools)
+
+    Args:
+        model_name: Model identifier like "ollama:llama3.1:8b" or "lmstudio:qwen-14b"
+
+    Returns:
+        "essential", "moderate", or "full"
+    """
+    import re
+
+    model_lower = model_name.lower()
+
+    # Cloud providers always get full access (they're powerful enough)
+    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:"]):
+        log.info("Auto-detected cloud provider → tool_filter_mode=full")
+        return "full"
+
+    # Extract parameter count (e.g., "7b", "14b", "72b", "32b")
+    # Matches patterns like: 7b, 8b, 14b, 32b, 72b, 1.5b, 2.7b, etc.
+    size_match = re.search(r'(\d+(?:\.\d+)?)\s*[bB](?![a-z])', model_lower)
+
+    if size_match:
+        size = float(size_match.group(1))
+
+        if size <= 8.0:
+            mode = "essential"
+            log.info(f"Auto-detected {size}B model → tool_filter_mode=essential")
+        elif size <= 32.0:
+            mode = "moderate"
+            log.info(f"Auto-detected {size}B model → tool_filter_mode=moderate")
+        else:
+            mode = "full"
+            log.info(f"Auto-detected {size}B model → tool_filter_mode=full")
+
+        return mode
+
+    # Model name-based heuristics (if no size found)
+    # Small models
+    if any(name in model_lower for name in ["gemma", "phi", "tiny", "mini", "small"]):
+        log.info(f"Auto-detected small model family → tool_filter_mode=essential")
+        return "essential"
+
+    # Large models
+    if any(name in model_lower for name in ["deepseek", "mixtral", "command-r", "gpt"]):
+        log.info(f"Auto-detected large model family → tool_filter_mode=full")
+        return "full"
+
+    # Default to moderate for unknown models
+    log.info(f"Unknown model size, defaulting → tool_filter_mode=moderate")
+    return "moderate"
+
 # Model prefix → pydantic-ai model string mapping
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
@@ -71,12 +129,15 @@ class PydanticAIClient:
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
         base_url: str | None = None,
+        tool_filter_mode: str | None = None,  # "essential", "moderate", "full", or None for auto-detect
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
         self.base_url = base_url
+        # Auto-detect filter mode based on model if not explicitly set
+        self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
         self._exit_stack: AsyncExitStack | None = None
         self._agent: Any = None
@@ -219,10 +280,46 @@ class PydanticAIClient:
                 env=env if env else None,
             )
 
-            # Use deferred loading to avoid overwhelming local models
-            # Tools are hidden until the model searches for them
-            deferred_server = mcp_server.defer_loading()
-            toolsets.append(deferred_server)
+            # Filter approach: Only show essential tools to avoid overwhelming local models
+            # Smaller models struggle with large tool lists and don't understand search_tools pattern
+            server_name = srv_config.get("name", "")
+
+            if server_name == "mcp-hummingbot":
+                # Filter hummingbot tools based on mode to avoid overwhelming local models
+                if self.tool_filter_mode == "essential":
+                    # Only read-only/query tools
+                    allowed_tools = {
+                        "get_market_data",
+                        "get_portfolio_overview",
+                        "manage_bots",  # read-only when action="list"
+                        "search_history",
+                    }
+                    filtered_server = mcp_server.filtered(
+                        lambda ctx, tool_def: tool_def.name in allowed_tools
+                    )
+                    toolsets.append(filtered_server)
+                elif self.tool_filter_mode == "moderate":
+                    # Add common write operations
+                    allowed_tools = {
+                        "get_market_data",
+                        "get_portfolio_overview",
+                        "manage_bots",
+                        "manage_executors",  # Start/stop executors
+                        "manage_controllers",  # Manage controllers
+                        "search_history",
+                        "setup_connector",  # Setup connectors
+                    }
+                    filtered_server = mcp_server.filtered(
+                        lambda ctx, tool_def: tool_def.name in allowed_tools
+                    )
+                    toolsets.append(filtered_server)
+                else:  # "full"
+                    # All tools for capable models
+                    toolsets.append(mcp_server)
+            else:
+                # Keep all tools for other servers (condor is small enough)
+                toolsets.append(mcp_server)
+
             self._mcp_servers.append(mcp_server)
 
         model = self._build_model()

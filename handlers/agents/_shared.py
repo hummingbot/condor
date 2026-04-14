@@ -11,9 +11,7 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "gemini": {"label": "Gemini CLI"},
     "codex": {"label": "ChatGPT Codex"},
     "ollama:": {"label": "Ollama — Default Model"},
-    "ollama:llama3.1": {"label": "Ollama — Llama 3.1"},
-    "ollama:qwen2.5:72b": {"label": "Ollama — Qwen 2.5 72B"},
-    "lmstudio:": {"label": "LM Studio — Auto-detect Model"},
+    "lmstudio:": {"label": "LM Studio — Default Model"},
 }
 
 DEFAULT_AGENT = "claude-code"

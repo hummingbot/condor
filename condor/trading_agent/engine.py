@@ -310,14 +310,20 @@ class TickEngine:
         use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
         if use_pydantic_ai:
+            import os
             base_url = self.config.get("model_base_url") or None
-            # Using deferred loading in PydanticAIClient to avoid overwhelming local models
-            # Tools are hidden until the model searches for them
+            # Auto-detect filter mode based on model, or use explicit config
+            tool_filter_mode = (
+                self.config.get("tool_filter_mode") or
+                os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
+                None  # None triggers auto-detection
+            )
             acp_client = PydanticAIClient(
                 model=agent_key,
-                mcp_servers=mcp_servers,  # Using deferred loading inside PydanticAIClient
+                mcp_servers=mcp_servers,
                 permission_callback=permission_cb,
                 base_url=base_url,
+                tool_filter_mode=tool_filter_mode,  # Auto-detects if None
             )
         else:
             agent_cmd = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
