@@ -202,6 +202,7 @@ class PydanticAIClient:
 
         # Build MCP server instances from configs
         # Each config has: name, command, args, env
+        toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
             args = srv_config.get("args", [])
@@ -217,17 +218,22 @@ class PydanticAIClient:
                 args=args,
                 env=env if env else None,
             )
+
+            # Use deferred loading to avoid overwhelming local models
+            # Tools are hidden until the model searches for them
+            deferred_server = mcp_server.defer_loading()
+            toolsets.append(deferred_server)
             self._mcp_servers.append(mcp_server)
 
         model = self._build_model()
 
         self._agent = Agent(
             model,
-            mcp_servers=self._mcp_servers,
+            toolsets=toolsets,  # Use toolsets instead of mcp_servers for deferred loading
         )
 
         log.info(
-            "PydanticAI client ready: model=%s, mcp_servers=%d",
+            "PydanticAI client ready: model=%s, mcp_servers=%d (deferred loading enabled)",
             self.model_name,
             len(self._mcp_servers),
         )

@@ -10,10 +10,10 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
     "codex": {"label": "ChatGPT Codex"},
-    "ollama:": {"label": "Ollama — Default Model "},
-    "lmstudio:": {"label": "LM Studio — Default Model"},
-    "openai:": {"label": "OpenAI — GPT-4o"},
-    "groq:": {"label": "Groq — Llama 3.3"},
+    "ollama:": {"label": "Ollama — Default Model"},
+    "ollama:llama3.1": {"label": "Ollama — Llama 3.1"},
+    "ollama:qwen2.5:72b": {"label": "Ollama — Qwen 2.5 72B"},
+    "lmstudio:": {"label": "LM Studio — Auto-detect Model"},
 }
 
 DEFAULT_AGENT = "claude-code"

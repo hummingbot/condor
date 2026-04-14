@@ -311,9 +311,11 @@ class TickEngine:
 
         if use_pydantic_ai:
             base_url = self.config.get("model_base_url") or None
+            # Using deferred loading in PydanticAIClient to avoid overwhelming local models
+            # Tools are hidden until the model searches for them
             acp_client = PydanticAIClient(
                 model=agent_key,
-                mcp_servers=mcp_servers,
+                mcp_servers=mcp_servers,  # Using deferred loading inside PydanticAIClient
                 permission_callback=permission_cb,
                 base_url=base_url,
             )

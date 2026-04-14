@@ -115,10 +115,11 @@ async def get_or_create_session(
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     if use_pydantic_ai:
-        # For Pydantic AI models: ollama:model, lmstudio:model, openai:model, etc.
+        # For Pydantic AI models: use deferred loading to avoid overwhelming local models
+        # Tools are hidden until the model searches for them via tool discovery
         client = PydanticAIClient(
             model=agent_key,
-            mcp_servers=mcp_servers,
+            mcp_servers=mcp_servers,  # Using deferred loading inside PydanticAIClient
             permission_callback=permission_callback,
             extra_env=extra_env,
         )
