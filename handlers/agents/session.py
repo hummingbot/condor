@@ -35,7 +35,7 @@ _health_bot: Bot | None = None
 @dataclass
 class AgentSession:
     chat_id: int
-    agent_key: str  # "claude-code", "gemini", "codex", "ollama:model", "lmstudio:model", etc.
+    agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
     client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False

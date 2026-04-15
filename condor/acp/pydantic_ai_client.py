@@ -280,46 +280,10 @@ class PydanticAIClient:
                 env=env if env else None,
             )
 
-            # Filter approach: Only show essential tools to avoid overwhelming local models
-            # Smaller models struggle with large tool lists and don't understand search_tools pattern
-            server_name = srv_config.get("name", "")
-
-            if server_name == "mcp-hummingbot":
-                # Filter hummingbot tools based on mode to avoid overwhelming local models
-                if self.tool_filter_mode == "essential":
-                    # Only read-only/query tools
-                    allowed_tools = {
-                        "get_market_data",
-                        "get_portfolio_overview",
-                        "manage_bots",  # read-only when action="list"
-                        "search_history",
-                    }
-                    filtered_server = mcp_server.filtered(
-                        lambda ctx, tool_def: tool_def.name in allowed_tools
-                    )
-                    toolsets.append(filtered_server)
-                elif self.tool_filter_mode == "moderate":
-                    # Add common write operations
-                    allowed_tools = {
-                        "get_market_data",
-                        "get_portfolio_overview",
-                        "manage_bots",
-                        "manage_executors",  # Start/stop executors
-                        "manage_controllers",  # Manage controllers
-                        "search_history",
-                        "setup_connector",  # Setup connectors
-                    }
-                    filtered_server = mcp_server.filtered(
-                        lambda ctx, tool_def: tool_def.name in allowed_tools
-                    )
-                    toolsets.append(filtered_server)
-                else:  # "full"
-                    # All tools for capable models
-                    toolsets.append(mcp_server)
-            else:
-                # Keep all tools for other servers (condor is small enough)
-                toolsets.append(mcp_server)
-
+            # Use deferred loading to avoid overwhelming local models
+            # Tools are hidden until the model searches for them
+            deferred_server = mcp_server.defer_loading()
+            toolsets.append(deferred_server)
             self._mcp_servers.append(mcp_server)
 
         model = self._build_model()

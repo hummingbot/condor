@@ -9,6 +9,7 @@ log = logging.getLogger(__name__)
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
+    "copilot": {"label": "GitHub Copilot CLI"},
     "codex": {"label": "ChatGPT Codex"},
     "ollama:": {"label": "Ollama — Default Model"},
     "lmstudio:": {"label": "LM Studio — Default Model"},
@@ -119,7 +120,7 @@ agent_key is just the default. Override it at launch via config:
 config={"agent_key": "ollama:qwen3:32b", "execution_mode": "dry_run"})
 
 Available models:
-- ACP (subprocess CLI): "claude-code", "gemini"
+- ACP (subprocess CLI): "claude-code", "gemini", "copilot"
 - Pydantic AI (local): "ollama:llama3.1", "ollama:qwen3:32b", \
 "ollama:qwen2.5:72b", "ollama:deepseek-r1:32b", "lmstudio:<model-name>"
 - Pydantic AI (cloud): "openai:gpt-4o", "groq:llama-3.3-70b-versatile"

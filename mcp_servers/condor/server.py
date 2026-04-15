@@ -796,7 +796,7 @@ async def manage_trading_agent(
         name: Strategy name (for create/update) or routine name (for run_routine).
         description: Strategy description (for create/update).
         instructions: Strategy instructions text (for create/update).
-        agent_key: Default LLM for the strategy (for create/update). Examples: "claude-code", "gemini", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Default "claude-code".
+        agent_key: Default LLM for the strategy (for create/update). Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Default "claude-code".
         skills: List of optional skill names to enable (for create/update).
         config: Agent config overrides (for create/update/start) or routine config (for run_routine).
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
