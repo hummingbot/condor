@@ -263,6 +263,10 @@ class PydanticAIClient:
 
         # Build MCP server instances from configs
         # Each config has: name, command, args, env
+        # Don't use deferred loading - it adds unnecessary complexity:
+        # - Cloud models can handle all tools easily
+        # - Local models struggle with the search_tools workflow
+        # Just show all tools upfront for best results
         toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
@@ -280,21 +284,19 @@ class PydanticAIClient:
                 env=env if env else None,
             )
 
-            # Use deferred loading to avoid overwhelming local models
-            # Tools are hidden until the model searches for them
-            deferred_server = mcp_server.defer_loading()
-            toolsets.append(deferred_server)
+            # Add MCP server directly (no deferred loading)
+            toolsets.append(mcp_server)
             self._mcp_servers.append(mcp_server)
 
         model = self._build_model()
 
         self._agent = Agent(
             model,
-            toolsets=toolsets,  # Use toolsets instead of mcp_servers for deferred loading
+            toolsets=toolsets,
         )
 
         log.info(
-            "PydanticAI client ready: model=%s, mcp_servers=%d (deferred loading enabled)",
+            "PydanticAI client ready: model=%s, mcp_servers=%d",
             self.model_name,
             len(self._mcp_servers),
         )

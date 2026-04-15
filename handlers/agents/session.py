@@ -149,7 +149,7 @@ async def get_or_create_session(
 
     # Send initial context about server and permissions
     if user_id:
-        initial_context = build_initial_context(user_id, chat_id, user_data)
+        initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key)
         if initial_context:
             try:
                 await client.prompt(initial_context)
