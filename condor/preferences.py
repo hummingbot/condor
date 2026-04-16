@@ -158,8 +158,9 @@ class TradingAgentPrefs(TypedDict, total=False):
 
 
 class AgentPrefs(TypedDict, total=False):
-    default_agent: str       # "claude-code", "gemini", "codex"
+    default_agent: str       # "claude-code", "gemini", "codex", "copilot"
     show_tool_calls: bool    # Show tool call indicators (default True)
+    tool_filter_mode: str    # "essential", "moderate", or "full" for PydanticAI models
 
 
 class UserPreferences(TypedDict, total=False):
@@ -857,6 +858,7 @@ def get_agent_prefs(user_data: Dict) -> "AgentPrefs":
     return deepcopy(user_data[USER_PREFERENCES_KEY].get("agent", {
         "default_agent": "claude-code",
         "show_tool_calls": True,
+        "tool_filter_mode": "essential",
     }))
 
 

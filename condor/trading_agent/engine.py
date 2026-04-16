@@ -282,7 +282,7 @@ class TickEngine:
             )
             self._pending_directives.clear()
 
-        # 6. Create agent client (ACP for Claude/Gemini, PydanticAI for open-source models)
+        # 6. Create agent client (ACP for Claude/Gemini/Copilot, PydanticAI for open-source models)
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
             build_mcp_servers_for_session,
@@ -310,12 +310,20 @@ class TickEngine:
         use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
         if use_pydantic_ai:
+            import os
             base_url = self.config.get("model_base_url") or None
+            # Auto-detect filter mode based on model, or use explicit config
+            tool_filter_mode = (
+                self.config.get("tool_filter_mode") or
+                os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
+                None  # None triggers auto-detection
+            )
             acp_client = PydanticAIClient(
                 model=agent_key,
                 mcp_servers=mcp_servers,
                 permission_callback=permission_cb,
                 base_url=base_url,
+                tool_filter_mode=tool_filter_mode,  # Auto-detects if None
             )
         else:
             agent_cmd = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])

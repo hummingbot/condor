@@ -9,13 +9,10 @@ log = logging.getLogger(__name__)
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
-    "ollama:llama3.1": {"label": "Ollama — Llama 3.1"},
-    "ollama:qwen3:32b": {"label": "Ollama — Qwen 3 32B"},
-    "ollama:qwen2.5:72b": {"label": "Ollama — Qwen 2.5 72B"},
-    "ollama:deepseek-r1:32b": {"label": "Ollama — DeepSeek R1 32B"},
-    "lmstudio:default": {"label": "LM Studio — Default Model"},
-    "openai:gpt-4o": {"label": "OpenAI — GPT-4o"},
-    "groq:llama-3.3-70b-versatile": {"label": "Groq — Llama 3.3 70B"},
+    "copilot": {"label": "GitHub Copilot CLI"},
+    "codex": {"label": "ChatGPT Codex"},
+    "ollama:": {"label": "Ollama — Default Model"},
+    "lmstudio:": {"label": "LM Studio — Default Model"},
 }
 
 DEFAULT_AGENT = "claude-code"
@@ -123,7 +120,7 @@ agent_key is just the default. Override it at launch via config:
 config={"agent_key": "ollama:qwen3:32b", "execution_mode": "dry_run"})
 
 Available models:
-- ACP (subprocess CLI): "claude-code", "gemini"
+- ACP (subprocess CLI): "claude-code", "gemini", "copilot"
 - Pydantic AI (local): "ollama:llama3.1", "ollama:qwen3:32b", \
 "ollama:qwen2.5:72b", "ollama:deepseek-r1:32b", "lmstudio:<model-name>"
 - Pydantic AI (cloud): "openai:gpt-4o", "groq:llama-3.3-70b-versatile"
@@ -453,9 +450,10 @@ def build_mcp_servers_for_agent(
     return [mcp_hummingbot, condor]
 
 
-def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = None) -> str:
+def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = None, agent_key: str | None = None) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from config_manager import ServerPermission, get_config_manager, get_effective_server
+    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     cm = get_config_manager()
 
@@ -497,48 +495,53 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
         else:
             configure_hint = ""
 
-        # Instruct agent to preload all MCP tools in one shot to avoid
-    # repeated ToolSearch calls that bloat the context window.
-    mcp_tools = [
-        "mcp__mcp-hummingbot__configure_server",
-        "mcp__mcp-hummingbot__get_market_data",
-        "mcp__mcp-hummingbot__get_portfolio_overview",
-        "mcp__mcp-hummingbot__manage_executors",
-        "mcp__mcp-hummingbot__manage_bots",
-        "mcp__mcp-hummingbot__manage_controllers",
-        "mcp__mcp-hummingbot__explore_dex_pools",
-        "mcp__mcp-hummingbot__explore_geckoterminal",
-        "mcp__mcp-hummingbot__manage_gateway_swaps",
-        "mcp__mcp-hummingbot__manage_gateway_config",
-        "mcp__mcp-hummingbot__manage_gateway_container",
-        "mcp__mcp-hummingbot__search_history",
-        "mcp__mcp-hummingbot__setup_connector",
-        "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
-        "mcp__condor__manage_routines",
-        "mcp__condor__manage_servers",
-        "mcp__condor__get_user_context",
-        "mcp__condor__manage_trading_agent",
-        "mcp__condor__trading_agent_journal_read",
-        "mcp__condor__trading_agent_journal_write",
-        "mcp__condor__send_notification",
-        "mcp__condor__manage_notes",
-        "mcp__condor__manage_skills",
-    ]
-    tool_preload_hint = (
-        "IMPORTANT: At the very start of the session (before your first response), "
-        "load ALL MCP tools in a single ToolSearch call:\n"
-        f'ToolSearch(query="select:{",".join(mcp_tools)}")\n'
-        "This avoids repeated ToolSearch calls that waste context tokens. "
-        "Do this silently without telling the user."
-    )
+        # For ACP agents (Claude Code): instruct them to preload MCP tools via ToolSearch
+        # Pydantic-ai agents get tools directly, no preload needed
+        tool_preload_hint = ""
+        if agent_key and not is_pydantic_ai_model(agent_key):
+            mcp_tools = [
+                "mcp__mcp-hummingbot__configure_server",
+                "mcp__mcp-hummingbot__get_market_data",
+                "mcp__mcp-hummingbot__get_portfolio_overview",
+                "mcp__mcp-hummingbot__manage_executors",
+                "mcp__mcp-hummingbot__manage_bots",
+                "mcp__mcp-hummingbot__manage_controllers",
+                "mcp__mcp-hummingbot__explore_dex_pools",
+                "mcp__mcp-hummingbot__explore_geckoterminal",
+                "mcp__mcp-hummingbot__manage_gateway_swaps",
+                "mcp__mcp-hummingbot__manage_gateway_config",
+                "mcp__mcp-hummingbot__manage_gateway_container",
+                "mcp__mcp-hummingbot__search_history",
+                "mcp__mcp-hummingbot__setup_connector",
+                "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
+                "mcp__condor__manage_routines",
+                "mcp__condor__manage_servers",
+                "mcp__condor__get_user_context",
+                "mcp__condor__manage_trading_agent",
+                "mcp__condor__trading_agent_journal_read",
+                "mcp__condor__trading_agent_journal_write",
+                "mcp__condor__send_notification",
+                "mcp__condor__manage_notes",
+                "mcp__condor__manage_skills",
+            ]
+            tool_preload_hint = (
+                "IMPORTANT: At the very start of the session (before your first response), "
+                "load ALL MCP tools in a single ToolSearch call:\n"
+                f'ToolSearch(query="select:{",".join(mcp_tools)}")\n'
+                "This avoids repeated ToolSearch calls that waste context tokens. "
+                "Do this silently without telling the user."
+            )
 
-    sections.append("\n".join([
-            f"Active server: {active_name}",
-            "",
-            tool_preload_hint,
-            "",
-            configure_hint,
-            "",
+        # Build server info section
+        server_info = [f"Active server: {active_name}", ""]
+
+        if tool_preload_hint:
+            server_info.extend([tool_preload_hint, ""])
+
+        if configure_hint:
+            server_info.extend([configure_hint, ""])
+
+        server_info.extend([
             "Available servers:",
             *server_lines,
             "",
@@ -551,6 +554,8 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
             "- TRADER: Can trade, view balances, and manage own settings.",
             "",
             "After switching servers, enforce the permission level shown for that server.",
-        ]))
+        ])
+
+        sections.append("\n".join(server_info))
 
     return "\n\n".join(sections)

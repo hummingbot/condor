@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from .client import (
     ACPEvent,
@@ -27,6 +30,64 @@ from .client import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _infer_tool_filter_mode(model_name: str) -> str:
+    """Automatically detect the best tool filter mode based on model name.
+
+    Analyzes model size and family to determine capability:
+    - Small models (≤8B): essential (minimal tools)
+    - Medium models (9B-32B): moderate (common operations)
+    - Large models (>32B) or cloud APIs: full (all tools)
+
+    Args:
+        model_name: Model identifier like "ollama:llama3.1:8b" or "lmstudio:qwen-14b"
+
+    Returns:
+        "essential", "moderate", or "full"
+    """
+    import re
+
+    model_lower = model_name.lower()
+
+    # Cloud providers always get full access (they're powerful enough)
+    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:"]):
+        log.info("Auto-detected cloud provider → tool_filter_mode=full")
+        return "full"
+
+    # Extract parameter count (e.g., "7b", "14b", "72b", "32b")
+    # Matches patterns like: 7b, 8b, 14b, 32b, 72b, 1.5b, 2.7b, etc.
+    size_match = re.search(r'(\d+(?:\.\d+)?)\s*[bB](?![a-z])', model_lower)
+
+    if size_match:
+        size = float(size_match.group(1))
+
+        if size <= 8.0:
+            mode = "essential"
+            log.info(f"Auto-detected {size}B model → tool_filter_mode=essential")
+        elif size <= 32.0:
+            mode = "moderate"
+            log.info(f"Auto-detected {size}B model → tool_filter_mode=moderate")
+        else:
+            mode = "full"
+            log.info(f"Auto-detected {size}B model → tool_filter_mode=full")
+
+        return mode
+
+    # Model name-based heuristics (if no size found)
+    # Small models
+    if any(name in model_lower for name in ["gemma", "phi", "tiny", "mini", "small"]):
+        log.info(f"Auto-detected small model family → tool_filter_mode=essential")
+        return "essential"
+
+    # Large models
+    if any(name in model_lower for name in ["deepseek", "mixtral", "command-r", "gpt"]):
+        log.info(f"Auto-detected large model family → tool_filter_mode=full")
+        return "full"
+
+    # Default to moderate for unknown models
+    log.info(f"Unknown model size, defaulting → tool_filter_mode=moderate")
+    return "moderate"
 
 # Model prefix → pydantic-ai model string mapping
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
@@ -68,12 +129,15 @@ class PydanticAIClient:
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
         base_url: str | None = None,
+        tool_filter_mode: str | None = None,  # "essential", "moderate", "full", or None for auto-detect
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
         self.base_url = base_url
+        # Auto-detect filter mode based on model if not explicitly set
+        self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
         self._exit_stack: AsyncExitStack | None = None
         self._agent: Any = None
@@ -100,6 +164,8 @@ class PydanticAIClient:
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
+            if not model_id:
+                model_id = self._resolve_default_local_model(prefix=prefix, base_url=base_url)
             provider = OpenAIProvider(base_url=base_url, api_key="not-needed")
             return OpenAIModel(model_id, provider=provider)
 
@@ -112,6 +178,82 @@ class PydanticAIClient:
         from pydantic_ai.models import infer_model
         return infer_model(self.model_name)
 
+    def _resolve_default_local_model(self, prefix: str, base_url: str) -> str:
+        """Resolve a usable default model for local providers.
+
+        For ollama/lmstudio with model strings like "ollama:" (no explicit model),
+        prefer an env override and then probe known model-list endpoints.
+        """
+        env_override = os.environ.get("CONDOR_DEFAULT_LOCAL_MODEL") or os.environ.get(
+            "OLLAMA_MODEL"
+        )
+        if env_override:
+            return env_override
+
+        model_id = self._fetch_openai_compatible_model(base_url)
+        if model_id:
+            return model_id
+
+        if prefix == "ollama":
+            model_id = self._fetch_ollama_native_model(base_url)
+            if model_id:
+                return model_id
+
+        raise RuntimeError(
+            f"No local model found for '{prefix}'. "
+            f"Use an explicit key like '{prefix}:<model-name>' (e.g. ollama:llama3.1) "
+            "or set CONDOR_DEFAULT_LOCAL_MODEL."
+        )
+
+    def _fetch_openai_compatible_model(self, base_url: str) -> str | None:
+        """Try GET {base_url}/models and return the first model id."""
+        url = f"{base_url.rstrip('/')}/models"
+        try:
+            req = Request(url, method="GET")
+            with urlopen(req, timeout=2) as resp:
+                if resp.status != 200:
+                    return None
+                import json
+
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+        data = payload.get("data")
+        if isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                model_id = first.get("id")
+                if isinstance(model_id, str) and model_id.strip():
+                    return model_id.strip()
+        return None
+
+    def _fetch_ollama_native_model(self, base_url: str) -> str | None:
+        """Try GET /api/tags from the Ollama host and return first model name."""
+        parsed = urlparse(base_url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        native_url = f"{parsed.scheme}://{parsed.netloc}/api/tags"
+        try:
+            req = Request(native_url, method="GET")
+            with urlopen(req, timeout=2) as resp:
+                if resp.status != 200:
+                    return None
+                import json
+
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+        models = payload.get("models")
+        if isinstance(models, list) and models:
+            first = models[0]
+            if isinstance(first, dict):
+                name = first.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        return None
+
     async def start(self) -> None:
         """Initialize MCP servers and create the pydantic-ai agent."""
         from pydantic_ai import Agent
@@ -121,6 +263,11 @@ class PydanticAIClient:
 
         # Build MCP server instances from configs
         # Each config has: name, command, args, env
+        # Don't use deferred loading - it adds unnecessary complexity:
+        # - Cloud models can handle all tools easily
+        # - Local models struggle with the search_tools workflow
+        # Just show all tools upfront for best results
+        toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
             args = srv_config.get("args", [])
@@ -136,13 +283,16 @@ class PydanticAIClient:
                 args=args,
                 env=env if env else None,
             )
+
+            # Add MCP server directly (no deferred loading)
+            toolsets.append(mcp_server)
             self._mcp_servers.append(mcp_server)
 
         model = self._build_model()
 
         self._agent = Agent(
             model,
-            mcp_servers=self._mcp_servers,
+            toolsets=toolsets,
         )
 
         log.info(

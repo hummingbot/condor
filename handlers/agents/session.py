@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from telegram import Bot
 
 from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone
+from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -34,8 +35,8 @@ _health_bot: Bot | None = None
 @dataclass
 class AgentSession:
     chat_id: int
-    agent_key: str  # "claude-code", "gemini", "codex"
-    client: ACPClient
+    agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
+    client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -101,9 +102,6 @@ async def get_or_create_session(
     if session:
         await _destroy_session_internal(chat_id)
 
-    # Create new session
-    command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
-
     extra_env = {
         "CONDOR_CHAT_ID": str(chat_id),
     }
@@ -113,19 +111,45 @@ async def get_or_create_session(
     if user_id:
         mcp_servers = build_mcp_servers_for_session(user_id, chat_id, user_data)
 
-    client = ACPClient(
-        command=command,
-        working_dir=get_project_dir(),
-        mcp_servers=mcp_servers,
-        permission_callback=permission_callback,
-        extra_env=extra_env,
-    )
+    # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
+    use_pydantic_ai = is_pydantic_ai_model(agent_key)
+
+    if use_pydantic_ai:
+        # For Pydantic AI models: auto-detect or use configured filter mode
+        import os
+        from condor.preferences import get_agent_prefs
+
+        # Priority: user preference > env variable > auto-detect (None)
+        agent_prefs = get_agent_prefs(user_data) if user_data else {}
+        tool_filter_mode = (
+            agent_prefs.get("tool_filter_mode") or
+            os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
+            None  # None triggers auto-detection based on model size
+        )
+
+        client = PydanticAIClient(
+            model=agent_key,
+            mcp_servers=mcp_servers,
+            permission_callback=permission_callback,
+            extra_env=extra_env,
+            tool_filter_mode=tool_filter_mode,  # Auto-detects if None
+        )
+    else:
+        # For ACP subprocess models: claude-code, gemini, codex
+        command = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
+        client = ACPClient(
+            command=command,
+            working_dir=get_project_dir(),
+            mcp_servers=mcp_servers,
+            permission_callback=permission_callback,
+            extra_env=extra_env,
+        )
 
     await client.start()
 
     # Send initial context about server and permissions
     if user_id:
-        initial_context = build_initial_context(user_id, chat_id, user_data)
+        initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key)
         if initial_context:
             try:
                 await client.prompt(initial_context)
