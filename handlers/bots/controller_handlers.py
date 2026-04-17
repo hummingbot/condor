@@ -17,7 +17,7 @@ import copy
 import logging
 from typing import List
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputMediaPhoto
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
@@ -79,14 +79,17 @@ def _get_controller_type_display(controller_name: str) -> tuple[str, str]:
     type_map = {
         "grid_strike": ("Grid Strike", "📊"),
         "pmm_mister": ("PMM Mister", "📈"),
-        "pmm_v1": ("PMM V1", "📈"),
+        "pmm_v1": ("PMM V1", "📉"),
+        "multi_grid_strike": ("Multi Grid Strike", "🔲"),
         "dman_v3": ("DMan V3", "🤖"),
-        "xemm": ("XEMM", "🔄"),
-        "pmm": ("PMM", "📈"),
+        "macd_bb_v1": ("MACD BB V1", "📉"),
+        "arbitrage_controller": ("Arbitrage", "⚡"),
+        "xemm_multiple_levels": ("XEMM Multi Levels", "🔄"),
+        "anti_folla_v1": ("Anti-Folla V1", "🦅"),
     }
     controller_lower = controller_name.lower() if controller_name else ""
     for key, (name, emoji) in type_map.items():
-        if key in controller_lower:
+        if key == controller_lower:
             return name, emoji
     return controller_name or "Unknown", "⚙️"
 
@@ -652,7 +655,6 @@ async def handle_cfg_edit_loop(
 
     await show_cfg_edit_form(update, context)
 
-
 def _get_editable_config_fields(config: dict) -> dict:
     """Extract editable fields from a controller config using centralized field definitions"""
     controller_type = config.get("controller_name", "grid_strike")
@@ -662,7 +664,6 @@ def _get_editable_config_fields(config: dict) -> dict:
     )
 
     if "grid_strike" in controller_type:
-        # Use centralized GS_EDITABLE_FIELDS for consistency between wizard and edit views
         result = {}
         for field_name in GS_EDITABLE_FIELDS:
             if field_name == "take_profit":
@@ -671,22 +672,213 @@ def _get_editable_config_fields(config: dict) -> dict:
                 default_val = GRID_STRIKE_DEFAULTS.get(field_name, "")
                 result[field_name] = config.get(field_name, default_val)
         return result
-    elif "pmm" in controller_type:
-        # Use centralized PMM_FIELDS and PMM_FIELD_ORDER for consistency
-        # between config creation and editing
-        from .controllers.pmm_mister import DEFAULTS as PMM_DEFAULTS
 
+    elif "pmm" in controller_type:
+        from .controllers.pmm_mister import DEFAULTS as PMM_DEFAULTS
         result = {}
         for field_name in PMM_FIELD_ORDER:
-            # Skip 'id' - it's shown in the header already
             if field_name == "id":
                 continue
             if field_name in PMM_FIELDS:
-                # Get value from config, fallback to PMM_DEFAULTS
                 default_val = PMM_DEFAULTS.get(field_name, "")
                 result[field_name] = config.get(field_name, default_val)
         return result
-    # Default fields for other controller types
+
+    elif controller_type == "multi_grid_strike":
+        tp_cfg = config.get("triple_barrier_config", {})
+        take_profit = tp_cfg.get("take_profit", 0.001)
+
+        grids = config.get("grids", [])
+
+        # ========== DEBUG ==========
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"MGS EDIT DEBUG: config_id={config.get('id')}, grids count={len(grids)}")
+        if grids:
+            logger.info(f"MGS EDIT DEBUG: first grid = {grids[0]}")
+        # ===========================
+
+        # Prepara i campi per TUTTI i grid (fino a un massimo di 5)
+        grid_fields = {}
+        for i, grid in enumerate(grids[:5]):
+            prefix = f"grid{i+1}_"
+            grid_fields[f"{prefix}id"] = grid.get("grid_id", f"grid_{i+1}")
+            grid_fields[f"{prefix}start"] = grid.get("start_price", 0.0)
+            grid_fields[f"{prefix}end"] = grid.get("end_price", 0.0)
+            grid_fields[f"{prefix}limit"] = grid.get("limit_price", 0.0)
+            grid_fields[f"{prefix}side"] = "LONG" if grid.get("side") == 1 else "SHORT"
+            grid_fields[f"{prefix}pct"] = grid.get("amount_quote_pct", 1.0)
+            grid_fields[f"{prefix}enabled"] = grid.get("enabled", True)
+
+        return {
+            "connector_name": config.get("connector_name", ""),
+            "trading_pair": config.get("trading_pair", ""),
+            "total_amount_quote": config.get("total_amount_quote", 1000),
+            "leverage": config.get("leverage", 1),
+            "position_mode": config.get("position_mode", "HEDGE"),
+            "take_profit": take_profit,
+            "min_spread_between_orders": config.get("min_spread_between_orders", 0.001),
+            "min_order_amount_quote": config.get("min_order_amount_quote", 5),
+            "max_open_orders": config.get("max_open_orders", 2),
+            "max_orders_per_batch": config.get("max_orders_per_batch", 1),
+            "order_frequency": config.get("order_frequency", 3),
+            "keep_position": config.get("keep_position", False),
+            "activation_bounds": config.get("activation_bounds", None),
+            "manual_kill_switch": config.get("manual_kill_switch", False),
+            **grid_fields,
+        }
+
+    elif controller_type == "dman_v3":
+        ts = config.get("trailing_stop", {}) or {}
+        if isinstance(ts, str):
+            parts = ts.split(",")
+            ts_activation = float(parts[0]) if len(parts) > 0 else 0.015
+            ts_delta = float(parts[1]) if len(parts) > 1 else 0.005
+        else:
+            ts_activation = ts.get("activation_price", 0.015)
+            ts_delta = ts.get("trailing_delta", 0.005)
+        return {
+            "connector_name": config.get("connector_name", ""),
+            "trading_pair": config.get("trading_pair", ""),
+            "total_amount_quote": config.get("total_amount_quote", 1000),
+            "leverage": config.get("leverage", 1),
+            "position_mode": config.get("position_mode", "HEDGE"),
+            "max_executors_per_side": config.get("max_executors_per_side", 1),
+            "cooldown_time": config.get("cooldown_time", 60),
+            "stop_loss": config.get("stop_loss", 0.05),
+            "take_profit": config.get("take_profit", 0.03),
+            "take_profit_order_type": config.get("take_profit_order_type", 2),
+            "time_limit": config.get("time_limit", None),
+            "trailing_stop_activation": ts_activation,
+            "trailing_stop_delta": ts_delta,
+            "candles_connector": config.get("candles_connector", ""),
+            "candles_trading_pair": config.get("candles_trading_pair", ""),
+            "interval": config.get("interval", "3m"),
+            "bb_length": config.get("bb_length", 100),
+            "bb_std": config.get("bb_std", 2.0),
+            "bb_long_threshold": config.get("bb_long_threshold", 0.0),
+            "bb_short_threshold": config.get("bb_short_threshold", 1.0),
+            "dca_spreads": config.get("dca_spreads", "0.001,0.018,0.15,0.25"),
+            "dca_amounts_pct": config.get("dca_amounts_pct", ""),
+            "dynamic_order_spread": config.get("dynamic_order_spread", False),
+            "dynamic_target": config.get("dynamic_target", False),
+            "activation_bounds": config.get("activation_bounds", None),
+        }
+
+    elif controller_type == "arbitrage_controller":
+        from .controllers.arbitrage_controller.config import get_flat_fields
+        return get_flat_fields(config)
+
+    elif controller_type == "xemm_multiple_levels":
+            return {
+                "maker_connector": config.get("maker_connector", ""),
+                "maker_trading_pair": config.get("maker_trading_pair", ""),
+                "taker_connector": config.get("taker_connector", ""),
+                "taker_trading_pair": config.get("taker_trading_pair", ""),
+                "total_amount_quote": config.get("total_amount_quote", 0),
+                "min_profitability": config.get("min_profitability", 0.003),
+                "max_profitability": config.get("max_profitability", 0.009),
+                "max_executors_imbalance": config.get("max_executors_imbalance", 1),
+                "buy_levels_targets_amount": config.get("buy_levels_targets_amount", ""),
+                "sell_levels_targets_amount": config.get("sell_levels_targets_amount", ""),
+            }
+    elif controller_type == "macd_bb_v1":
+        ts = config.get("trailing_stop", {}) or {}
+        ts_activation = ts.get("activation_price", 0.015) if isinstance(ts, dict) else 0.015
+        ts_delta = ts.get("trailing_delta", 0.005) if isinstance(ts, dict) else 0.005
+        return {
+            "connector_name": config.get("connector_name", ""),
+            "trading_pair": config.get("trading_pair", ""),
+            "total_amount_quote": config.get("total_amount_quote", 1000),
+            "leverage": config.get("leverage", 1),
+            "position_mode": config.get("position_mode", "HEDGE"),
+            "max_executors_per_side": config.get("max_executors_per_side", 1),
+            "cooldown_time": config.get("cooldown_time", 60),
+            "stop_loss": config.get("stop_loss", 0.05),
+            "take_profit": config.get("take_profit", 0.03),
+            "take_profit_order_type": config.get("take_profit_order_type", 2),
+            "trailing_stop_activation": ts_activation,
+            "trailing_stop_delta": ts_delta,
+            "candles_connector": config.get("candles_connector", ""),
+            "candles_trading_pair": config.get("candles_trading_pair", ""),
+            "interval": config.get("interval", "3m"),
+            "bb_length": config.get("bb_length", 100),
+            "bb_std": config.get("bb_std", 2.0),
+            "bb_long_threshold": config.get("bb_long_threshold", 0.0),
+            "bb_short_threshold": config.get("bb_short_threshold", 1.0),
+            "macd_fast": config.get("macd_fast", 21),
+            "macd_slow": config.get("macd_slow", 42),
+            "macd_signal": config.get("macd_signal", 9),
+        }
+
+    elif controller_type == "supertrend_v1":
+        ts = config.get("trailing_stop", {}) or {}
+        ts_activation = ts.get("activation_price", 0.015) if isinstance(ts, dict) else 0.015
+        ts_delta = ts.get("trailing_delta", 0.005) if isinstance(ts, dict) else 0.005
+        return {
+            "connector_name": config.get("connector_name", ""),
+            "trading_pair": config.get("trading_pair", ""),
+            "total_amount_quote": config.get("total_amount_quote", 1000),
+            "leverage": config.get("leverage", 1),
+            "position_mode": config.get("position_mode", "HEDGE"),
+            "max_executors_per_side": config.get("max_executors_per_side", 1),
+            "cooldown_time": config.get("cooldown_time", 60),
+            "stop_loss": config.get("stop_loss", 0.05),
+            "take_profit": config.get("take_profit", 0.03),
+            "take_profit_order_type": config.get("take_profit_order_type", 2),
+            "trailing_stop_activation": ts_activation,
+            "trailing_stop_delta": ts_delta,
+            "interval": config.get("interval", "3m"),
+            "length": config.get("length", 20),
+            "multiplier": config.get("multiplier", 4.0),
+            "percentage_threshold": config.get("percentage_threshold", 0.01),
+        }
+
+    elif controller_type == "anti_folla_v1":
+        ts = config.get("trailing_stop", {}) or {}
+        ts_activation = ts.get("activation_price", 0.015) if isinstance(ts, dict) else 0.015
+        ts_delta = ts.get("trailing_delta", 0.005) if isinstance(ts, dict) else 0.005
+        return {
+            "connector_name": config.get("connector_name", ""),
+            "trading_pair": config.get("trading_pair", ""),
+            "total_amount_quote": config.get("total_amount_quote", 1000),
+            "leverage": config.get("leverage", 1),
+            "position_mode": config.get("position_mode", "HEDGE"),
+            "max_executors_per_side": config.get("max_executors_per_side", 1),
+            "cooldown_time": config.get("cooldown_time", 60),
+            "stop_loss": config.get("stop_loss", 0.05),
+            "take_profit": config.get("take_profit", 0.03),
+            "take_profit_order_type": config.get("take_profit_order_type", 2),
+            "trailing_stop_activation": ts_activation,
+            "trailing_stop_delta": ts_delta,
+            "candles_connector": config.get("candles_connector", ""),
+            "candles_trading_pair": config.get("candles_trading_pair", ""),
+            "interval": config.get("interval", "3m"),
+            "is_perpetual": config.get("is_perpetual", False),
+            "vwap_period": config.get("vwap_period", 20),
+            "donchian_period": config.get("donchian_period", 20),
+            "atr_period": config.get("atr_period", 14),
+            "obv_divergence_lookback": config.get("obv_divergence_lookback", 10),
+            "volume_spike_threshold": config.get("volume_spike_threshold", 2.5),
+            "enable_order_book_imbalance": config.get("enable_order_book_imbalance", True),
+            "obi_depth_percentage": config.get("obi_depth_percentage", 0.02),
+            "obi_buy_threshold": config.get("obi_buy_threshold", 1.5),
+            "obi_sell_threshold": config.get("obi_sell_threshold", 0.67),
+            "score_buy_threshold": config.get("score_buy_threshold", 50.0),
+            "score_sell_threshold": config.get("score_sell_threshold", -50.0),
+            "weight_vwap": config.get("weight_vwap", 15),
+            "weight_donchian": config.get("weight_donchian", 10),
+            "weight_obv": config.get("weight_obv", 15),
+            "weight_obi": config.get("weight_obi", 20),
+            "weight_volume_spike": config.get("weight_volume_spike", 10),
+            "weight_trade_flow": config.get("weight_trade_flow", 15),
+            "weight_funding": config.get("weight_funding", 15),
+        }
+
+
+
+
+    # Default fallback per controller types non riconosciuti
     return {
         "total_amount_quote": config.get("total_amount_quote", 0),
         "take_profit": take_profit,
@@ -936,6 +1128,88 @@ async def process_cfg_edit_input(
             if "triple_barrier_config" not in config:
                 config["triple_barrier_config"] = {}
             config["triple_barrier_config"]["take_profit"] = value
+        elif key in ("stop_loss", "time_limit", "trailing_stop") and config.get("controller_name") == "multi_grid_strike":
+            if "triple_barrier_config" not in config:
+                config["triple_barrier_config"] = {}
+            config["triple_barrier_config"][key] = value if value not in ("null", "None", "") else None
+        elif key == "trailing_stop_activation" and config.get("controller_name") == "dman_v3":
+            if not isinstance(config.get("trailing_stop"), dict):
+                config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+            config["trailing_stop"]["activation_price"] = value
+        elif key == "trailing_stop_delta" and config.get("controller_name") == "dman_v3":
+            if not isinstance(config.get("trailing_stop"), dict):
+                config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+            config["trailing_stop"]["trailing_delta"] = value
+
+        elif key.startswith("exchange_pair_"):
+            from .controllers.arbitrage_controller.config import apply_flat_fields
+            apply_flat_fields(config, {key: value})
+
+        elif key.startswith("exchange_pair_"):
+            from .controllers.arbitrage_controller.config import apply_flat_fields
+            apply_flat_fields(config, {key: value})
+
+        elif key.startswith("grid") and "_" in key and not key.startswith("grid_analysis"):
+            # Supporta grid1_, grid2_, grid3_, ... per Multi Grid Strike
+            # Formato: gridX_field (es. grid1_start, grid2_side, grid3_enabled)
+            parts = key.split("_", 1)
+            if len(parts) == 2:
+                grid_num_str = parts[0].replace("grid", "")
+                field_name = parts[1]
+                try:
+                    grid_idx = int(grid_num_str) - 1  # 0-based index
+                    grids = config.get("grids", [])
+
+                    # Assicurati che la lista grids abbia abbastanza elementi
+                    while len(grids) <= grid_idx:
+                        grids.append({
+                            "grid_id": f"grid_{len(grids)+1}",
+                            "side": 1,
+                            "amount_quote_pct": 1.0,
+                            "enabled": True,
+                            "start_price": 0.0,
+                            "end_price": 0.0,
+                            "limit_price": 0.0
+                        })
+
+                    # Mappa i nomi dei campi
+                    field_map = {
+                        "id": "grid_id",
+                        "start": "start_price",
+                        "end": "end_price",
+                        "limit": "limit_price",
+                        "side": "side",
+                        "pct": "amount_quote_pct",
+                        "enabled": "enabled",
+                    }
+                    mapped_field = field_map.get(field_name, field_name)
+
+                    # Converti il valore in base al tipo di campo
+                    if mapped_field == "side":
+                        if isinstance(value, str):
+                            if value.upper() in ("LONG", "1"):
+                                val = 1
+                            elif value.upper() in ("SHORT", "2"):
+                                val = 2
+                            else:
+                                val = int(value)
+                        else:
+                            val = int(value)
+                    elif mapped_field == "enabled":
+                        if isinstance(value, str):
+                            val = value.lower() in ("true", "1", "yes", "on")
+                        else:
+                            val = bool(value)
+                    elif mapped_field in ("start_price", "end_price", "limit_price", "amount_quote_pct"):
+                        val = float(value)
+                    else:
+                        val = value
+
+                    grids[grid_idx][mapped_field] = val
+                    config["grids"] = grids
+
+                except (ValueError, IndexError) as e:
+                    errors.append(f"Grid error: {key}={value} ({e})")
         else:
             config[key] = value
 
@@ -3607,7 +3881,7 @@ async def _show_gs_pair_suggestions(
 
     keyboard.append(
         [
-            InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back:connector"),
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:gs_back_to_connector"),
             InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
         ]
     )
@@ -8985,3 +9259,7813 @@ async def handle_config_file_upload(
             format_error_message(f"Failed to upload config: {str(e)}"),
             parse_mode="MarkdownV2",
         )
+
+# ============================================
+# MULTI GRID STRIKE WIZARD
+# ============================================
+# Steps: connector → pair → grid_type → num_grids → leverage (perp) → amount → review+save
+# Prefisso handler: mgs_
+
+async def show_new_multi_grid_strike_form(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Start the Multi Grid Strike wizard - Step 1: Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    # Clear cached market data
+    for key in ["mgs_current_price", "mgs_candles", "mgs_candles_interval",
+                "mgs_chart_interval", "mgs_natr", "mgs_trading_rules"]:
+        context.user_data.pop(key, None)
+
+    # Fetch existing configs for sequence numbering
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs for sequencing: {e}")
+
+    # Initialize new config with defaults
+    init_new_controller_config(context, "multi_grid_strike")
+    context.user_data["bots_state"] = "mgs_wizard"
+    context.user_data["mgs_wizard_step"] = "connector_name"
+    context.user_data["mgs_wizard_message_id"] = query.message.message_id
+    context.user_data["mgs_wizard_chat_id"] = query.message.chat_id
+
+    await _mgs_show_connector_step(update, context)
+
+
+async def _mgs_show_connector_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """MGS Wizard Step 1: Select Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+
+        if not cex_connectors:
+            keyboard = [
+                [InlineKeyboardButton("🔑 Configure API Keys", callback_data="config_api_keys")],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
+            ]
+            await query.message.edit_text(
+                r"*🔲 Multi Grid Strike \- New Config*" + "\n\n"
+                r"⚠️ No CEX connectors available\." + "\n\n"
+                r"You need to connect API keys for an exchange to deploy strategies\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        keyboard = []
+        row = []
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(
+                f"🏦 {connector}", callback_data=f"bots:mgs_connector:{connector}"
+            ))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+        # Escapa TUTTO il testo fisso
+        message_text = (
+            r"\*🔲 Multi Grid Strike\*" + "\n\n"
+            r"Multiple independent grids on the same trading pair, each covering "
+            r"a different price range\. Ideal for layered market making strategies\." + "\n\n"
+            r"─────────────────────────" + "\n\n"
+            r"\*Step 1: Select Exchange\*"
+        )
+
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
+
+    except Exception as e:
+        logger.error(f"MGS connector step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        await query.message.edit_text(
+            format_error_message(f"Error: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+async def handle_mgs_wizard_connector(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector: str
+) -> None:
+    """Handle connector selection"""
+    config = get_controller_config(context)
+    config["connector_name"] = connector
+    set_controller_config(context, config)
+    context.user_data["mgs_wizard_step"] = "trading_pair"
+    await _mgs_show_pair_step(update, context)
+
+async def _mgs_show_pair_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """MGS Wizard Step 2: Enter Trading Pair"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+
+    context.user_data["bots_state"] = "mgs_wizard_input"
+    context.user_data["mgs_wizard_step"] = "trading_pair"
+
+    # Recent pairs from existing configs
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:mgs_pair:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 7 if is_perp else 6
+
+    # Escapa il connector
+    escaped_connector = escape_markdown_v2(connector)
+
+    await query.message.edit_text(
+        rf"*🔲 Multi Grid Strike \- Step 2/{total_steps}*" + "\n\n"
+        f"🏦 `{escaped_connector}`" + "\n\n"
+        r"🔗 *Trading Pair*" + "\n\n"
+        r"Select a recent pair or type a new one:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+async def handle_mgs_wizard_pair(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str
+) -> None:
+    """Handle pair selection via button"""
+    config = get_controller_config(context)
+    config["trading_pair"] = pair
+    set_controller_config(context, config)
+    context.user_data["mgs_wizard_step"] = "grid_type"
+    await _mgs_show_grid_type_step(update, context)
+
+async def _mgs_show_grid_type_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """MGS Wizard Step 3: Select Strategy Type"""
+    # Usa i dati salvati
+    chat_id = context.user_data.get("mgs_wizard_chat_id")
+    message_id = context.user_data.get("mgs_wizard_message_id")
+
+    if not chat_id or not message_id:
+        logger.error("MGS: No chat_id or message_id saved for grid_type step")
+        return
+
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "mgs_wizard_input"
+    context.user_data["mgs_wizard_step"] = "grid_type"
+
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 7 if is_perp else 6
+    current_step = 3
+
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+
+    from .controllers.multi_grid_strike.config import GRID_TYPES
+
+    keyboard = []
+    for grid_type_key, grid_type_info in GRID_TYPES.items():
+        # Crea un unico bottone per strategia con nome e descrizione su due righe
+        button_text = f"{grid_type_info['label']}\n   {grid_type_info['description']}"
+        keyboard.append([
+            InlineKeyboardButton(
+                button_text,
+                callback_data=f"bots:mgs_grid_type:{grid_type_key}"
+            )
+        ])
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_pair"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    # ========== DEFINISCI message_text ==========
+    message_text = (
+        rf"*🔲 Multi Grid Strike \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}`" + "\n\n"
+        r"🎯 *Select Strategy Type*" + "\n\n"
+        r"Choose how your grids will be structured:"
+    )
+    # ===========================================
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def _mgs_show_num_grids_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """MGS Wizard Step 4: Select Number of Grids"""
+    query = update.callback_query
+
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    grid_type = config.get("grid_strategy_type", "accumulation_distribution")
+
+    from .controllers.multi_grid_strike.config import GRID_TYPES
+    grid_info = GRID_TYPES.get(grid_type, GRID_TYPES["accumulation_distribution"])
+    min_grids = grid_info["min_grids"]
+    max_grids = grid_info["max_grids"]
+    default_grids = grid_info["default_grids"]
+
+    context.user_data["bots_state"] = "mgs_wizard_input"
+    context.user_data["mgs_wizard_step"] = "num_grids"
+
+    # 🔧 FIX: Salva i limiti nel contesto per validazione successiva
+    context.user_data["mgs_min_grids"] = min_grids
+    context.user_data["mgs_max_grids"] = max_grids
+
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 7 if is_perp else 6
+    current_step = 4
+
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+    escaped_label = escape_markdown_v2(grid_info['label'])
+
+    keyboard = []
+
+    # Suggest 3 values
+    suggested = [min_grids, default_grids, max_grids]
+    if len(set(suggested)) < 3:
+        suggested = [min_grids, (min_grids + max_grids) // 2, max_grids]
+
+    row = []
+    for num in suggested:
+        row.append(InlineKeyboardButton(
+            f"{num} grids", callback_data=f"bots:mgs_num_grids:{num}"
+        ))
+    keyboard.append(row)
+
+    # Custom option
+    keyboard.append([
+        InlineKeyboardButton("✏️ Custom", callback_data="bots:mgs_num_grids:custom")
+    ])
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_grid_type"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    message_text = (
+        rf"*🔲 Multi Grid Strike \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}`" + "\n\n"
+        f"📊 *Strategy:* {escaped_label}" + "\n\n"
+        f"🔢 *Number of Grids*" + "\n"
+        f"_Min: {min_grids} \\| Max: {max_grids} \\| Default: {default_grids}_" + "\n\n"
+        r"Select or type a number:"
+    )
+
+    # Cancella il messaggio corrente
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    # Invia nuovo messaggio
+    new_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+    context.user_data["mgs_wizard_message_id"] = new_msg.message_id
+    context.user_data["mgs_wizard_chat_id"] = update.effective_chat.id
+
+async def handle_mgs_grid_type(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, grid_type: str
+) -> None:
+    """Handle grid type selection"""
+    config = get_controller_config(context)
+    config["grid_strategy_type"] = grid_type
+    set_controller_config(context, config)
+
+    from .controllers.multi_grid_strike.config import GRID_TYPES
+    grid_info = GRID_TYPES.get(grid_type, GRID_TYPES["accumulation_distribution"])
+    default_grids = grid_info["default_grids"]
+
+    context.user_data["mgs_wizard_step"] = "num_grids"
+    context.user_data["mgs_default_grids"] = default_grids
+
+    await _mgs_show_num_grids_step(update, context)
+
+
+async def handle_mgs_num_grids(update, context, num_grids_str: str) -> None:
+    """Handle number of grids selection"""
+    config = get_controller_config(context)
+
+    # 🔧 FIX: Recupera i limiti dal contesto
+    min_grids = context.user_data.get("mgs_min_grids", 2)
+    max_grids = context.user_data.get("mgs_max_grids", 20)
+
+    if num_grids_str == "custom":
+        context.user_data["bots_state"] = "mgs_wizard_input"
+        context.user_data["mgs_wizard_step"] = "num_grids_custom"
+        context.user_data["mgs_waiting_for_num_grids"] = True
+
+        query = update.callback_query
+        connector = config.get("connector_name", "")
+        pair = config.get("trading_pair", "")
+
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:mgs_back_to_num_grids")]]
+        await query.message.edit_text(
+            rf"*🔲 Multi Grid Strike*" + "\n\n"
+            f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+            r"*Enter number of grids:*" + "\n"
+            rf"_Type a number between {min_grids} and {max_grids}_",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    num_grids = int(num_grids_str)
+
+    # 🔧 FIX: Valida il numero di griglie
+    if num_grids < min_grids or num_grids > max_grids:
+        query = update.callback_query
+        await query.answer(f"Number must be between {min_grids} and {max_grids}", show_alert=True)
+        return
+
+    config["num_grids"] = num_grids
+    set_controller_config(context, config)
+
+    connector = config.get("connector_name", "")
+    if connector.endswith("_perpetual"):
+        context.user_data["mgs_wizard_step"] = "leverage"
+        await _mgs_show_leverage_step(update, context)
+    else:
+        # Spot: salta leverage
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["mgs_wizard_step"] = "total_amount_quote"
+        await _mgs_show_amount_step(update, context)
+
+async def _mgs_show_leverage_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """MGS Wizard Step 5 (perp only): Select Leverage"""
+    query = update.callback_query
+
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "mgs_wizard_input"
+    context.user_data["mgs_wizard_step"] = "leverage"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1x", callback_data="bots:mgs_leverage:1"),
+            InlineKeyboardButton("5x", callback_data="bots:mgs_leverage:5"),
+            InlineKeyboardButton("10x", callback_data="bots:mgs_leverage:10"),
+        ],
+        [
+            InlineKeyboardButton("20x", callback_data="bots:mgs_leverage:20"),
+            InlineKeyboardButton("50x", callback_data="bots:mgs_leverage:50"),
+            InlineKeyboardButton("75x", callback_data="bots:mgs_leverage:75"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_num_grids"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+
+    message_text = (
+        rf"*🔲 Multi Grid Strike \- Step 5/7*" + "\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}`" + "\n\n"
+        r"⚡ *Select Leverage*" + "\n"
+        r"_Or type a value \(e\.g\. 20\)_"
+    )
+
+    # ========== INVIA NUOVO MESSAGGIO ==========
+    # Cancella il messaggio corrente
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    # Invia nuovo messaggio
+    new_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+    # Salva il nuovo message_id
+    context.user_data["mgs_wizard_message_id"] = new_msg.message_id
+    context.user_data["mgs_wizard_chat_id"] = update.effective_chat.id
+
+
+async def handle_mgs_wizard_leverage(update, context, leverage: int) -> None:
+    """Handle leverage selection"""
+    config = get_controller_config(context)
+    config["leverage"] = leverage
+    set_controller_config(context, config)
+
+    # Step 6: Position Mode
+    context.user_data["mgs_wizard_step"] = "position_mode"
+    await _mgs_show_position_mode_step(update, context)
+
+async def _mgs_show_position_mode_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """MGS Wizard Step: Select Position Mode (only for perpetual)"""
+    query = update.callback_query
+
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+
+    context.user_data["bots_state"] = "mgs_wizard_input"
+    context.user_data["mgs_wizard_step"] = "position_mode"
+
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 7 if is_perp else 6
+    current_step = 6 if is_perp else 5
+
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔒 ONEWAY", callback_data="bots:mgs_position_mode:ONEWAY"),
+            InlineKeyboardButton("🔄 HEDGE", callback_data="bots:mgs_position_mode:HEDGE"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_leverage"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    message_text = (
+        rf"*🔲 Multi Grid Strike \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}` \\| ⚡ `{leverage}x`" + "\n\n"
+        r"🎯 *Position Mode*" + "\n\n"
+        r"• *ONEWAY*: Can only hold positions in one direction \(long OR short\)" + "\n"
+        r"• *HEDGE*: Can hold both long and short positions simultaneously" + "\n\n"
+        r"_Select your position mode:_"
+    )
+
+    # ========== INVIA NUOVO MESSAGGIO ==========
+    # Cancella il messaggio corrente
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    # Invia nuovo messaggio
+    new_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+    # Salva il nuovo message_id
+    context.user_data["mgs_wizard_message_id"] = new_msg.message_id
+    context.user_data["mgs_wizard_chat_id"] = update.effective_chat.id
+async def handle_mgs_back_to_position_mode(update, context) -> None:
+    """Go back to position mode step"""
+    context.user_data["mgs_wizard_step"] = "position_mode"
+    await _mgs_show_position_mode_step(update, context)
+
+async def handle_mgs_position_mode(update, context, mode: str) -> None:
+    """Handle position mode selection"""
+    config = get_controller_config(context)
+    config["position_mode"] = mode
+    set_controller_config(context, config)
+
+    # Step 7: Total Amount
+    context.user_data["mgs_wizard_step"] = "total_amount_quote"
+    await _mgs_show_amount_step(update, context)
+
+async def _mgs_show_amount_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """MGS Wizard Step: Enter Total Amount"""
+    # Determina chat_id e message_id
+    if update.callback_query:
+        chat_id = update.callback_query.message.chat_id
+        # Non abbiamo un message_id esistente perché abbiamo cancellato il vecchio
+        message_id = None
+    else:
+        chat_id = update.effective_chat.id
+        message_id = None
+
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+    grid_type = config.get("grid_strategy_type", "accumulation_distribution")
+    num_grids = config.get("num_grids", 2)
+
+    context.user_data["bots_state"] = "mgs_wizard_input"
+    context.user_data["mgs_wizard_step"] = "total_amount_quote"
+
+    is_perp = connector.endswith("_perpetual")
+    total_steps = 7 if is_perp else 6
+    current_step = 7 if is_perp else 5
+
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+    escaped_grid_type = escape_markdown_v2(grid_type)
+
+    # Fetch balance
+    balance_text = ""
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        balances = await get_cex_balances(context.user_data, client, connector)
+        quote = pair.split("-")[1] if "-" in pair else "USDT"
+        available = balances.get(quote, {}).get("available", 0)
+        if available:
+            balance_text = f"\n\n💰 Available `{escape_markdown_v2(quote)}`: `{available:,.2f}`"
+    except Exception:
+        pass
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:mgs_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:mgs_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:mgs_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:mgs_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:mgs_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:mgs_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_leverage" if is_perp else "bots:mgs_back_to_num_grids"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    message_text = (
+        rf"*🔲 Multi Grid Strike \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}` \\| ⚡ `{leverage}x`" + "\n"
+        f"📊 `{escaped_grid_type}` \\| 🔢 `{num_grids}` grids" + balance_text + "\n\n"
+        r"💰 *Total Amount \(USDT\)*" + "\n"
+        r"_Select or type an amount:_"
+    )
+
+    # ========== INVIA NUOVO MESSAGGIO (non edit) ==========
+    try:
+        # Cancella eventuale messaggio precedente
+        old_msg_id = context.user_data.get("mgs_wizard_message_id")
+        if old_msg_id:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=old_msg_id)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Invia nuovo messaggio
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data["mgs_wizard_message_id"] = msg.message_id
+    context.user_data["mgs_wizard_chat_id"] = chat_id
+
+    # =============================================
+async def handle_mgs_wizard_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, amount: float
+) -> None:
+    """Handle amount selection"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
+
+    pair = config.get("trading_pair", "")
+    await query.message.edit_text(
+        r"*🔲 Multi Grid Strike \- New Config*" + "\n\n"
+        f"⏳ *Loading market data for* `{escape_markdown_v2(pair)}`\\.\\.\\.  " + "\n\n"
+        r"_Fetching price and generating grids\.\.\._",
+        parse_mode="MarkdownV2",
+    )
+
+    context.user_data["mgs_wizard_step"] = "final"
+    await _mgs_show_final_step(update, context)
+
+async def _mgs_show_final_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str = None
+) -> None:
+    """MGS Final Step: Generate grids, show chart + config summary"""
+    import html
+
+    if update.callback_query:
+        query = update.callback_query
+        msg = query.message
+    else:
+        msg = update.message
+
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    total_amount = config.get("total_amount_quote", 1000)
+    leverage = config.get("leverage", 1)
+    position_mode = config.get("position_mode", "HEDGE")
+    grid_type = config.get("grid_strategy_type", "accumulation_distribution")
+    num_grids = config.get("num_grids", 2)
+
+    logger.info(f"MGS FINAL STEP: grid_type={grid_type}, num_grids={num_grids}, total_amount={total_amount}")
+
+    config["num_grids"] = num_grids
+    set_controller_config(context, config)
+
+    if interval is None:
+        interval = context.user_data.get("mgs_chart_interval", "5m")
+    context.user_data["mgs_chart_interval"] = interval
+
+    current_price = context.user_data.get("mgs_current_price")
+    candles = context.user_data.get("mgs_candles")
+    natr = context.user_data.get("mgs_natr")
+
+    try:
+        cached_interval = context.user_data.get("mgs_candles_interval", "5m")
+        if not current_price or interval != cached_interval:
+            try:
+                await msg.edit_text(
+                    "<b>🔲 Multi Grid Strike - New Config</b>\n\n"
+                    f"⏳ Fetching market data for <code>{html.escape(pair)}</code>...",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            current_price = await fetch_current_price(client, connector, pair)
+
+            if current_price:
+                context.user_data["mgs_current_price"] = current_price
+                candles = await fetch_candles(
+                    client, connector, pair, interval=interval, max_records=420
+                )
+                context.user_data["mgs_candles"] = candles
+                context.user_data["mgs_candles_interval"] = interval
+
+                candles_list = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+                if candles_list:
+                    natr = calculate_natr(candles_list, period=14)
+                    context.user_data["mgs_natr"] = natr
+
+                try:
+                    rules = await get_trading_rules(context.user_data, client, connector)
+                    context.user_data["mgs_trading_rules"] = rules.get(pair, {})
+                except Exception:
+                    context.user_data["mgs_trading_rules"] = {}
+
+        if not current_price:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
+            await msg.edit_text(
+                f"<b>❌ Error</b>\n\nCould not fetch price for <code>{html.escape(pair)}</code>.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        candles_list = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+        if candles_list:
+            last_close = candles_list[-1].get("close") or candles_list[-1].get("c")
+            if last_close:
+                current_price = float(last_close)
+                context.user_data["mgs_current_price"] = current_price
+
+        min_order_amount = config.get("min_order_amount_quote", 5)
+        trading_rules = context.user_data.get("mgs_trading_rules", {})
+
+        from .controllers.multi_grid_strike.grid_analysis import suggest_multi_grid_params
+        suggestion = suggest_multi_grid_params(
+            current_price=current_price,
+            natr=natr or 0.02,
+            total_amount=total_amount,
+            min_order_amount=min_order_amount,
+            num_grids=num_grids,
+            grid_type=grid_type
+        )
+
+        config["grids"] = suggestion["grids"]
+        set_controller_config(context, config)
+
+        if not config.get("id"):
+            existing_configs = context.user_data.get("controller_configs_list", [])
+            from .controllers.multi_grid_strike import generate_id as mgs_generate_id
+            config["id"] = mgs_generate_id(config, existing_configs)
+            set_controller_config(context, config)
+
+        min_spread = config.get("min_spread_between_orders", 0.001)
+        take_profit = config.get("triple_barrier_config", {}).get("take_profit", 0.001)
+        natr_pct = f"{natr*100:.2f}%" if natr else "N/A"
+
+        # ========== BUILD GRID DISPLAY CON LIMITE DI GRIGLIE VISUALIZZATE ==========
+        # Per evitare caption troppo lunghe, mostriamo massimo 5 griglie nel messaggio
+        max_grids_to_show = 5
+        total_grids = len(suggestion["grids"])
+
+        grid_lines = []
+        for i, grid in enumerate(suggestion["grids"][:max_grids_to_show]):
+            side_str = "LONG" if grid["side"] == SIDE_LONG else "SHORT"
+            grid_lines.append(
+                f"<b>Grid {i+1}:</b> <code>{html.escape(grid['grid_id'])}</code> ({side_str}, {grid['amount_quote_pct']*100:.0f}%)"
+            )
+            grid_lines.append(f"  <code>start={grid['start_price']:.6g}</code>")
+            grid_lines.append(f"  <code>end={grid['end_price']:.6g}</code>")
+            grid_lines.append(f"  <code>limit={grid['limit_price']:.6g}</code>")
+
+        if total_grids > max_grids_to_show:
+            grid_lines.append(f"<i>...and {total_grids - max_grids_to_show} more grids (edit via Configs menu)</i>")
+        # ========================================================================
+
+        context.user_data["bots_state"] = "mgs_wizard_input"
+        context.user_data["mgs_wizard_step"] = "final"
+
+        interval_options = ["1m", "5m", "15m", "1h", "4h"]
+        interval_row = [
+            InlineKeyboardButton(
+                f"✓ {opt}" if opt == interval else opt,
+                callback_data=f"bots:mgs_interval:{opt}"
+            )
+            for opt in interval_options
+        ]
+
+        keyboard = [
+            interval_row,
+            [InlineKeyboardButton("💾 Save Config", callback_data="bots:mgs_save")],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_amount"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+            ],
+        ]
+
+        is_perp = connector.endswith("_perpetual")
+        final_step = 7 if is_perp else 6
+
+        # ========== COSTRUISCI CONFIG_TEXT CON TAG BILANCIATI ==========
+        # Usa una lista e poi join per evitare problemi di concatenazione
+        config_text_parts = [
+            f"<b>🔲 Multi Grid Strike - Step {final_step}/{final_step} (Final)</b>",
+            "",
+            f"<b>{html.escape(pair)}</b>",
+            f"Price: <code>{current_price:,.6g}</code> | NATR: <code>{html.escape(natr_pct)}</code>",
+            "",
+            f"<code>connector_name={html.escape(connector)}</code>",
+            f"<code>trading_pair={html.escape(pair)}</code>",
+            f"<code>total_amount_quote={total_amount:.0f}</code>",
+            f"<code>leverage={leverage}</code>",
+            f"<code>position_mode={html.escape(position_mode)}</code>",
+            f"<code>min_spread_between_orders={min_spread}</code>",
+            f"<code>min_order_amount_quote={min_order_amount}</code>",
+            f"<code>max_open_orders={config.get('max_open_orders', 2)}</code>",
+            f"<code>take_profit={take_profit}</code>",
+            f"<code>keep_position={str(config.get('keep_position', False)).lower()}</code>",
+            "",
+        ]
+        config_text_parts.extend(grid_lines)
+        config_text_parts.extend(["", "<i>Edit individual grids via Configs menu after saving</i>"])
+
+        config_text = "\n".join(config_text_parts)
+        # ================================================================
+
+        # ========== TRONCAMENTO PIÙ SICURO ==========
+        MAX_CAPTION_LEN = 950
+        if len(config_text) > MAX_CAPTION_LEN:
+            truncation_note = "\n\n<i>...truncated due to length limit. Edit via Configs menu.</i>"
+            max_allowed = MAX_CAPTION_LEN - len(truncation_note)
+            # Cerca l'ultimo newline prima del limite per non troncare a metà riga
+            last_newline = config_text.rfind('\n', 0, max_allowed)
+            if last_newline > 0:
+                config_text = config_text[:last_newline] + truncation_note
+            else:
+                config_text = config_text[:max_allowed] + truncation_note
+        # ===========================================
+
+        # Invia la foto
+        if candles_list and suggestion["grids"]:
+            first_grid = suggestion["grids"][0]
+            chart_bytes = generate_candles_chart(
+                candles_list,
+                pair,
+                start_price=first_grid["start_price"],
+                end_price=first_grid["end_price"],
+                limit_price=first_grid["limit_price"],
+                current_price=current_price,
+                side=first_grid["side"],
+            )
+            try:
+                await context.bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=msg.message_id,
+                    media=InputMediaPhoto(media=chart_bytes, caption=config_text, parse_mode="HTML"),
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["mgs_wizard_message_id"] = msg.message_id
+            except Exception as e:
+                logger.warning(f"edit_message_media fallito: {e}, fallback a delete+send")
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                new_msg = await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=chart_bytes,
+                    caption=config_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["mgs_wizard_message_id"] = new_msg.message_id
+                context.user_data["mgs_wizard_chat_id"] = chat_id
+        else:
+            try:
+                await msg.edit_text(
+                    text=config_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["mgs_wizard_message_id"] = msg.message_id
+            except Exception as e:
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                new_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=config_text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["mgs_wizard_message_id"] = new_msg.message_id
+                context.user_data["mgs_wizard_chat_id"] = chat_id
+
+    except Exception as e:
+        logger.error(f"MGS final step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        try:
+            await msg.edit_text(
+                f"<b>Error</b>\n\n{html.escape(str(e))}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            pass
+async def handle_mgs_interval_change(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, interval: str
+) -> None:
+    """Change chart interval"""
+    query = update.callback_query
+    context.user_data["mgs_candles"] = None
+    context.user_data["mgs_candles_interval"] = None
+
+    # Ricrea il final step con un nuovo messaggio
+    await _mgs_show_final_step(update, context, interval=interval)
+
+
+async def handle_mgs_save(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Save the Multi Grid Strike configuration"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # ========== PULISCI I CAMPI NON NECESSARI ==========
+    # Rimuovi campi interni del wizard
+    config.pop("grid_strategy_type", None)
+    config.pop("num_grids", None)
+    config.pop("candles_config", None)
+    config.pop("initial_positions", None)
+
+    # Rimuovi 'description' da ogni grid
+    if "grids" in config:
+        for grid in config["grids"]:
+            grid.pop("description", None)
+    # ========== NUOVO: PULISCI triple_barrier_config (SOLO CAMPI VALIDI) ==========
+    # Multi Grid Strike supporta SOLO: open_order_type, take_profit, take_profit_order_type
+    valid_tp_fields = {"open_order_type", "take_profit", "take_profit_order_type"}
+
+    if "triple_barrier_config" in config:
+        tp_config = config["triple_barrier_config"]
+        if isinstance(tp_config, dict):
+            # Filtra solo i campi validi
+            cleaned_tp = {
+                k: v for k, v in tp_config.items()
+                if k in valid_tp_fields and v is not None
+            }
+            if cleaned_tp:
+                config["triple_barrier_config"] = cleaned_tp
+            else:
+                config.pop("triple_barrier_config", None)
+        else:
+            config.pop("triple_barrier_config", None)
+
+    # ========== NUOVO: RIMUOVI CAMPI NON STANDARD (ereditati da altri wizard) ==========
+    invalid_fields = [
+        "candles_connector",
+        "candles_trading_pair",
+        "interval",
+        "bb_length",
+        "bb_std",
+        "bb_long_threshold",
+        "bb_short_threshold",
+        "macd_fast",
+        "macd_slow",
+        "macd_signal",
+        "dca_spreads",
+        "dca_amounts_pct",
+        "dynamic_order_spread",
+        "dynamic_target",
+        "cooldown_time",
+        "max_executors_per_side",
+        "stop_loss",
+        "time_limit",
+        "trailing_stop",
+        "trailing_stop_activation",
+        "trailing_stop_delta",
+    ]
+    for field in invalid_fields:
+        config.pop(field, None)
+
+    # ========== GARANTISCI CHE I CAMPI OBBLIGATORI SIANO PRESENTI ==========
+    # Se manca triple_barrier_config ma c'è take_profit da qualche parte
+    if "take_profit" in config and "triple_barrier_config" not in config:
+        config["triple_barrier_config"] = {
+            "take_profit": config.pop("take_profit")
+        }
+
+    # Assicurati che open_order_type e take_profit_order_type abbiano valori validi
+    if "triple_barrier_config" in config:
+        if "open_order_type" not in config["triple_barrier_config"]:
+            config["triple_barrier_config"]["open_order_type"] = ORDER_TYPE_LIMIT_MAKER
+        if "take_profit_order_type" not in config["triple_barrier_config"]:
+            config["triple_barrier_config"]["take_profit_order_type"] = ORDER_TYPE_LIMIT_MAKER
+
+    # ===================================================
+
+    config_id = config.get("id", "")
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving configuration `" + escape_markdown_v2(config_id) + "`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+
+        # Cleanup wizard state
+        for key in ["mgs_wizard_step", "mgs_wizard_message_id", "mgs_wizard_chat_id",
+                    "mgs_current_price", "mgs_candles", "mgs_candles_interval",
+                    "mgs_chart_interval", "mgs_natr", "mgs_trading_rules",
+                    "mgs_default_grids", "mgs_waiting_for_num_grids"]:
+            context.user_data.pop(key, None)
+        context.user_data.pop("bots_state", None)
+
+        keyboard = [
+            [InlineKeyboardButton("Create Another", callback_data="bots:new_multi_grid_strike")],
+            [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        saved_msg = (
+            "*Config Saved\\!*\n\n"
+            "Controller `" + escape_markdown_v2(config_id) + "` saved successfully\\.\n"
+            "Use 📋 Configs menu to edit individual grids or parameters\\."
+        )
+        await status_msg.edit_text(
+            saved_msg,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"MGS save error: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:mgs_save")],
+            [InlineKeyboardButton("Back", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            format_error_message(f"Failed to save: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+# ============================================
+# MGS BACK HANDLERS
+# ============================================
+
+async def handle_mgs_back_to_connector(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    context.user_data["mgs_wizard_step"] = "connector_name"
+    await _mgs_show_connector_step(update, context)
+
+
+async def handle_mgs_back_to_pair(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    context.user_data["mgs_wizard_step"] = "trading_pair"
+    await _mgs_show_pair_step(update, context)
+
+
+async def handle_mgs_back_to_grid_type(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    context.user_data["mgs_wizard_step"] = "grid_type"
+    await _mgs_show_grid_type_step(update, context)
+
+async def handle_mgs_back_to_leverage(update, context) -> None:
+    config = get_controller_config(context)
+    if config.get("connector_name", "").endswith("_perpetual"):
+        context.user_data["mgs_wizard_step"] = "leverage"
+
+        # Cancella messaggio corrente
+        query = update.callback_query
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        await _mgs_show_leverage_step(update, context)
+    else:
+        await handle_mgs_back_to_num_grids(update, context)
+
+async def handle_mgs_back_to_num_grids(update, context) -> None:
+    """Go back to num_grids step"""
+    query = update.callback_query
+
+    # Cancella il messaggio corrente
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    context.user_data["mgs_wizard_step"] = "num_grids"
+    await _mgs_show_num_grids_step(update, context)
+
+async def handle_mgs_back_to_amount(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Go back to amount step"""
+    query = update.callback_query
+
+    # Cancella il messaggio corrente
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    context.user_data["mgs_wizard_step"] = "total_amount_quote"
+    context.user_data.pop("mgs_current_price", None)
+    context.user_data.pop("mgs_candles", None)
+
+    await _mgs_show_amount_step(update, context)
+
+
+# ============================================
+# MGS PAIR SELECTION HANDLER
+# ============================================
+
+async def handle_mgs_pair_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str
+) -> None:
+    """Handle pair selection via button"""
+    await handle_mgs_wizard_pair(update, context, pair)
+
+
+# ============================================
+# MGS TEXT INPUT PROCESSOR
+# ============================================
+async def process_mgs_wizard_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
+) -> None:
+    """Process text input during MGS wizard"""
+    step = context.user_data.get("mgs_wizard_step")
+    logger.info(f"🔍 MGS DEBUG: step={step}, input={user_input}, bots_state={context.user_data.get('bots_state')}")
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    message_id = context.user_data.get("mgs_wizard_message_id")
+    wizard_chat_id = context.user_data.get("mgs_wizard_chat_id", chat_id)
+
+    try:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        # ========== GESTISCI INPUT MANUALE PER TRADING PAIR ==========
+        if step == "trading_pair":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("connector_name", "")
+
+            # Validazione base: deve contenere un trattino
+            if "-" not in pair:
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_connector")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+                error_text = (
+                    r"*🔲 Multi Grid Strike \- Step 2*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+                    r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. BTC\-USDT\)*" + "\n\n"
+                    r"Type the pair again \(e\.g\. `BTC\-USDT`\):"
+                )
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id,
+                        message_id=message_id,
+                        text=error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["mgs_wizard_message_id"] = msg.message_id
+                return
+
+            # Valida il trading pair sull'exchange
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            is_valid, error_msg, suggestions, correct_pair = (
+                await validate_trading_pair(context.user_data, client, connector, pair)
+            )
+
+            if not is_valid:
+                # Mostra suggerimenti se disponibili
+                keyboard = []
+                for sugg in suggestions[:4]:
+                    keyboard.append([InlineKeyboardButton(sugg, callback_data=f"bots:mgs_pair:{sugg}")])
+                keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:mgs_back_to_connector")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+                error_text = (
+                    r"*🔲 Multi Grid Strike \- Step 2*" + "\n\n"
+                    f"❌ `{escape_markdown_v2(pair)}` not found on `{escape_markdown_v2(connector)}`\\.\n\n"
+                    r"*Did you mean?*"
+                )
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id,
+                        message_id=message_id,
+                        text=error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["mgs_wizard_message_id"] = msg.message_id
+                return
+
+            if correct_pair:
+                pair = correct_pair
+
+            config["trading_pair"] = pair
+            for key in ["mgs_current_price", "mgs_candles", "mgs_candles_interval", "mgs_natr"]:
+                context.user_data.pop(key, None)
+            set_controller_config(context, config)
+            # ========== DEBUG ==========
+            logger.info(f"🔍 MGS: pair set to {pair}, now calling _mgs_show_grid_type_step")
+            # ===========================
+            # Vai allo step successivo (grid_type)
+            context.user_data["mgs_wizard_step"] = "grid_type"
+            await _mgs_show_grid_type_step(update, context)
+
+        # ========== GESTISCI INPUT PER NUM_GRIDS_CUSTOM ==========
+        elif step == "num_grids_custom":
+            try:
+                num_grids = int(user_input.strip())
+
+                # 🔧 FIX: Recupera i limiti dal contesto
+                min_grids = context.user_data.get("mgs_min_grids", 2)
+                max_grids = context.user_data.get("mgs_max_grids", 20)
+
+                if num_grids < min_grids or num_grids > max_grids:
+                    raise ValueError(f"Number must be between {min_grids} and {max_grids}")
+
+                config["num_grids"] = num_grids
+                set_controller_config(context, config)
+                context.user_data.pop("mgs_waiting_for_num_grids", None)
+
+                connector = config.get("connector_name", "")
+                if connector.endswith("_perpetual"):
+                    context.user_data["mgs_wizard_step"] = "leverage"
+                    await _mgs_show_leverage_step(update, context)
+                else:
+                    config["leverage"] = 1
+                    config["position_mode"] = "ONEWAY"
+                    set_controller_config(context, config)
+                    context.user_data["mgs_wizard_step"] = "total_amount_quote"
+                    await _mgs_show_amount_step(update, context)
+            except ValueError as e:
+                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:mgs_back_to_num_grids")]]
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=message_id,
+                    text=rf"*🔲 Multi Grid Strike*" + "\n\n"
+                    f"❌ *Invalid number:* {escape_markdown_v2(str(e))}" + "\n\n"
+                    rf"*Enter number of grids ({min_grids}-{max_grids}):*",
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+        elif step == "leverage":
+            try:
+                val = int(float(user_input.strip().lower().replace("x", "")))
+                config["leverage"] = val
+                set_controller_config(context, config)
+                context.user_data["mgs_wizard_step"] = "total_amount_quote"
+                await _mgs_show_amount_step(update, context)
+            except ValueError:
+                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:mgs_back_to_leverage")]]
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=message_id,
+                    text=r"*🔲 Multi Grid Strike*" + "\n\n"
+                    r"❌ *Invalid leverage*" + "\n\n"
+                    r"Enter a positive number \(e\.g\. 20\):",
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+        elif step == "total_amount_quote":
+            try:
+                amount = float(user_input.strip().replace("$", "").replace(",", ""))
+                config["total_amount_quote"] = amount
+                set_controller_config(context, config)
+                context.user_data["mgs_wizard_step"] = "final"
+                # Show loading
+                tmp = await context.bot.send_message(
+                    chat_id=wizard_chat_id,
+                    text=r"*🔲 Multi Grid Strike*" + "\n\n"
+                         f"⏳ Loading market data for `{escape_markdown_v2(config.get('trading_pair', ''))}`\\.\\.\\.",
+                    parse_mode="MarkdownV2",
+                )
+                context.user_data["mgs_wizard_message_id"] = tmp.message_id
+                await _mgs_show_final_step(update, context)
+            except ValueError:
+                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:mgs_back_to_amount")]]
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=message_id,
+                    text=r"*🔲 Multi Grid Strike*" + "\n\n"
+                    r"❌ *Invalid amount*" + "\n\n"
+                    r"Enter a positive number \(e\.g\. 500\):",
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+        elif step == "final":
+            # Handle field=value edits
+            if "=" in user_input:
+                for line in user_input.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+                    try:
+                        if field in ("min_spread_between_orders", "min_spread"):
+                            val = float(value.replace("%", ""))
+                            config["min_spread_between_orders"] = val / 100 if val > 1 else val
+                        elif field in ("take_profit", "tp"):
+                            val = float(value.replace("%", ""))
+                            if "triple_barrier_config" not in config:
+                                config["triple_barrier_config"] = {}
+                            config["triple_barrier_config"]["take_profit"] = val / 100 if val > 1 else val
+                        elif field in ("total_amount_quote", "amount"):
+                            config["total_amount_quote"] = float(value)
+                        elif field == "leverage":
+                            config["leverage"] = int(float(value))
+                        elif field == "max_open_orders":
+                            config["max_open_orders"] = int(float(value))
+                        elif field == "min_order_amount_quote":
+                            config["min_order_amount_quote"] = float(value)
+                        elif field == "keep_position":
+                            config["keep_position"] = value.lower() in ("true", "yes", "1")
+                        elif field == "position_mode":
+                            config["position_mode"] = value.upper()
+                    except Exception:
+                        pass
+                set_controller_config(context, config)
+                # Refresh the final step
+                await _mgs_show_final_step(update, context)
+
+    except Exception as e:
+        logger.error(f"MGS wizard input error: {e}", exc_info=True)
+
+# ============================================
+# GENERIC SAVE HANDLER (for wizard fallback)
+# ============================================
+async def _show_new_generic_form(
+    update, context, controller_type: str
+) -> None:
+    """Generic handler for new bot configs - saves with defaults."""
+    from .controllers import get_controller
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs for sequencing: {e}")
+        configs = []
+
+    ctrl_cls = get_controller(controller_type)
+    config = ctrl_cls.get_defaults() if ctrl_cls else {}
+    config_id = ctrl_cls.generate_id(config, configs) if ctrl_cls else f"001_{controller_type}"
+    config["id"] = config_id
+
+    lines = [
+        f"*🆕 New {escape_markdown_v2(ctrl_cls.display_name if ctrl_cls else controller_type)}*",
+        "",
+        f"`{escape_markdown_v2(config_id)}`",
+        "",
+        "_Config created with default values\\._",
+        "_Use 📋 Configs menu to edit fields\\._",
+        "",
+    ]
+    for key, value in config.items():
+        if key in ("controller_name", "controller_type"):
+            continue
+        lines.append(f"`{escape_markdown_v2(str(key))}={escape_markdown_v2(str(value))}`")
+
+    keyboard = [
+        [InlineKeyboardButton("💾 Save with defaults", callback_data=f"bots:generic_save:{controller_type}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bots:controller_configs")],
+    ]
+
+    set_controller_config(context, config)
+    context.user_data["generic_pending_id"] = config_id
+
+    try:
+        await query.message.edit_text(
+            "\n".join(lines),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        logger.error(f"Error showing generic form: {e}", exc_info=True)
+
+
+async def handle_generic_save(
+    update, context, controller_type: str
+) -> None:
+    """Save a generic bot config with default values."""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    config_id = config.get("id", context.user_data.get("generic_pending_id", f"001_{controller_type}"))
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving `" + escape_markdown_v2(config_id) + "`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+
+        keyboard = [
+            [InlineKeyboardButton("📋 Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        saved_text = (
+            "*✅ Config Saved\\!*\n\n"
+            + "`" + escape_markdown_v2(config_id) + "` saved with default values\\.\n"
+            + "Open 📋 Configs to edit the fields\\."
+        )
+        await status_msg.edit_text(
+            saved_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        logger.error(f"Error saving generic config: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:controller_configs")]]
+        await status_msg.edit_text(
+            format_error_message(f"Failed to save: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+# ============================================
+# DMAN V3 WIZARD
+# ============================================
+# Steps: connector → pair → (leverage) → amount → interval+chart → save
+# Prefisso handler: dman_
+
+async def show_new_dman_v3_form(
+    update, context
+) -> None:
+    """Start the DMan V3 wizard - Step 1: Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    # ========== PULISCI STATI DI ALTRI WIZARD ==========
+    # Rimuovi tutti i message_id e chat_id di altri wizard
+    for key in list(context.user_data.keys()):
+        if key.endswith("_wizard_message_id") or key.endswith("_wizard_chat_id"):
+            context.user_data.pop(key, None)
+        if key.endswith("_wizard_step"):
+            context.user_data.pop(key, None)
+    # ===================================================
+
+    # Clear cached data
+    for key in ["dman_current_price", "dman_candles", "dman_candles_interval",
+                "dman_chart_interval", "dman_trading_rules"]:
+        context.user_data.pop(key, None)
+
+    # Fetch existing configs for sequence numbering
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    init_new_controller_config(context, "dman_v3")
+    context.user_data["bots_state"] = "dman_wizard"
+    context.user_data["dman_wizard_step"] = "connector_name"
+    context.user_data["dman_wizard_message_id"] = query.message.message_id
+    context.user_data["dman_wizard_chat_id"] = query.message.chat_id
+
+    await _dman_show_connector_step(update, context)
+
+
+async def _dman_show_connector_step(update, context) -> None:
+    """DMan Step 1: Select Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+
+        if not cex_connectors:
+            keyboard = [
+                [InlineKeyboardButton("🔑 Configure API Keys", callback_data="config_api_keys")],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
+            ]
+            await query.message.edit_text(
+                r"*📉 DMan V3 \- New Config*" + "\n\n"
+                r"⚠️ No CEX connectors available\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        keyboard = []
+        row = []
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(
+                f"🏦 {connector}", callback_data=f"bots:dman_connector:{connector}"
+            ))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+        await query.message.edit_text(
+            r"*📉 DMan V3*" + "\n\n"
+            r"Mean reversion strategy using Bollinger Bands to detect overbought/oversold "
+            r"conditions, then enters with DCA orders at multiple levels\." + "\n\n"
+            r"─────────────────────────" + "\n\n"
+            r"*Step 1: Select Exchange*",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
+
+    except Exception as e:
+        logger.error(f"DMan connector step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        await query.message.edit_text(
+            format_error_message(f"Error: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def handle_dman_wizard_connector(update, context, connector: str) -> None:
+    """Handle connector selection"""
+    config = get_controller_config(context)
+    config["connector_name"] = connector
+    # Auto-set candles connector = same exchange
+    config["candles_connector"] = connector
+    set_controller_config(context, config)
+    context.user_data["dman_wizard_step"] = "trading_pair"
+    await _dman_show_pair_step(update, context)
+
+async def _dman_show_pair_step(update, context) -> None:
+    """DMan Step 2: Select Trading Pair"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+
+    context.user_data["bots_state"] = "dman_wizard_input"
+    context.user_data["dman_wizard_step"] = "trading_pair"
+
+    # Recent pairs from existing configs
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:dman_pair:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    total_steps = 6 if is_perp else 4
+    current_step = 2
+    message_text = (
+        rf"*📉 DMan V3 \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}`" + "\n\n"
+        r"🔗 *Trading Pair*" + "\n\n"
+        r"Select a recent pair or type a new one:"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    try:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["dman_wizard_message_id"] = query.message.message_id
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        new_msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["dman_wizard_message_id"] = new_msg.message_id
+        context.user_data["dman_wizard_chat_id"] = query.message.chat_id
+
+async def handle_dman_wizard_pair(update, context, pair: str) -> None:
+    """Handle pair selection"""
+    config = get_controller_config(context)
+    config["trading_pair"] = pair
+    config["candles_trading_pair"] = pair
+    set_controller_config(context, config)
+
+    connector = config.get("connector_name", "").lower()
+    is_perp = "_perpetual" in connector or "_margin" in connector
+
+    if is_perp:
+        # Step: Leverage
+        context.user_data["dman_wizard_step"] = "leverage"
+        await _dman_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"  # spot → ONEWAY obbligatorio
+        set_controller_config(context, config)
+        context.user_data["dman_wizard_step"] = "total_amount_quote"
+        await _dman_show_amount_step(update, context)
+
+async def _dman_show_leverage_step(update, context) -> None:
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "dman_wizard_input"
+    context.user_data["dman_wizard_step"] = "leverage"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1x", callback_data="bots:dman_leverage:1"),
+            InlineKeyboardButton("5x", callback_data="bots:dman_leverage:5"),
+            InlineKeyboardButton("10x", callback_data="bots:dman_leverage:10"),
+        ],
+        [
+            InlineKeyboardButton("20x", callback_data="bots:dman_leverage:20"),
+            InlineKeyboardButton("50x", callback_data="bots:dman_leverage:50"),
+            InlineKeyboardButton("75x", callback_data="bots:dman_leverage:75"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    # ========== SALVA message_id PER ERROR HANDLING ==========
+    context.user_data["dman_wizard_message_id"] = query.message.message_id
+    context.user_data["dman_wizard_chat_id"] = query.message.chat_id
+    # ========================================================
+
+    await query.message.edit_text(
+        r"*📉 DMan V3 \- Step 3/6*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+        r"⚡ *Select Leverage*" + "\n"
+        r"_Or type a value \(e\.g\. 20\)_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_dman_wizard_leverage(update, context, leverage: int) -> None:
+    config = get_controller_config(context)
+    config["leverage"] = leverage
+    set_controller_config(context, config)
+    context.user_data["dman_wizard_step"] = "position_mode"
+    await _dman_show_position_mode_step(update, context)
+
+async def _dman_show_position_mode_step(update, context) -> None:
+    """DMan Step 4 (derivati only): HEDGE vs ONEWAY"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+
+    context.user_data["bots_state"] = "dman_wizard_input"
+    context.user_data["dman_wizard_step"] = "position_mode"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔀 HEDGE  ✅ recommended", callback_data="bots:dman_position_mode:HEDGE"),
+            InlineKeyboardButton("➡️ ONEWAY", callback_data="bots:dman_position_mode:ONEWAY"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_leverage"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    # CORREZIONE: escape di tutti i caratteri speciali MarkdownV2
+    # I caratteri speciali sono: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+
+    await query.message.edit_text(
+        f"*📉 DMan V3 \\- Step 4/6*\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}` \\| ⚡ `{leverage}x`\n\n"
+        r"📐 *Position Mode*" + "\n\n"
+        r"• *HEDGE*: Can hold both long and short positions simultaneously" + "\n"
+        r"• *ONEWAY*: Can only hold positions in one direction \(long OR short\)",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+async def handle_dman_position_mode(update, context, position_mode: str) -> None:
+    config = get_controller_config(context)
+    config["position_mode"] = position_mode
+    set_controller_config(context, config)
+    context.user_data["dman_wizard_step"] = "total_amount_quote"
+    await _dman_show_amount_step(update, context)
+
+async def _dman_show_amount_step(update, context) -> None:
+    """DMan Step: Enter Total Amount"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+    pos_mode = config.get("position_mode", "HEDGE")
+
+    context.user_data["bots_state"] = "dman_wizard_input"
+    context.user_data["dman_wizard_step"] = "total_amount_quote"
+    connector = config.get("connector_name", "").lower()
+    is_perp = "_perpetual" in connector or "_margin" in connector
+    total_steps = 6 if is_perp else 4
+    current_step = 5 if is_perp else 3
+
+    # Fetch balance
+    balance_text = ""
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        balances = await get_cex_balances(context.user_data, client, connector)
+        quote = pair.split("-")[1] if "-" in pair else "USDT"
+        available = balances.get(quote, {}).get("available", 0)
+        if available:
+            balance_text = f"\n\n💰 Available `{escape_markdown_v2(quote)}`: `{available:,.2f}`"
+    except Exception:
+        pass
+
+    # Gestione dinamica del tasto Back
+    back_callback = "bots:dman_back_to_position_mode" if is_perp else "bots:dman_back_to_pair"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:dman_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:dman_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:dman_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:dman_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:dman_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:dman_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data=back_callback),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    # Testo del messaggio con riepilogo parametri scelti finora
+    header_info = f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+    if is_perp:
+        header_info += f" \\| ⚡ `{leverage}x` \\| 🎯 `{pos_mode}`"
+
+    message_text = (
+        rf"*📉 DMan V3 \- Step {current_step}/{total_steps}*" + "\n\n"
+        + header_info + balance_text + "\n\n"
+        r"💰 *Total Amount \(USDT\)*" + "\n"
+        r"_Select or type an amount:_"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    target_chat_id = chat_id
+    if query and query.message:
+        target_chat_id = query.message.chat_id
+        try:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["dman_wizard_message_id"] = query.message.message_id
+            return
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+    new_msg = await context.bot.send_message(
+        chat_id=target_chat_id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data["dman_wizard_message_id"] = new_msg.message_id
+    context.user_data["dman_wizard_chat_id"] = target_chat_id
+
+async def handle_dman_wizard_amount(update, context, amount: float) -> None:
+    """Handle amount selection"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
+
+    pair = config.get("trading_pair", "")
+    await query.message.edit_text(
+        r"*📉 DMan V3 \- New Config*" + "\n\n"
+        f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\.  " + "\n\n"
+        r"_Fetching market data\.\.\._",
+        parse_mode="MarkdownV2",
+    )
+
+    context.user_data["dman_wizard_step"] = "final"
+    await _dman_show_final_step(update, context)
+
+
+async def _dman_show_final_step(update, context, interval: str = None) -> None:
+    """DMan Final Step: Chart + Config Summary"""
+    query = update.callback_query
+    msg = query.message if query else update.message
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    total_amount = config.get("total_amount_quote", 1000)
+    leverage = config.get("leverage", 1)
+    bb_length = config.get("bb_length", 100)
+
+    if interval is None:
+        interval = context.user_data.get("dman_chart_interval", config.get("interval", "3m"))
+    context.user_data["dman_chart_interval"] = interval
+    config["interval"] = interval
+    set_controller_config(context, config)
+
+    current_price = context.user_data.get("dman_current_price")
+    candles = context.user_data.get("dman_candles")
+
+    try:
+        cached_interval = context.user_data.get("dman_candles_interval", interval)
+        if not current_price or interval != cached_interval:
+            try:
+                await msg.edit_text(
+                    r"*📉 DMan V3 \- New Config*" + "\n\n"
+                    f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+            client, _ = await get_bots_client(chat_id, context.user_data)
+
+            # --- INIZIO MODIFICA FIX GRAFICO ---
+            # Puliamo il nome del connettore per le candele (es: kucoin_perpetual -> kucoin)
+            # Questo evita l'errore 500 sui futures
+            candles_connector = connector.replace("_perpetual", "").replace("_margin", "").replace("_spot", "")
+            # -----------------------------------
+
+            current_price = await fetch_current_price(client, connector, pair)
+
+            if current_price:
+                context.user_data["dman_current_price"] = current_price
+                candles = await fetch_candles(
+                    client, candles_connector, pair, interval=interval, max_records=420 # <--- Usiamo candles_connector
+                )
+                context.user_data["dman_candles"] = candles
+                context.user_data["dman_candles_interval"] = interval
+
+        if not current_price:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
+            await msg.edit_text(
+                r"*❌ Error*" + "\n\n"
+                f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        candles_list = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+
+        if candles_list:
+            last_close = candles_list[-1].get("close") or candles_list[-1].get("c")
+            if last_close:
+                current_price = float(last_close)
+                context.user_data["dman_current_price"] = current_price
+
+        if not config.get("id"):
+            existing_configs = context.user_data.get("controller_configs_list", [])
+            from .controllers.dman_v3 import generate_id as dman_generate_id
+            config["id"] = dman_generate_id(config, existing_configs)
+
+        from .controllers.dman_v3.analysis import analyze_candles_for_dman, format_dman_analysis, get_dca_strategy_suggestions
+        bb_length = config.get("bb_length", 20)
+        bb_std_val = config.get("bb_std", 2.0)
+        analysis = analyze_candles_for_dman(candles_list, bb_length=bb_length, bb_std=bb_std_val)
+
+        config["bb_long_threshold"] = analysis["suggested_long_threshold"]
+        config["bb_short_threshold"] = analysis["suggested_short_threshold"]
+        if analysis["suggested_dca_spreads"]:
+            config["dca_spreads"] = ",".join(str(s) for s in analysis["suggested_dca_spreads"])
+        if "dca_amounts_pct" not in config or config["dca_amounts_pct"] is None:
+            config["dca_amounts_pct"] = ""
+        set_controller_config(context, config)
+
+        config_id = config.get("id", "")
+        position_mode = config.get("position_mode", "HEDGE")
+        stop_loss = config.get("stop_loss", 0.05)
+        take_profit = config.get("take_profit", 0.03)
+        max_exec = config.get("max_executors_per_side", 1)
+        cooldown = config.get("cooldown_time", 60)
+        dca_spreads = config.get("dca_spreads", "0.001,0.018,0.15,0.25")
+        bb_std = config.get("bb_std", 2.0)
+        bb_long = config.get("bb_long_threshold", 0.0)
+        bb_short = config.get("bb_short_threshold", 1.0)
+        ts = config.get("trailing_stop", {}) or {}
+        ts_act = ts.get("activation_price", 0.015) if isinstance(ts, dict) else 0.015
+        ts_delta = ts.get("trailing_delta", 0.005) if isinstance(ts, dict) else 0.005
+
+        context.user_data["bots_state"] = "dman_wizard_input"
+        context.user_data["dman_wizard_step"] = "final"
+
+        interval_options = ["1m", "3m", "5m", "15m", "1h"]
+        interval_row = [
+            InlineKeyboardButton(
+                f"✓ {opt}" if opt == interval else opt,
+                callback_data=f"bots:dman_interval:{opt}"
+            )
+            for opt in interval_options
+        ]
+# Recuperiamo il NATR dall'analisi fatta precedentemente (punto dove hai chiamato analyze_candles_for_dman)
+        natr_val = analysis.get("natr", 0.01)
+        # Salviamo l'analisi in user_data per recuperarla quando l'utente clicca i bottoni
+        context.user_data["dman_analysis"] = analysis
+
+        # Generiamo i bottoni usando le chiavi che abbiamo definito in analysis.py
+        strategy_row = [
+            InlineKeyboardButton("🎯 Scalp", callback_data="bots:dman_set_strat:scalping"),
+            InlineKeyboardButton("🎲 Marti", callback_data="bots:dman_set_strat:martingale"),
+            InlineKeyboardButton("⚖️ Def", callback_data="bots:dman_set_strat:standard"),
+            InlineKeyboardButton("🛡️ Cons", callback_data="bots:dman_set_strat:conservative"),
+            InlineKeyboardButton("🤖 Auto", callback_data="bots:dman_set_strat:auto"),
+        ]
+        is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+        final_step = 6 if is_perp else 4
+
+        keyboard = [
+                    interval_row,
+                    strategy_row,  # <--- AGGIUNGI QUESTA RIGA QUI
+                    [InlineKeyboardButton("💾 Save Config", callback_data="bots:dman_save")],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_amount"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+
+        config_text = (
+            rf"*📉 DMan V3 \- Step {final_step}/{final_step} \(Final\)*" + "\n\n"
+            f"*{escape_markdown_v2(pair)}*\n"
+            f"Price: `{current_price:,.6g}` \\| BB: `{bb_length}` \\| Interval: `{interval}`\n\n"
+            f"`connector_name={connector}`\n"
+            f"`trading_pair={pair}`\n"
+            f"`total_amount_quote={total_amount:.0f}`\n"
+            f"`leverage={leverage}`\n"
+            f"`position_mode={position_mode}`\n"
+            f"`max_executors_per_side={max_exec}`\n"
+            f"`cooldown_time={cooldown}`\n"
+            f"`stop_loss={stop_loss}`\n"
+            f"`take_profit={take_profit}`\n"
+            f"`trailing_stop_activation={ts_act}`\n"
+            f"`trailing_stop_delta={ts_delta}`\n"
+            f"`interval={interval}`\n"
+            f"`bb_length={bb_length}`\n"
+            f"`bb_std={bb_std}`\n"
+            f"`bb_long_threshold={bb_long}`\n"
+            f"`bb_short_threshold={bb_short}`\n"
+            f"`dca_spreads={escape_markdown_v2(str(dca_spreads))}`\n"
+            f"`dca_amounts_pct={config.get('dca_amounts_pct', '')}`\n"
+            r"_Edit: `field=value`_"
+        )
+
+        analysis_text = format_dman_analysis(analysis)
+        config_text += "\n\n```\n" + analysis_text + "\n```"
+
+        if candles_list:
+            from .controllers.dman_v3.chart import generate_chart as dman_chart
+            chart_bytes = dman_chart(config, candles_list, current_price)
+
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+            new_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_bytes,
+                caption=config_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["dman_wizard_message_id"] = new_msg.message_id
+            context.user_data["dman_wizard_chat_id"] = chat_id
+        else:
+            try:
+                await msg.edit_text(
+                    text=config_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception:
+                new_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=config_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["dman_wizard_message_id"] = new_msg.message_id
+
+    except Exception as e:
+        logger.error(f"DMan final step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        try:
+            await msg.edit_text(
+                format_error_message(f"Error: {str(e)}"),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            pass
+
+async def handle_dman_interval_change(update, context, interval: str) -> None:
+    """Change chart interval"""
+    context.user_data["dman_candles"] = None
+    context.user_data["dman_candles_interval"] = None
+    await _dman_show_final_step(update, context, interval=interval)
+
+async def handle_dman_set_strategy(update, context, strat_key: str) -> None:
+    """Handle DCA strategy selection from the final step buttons"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # Recuperiamo l'analisi NATR salvata in precedenza in _dman_show_final_step
+    analysis = context.user_data.get("dman_analysis", {})
+    natr = analysis.get("natr", 0.01)
+
+    from .controllers.dman_v3.analysis import get_dca_strategy_suggestions
+    strats = get_dca_strategy_suggestions(natr)
+
+    if strat_key in strats:
+        selected = strats[strat_key]
+        # Aggiorniamo la configurazione con i valori della strategia scelta
+        config["dca_spreads"] = ",".join(str(s) for s in selected["dca_spreads"])
+        config["dca_amounts_pct"] = ",".join(str(a) for a in selected["dca_amounts_pct"])
+
+        # Applichiamo anche i threshold suggeriti dall'analisi BB
+        config["bb_long_threshold"] = analysis.get("suggested_long_threshold", 0.0)
+        config["bb_short_threshold"] = analysis.get("suggested_short_threshold", 1.0)
+
+        set_controller_config(context, config)
+
+        # Feedback visivo all'utente
+        await query.answer(f"✅ Strategia {selected['label']} applicata")
+
+        # Ricarichiamo la schermata finale per mostrare i nuovi valori nel testo e nel grafico
+        return await _dman_show_final_step(update, context)
+
+async def handle_dman_save(update, context) -> None:
+    """Save DMan V3 configuration"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # 1. Riconoscimento del tipo di connettore
+    connector = config.get("connector_name", "").lower()
+    is_perp = "_perpetual" in connector or "_margin" in connector
+
+    # 2. ========== LOGICA DI PULIZIA E VALIDAZIONE ==========
+    # Se è SPOT, forziamo i parametri corretti a prescindere dall'input utente
+    if not is_perp:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+    else:
+        # Se è Perpetual/Margin e non è stato impostato un position_mode, mettiamo HEDGE
+        if not config.get("position_mode"):
+            config["position_mode"] = "HEDGE"
+
+    # ========== PULISCI I CAMPI NON NECESSARI ==========
+    config.pop("candles_config", None)
+    config.pop("manual_kill_switch", None)
+    # dca_amounts_pct vuoto → rimuovilo, hummingbot usa distribuzione uguale di default
+    if not config.get("dca_amounts_pct"):
+        config.pop("dca_amounts_pct", None)
+    # ===================================================
+
+    config_id = config.get("id", "")
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving `" + escape_markdown_v2(config_id) + "`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+
+        # Cleanup dati temporanei del wizard
+        for key in ["dman_wizard_step", "dman_wizard_message_id", "dman_wizard_chat_id",
+                    "dman_current_price", "dman_candles", "dman_candles_interval",
+                    "dman_chart_interval", "controller_config"]: # Aggiunto controller_config per sicurezza
+            context.user_data.pop(key, None)
+        context.user_data.pop("bots_state", None)
+
+        keyboard = [
+            [InlineKeyboardButton("Create Another", callback_data="bots:new_dman_v3")],
+            [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        saved_msg = (
+            "*Config Saved\\!*\n\n"
+            "Controller `" + escape_markdown_v2(config_id) + "` saved successfully\\."
+        )
+        await status_msg.edit_text(
+            saved_msg,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"DMan save error: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:dman_save")],
+            [InlineKeyboardButton("Back", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            format_error_message(f"Failed to save: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+async def handle_dman_back_to_connector(update, context) -> None:
+    context.user_data["dman_wizard_step"] = "connector_name"
+    await _dman_show_connector_step(update, context)
+
+
+async def handle_dman_back_to_pair(update, context) -> None:
+    context.user_data["dman_wizard_step"] = "trading_pair"
+    await _dman_show_pair_step(update, context)
+
+async def handle_dman_back_to_leverage(update, context) -> None:
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    # Usa la stessa logica degli altri wizard
+    is_perp = "_perpetual" in connector or "_margin" in connector
+    if is_perp:
+        context.user_data["dman_wizard_step"] = "leverage"
+        await _dman_show_leverage_step(update, context)
+    else:
+        await handle_dman_back_to_pair(update, context)
+
+
+async def handle_dman_back_to_amount(update, context) -> None:
+    context.user_data["dman_wizard_step"] = "total_amount_quote"
+    context.user_data.pop("dman_current_price", None)
+    context.user_data.pop("dman_candles", None)
+    context.user_data.pop("dman_candles_interval", None)
+    await _dman_show_amount_step(update, context)
+
+async def handle_dman_back_to_position_mode(update, context) -> None:
+    context.user_data["dman_wizard_step"] = "position_mode"
+    await _dman_show_position_mode_step(update, context)
+
+async def handle_dman_pair_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str
+) -> None:
+    """Handle selection of a suggested trading pair in DMan wizard"""
+    config = get_controller_config(context)
+    chat_id = update.effective_chat.id
+
+    # Clear old market data
+    for key in ["dman_current_price", "dman_candles", "dman_candles_interval", "dman_chart_interval"]:
+        context.user_data.pop(key, None)
+
+    config["trading_pair"] = trading_pair
+    config["candles_trading_pair"] = trading_pair
+    set_controller_config(context, config)
+
+    # Move to next step based on connector type
+    connector = config.get("connector_name", "")
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    if is_perp:
+        context.user_data["dman_wizard_step"] = "leverage"
+        await _dman_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["dman_wizard_step"] = "total_amount_quote"
+        await _dman_show_amount_step(update, context)
+
+async def process_dman_wizard_input(update, context, user_input: str) -> None:
+    """Process text input during DMan V3 wizard"""
+    step = context.user_data.get("dman_wizard_step")
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    message_id = context.user_data.get("dman_wizard_message_id")
+    wizard_chat_id = context.user_data.get("dman_wizard_chat_id", chat_id)
+    try:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        if step == "trading_pair":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("connector_name", "")
+
+            # ========== VALIDAZIONE BASE: DEVE CONTENERE IL TRATTINO ==========
+            if "-" not in pair:
+                message_id = context.user_data.get("dman_wizard_message_id")
+                wizard_chat_id = context.user_data.get("dman_wizard_chat_id", chat_id)
+
+                # CORRETTO: keyboard come lista di liste
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_connector")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+
+                # Mostra il contesto con exchange selezionato
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*📉 DMan V3 \- Step 2*" + "\n\n"
+                    + context_text
+                    + r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. BTC\-USDT\)*" + "\n\n"
+                    r"Type the pair again:"
+                )
+
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["dman_wizard_message_id"] = msg.message_id
+                return
+
+            # ========== 2. VALIDAZIONE SULL'EXCHANGE (CON SUGGERIMENTI) ==========
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            is_valid, error_msg, suggestions, correct_pair = (
+                await validate_trading_pair(context.user_data, client, connector, pair)
+            )
+
+            if not is_valid:
+                message_id = context.user_data.get("dman_wizard_message_id")
+                wizard_chat_id = context.user_data.get("dman_wizard_chat_id", chat_id)
+
+                # CORRETTO: costruisci la keyboard come lista di liste
+                keyboard = []
+                for sugg in suggestions[:4]:
+                    keyboard.append([InlineKeyboardButton(sugg, callback_data=f"bots:dman_pair_select:{sugg}")])
+                keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_connector")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+                # Mostra il contesto con exchange selezionato
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*📉 DMan V3 \- Step 2*" + "\n\n"
+                    + context_text
+                    + f"❌ `{escape_markdown_v2(pair)}` not found on `{escape_markdown_v2(connector)}`\\.\n\n"
+                    r"*Did you mean?*"
+                )
+
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["dman_wizard_message_id"] = msg.message_id
+                return
+
+            if correct_pair:
+                pair = correct_pair
+
+            config["trading_pair"] = pair
+            config["candles_trading_pair"] = pair
+            for key in ["dman_current_price", "dman_candles", "dman_candles_interval"]:
+                context.user_data.pop(key, None)
+            set_controller_config(context, config)            # Advance to next step
+            connector = config.get("connector_name", "")
+            is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+            message_id = context.user_data.get("dman_wizard_message_id")
+            wizard_chat_id = context.user_data.get("dman_wizard_chat_id", chat_id)
+
+            if is_perp:
+                context.user_data["dman_wizard_step"] = "leverage"
+                leverage = config.get("leverage", 1)
+                keyboard = [
+                    [
+                        InlineKeyboardButton("1x", callback_data="bots:dman_leverage:1"),
+                        InlineKeyboardButton("5x", callback_data="bots:dman_leverage:5"),
+                        InlineKeyboardButton("10x", callback_data="bots:dman_leverage:10"),
+                    ],
+                    [
+                        InlineKeyboardButton("20x", callback_data="bots:dman_leverage:20"),
+                        InlineKeyboardButton("50x", callback_data="bots:dman_leverage:50"),
+                        InlineKeyboardButton("75x", callback_data="bots:dman_leverage:75"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+                text = (
+                    r"*📉 DMan V3 \- Step 3/6*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"⚡ *Select Leverage*" + "\n"
+                    r"_Or type a value \(e\.g\. 20\)_"
+                )
+            else:
+                config["leverage"] = 1
+                set_controller_config(context, config)
+                context.user_data["dman_wizard_step"] = "total_amount_quote"
+                context.user_data["bots_state"] = "dman_wizard_input"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("$100", callback_data="bots:dman_amount:100"),
+                        InlineKeyboardButton("$500", callback_data="bots:dman_amount:500"),
+                        InlineKeyboardButton("$1000", callback_data="bots:dman_amount:1000"),
+                    ],
+                    [
+                        InlineKeyboardButton("$2000", callback_data="bots:dman_amount:2000"),
+                        InlineKeyboardButton("$5000", callback_data="bots:dman_amount:5000"),
+                        InlineKeyboardButton("$10000", callback_data="bots:dman_amount:10000"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+                text = (
+                    r"*📉 DMan V3 \- Step 3/4*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"💰 *Total Amount \(USDT\)*" + "\n"
+                    r"_Select or type an amount:_"
+                )
+
+            try:
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["dman_wizard_message_id"] = message_id
+            except Exception:
+                pass
+            return
+        elif step == "leverage":
+            val = int(float(user_input.strip().lower().replace("x", "")))
+            config["leverage"] = val
+            set_controller_config(context, config)
+            context.user_data["dman_wizard_step"] = "total_amount_quote"
+            message_id = context.user_data.get("dman_wizard_message_id")
+            wizard_chat_id = context.user_data.get("dman_wizard_chat_id", chat_id)
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+            keyboard = [
+                [
+                    InlineKeyboardButton("$100", callback_data="bots:dman_amount:100"),
+                    InlineKeyboardButton("$500", callback_data="bots:dman_amount:500"),
+                    InlineKeyboardButton("$1000", callback_data="bots:dman_amount:1000"),
+                ],
+                [
+                    InlineKeyboardButton("$2000", callback_data="bots:dman_amount:2000"),
+                    InlineKeyboardButton("$5000", callback_data="bots:dman_amount:5000"),
+                    InlineKeyboardButton("$10000", callback_data="bots:dman_amount:10000"),
+                ],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data="bots:dman_back_to_leverage"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                ],
+            ]
+            text = (
+                r"*📉 DMan V3 \- Step 4/6*" + "\n\n"
+                f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}` \\| ⚡ `{val}x`" + "\n\n"
+                r"💰 *Total Amount \(USDT\)*" + "\n"
+                r"_Select or type an amount:_"
+            )
+            context.user_data["bots_state"] = "dman_wizard_input"
+            if message_id:
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id, message_id=message_id,
+                    text=text, parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+        elif step == "total_amount_quote":
+                    amount = float(user_input.strip().replace("$", "").replace(",", ""))
+                    config["total_amount_quote"] = amount
+                    set_controller_config(context, config)
+                    context.user_data["dman_wizard_step"] = "final"
+                    wizard_chat_id = context.user_data.get("dman_wizard_chat_id", chat_id)
+                    pair = config.get("trading_pair", "")
+                    tmp = await context.bot.send_message(
+                        chat_id=wizard_chat_id,
+                        text=r"*📉 DMan V3*" + "\n\n"
+                             f"⏳ Loading chart for `{escape_markdown_v2(pair)}`\\.\\.\\.  ",
+                        parse_mode="MarkdownV2",
+                    )
+                    context.user_data["dman_wizard_message_id"] = tmp.message_id
+                    await _dman_show_final_step(update, context)
+
+        elif step == "final":
+            # Handle field=value edits
+            if "=" in user_input:
+                for line in user_input.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+                    try:
+                        if field in ("total_amount_quote", "stop_loss", "take_profit",
+                                     "bb_std", "bb_long_threshold", "bb_short_threshold",
+                                     "trailing_stop_activation", "trailing_stop_delta"):
+                            val = float(value)
+                            if field == "trailing_stop_activation":
+                                if not isinstance(config.get("trailing_stop"), dict):
+                                    config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+                                config["trailing_stop"]["activation_price"] = val
+                            elif field == "trailing_stop_delta":
+                                if not isinstance(config.get("trailing_stop"), dict):
+                                    config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+                                config["trailing_stop"]["trailing_delta"] = val
+                            else:
+                                config[field] = val
+                        elif field in ("leverage", "bb_length", "max_executors_per_side",
+                                       "cooldown_time", "take_profit_order_type"):
+                            config[field] = int(float(value))
+                        elif field in ("dynamic_order_spread", "dynamic_target"):
+                            config[field] = value.lower() in ("true", "yes", "1")
+                        elif field == "interval":
+                            config["interval"] = value
+                            # Clear candles to refresh chart
+                            context.user_data.pop("dman_candles", None)
+                            context.user_data["dman_chart_interval"] = value
+                        else:
+                            config[field] = value
+                    except Exception:
+                        pass
+                set_controller_config(context, config)
+
+    except Exception as e:
+        logger.error(f"DMan wizard input error: {e}", exc_info=True)
+
+
+# ============================================
+# ARBITRAGE CONTROLLER WIZARD
+# ============================================
+# Steps: connector1 → pair1 → connector2 → pair2 → amount → final+save
+# Prefisso handler: arb_
+
+async def show_new_arbitrage_controller_form(update, context) -> None:
+    """Start the Arbitrage Controller wizard - Step 1: Exchange 1"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    for key in ["arb_price_1", "arb_price_2"]:
+        context.user_data.pop(key, None)
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    init_new_controller_config(context, "arbitrage_controller")
+    context.user_data["bots_state"] = "arb_wizard"
+    context.user_data["arb_wizard_step"] = "connector_1"  # Step 1: primo exchange
+    context.user_data["arb_wizard_message_id"] = query.message.message_id
+    context.user_data["arb_wizard_chat_id"] = query.message.chat_id
+    await _arb_show_connector_step(update, context, exchange_num=1)
+
+async def _arb_show_connector_step(update, context, exchange_num: int, target_message_id: int = None) -> None:
+    """Show connector selection for exchange 1 or 2"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    # Usa target_message_id se fornito
+    use_message_id = target_message_id
+    if not query and not use_message_id:
+        logger.error("_arb_show_connector_step called without callback_query and without target_message_id")
+        return
+
+    if not query and use_message_id:
+        wizard_chat_id = context.user_data.get("arb_wizard_chat_id", chat_id)
+
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+
+        # DEX connectors via Gateway
+        dex_connectors = ["jupiter/router", "uniswap/ethereum", "uniswap/base",
+                          "uniswap/arbitrum", "uniswap/bsc", "pancakeswap/bsc",
+                          "raydium/solana"]
+
+        # ========== CORREZIONE STEP NUMBER ==========
+        # exchange_num=1 -> step 1, exchange_num=2 -> step 3
+        if exchange_num == 1:
+            step = 1
+        else:
+            step = 3
+        # ===========================================
+
+        total_steps = 6
+        emoji = "1️⃣" if exchange_num == 1 else "2️⃣"
+        role = "Buy" if exchange_num == 1 else "Sell"
+
+        # Show context for step 3 (second exchange)
+        header = ""
+        if exchange_num == 2:
+            ep1 = config.get("exchange_pair_1", {})
+            c1 = ep1.get("connector_name", "")
+            p1 = ep1.get("trading_pair", "")
+            header = f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n\n"
+
+        keyboard = []
+        if cex_connectors:
+            keyboard.append([InlineKeyboardButton("— CEX —", callback_data="bots:noop")])
+            row = []
+            for c in cex_connectors:
+                row.append(InlineKeyboardButton(c, callback_data=f"bots:arb_connector_{exchange_num}:{c}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+        if dex_connectors:
+            keyboard.append([InlineKeyboardButton("— DEX (Gateway) —", callback_data="bots:noop")])
+            row = []
+            for d in dex_connectors:
+                row.append(InlineKeyboardButton(d, callback_data=f"bots:arb_connector_{exchange_num}:{d}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+        back_cb = "bots:main_menu" if exchange_num == 1 else "bots:arb_back_to_pair_1"
+        keyboard.append([
+            InlineKeyboardButton("⬅️ Back", callback_data=back_cb),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ])
+
+        message_text = (
+            rf"*⚡ Arbitrage \- Step {step}/{total_steps}*" + "\n\n"
+            r"Buy on one exchange, sell on another when spread exceeds min profitability\." + "\n\n"
+            r"─────────────────────────" + "\n\n"
+            + header
+            + rf"*{emoji} Select Exchange {exchange_num} \({role}\):*"
+        )
+
+        # Invia/edita il messaggio
+        if query and query.message:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        elif use_message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=use_message_id,
+                    text=message_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception as e:
+                logger.error(f"Error editing message: {e}")
+                new_msg = await context.bot.send_message(
+                    chat_id=wizard_chat_id,
+                    text=message_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["arb_wizard_message_id"] = new_msg.message_id
+
+    except Exception as e:
+        logger.error(f"Arb connector step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        error_text = format_error_message(f"Error: {str(e)}")
+
+        if query and query.message:
+            await query.message.edit_text(
+                error_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        elif use_message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=use_message_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception:
+                pass
+
+
+
+async def handle_arb_wizard_connector_1(update, context, connector: str) -> None:
+    """Handle Exchange 1 connector selection"""
+    config = get_controller_config(context)
+    if "exchange_pair_1" not in config:
+        config["exchange_pair_1"] = {}
+    config["exchange_pair_1"]["connector_name"] = connector
+    # Auto-set rate_connector to first CEX (not DEX)
+    if "/" not in connector:
+        config["rate_connector"] = connector.replace("_perpetual", "").replace("_spot", "")
+    set_controller_config(context, config)
+
+    # VAI AL PAIR 1 (step 2)
+    context.user_data["arb_wizard_step"] = "pair_1"
+    await _arb_show_pair_step(update, context, exchange_num=1)
+
+async def handle_arb_wizard_connector_2(update, context, connector: str) -> None:
+    """Handle Exchange 2 connector selection"""
+    config = get_controller_config(context)
+    if "exchange_pair_2" not in config:
+        config["exchange_pair_2"] = {}
+    config["exchange_pair_2"]["connector_name"] = connector
+    set_controller_config(context, config)
+
+    # VAI AL PAIR 2 (step 4)
+    context.user_data["arb_wizard_step"] = "pair_2"
+    await _arb_show_pair_step(update, context, exchange_num=2)
+
+async def _arb_show_pair_step(update, context, exchange_num: int) -> None:
+    """Show trading pair input for exchange 1 or 2"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    ep_key = f"exchange_pair_{exchange_num}"
+    connector = config.get(ep_key, {}).get("connector_name", "")
+
+    context.user_data["bots_state"] = "arb_wizard_input"
+    context.user_data["arb_wizard_step"] = f"pair_{exchange_num}"
+
+    # Calcola lo step corretto
+    if exchange_num == 1:
+        step = 2
+        emoji = "1️⃣"
+    else:
+        step = 4
+        emoji = "2️⃣"
+
+    total_steps = 6
+
+    # Show context per exchange 2
+    header = ""
+    if exchange_num == 2:
+        ep1 = config.get("exchange_pair_1", {})
+        c1 = ep1.get("connector_name", "")
+        p1 = ep1.get("trading_pair", "")
+        c2 = config.get("exchange_pair_2", {}).get("connector_name", "")
+        header = (
+            f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n"
+            f"2️⃣ `{escape_markdown_v2(c2)}`\n\n"
+        )
+    else:
+        c1 = config.get("exchange_pair_1", {}).get("connector_name", "")
+        header = f"1️⃣ `{escape_markdown_v2(c1)}`\n\n"
+
+    # ... resto del codice invariato ...
+
+    # Recent pairs from existing configs
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        ep = cfg.get(ep_key, {})
+        pair = ep.get("trading_pair", "") if isinstance(ep, dict) else ""
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    # Suggest same pair as exchange 1 for exchange 2
+    if exchange_num == 2:
+        p1 = config.get("exchange_pair_1", {}).get("trading_pair", "")
+        if p1 and p1 not in seen:
+            recent_pairs.insert(0, p1)
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs[:6]:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:arb_pair_{exchange_num}:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    back_cb = f"bots:arb_back_to_connector_{exchange_num}"
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data=back_cb),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    is_dex = "/" in connector
+    hint = r"_e\.g\. SOL\-USDC_" if is_dex else r"_e\.g\. SOL\-USDT_"
+
+    await query.message.edit_text(
+        rf"*⚡ Arbitrage \- Step {step}/6*" + "\n\n"
+        + header
+        + rf"*{emoji} Trading Pair on* `{escape_markdown_v2(connector)}`:" + "\n\n"
+        + hint + "\n\n"
+        r"Select or type a pair:",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_arb_wizard_pair_1(update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str) -> None:
+    """Handle pair selection for Exchange 1"""
+    config = get_controller_config(context)
+
+    if "exchange_pair_1" not in config:
+        config["exchange_pair_1"] = {}
+    config["exchange_pair_1"]["trading_pair"] = pair.upper()
+    set_controller_config(context, config)
+
+    # VAI AL CONNECTOR 2 (step 3) - NON al pair 2
+    context.user_data["arb_wizard_step"] = "connector_2"
+
+    # Mostra la selezione del secondo exchange
+    await _arb_show_connector_step(update, context, exchange_num=2)
+
+async def handle_arb_wizard_pair_2(update, context, pair: str) -> None:
+    """Handle pair selection for Exchange 2"""
+    config = get_controller_config(context)
+    if "exchange_pair_2" not in config:
+        config["exchange_pair_2"] = {}
+    config["exchange_pair_2"]["trading_pair"] = pair.upper()
+
+    # Auto-set quote_conversion_asset from first pair (or second)
+    ep1 = config.get("exchange_pair_1", {})
+    p1 = ep1.get("trading_pair", "")
+    if p1:
+        quote = p1.split("-")[1] if "-" in p1 else "USDT"
+    else:
+        quote = pair.split("-")[1] if "-" in pair else "USDT"
+    config["quote_conversion_asset"] = quote
+
+    set_controller_config(context, config)
+
+    # VAI ALL'AMOUNT (step 5)
+    context.user_data["arb_wizard_step"] = "total_amount_quote"
+    await _arb_show_amount_step(update, context)
+
+
+async def _arb_show_amount_step(update, context) -> None:
+    """Arb Step 5: Enter Total Amount"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    ep1 = config.get("exchange_pair_1", {})
+    ep2 = config.get("exchange_pair_2", {})
+    c1 = ep1.get("connector_name", "")
+    p1 = ep1.get("trading_pair", "")
+    c2 = ep2.get("connector_name", "")
+    p2 = ep2.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "arb_wizard_input"
+    context.user_data["arb_wizard_step"] = "total_amount_quote"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:arb_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:arb_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:arb_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:arb_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:arb_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:arb_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_pair_2"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    message_text = (
+        r"*⚡ Arbitrage \- Step 5/6*" + "\n\n"
+        f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n"
+        f"2️⃣ `{escape_markdown_v2(c2)}` \\| `{escape_markdown_v2(p2)}`\n\n"
+        r"💰 *Total Amount per side \(Quote\)*" + "\n"
+        r"_Select or type an amount:_"
+    )
+
+    try:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def handle_arb_wizard_amount(update, context, amount: float) -> None:
+    """Handle amount selection from button click"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
+
+    ep1 = config.get("exchange_pair_1", {})
+    pair = ep1.get("trading_pair", "")
+    await query.message.edit_text(
+        r"*⚡ Arbitrage \- New Config*" + "\n\n"
+        f"⏳ Fetching prices for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+    context.user_data["arb_wizard_step"] = "final"
+    await _arb_show_final_step(update, context)
+
+async def _arb_show_final_step(update, context) -> None:
+    """Arb Final Step: Show config with ONLY fields supported by the controller"""
+    query = update.callback_query
+    msg = query.message if query else update.message
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    ep1 = config.get("exchange_pair_1", {})
+    ep2 = config.get("exchange_pair_2", {})
+    c1 = ep1.get("connector_name", "")
+    p1 = ep1.get("trading_pair", "")
+    c2 = ep2.get("connector_name", "")
+    p2 = ep2.get("trading_pair", "")
+    total_amount = config.get("total_amount_quote", 1000)
+    min_prof = config.get("min_profitability", 0.01)
+    delay = config.get("delay_between_executors", 10)
+    max_imbalance = config.get("max_executors_imbalance", 1)
+    rate_connector = config.get("rate_connector", "binance")
+    quote_asset = config.get("quote_conversion_asset", "USDT")
+
+    if "controller_type" not in config:
+        config["controller_type"] = "generic"
+        set_controller_config(context, config)
+    # Generate ID if not set
+    if not config.get("id"):
+        existing_configs = context.user_data.get("controller_configs_list", [])
+        from .controllers.arbitrage_controller.config import generate_id as arb_generate_id
+        config["id"] = arb_generate_id(config, existing_configs)
+        set_controller_config(context, config)
+
+    # ========== FETCH LIVE PRICES FOR SPREAD (opzionale, solo visualizzazione) ==========
+    spread_text = ""
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+
+        price_1 = None
+        price_2 = None
+
+        if "/" not in c1:
+            price_1 = await fetch_current_price(client, c1, p1)
+            context.user_data["arb_price_1"] = price_1
+
+        if "/" not in c2:
+            price_2 = await fetch_current_price(client, c2, p2)
+            context.user_data["arb_price_2"] = price_2
+
+        if price_1 and price_2:
+            spread_pct = abs(price_1 - price_2) / min(price_1, price_2) * 100
+            spread_text = (
+                "\n\n📊 *Live Spread:*\n"
+                f"  `{c1}`: `{price_1:,.6g}`\n"
+                f"  `{c2}`: `{price_2:,.6g}`\n"
+                f"  Spread: `{spread_pct:.3f}%`\n"
+            )
+            if spread_pct > min_prof * 100:
+                spread_text += r"  ✅ _Current spread \> min profitability_"
+            else:
+                spread_text += r"  ⚠️ _Current spread \< min profitability_"
+        elif price_1:
+            spread_text = (
+                "\n\n📊 *Live Price:*\n"
+                f"  `{c1}`: `{price_1:,.6g}`\n"
+                r"  _DEX price not available via API_"
+            )
+    except Exception as e:
+        logger.warning(f"Could not fetch arb prices: {e}")
+
+    context.user_data["bots_state"] = "arb_wizard_input"
+    context.user_data["arb_wizard_step"] = "final"
+
+    keyboard = [
+        [InlineKeyboardButton("💾 Save Config", callback_data="bots:arb_save")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_amount"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    config_id = config.get("id", "")
+
+    # ========== MOSTRA SOLO I CAMPI SUPPORTATI DAL CONTROLLER ==========
+    config_text = (
+        r"*⚡ Arbitrage \- Final Review*" + "\n\n"
+        f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n"
+        f"2️⃣ `{escape_markdown_v2(c2)}` \\| `{escape_markdown_v2(p2)}`"
+        + spread_text
+        + "\n\n"
+        f"`id={escape_markdown_v2(config_id)}`\n"
+        f"`total_amount_quote={total_amount:.0f}`\n"
+        f"`min_profitability={min_prof}`\n"
+        f"`delay_between_executors={delay}`\n"
+        f"`max_executors_imbalance={max_imbalance}`\n"
+        f"`rate_connector={escape_markdown_v2(rate_connector)}`\n"
+        f"`quote_conversion_asset={escape_markdown_v2(quote_asset)}`\n\n"
+        r"_Edit: `field=value`_"
+    )
+
+    try:
+        await msg.edit_text(
+            config_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        new_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=config_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["arb_wizard_message_id"] = new_msg.message_id
+        context.user_data["arb_wizard_chat_id"] = chat_id
+
+async def handle_arb_save(update, context) -> None:
+    """Save Arbitrage config - cleans unsupported fields before saving"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # ========== PULISCI I CAMPI NON SUPPORTATI ==========
+    # Campi supportati dal controller originale
+    supported_fields = [
+        "id",
+        "controller_name",
+        "controller_type",
+        "exchange_pair_1",
+        "exchange_pair_2",
+        "total_amount_quote",
+        "min_profitability",
+        "delay_between_executors",
+        "max_executors_imbalance",
+        "rate_connector",
+        "quote_conversion_asset",
+    ]
+    if "controller_type" not in config:
+        config["controller_type"] = "generic"
+    # Rimuovi tutti i campi non supportati
+    keys_to_remove = [k for k in config.keys() if k not in supported_fields]
+    for key in keys_to_remove:
+        config.pop(key, None)
+
+    # Assicurati che exchange_pair_1 e exchange_pair_2 abbiano solo i campi necessari
+    for ep_key in ["exchange_pair_1", "exchange_pair_2"]:
+        if ep_key in config:
+            # ConnectorPair supporta solo connector_name e trading_pair
+            ep = config[ep_key]
+            config[ep_key] = {
+                "connector_name": ep.get("connector_name", ""),
+                "trading_pair": ep.get("trading_pair", "")
+            }
+
+    # ===================================================
+
+    config_id = config.get("id", "")
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving `" + escape_markdown_v2(config_id) + "`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+
+        for key in ["arb_wizard_step", "arb_wizard_message_id", "arb_wizard_chat_id",
+                    "arb_price_1", "arb_price_2"]:
+            context.user_data.pop(key, None)
+        context.user_data.pop("bots_state", None)
+
+        keyboard = [
+            [InlineKeyboardButton("Create Another", callback_data="bots:new_arbitrage_controller")],
+            [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            "*Config Saved\\!*\n\n"
+            "Controller `" + escape_markdown_v2(config_id) + "` saved successfully\\.",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        logger.error(f"Arb save error: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:arb_save")],
+            [InlineKeyboardButton("Back", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            format_error_message(f"Failed to save: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+# Back handlers
+async def handle_arb_back_to_connector_1(update, context) -> None:
+    context.user_data["arb_wizard_step"] = "connector_1"
+    await _arb_show_connector_step(update, context, exchange_num=1)
+
+async def handle_arb_back_to_connector_2(update, context) -> None:
+    context.user_data["arb_wizard_step"] = "connector_2"
+    await _arb_show_connector_step(update, context, exchange_num=2)
+
+async def handle_arb_back_to_pair_1(update, context) -> None:
+    context.user_data["arb_wizard_step"] = "pair_1"
+    await _arb_show_pair_step(update, context, exchange_num=1)
+
+async def handle_arb_back_to_pair_2(update, context) -> None:
+    context.user_data["arb_wizard_step"] = "pair_2"
+    await _arb_show_pair_step(update, context, exchange_num=2)
+
+async def handle_arb_back_to_amount(update, context) -> None:
+    context.user_data["arb_wizard_step"] = "total_amount_quote"
+    context.user_data.pop("arb_price_1", None)
+    context.user_data.pop("arb_price_2", None)
+    await _arb_show_amount_step(update, context)
+
+async def _arb_show_amount_step(update, context, target_message_id: int = None) -> None:
+    """Arb Step 5: Enter Total Amount"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    # Usa target_message_id se fornito
+    use_message_id = target_message_id
+    if not query and not use_message_id:
+        logger.error("_arb_show_amount_step called without callback_query and without target_message_id")
+        return
+
+    if not query and use_message_id:
+        wizard_chat_id = context.user_data.get("arb_wizard_chat_id", chat_id)
+
+    ep1 = config.get("exchange_pair_1", {})
+    ep2 = config.get("exchange_pair_2", {})
+    c1 = ep1.get("connector_name", "")
+    p1 = ep1.get("trading_pair", "")
+    c2 = ep2.get("connector_name", "")
+    p2 = ep2.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "arb_wizard_input"
+    context.user_data["arb_wizard_step"] = "total_amount_quote"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:arb_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:arb_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:arb_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:arb_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:arb_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:arb_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_pair_2"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    message_text = (
+        r"*⚡ Arbitrage \- Step 5/6*" + "\n\n"
+        f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n"
+        f"2️⃣ `{escape_markdown_v2(c2)}` \\| `{escape_markdown_v2(p2)}`\n\n"
+        r"💰 *Total Amount per side \(Quote\)*" + "\n"
+        r"_Select or type an amount:_"
+    )
+
+    # Invia/edita il messaggio
+    if query and query.message:
+        try:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+    elif use_message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=wizard_chat_id,
+                message_id=use_message_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception as e:
+            logger.error(f"Error editing message in _arb_show_amount_step: {e}")
+            # Fallback: invia un nuovo messaggio
+            new_msg = await context.bot.send_message(
+                chat_id=wizard_chat_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["arb_wizard_message_id"] = new_msg.message_id
+    # ========== RIMUOVI IL BLOCCO elif step == "total_amount_quote" DA QUI ==========
+
+
+async def process_arb_wizard_input(update, context, user_input: str) -> None:
+    """Process text input during Arbitrage wizard"""
+    step = context.user_data.get("arb_wizard_step")
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    message_id = context.user_data.get("arb_wizard_message_id")
+    wizard_chat_id = context.user_data.get("arb_wizard_chat_id", chat_id)
+
+    try:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        # ========== GESTISCI INPUT MANUALE PER PAIR 1 ==========
+        if step == "pair_1":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("exchange_pair_1", {}).get("connector_name", "")
+
+            # Validazione base
+            if "-" not in pair:
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_connector_1")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+                error_text = (
+                    r"*⚡ Arbitrage \- Step 2/6*" + "\n\n"
+                    f"1️⃣ `{escape_markdown_v2(connector)}`\n\n"
+                    r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. SOL\-USDT\)*" + "\n\n"
+                    r"Type the pair again:"
+                )
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=error_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                return
+
+            # Validazione sul primo exchange
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            is_valid, error_msg, suggestions, correct_pair = (
+                await validate_trading_pair(context.user_data, client, connector, pair)
+            )
+
+            if not is_valid:
+                keyboard = []
+                for sugg in suggestions[:4]:
+                    keyboard.append([InlineKeyboardButton(sugg, callback_data=f"bots:arb_pair_select:{sugg}")])
+                keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_connector_1")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+                error_text = (
+                    r"*⚡ Arbitrage \- Step 2/6*" + "\n\n"
+                    f"1️⃣ `{escape_markdown_v2(connector)}`\n\n"
+                    f"❌ `{escape_markdown_v2(pair)}` not found on `{escape_markdown_v2(connector)}`\\.\n\n"
+                    r"*Did you mean?*"
+                )
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=error_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                return
+
+            if correct_pair:
+                pair = correct_pair
+
+            # Imposta la pair per il primo exchange
+            if "exchange_pair_1" not in config:
+                config["exchange_pair_1"] = {}
+            config["exchange_pair_1"]["trading_pair"] = pair
+            set_controller_config(context, config)
+
+            # VAI AL CONNECTOR 2 (STEP 3)
+            context.user_data["arb_wizard_step"] = "connector_2"
+
+            # Mostra la selezione del secondo exchange
+            await _arb_show_connector_step(update, context, exchange_num=2, target_message_id=message_id)
+
+        # ========== GESTISCI INPUT MANUALE PER PAIR 2 ==========
+        elif step == "pair_2":
+            # message_id già definito all'inizio della funzione
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("exchange_pair_2", {}).get("connector_name", "")
+
+            # Validazione base
+            if "-" not in pair:
+                ep1 = config.get("exchange_pair_1", {})
+                c1 = ep1.get("connector_name", "")
+                p1 = ep1.get("trading_pair", "")
+
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_connector_2")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+                error_text = (
+                    r"*⚡ Arbitrage \- Step 4/6*" + "\n\n"
+                    f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n"
+                    f"2️⃣ `{escape_markdown_v2(connector)}`\n\n"
+                    r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. SOL\-USDT\)*" + "\n\n"
+                    r"Type the pair again:"
+                )
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=error_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                return
+
+            # Validazione sul secondo exchange (solo se CEX)
+            is_cex = "/" not in connector
+            if is_cex:
+                client, _ = await get_bots_client(chat_id, context.user_data)
+                is_valid, error_msg, suggestions, correct_pair = (
+                    await validate_trading_pair(context.user_data, client, connector, pair)
+                )
+
+                if not is_valid:
+                    keyboard = []
+                    for sugg in suggestions[:4]:
+                        keyboard.append([InlineKeyboardButton(sugg, callback_data=f"bots:arb_pair_select:{sugg}")])
+                    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_connector_2")])
+                    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+                    ep1 = config.get("exchange_pair_1", {})
+                    c1 = ep1.get("connector_name", "")
+                    p1 = ep1.get("trading_pair", "")
+
+                    error_text = (
+                        r"*⚡ Arbitrage \- Step 4/6*" + "\n\n"
+                        f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n"
+                        f"2️⃣ `{escape_markdown_v2(connector)}`\n\n"
+                        f"❌ `{escape_markdown_v2(pair)}` not found on `{escape_markdown_v2(connector)}`\\.\n\n"
+                        r"*Did you mean?*"
+                    )
+                    if message_id:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id, message_id=message_id,
+                            text=error_text, parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                    return
+
+                if correct_pair:
+                    pair = correct_pair
+
+            # Imposta la pair per il secondo exchange
+            if "exchange_pair_2" not in config:
+                config["exchange_pair_2"] = {}
+            config["exchange_pair_2"]["trading_pair"] = pair
+
+            # Auto-set quote_conversion_asset
+            ep1 = config.get("exchange_pair_1", {})
+            p1 = ep1.get("trading_pair", "")
+            if p1:
+                quote = p1.split("-")[1] if "-" in p1 else "USDT"
+            else:
+                quote = pair.split("-")[1] if "-" in pair else "USDT"
+            config["quote_conversion_asset"] = quote
+
+            set_controller_config(context, config)
+
+            # VAI ALL'AMOUNT (STEP 5)
+            context.user_data["arb_wizard_step"] = "total_amount_quote"
+
+            # Mostra lo step dell'amount
+            await _arb_show_amount_step(update, context, target_message_id=message_id)
+
+        # ========== GESTISCI INPUT PER TOTAL_AMOUNT_QUOTE ==========
+        elif step == "total_amount_quote":
+            message_id = context.user_data.get("arb_wizard_message_id")
+            wizard_chat_id = context.user_data.get("arb_wizard_chat_id", chat_id)
+            try:
+                # Rimuovi simboli di valuta e virgole
+                cleaned_input = user_input.strip().replace("$", "").replace(",", "")
+
+                # Controlla se è un numero valido
+                amount = float(cleaned_input)
+
+                if amount <= 0:
+                    raise ValueError("Amount must be positive")
+
+                config["total_amount_quote"] = amount
+                set_controller_config(context, config)
+                context.user_data["arb_wizard_step"] = "final"
+
+                # Mostra messaggio di caricamento
+                pair = config.get("exchange_pair_1", {}).get("trading_pair", "")
+
+                if message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id,
+                            message_id=message_id,
+                            text=r"*⚡ Arbitrage \- New Config*" + "\n\n"
+                                 f"⏳ Fetching prices for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                            parse_mode="MarkdownV2",
+                        )
+                    except Exception:
+                        pass
+                else:
+                    tmp_msg = await context.bot.send_message(
+                        chat_id=wizard_chat_id,
+                        text=r"*⚡ Arbitrage \- New Config*" + "\n\n"
+                             f"⏳ Fetching prices for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                        parse_mode="MarkdownV2",
+                    )
+                    context.user_data["arb_wizard_message_id"] = tmp_msg.message_id
+
+                await _arb_show_final_step(update, context)
+
+            except ValueError:
+                # Input non valido - mostra errore
+                ep1 = config.get("exchange_pair_1", {})
+                ep2 = config.get("exchange_pair_2", {})
+                c1 = ep1.get("connector_name", "")
+                p1 = ep1.get("trading_pair", "")
+                c2 = ep2.get("connector_name", "")
+                p2 = ep2.get("trading_pair", "")
+
+                keyboard = [
+                    [
+                        InlineKeyboardButton("$100", callback_data="bots:arb_amount:100"),
+                        InlineKeyboardButton("$500", callback_data="bots:arb_amount:500"),
+                        InlineKeyboardButton("$1000", callback_data="bots:arb_amount:1000"),
+                    ],
+                    [
+                        InlineKeyboardButton("$2000", callback_data="bots:arb_amount:2000"),
+                        InlineKeyboardButton("$5000", callback_data="bots:arb_amount:5000"),
+                        InlineKeyboardButton("$10000", callback_data="bots:arb_amount:10000"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:arb_back_to_pair_2"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+
+                error_text = (
+                    r"*⚡ Arbitrage \- Step 5/6*" + "\n\n"
+                    f"1️⃣ `{escape_markdown_v2(c1)}` \\| `{escape_markdown_v2(p1)}`\n"
+                    f"2️⃣ `{escape_markdown_v2(c2)}` \\| `{escape_markdown_v2(p2)}`\n\n"
+                    r"💰 *Total Amount \(Quote\)*" + "\n"
+                    r"⚠️ *Invalid amount\. Enter a positive number \(e\.g\. 500\)*" + "\n\n"
+                    r"_Select or type an amount:_"
+                )
+
+                if message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id,
+                            message_id=message_id,
+                            text=error_text,
+                            parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                    except Exception:
+                        pass
+                else:
+                    new_msg = await context.bot.send_message(
+                        chat_id=wizard_chat_id,
+                        text=error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["arb_wizard_message_id"] = new_msg.message_id
+
+        # ========== GESTISCI INPUT PER FINAL (EDIT CAMPI) ==========
+        elif step == "final":
+            if "=" in user_input:
+                supported_fields = [
+                    "id", "total_amount_quote", "min_profitability", "delay_between_executors",
+                    "max_executors_imbalance", "rate_connector", "quote_conversion_asset",
+                    "exchange_pair_1_connector", "exchange_pair_1_pair",
+                    "exchange_pair_2_connector", "exchange_pair_2_pair",
+                ]
+
+                for line in user_input.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+
+                    if field not in supported_fields:
+                        continue
+
+                    try:
+                        if field in ("min_profitability", "total_amount_quote"):
+                            config[field] = float(value)
+                        elif field in ("delay_between_executors", "max_executors_imbalance"):
+                            config[field] = int(float(value))
+                        elif field.startswith("exchange_pair_"):
+                            from .controllers.arbitrage_controller.config import apply_flat_fields
+                            apply_flat_fields(config, {field: value})
+                        else:
+                            config[field] = value
+                    except Exception:
+                        pass
+
+                set_controller_config(context, config)
+                await _arb_show_final_step(update, context)
+
+    except Exception as e:
+        logger.error(f"Arb wizard input error: {e}", exc_info=True)
+
+async def handle_arb_pair_select(update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str) -> None:
+    """Handle selection of a suggested trading pair in Arbitrage wizard"""
+    step = context.user_data.get("arb_wizard_step")
+    if step == "pair_1":
+        await handle_arb_wizard_pair_1(update, context, trading_pair)
+    elif step == "pair_2":
+        await handle_arb_wizard_pair_2(update, context, trading_pair)
+
+async def handle_arb_proceed_anyway(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle proceeding with DEX pair validation warning"""
+    pair = context.user_data.get("arb_pending_pair")
+    step = context.user_data.get("arb_wizard_step")
+    if step == "pair_1":
+        await handle_arb_wizard_pair_1(update, context, pair)
+    elif step == "pair_2":
+        await handle_arb_wizard_pair_2(update, context, pair)
+# ============================================
+# XEMM MULTIPLE LEVELS WIZARD
+# ============================================
+# Steps: maker_connector → maker_pair → taker_connector → taker_pair → amount → final+save
+# Prefisso handler: xemm_
+
+async def show_new_xemm_multiple_levels_form(update, context) -> None:
+    """Start the XEMM wizard - Step 1: Maker Exchange (come arbitrage)"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    for key in ["xemm_price_maker", "xemm_price_taker"]:
+        context.user_data.pop(key, None)
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    init_new_controller_config(context, "xemm_multiple_levels")
+    context.user_data["bots_state"] = "xemm_wizard"
+    context.user_data["xemm_wizard_step"] = "maker_connector"  # Step 1
+    context.user_data["xemm_wizard_message_id"] = query.message.message_id
+    context.user_data["xemm_wizard_chat_id"] = query.message.chat_id
+
+    await _xemm_show_connector_step(update, context, role="maker")
+
+async def _xemm_show_connector_step(update, context, role: str, target_message_id: int = None) -> None:
+    """Show connector selection for maker or taker"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    # Usa target_message_id se fornito
+    use_message_id = target_message_id
+    if not query and not use_message_id:
+        logger.error("_xemm_show_connector_step called without callback_query and without target_message_id")
+        return
+
+    if not query and use_message_id:
+        wizard_chat_id = context.user_data.get("xemm_wizard_chat_id", chat_id)
+
+    is_maker = role == "maker"
+    step = 1 if is_maker else 3
+    emoji = "🏭" if is_maker else "⚡"
+    role_label = "Maker (less liquid, limit orders)" if is_maker else "Taker (more liquid, hedge)"
+    # Show context for taker step
+    header = ""
+    if not is_maker:
+        mc = config.get("maker_connector", "")
+        mp = config.get("maker_trading_pair", "")
+        header = f"🏭 Maker: `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n\n"
+
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+
+        # Taker can also be a DEX
+        dex_connectors = [] if is_maker else [
+            "jupiter/router", "uniswap/ethereum", "uniswap/base",
+            "uniswap/arbitrum", "uniswap/bsc", "pancakeswap/bsc",
+        ]
+
+        keyboard = []
+        if cex_connectors:
+            if dex_connectors:
+                keyboard.append([InlineKeyboardButton("— CEX —", callback_data="bots:noop")])
+            row = []
+            for c in cex_connectors:
+                row.append(InlineKeyboardButton(
+                    c, callback_data=f"bots:xemm_{role}_connector:{c}"
+                ))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+        if dex_connectors:
+            keyboard.append([InlineKeyboardButton("— DEX (Gateway) —", callback_data="bots:noop")])
+            row = []
+            for d in dex_connectors:
+                row.append(InlineKeyboardButton(
+                    d, callback_data=f"bots:xemm_{role}_connector:{d}"
+                ))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+        back_cb = "bots:main_menu" if is_maker else "bots:xemm_back_to_pair"
+        keyboard.append([
+            InlineKeyboardButton("⬅️ Back", callback_data=back_cb),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ])
+
+        message_text = (
+            rf"*🔄 XEMM Multi Levels \- Step {step}/6*" + "\n\n"
+            r"Places limit orders on maker exchange, hedges instantly on taker\." + "\n\n"
+            r"─────────────────────────" + "\n\n"
+            + header
+            + rf"*{emoji} Select {escape_markdown_v2(role_label)}:*"
+        )
+
+        # Invia/edita il messaggio
+        if query and query.message:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        elif use_message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=use_message_id,
+                    text=message_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception as e:
+                logger.error(f"Error editing message in _xemm_show_connector_step: {e}")
+                new_msg = await context.bot.send_message(
+                    chat_id=wizard_chat_id,
+                    text=message_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["xemm_wizard_message_id"] = new_msg.message_id
+
+    except Exception as e:
+        logger.error(f"XEMM connector step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        error_text = format_error_message(f"Error: {str(e)}")
+
+        if query and query.message:
+            await query.message.edit_text(
+                error_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        elif use_message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=use_message_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception:
+                pass
+
+async def handle_xemm_maker_connector(update, context, connector: str) -> None:
+    """Handle Maker connector selection"""
+    config = get_controller_config(context)
+    config["maker_connector"] = connector
+    set_controller_config(context, config)
+
+    # VAI AL PAIR DEL MAKER (Step 2)
+    context.user_data["xemm_wizard_step"] = "maker_pair"
+    await _xemm_show_pair_step(update, context, role="maker")
+
+async def handle_xemm_taker_connector(update, context, connector: str) -> None:
+    """Handle Taker connector selection"""
+    config = get_controller_config(context)
+    config["taker_connector"] = connector
+    set_controller_config(context, config)
+
+    # VAI AL PAIR DEL TAKER (Step 4)
+    context.user_data["xemm_wizard_step"] = "taker_pair"
+    await _xemm_show_pair_step(update, context, role="taker")
+
+async def handle_xemm_wizard_pair(update, context, pair: str) -> None:
+    """Handle pair selection - applies to BOTH exchanges (come arbitrage)"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # Applica lo stesso pair a entrambi (come arbitrage)
+    config["maker_trading_pair"] = pair
+    config["taker_trading_pair"] = pair
+    set_controller_config(context, config)
+
+    # Vai al taker connector (Step 3)
+    context.user_data["xemm_wizard_step"] = "taker_connector"
+    await _xemm_show_connector_step(update, context, role="taker")
+
+async def _xemm_show_pair_step(update, context, role: str) -> None:
+    """Mostra l'input per la trading pair (Maker o Taker)"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    is_maker = (role == "maker")
+    connector = config.get("maker_connector" if is_maker else "taker_connector", "")
+
+    context.user_data["bots_state"] = "xemm_wizard_input"
+    context.user_data["xemm_wizard_step"] = f"{role}_pair"
+
+    step = 2 if is_maker else 4
+    emoji = "🏭 Maker" if is_maker else "⚡ Taker"
+
+    # Header con riepilogo passi precedenti
+    if not is_maker:
+        mc = config.get("maker_connector", "")
+        mp = config.get("maker_trading_pair", "")
+        header = f"🏭 `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n" \
+                 f"⚡ `{escape_markdown_v2(connector)}`\n\n"
+    else:
+        header = f"🏭 `{escape_markdown_v2(connector)}`\n\n"
+
+    # Suggerimenti coppie recenti
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        p = cfg.get(f"{role}_trading_pair", "")
+        if p and p not in seen:
+            seen.add(p); recent_pairs.append(p)
+            if len(recent_pairs) >= 6: break
+
+    # Se Taker, suggerisci la stessa pair del Maker come prima opzione
+    if not is_maker:
+        mp = config.get("maker_trading_pair", "")
+        if mp and mp not in seen: recent_pairs.insert(0, mp)
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for p in recent_pairs[:6]:
+            row.append(InlineKeyboardButton(p, callback_data=f"bots:xemm_{role}_pair:{p}"))
+            if len(row) == 2: keyboard.append(row); row = []
+        if row: keyboard.append(row)
+
+    back_cb = "bots:xemm_back_to_maker_connector" if is_maker else "bots:xemm_back_to_taker_connector"
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data=back_cb),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    await query.message.edit_text(
+        rf"*🔄 XEMM \- Step {step}/6*" + "\n\n" + header +
+        rf"*{emoji} Trading Pair:* " + "\n\n" +
+        r"_Esempio: BTC\-USDT_" + "\n\n" +
+        r"Seleziona o scrivi la coppia:",
+        parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_xemm_maker_pair(update, context, pair: str) -> None:
+    """Handle maker pair selection"""
+    config = get_controller_config(context)
+    config["maker_trading_pair"] = pair.upper()
+    set_controller_config(context, config)
+    context.user_data["xemm_wizard_step"] = "taker_connector"
+    # Non serve target_message_id qui perché viene da callback
+    await _xemm_show_connector_step(update, context, role="taker")
+
+
+async def handle_xemm_taker_pair(update, context, pair: str) -> None:
+    """Handle taker pair selection"""
+    config = get_controller_config(context)
+    config["taker_trading_pair"] = pair.upper()
+    set_controller_config(context, config)
+    context.user_data["xemm_wizard_step"] = "total_amount_quote"
+    # Non serve target_message_id perché viene da callback
+    await _xemm_show_amount_step(update, context)
+
+async def _show_xemm_pair_suggestions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    input_pair: str,
+    error_msg: str,
+    suggestions: list,
+    connector: str,
+    role: str,  # "maker" o "taker"
+) -> None:
+    """Show trading pair suggestions when validation fails in XEMM wizard"""
+    message_id = context.user_data.get("xemm_wizard_message_id")
+    chat_id = context.user_data.get("xemm_wizard_chat_id")
+    wizard_chat_id = context.user_data.get("xemm_wizard_chat_id", update.effective_chat.id)
+
+    # Memorizza la pair in sospeso per proceed_anyway
+    context.user_data["xemm_pending_pair"] = input_pair
+    # Memorizza anche lo step corrente
+    context.user_data["xemm_wizard_step"] = role + "_pair"
+
+    # Build suggestion message
+    help_text = f"❌ *{escape_markdown_v2(error_msg)}*\n\n"
+
+    if suggestions:
+        help_text += "💡 *Did you mean:*\n"
+    else:
+        help_text += "_No similar pairs found\\._\n"
+
+    # Build keyboard with suggestions
+    keyboard = []
+    for pair in suggestions[:4]:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    f"📈 {pair}", callback_data=f"bots:xemm_{role}_pair:{pair}"
+                )
+            ]
+        )
+
+    # Back button based on role
+    back_cb = "bots:xemm_back_to_maker_connector" if role == "maker" else "bots:xemm_back_to_taker_connector"
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data=back_cb),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if message_id and chat_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=help_text,
+                parse_mode="MarkdownV2",
+                reply_markup=reply_markup,
+            )
+        except Exception as e:
+            logger.debug(f"Could not update XEMM wizard message: {e}")
+    else:
+        await update.effective_chat.send_message(
+            help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+
+
+
+async def _xemm_show_amount_step(update, context, target_message_id: int = None) -> None:
+    """XEMM Step 5: Enter Total Amount"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    # Usa target_message_id se fornito
+    use_message_id = target_message_id
+    if not query and not use_message_id:
+        logger.error("_xemm_show_amount_step called without callback_query and without target_message_id")
+        return
+
+    if not query and use_message_id:
+        wizard_chat_id = context.user_data.get("xemm_wizard_chat_id", chat_id)
+
+    mc = config.get("maker_connector", "")
+    mp = config.get("maker_trading_pair", "")
+    tc = config.get("taker_connector", "")
+    tp = config.get("taker_trading_pair", "")
+
+    context.user_data["bots_state"] = "xemm_wizard_input"
+    context.user_data["xemm_wizard_step"] = "total_amount_quote"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:xemm_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:xemm_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:xemm_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:xemm_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:xemm_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:xemm_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:xemm_back_to_taker_connector"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    message_text = (
+        r"*🔄 XEMM Multi Levels \- Step 5/6*" + "\n\n"
+        f"🏭 `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n"
+        f"⚡ `{escape_markdown_v2(tc)}` \\| `{escape_markdown_v2(tp)}`\n\n"
+        r"💰 *Total Amount \(Quote\)*" + "\n"
+        r"_50% allocated to buy side, 50% to sell side_\n"
+        r"_Select or type an amount:_"
+    )
+
+    # Invia/edita il messaggio
+    if query and query.message:
+        try:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+    elif use_message_id:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=wizard_chat_id,
+                message_id=use_message_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception as e:
+            logger.error(f"Error editing message in _xemm_show_amount_step: {e}")
+            # Fallback: invia un nuovo messaggio
+            new_msg = await context.bot.send_message(
+                chat_id=wizard_chat_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["xemm_wizard_message_id"] = new_msg.message_id
+
+
+async def handle_xemm_wizard_amount(update, context, amount: float) -> None:
+    """Handle amount selection"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
+
+    mp = config.get("maker_trading_pair", "")
+    await query.message.edit_text(
+        r"*🔄 XEMM Multi Levels \- New Config*" + "\n\n"
+        f"⏳ Fetching prices for `{escape_markdown_v2(mp)}`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+    context.user_data["xemm_wizard_step"] = "final"
+    await _xemm_show_final_step(update, context)
+
+
+async def _xemm_show_final_step(update, context) -> None:
+    """XEMM Final Step: Show config + live spread + suggested levels"""
+    query = update.callback_query
+    if query:
+        msg = query.message
+    else:
+        msg = update.message
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    mc = config.get("maker_connector", "")
+    mp = config.get("maker_trading_pair", "")
+    tc = config.get("taker_connector", "")
+    tp = config.get("taker_trading_pair", "")
+    total_amount = config.get("total_amount_quote", 1000)
+    min_prof = config.get("min_profitability", 0.003)
+    max_prof = config.get("max_profitability", 0.01)
+    buy_levels = config.get("buy_levels_targets_amount", "0.003,10-0.006,20-0.009,30")
+    sell_levels = config.get("sell_levels_targets_amount", "0.003,10-0.006,20-0.009,30")
+
+    # Generate ID if not set
+    if not config.get("id"):
+        existing_configs = context.user_data.get("controller_configs_list", [])
+        from .controllers.xemm_multiple_levels.config import generate_id as xemm_generate_id
+        config["id"] = xemm_generate_id(config, existing_configs)
+        set_controller_config(context, config)
+
+    # Fetch live prices and calculate spread
+    spread_line = ""
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+
+        price_maker = None
+        price_taker = None
+
+        if "/" not in mc:
+            price_maker = await fetch_current_price(client, mc, mp)
+            if price_maker:
+                context.user_data["xemm_price_maker"] = price_maker
+
+        if "/" not in tc:
+            price_taker = await fetch_current_price(client, tc, tp)
+            if price_taker:
+                context.user_data["xemm_price_taker"] = price_taker
+
+        if price_maker and price_taker:
+            spread_pct = abs(price_maker - price_taker) / min(price_maker, price_taker)
+            spread_pct_display = spread_pct * 100
+
+            # Auto-suggest levels based on observed spread
+            from .controllers.xemm_multiple_levels.config import suggest_levels_from_spread
+            suggested_levels = suggest_levels_from_spread(spread_pct, total_amount)
+            config["buy_levels_targets_amount"] = suggested_levels
+            config["sell_levels_targets_amount"] = suggested_levels
+            buy_levels = suggested_levels
+            sell_levels = suggested_levels
+            set_controller_config(context, config)
+
+            spread_line = (
+                "\n\n" +
+                r"📊 *Live Spread:*" + "\n"
+                f"🏭 `{escape_markdown_v2(mc)}`: `{price_maker:,.6g}`\n"
+                f"⚡ `{escape_markdown_v2(tc)}`: `{price_taker:,.6g}`\n"
+                f"Spread: `{spread_pct_display:.3f}%`\n"
+                r"_✅ Levels auto\-suggested from spread_"
+            )
+        elif price_maker:
+            spread_line = (
+                "\n\n" +
+                r"📊 *Live Price \(maker\):*" + "\n"
+                f"🏭 `{escape_markdown_v2(mc)}`: `{price_maker:,.6g}`\n"
+                r"_⚠️ Taker price not available — using default levels_"
+            )
+
+    except Exception as e:
+        logger.warning(f"Could not fetch XEMM prices: {e}")
+
+    context.user_data["bots_state"] = "xemm_wizard_input"
+    context.user_data["xemm_wizard_step"] = "final"
+
+    keyboard = [
+        [InlineKeyboardButton("💾 Save Config", callback_data="bots:xemm_save")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:xemm_back_to_amount"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    config_text = (
+        r"*🔄 XEMM Multi Levels \- Step 6/6 \(Final\)*" + "\n\n"
+        f"🏭 `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n"
+        f"⚡ `{escape_markdown_v2(tc)}` \\| `{escape_markdown_v2(tp)}`"
+        + spread_line + "\n\n"
+        f"`total_amount_quote={total_amount:.0f}`\n"
+        f"`buy_levels_targets_amount={escape_markdown_v2(str(buy_levels))}`\n"
+        f"`sell_levels_targets_amount={escape_markdown_v2(str(sell_levels))}`\n"
+        f"`min_profitability={min_prof}`\n"
+        f"`max_profitability={max_prof}`\n"
+        f"`max_executors_imbalance={config.get('max_executors_imbalance', 1)}`\n\n"
+        r"_Edit: `field=value`_" + "\n"
+        r"_Levels format: `profit,weight\-profit,weight`_"
+    )
+    try:
+        await msg.edit_text(
+            config_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        new_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=config_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["xemm_wizard_message_id"] = new_msg.message_id
+        context.user_data["xemm_wizard_chat_id"] = chat_id
+
+
+async def handle_xemm_save(update, context) -> None:
+    """Save XEMM config"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config_id = config.get("id", "").replace("/", "-")
+    config["id"] = config_id  # aggiorna anche nel config
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving `" + escape_markdown_v2(config_id) + "`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+
+        for key in ["xemm_wizard_step", "xemm_wizard_message_id", "xemm_wizard_chat_id",
+                    "xemm_price_maker", "xemm_price_taker"]:
+            context.user_data.pop(key, None)
+        context.user_data.pop("bots_state", None)
+
+        keyboard = [
+            [InlineKeyboardButton("Create Another", callback_data="bots:new_xemm_multiple_levels")],
+            [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            "*Config Saved\\!*\n\n"
+            "Controller `" + escape_markdown_v2(config_id) + "` saved successfully\\.",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        logger.error(f"XEMM save error: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:xemm_save")],
+            [InlineKeyboardButton("Back", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            format_error_message(f"Failed to save: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+# Back handlers
+async def handle_xemm_back_to_maker_connector(update, context) -> None:
+    context.user_data["xemm_wizard_step"] = "maker_connector"
+    await _xemm_show_connector_step(update, context, role="maker")
+
+async def handle_xemm_back_to_maker_pair(update, context) -> None:
+    context.user_data["xemm_wizard_step"] = "maker_trading_pair"
+    await _xemm_show_pair_step(update, context, role="maker")
+
+async def handle_xemm_back_to_taker_connector(update, context) -> None:
+    context.user_data["xemm_wizard_step"] = "taker_connector"
+    await _xemm_show_connector_step(update, context, role="taker")
+
+async def handle_xemm_back_to_taker_pair(update, context) -> None:
+    context.user_data["xemm_wizard_step"] = "taker_trading_pair"
+    await _xemm_show_pair_step(update, context, role="taker")
+
+async def handle_xemm_back_to_amount(update, context) -> None:
+    context.user_data["xemm_wizard_step"] = "total_amount_quote"
+    context.user_data.pop("xemm_price_maker", None)
+    context.user_data.pop("xemm_price_taker", None)
+    await _xemm_show_amount_step(update, context)
+
+async def process_xemm_wizard_input(update, context, user_input: str) -> None:
+    """Process text input during XEMM wizard"""
+    step = context.user_data.get("xemm_wizard_step")
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    message_id = context.user_data.get("xemm_wizard_message_id")
+    wizard_chat_id = context.user_data.get("xemm_wizard_chat_id", chat_id)
+
+    try:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        # ========== GESTISCI INPUT MANUALE PER MAKER PAIR ==========
+        if step == "maker_pair":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("maker_connector", "")
+
+            # Validazione base
+            if "-" not in pair:
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:xemm_back_to_maker_connector")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+                error_text = (
+                    r"*🔄 XEMM Multi Levels \- Step 2*" + "\n\n"
+                    f"🏭 `{escape_markdown_v2(connector)}`\n\n"
+                    r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. BTC\-USDT\)*" + "\n\n"
+                    r"Type the pair again:"
+                )
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=error_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                return
+
+            # Validazione sul maker exchange (solo se CEX)
+            is_cex = "/" not in connector
+            if is_cex:
+                client, _ = await get_bots_client(chat_id, context.user_data)
+                is_valid, error_msg, suggestions, correct_pair = (
+                    await validate_trading_pair(context.user_data, client, connector, pair)
+                )
+
+                if not is_valid:
+                    await _show_xemm_pair_suggestions(
+                        update, context, pair, error_msg, suggestions, connector, "maker"
+                    )
+                    return
+
+                if correct_pair:
+                    pair = correct_pair
+            else:
+                # DEX - avvertimento ma permetti di continuare
+                context.user_data["xemm_pending_pair"] = pair
+                warning_text = (
+                    r"*🔄 XEMM Multi Levels \- Step 2*" + "\n\n"
+                    f"🏭 `{escape_markdown_v2(connector)}` \\| `{escape_markdown_v2(pair)}`\n\n"
+                    r"⚠️ *DEX pair validation not available*" + "\n\n"
+                    r"_The pair may not exist on the DEX\. Proceed with caution\._"
+                )
+                keyboard = [[InlineKeyboardButton("✅ Proceed Anyway", callback_data="bots:xemm_proceed_anyway")]]
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=warning_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                return
+
+            # Imposta la pair per il maker exchange
+            config["maker_trading_pair"] = pair
+            set_controller_config(context, config)
+
+            # VAI AL TAKER CONNECTOR (Step 3)
+            context.user_data["xemm_wizard_step"] = "taker_connector"
+
+            # Mostra la selezione del taker exchange
+            await _xemm_show_connector_step(update, context, role="taker", target_message_id=message_id)
+
+        # ========== GESTISCI INPUT MANUALE PER TAKER PAIR ==========
+        elif step == "taker_pair":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("taker_connector", "")
+
+            # Validazione base
+            if "-" not in pair:
+                mc = config.get("maker_connector", "")
+                mp = config.get("maker_trading_pair", "")
+
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:xemm_back_to_taker_connector")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+                error_text = (
+                    r"*🔄 XEMM Multi Levels \- Step 4*" + "\n\n"
+                    f"🏭 `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n"
+                    f"⚡ `{escape_markdown_v2(connector)}`\n\n"
+                    r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. BTC\-USDT\)*" + "\n\n"
+                    r"Type the pair again:"
+                )
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=error_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                return
+
+            # Validazione sul taker exchange (solo se CEX)
+            is_cex = "/" not in connector
+            if is_cex:
+                client, _ = await get_bots_client(chat_id, context.user_data)
+                is_valid, error_msg, suggestions, correct_pair = (
+                    await validate_trading_pair(context.user_data, client, connector, pair)
+                )
+
+                if not is_valid:
+                    await _show_xemm_pair_suggestions(
+                        update, context, pair, error_msg, suggestions, connector, "taker"
+                    )
+                    return
+
+                if correct_pair:
+                    pair = correct_pair
+            else:
+                # DEX - avvertimento ma permetti di continuare
+                context.user_data["xemm_pending_pair"] = pair
+                mc = config.get("maker_connector", "")
+                mp = config.get("maker_trading_pair", "")
+                warning_text = (
+                    r"*🔄 XEMM Multi Levels \- Step 4*" + "\n\n"
+                    f"🏭 `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n"
+                    f"⚡ `{escape_markdown_v2(connector)}` \\| `{escape_markdown_v2(pair)}`\n\n"
+                    r"⚠️ *DEX pair validation not available*" + "\n\n"
+                    r"_The pair may not exist on the DEX\. Proceed with caution\._"
+                )
+                keyboard = [[InlineKeyboardButton("✅ Proceed Anyway", callback_data="bots:xemm_proceed_anyway")]]
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=warning_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                return
+
+            # Imposta la pair per il taker exchange
+            config["taker_trading_pair"] = pair
+            set_controller_config(context, config)
+
+            # VAI ALL'AMOUNT (Step 5)
+            context.user_data["xemm_wizard_step"] = "total_amount_quote"
+
+            # Mostra lo step dell'amount
+            await _xemm_show_amount_step(update, context, target_message_id=message_id)
+        elif step == "taker_connector":
+            # Questo step è gestito esclusivamente dai callback button
+            pass
+        # ========== TOTAL AMOUNT QUOTE (ispirato a arbitrage) ==========
+        elif step == "total_amount_quote":
+            try:
+                # Rimuovi simboli di valuta e virgole
+                cleaned_input = user_input.strip().replace("$", "").replace(",", "")
+
+                # Controlla se è un numero valido
+                amount = float(cleaned_input)
+
+                if amount <= 0:
+                    raise ValueError("Amount must be positive")
+
+                config["total_amount_quote"] = amount
+                set_controller_config(context, config)
+                context.user_data["xemm_wizard_step"] = "final"
+
+                # Mostra messaggio di caricamento (come arbitrage)
+                wizard_chat_id = context.user_data.get("xemm_wizard_chat_id", chat_id)
+                mp = config.get("maker_trading_pair", "")
+
+                # Crea un messaggio temporaneo per il caricamento
+                tmp_msg = await context.bot.send_message(
+                    chat_id=wizard_chat_id,
+                    text=r"*🔄 XEMM Multi Levels \- New Config*" + "\n\n"
+                         f"⏳ Fetching prices for `{escape_markdown_v2(mp)}`\\.\\.\\.",
+                    parse_mode="MarkdownV2",
+                )
+                context.user_data["xemm_wizard_message_id"] = tmp_msg.message_id
+                await _xemm_show_final_step(update, context)
+
+            except ValueError:
+                # Input non valido - mostra errore (come arbitrage)
+                mc = config.get("maker_connector", "")
+                mp = config.get("maker_trading_pair", "")
+                tc = config.get("taker_connector", "")
+                tp = config.get("taker_trading_pair", "")
+
+                keyboard = [
+                    [
+                        InlineKeyboardButton("$100", callback_data="bots:xemm_amount:100"),
+                        InlineKeyboardButton("$500", callback_data="bots:xemm_amount:500"),
+                        InlineKeyboardButton("$1000", callback_data="bots:xemm_amount:1000"),
+                    ],
+                    [
+                        InlineKeyboardButton("$2000", callback_data="bots:xemm_amount:2000"),
+                        InlineKeyboardButton("$5000", callback_data="bots:xemm_amount:5000"),
+                        InlineKeyboardButton("$10000", callback_data="bots:xemm_amount:10000"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:xemm_back_to_taker_connector"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+
+                error_text = (
+                    r"*🔄 XEMM Multi Levels \- Step 5/6*" + "\n\n"
+                    f"🏭 `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n"
+                    f"⚡ `{escape_markdown_v2(tc)}` \\| `{escape_markdown_v2(tp)}`\n\n"
+                    r"💰 *Total Amount \(Quote\)*" + "\n"
+                    r"⚠️ *Invalid amount\. Enter a positive number \(e\.g\. 500\)*" + "\n\n"
+                    r"_Select or type an amount:_"
+                )
+
+                if message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id,
+                            message_id=message_id,
+                            text=error_text,
+                            parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                    except Exception:
+                        pass
+                else:
+                    # Se non c'è message_id, invia un nuovo messaggio
+                    new_msg = await context.bot.send_message(
+                        chat_id=wizard_chat_id,
+                        text=error_text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["xemm_wizard_message_id"] = new_msg.message_id
+
+        # ========== FINAL (edit campi) ==========
+        elif step == "final":
+            if "=" in user_input:
+                for line in user_input.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+                    try:
+                        if field in ("total_amount_quote", "min_profitability", "max_profitability"):
+                            config[field] = float(value)
+                        elif field == "max_executors_imbalance":
+                            config[field] = int(float(value))
+                        elif field in ("buy_levels_targets_amount", "sell_levels_targets_amount"):
+                            # Validazione formato (es. "0.003,10-0.006,20")
+                            parts = value.split("-")
+                            valid = True
+                            for part in parts:
+                                vals = part.split(",")
+                                if len(vals) != 2:
+                                    valid = False
+                                    break
+                                try:
+                                    float(vals[0])
+                                    float(vals[1])
+                                except ValueError:
+                                    valid = False
+                                    break
+                            if valid:
+                                config[field] = value
+                        else:
+                            config[field] = value
+                    except Exception:
+                        pass
+                set_controller_config(context, config)
+                await _xemm_show_final_step(update, context)
+
+    except Exception as e:
+        logger.error(f"XEMM wizard input error: {e}", exc_info=True)
+
+async def handle_xemm_back_to_pair(update, context) -> None:
+    """Go back to trading pair selection"""
+    context.user_data["xemm_wizard_step"] = "trading_pair"
+    await _xemm_show_pair_step(update, context)
+
+
+async def handle_xemm_proceed_anyway(update, context) -> None:
+    """Handle proceeding with DEX pair validation warning"""
+    query = update.callback_query
+    pair = context.user_data.get("xemm_pending_pair")
+    step = context.user_data.get("xemm_wizard_step")
+    config = get_controller_config(context)
+
+    if not pair:
+        await query.answer("No pending pair found", show_alert=True)
+        return
+
+    if step == "maker_pair":
+        # Imposta la pair per il maker exchange
+        config["maker_trading_pair"] = pair
+        set_controller_config(context, config)
+        # Vai al taker connector (Step 3)
+        context.user_data["xemm_wizard_step"] = "taker_connector"
+        await _xemm_show_connector_step(update, context, role="taker")
+
+    elif step == "taker_pair":
+        # Imposta la pair per il taker exchange
+        config["taker_trading_pair"] = pair
+        set_controller_config(context, config)
+        # Vai all'amount (Step 5)
+        context.user_data["xemm_wizard_step"] = "total_amount_quote"
+        await _xemm_show_amount_step(update, context)
+
+    else:
+        # Fallback: vai all'amount (comportamento originale)
+        context.user_data["xemm_wizard_step"] = "total_amount_quote"
+
+        mc = config.get("maker_connector", "")
+        mp = config.get("maker_trading_pair", "")
+        tc = config.get("taker_connector", "")
+        tp = config.get("taker_trading_pair", "")
+
+        # Se non c'è maker_pair, usa la pair in sospeso
+        if not mp and pair:
+            mp = pair
+            config["maker_trading_pair"] = pair
+            set_controller_config(context, config)
+
+        keyboard = [
+            [
+                InlineKeyboardButton("$100", callback_data="bots:xemm_amount:100"),
+                InlineKeyboardButton("$500", callback_data="bots:xemm_amount:500"),
+                InlineKeyboardButton("$1000", callback_data="bots:xemm_amount:1000"),
+            ],
+            [
+                InlineKeyboardButton("$2000", callback_data="bots:xemm_amount:2000"),
+                InlineKeyboardButton("$5000", callback_data="bots:xemm_amount:5000"),
+                InlineKeyboardButton("$10000", callback_data="bots:xemm_amount:10000"),
+            ],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:xemm_back_to_taker_pair"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+            ],
+        ]
+
+        amount_text = (
+            r"*🔄 XEMM Multi Levels \- Step 5/6*" + "\n\n"
+            f"🏭 `{escape_markdown_v2(mc)}` \\| `{escape_markdown_v2(mp)}`\n"
+            f"⚡ `{escape_markdown_v2(tc)}` \\| `{escape_markdown_v2(tp)}`\n\n"
+            r"💰 *Total Amount \(USDT\)*" + "\n"
+            r"_Select or type an amount:_"
+        )
+
+        await query.message.edit_text(
+            amount_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+# ============================================
+# MACD BB V1 WIZARD
+# ============================================
+# Steps: connector → pair → (leverage) → amount → interval+chart → final
+# Prefisso handler: macdbb_
+
+async def show_new_macd_bb_v1_form(update, context) -> None:
+    """Start the MACD BB V1 wizard - Step 1: Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    # Clear cached data
+    for key in ["macdbb_current_price", "macdbb_candles", "macdbb_candles_interval",
+                "macdbb_chart_interval", "macdbb_trading_rules"]:
+        context.user_data.pop(key, None)
+
+    # Fetch existing configs for sequence numbering
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    init_new_controller_config(context, "macd_bb_v1")
+    context.user_data["bots_state"] = "macdbb_wizard"
+    context.user_data["macdbb_wizard_step"] = "connector_name"
+    context.user_data["macdbb_wizard_message_id"] = query.message.message_id
+    context.user_data["macdbb_wizard_chat_id"] = query.message.chat_id
+
+    await _macdbb_show_connector_step(update, context)
+
+
+async def _macdbb_show_connector_step(update, context) -> None:
+    """MACD BB Step 1: Select Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+
+        if not cex_connectors:
+            keyboard = [
+                [InlineKeyboardButton("🔑 Configure API Keys", callback_data="config_api_keys")],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
+            ]
+            await query.message.edit_text(
+                r"*📊 MACD BB V1 \- New Config*" + "\n\n"
+                r"⚠️ No CEX connectors available\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        keyboard = []
+        row = []
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(
+                f"🏦 {connector}", callback_data=f"bots:macdbb_connector:{connector}"
+            ))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+        await query.message.edit_text(
+            r"*📊 MACD BB V1*" + "\n\n"
+            r"Combines Bollinger Bands with MACD confirmation\. "
+            r"Enters LONG when BBP is low AND MACD histogram is rising\. "
+            r"Enters SHORT when BBP is high AND MACD histogram is falling\." + "\n\n"
+            r"─────────────────────────" + "\n\n"
+            r"*Step 1: Select Exchange*",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
+
+    except Exception as e:
+        logger.error(f"MACD BB connector step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        await query.message.edit_text(
+            format_error_message(f"Error: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def handle_macdbb_wizard_connector(update, context, connector: str) -> None:
+    """Handle connector selection"""
+    config = get_controller_config(context)
+    config["connector_name"] = connector
+    config["candles_connector"] = connector  # Auto-set candles connector = same exchange
+    set_controller_config(context, config)
+    context.user_data["macdbb_wizard_step"] = "trading_pair"
+    await _macdbb_show_pair_step(update, context)
+
+async def _macdbb_show_pair_step(update, context) -> None:
+    """MACD BB Step 2: Select Trading Pair"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+
+    context.user_data["bots_state"] = "macdbb_wizard_input"
+    context.user_data["macdbb_wizard_step"] = "trading_pair"
+
+    # Recent pairs from existing configs
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:macdbb_pair:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    total_steps = 6 if is_perp else 4
+    current_step = 2
+
+    message_text = (
+        rf"*📊 MACD BB V1 \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}`" + "\n\n"
+        r"🔗 *Trading Pair*" + "\n\n"
+        r"Select a recent pair or type a new one:"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    try:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["macdbb_wizard_message_id"] = query.message.message_id
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        new_msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["macdbb_wizard_message_id"] = new_msg.message_id
+        context.user_data["macdbb_wizard_chat_id"] = query.message.chat_id
+
+async def handle_macdbb_wizard_pair(update, context, pair: str) -> None:
+    """Handle pair selection via button"""
+    config = get_controller_config(context)
+    config["trading_pair"] = pair
+    config["candles_trading_pair"] = pair
+    set_controller_config(context, config)
+
+    connector = config.get("connector_name", "").lower()
+    is_perp = "_perpetual" in connector or "_margin" in connector
+
+    if is_perp:
+        context.user_data["macdbb_wizard_step"] = "leverage"
+        await _macdbb_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["macdbb_wizard_step"] = "total_amount_quote"
+        await _macdbb_show_amount_step(update, context)
+
+async def _macdbb_show_leverage_step(update, context) -> None:
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "macdbb_wizard_input"
+    context.user_data["macdbb_wizard_step"] = "leverage"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1x", callback_data="bots:macdbb_leverage:1"),
+            InlineKeyboardButton("5x", callback_data="bots:macdbb_leverage:5"),
+            InlineKeyboardButton("10x", callback_data="bots:macdbb_leverage:10"),
+        ],
+        [
+            InlineKeyboardButton("20x", callback_data="bots:macdbb_leverage:20"),
+            InlineKeyboardButton("50x", callback_data="bots:macdbb_leverage:50"),
+            InlineKeyboardButton("75x", callback_data="bots:macdbb_leverage:75"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    # ========== SALVA message_id PER ERROR HANDLING ==========
+    context.user_data["macdbb_wizard_message_id"] = query.message.message_id
+    context.user_data["macdbb_wizard_chat_id"] = query.message.chat_id
+    # ========================================================
+
+    await query.message.edit_text(
+        r"*📊 MACD BB V1 \- Step 3/6*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+        r"⚡ *Select Leverage*" + "\n"
+        r"_Or type a value \(e\.g\. 20\)_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_macdbb_wizard_leverage(update, context, leverage: int) -> None:
+    config = get_controller_config(context)
+    config["leverage"] = leverage
+    set_controller_config(context, config)
+    context.user_data["macdbb_wizard_step"] = "position_mode"
+    await _macdbb_show_position_mode_step(update, context)
+
+async def _macdbb_show_position_mode_step(update, context) -> None:
+    """MACD BB Wizard Step: Select Position Mode (Perpetual/Margin only)"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = escape_markdown_v2(config.get("connector_name", ""))
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+
+    context.user_data["macdbb_wizard_message_id"] = query.message.message_id
+    context.user_data["macdbb_wizard_chat_id"] = query.message.chat_id
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔒 ONEWAY", callback_data="bots:macdbb_position_mode:ONEWAY"),
+            InlineKeyboardButton("🔄 HEDGE", callback_data="bots:macdbb_position_mode:HEDGE"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_leverage"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+
+    # CORREZIONE: escape di tutti i caratteri speciali MarkdownV2
+    # I caratteri speciali sono: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+
+    await query.message.edit_text(
+        f"*📊 MACD BB V1 \\- Step 4/6*\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}` \\| ⚡ `{leverage}x`\n\n"
+        r"🎯 *Position Mode*" + "\n\n"
+        r"• *HEDGE*: Can hold both long and short positions simultaneously" + "\n"
+        r"• *ONEWAY*: Can only hold positions in one direction \(long OR short\)",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_macdbb_position_mode(update, context, mode: str) -> None:
+    config = get_controller_config(context)
+    config["position_mode"] = mode
+    set_controller_config(context, config)
+    context.user_data["macdbb_wizard_step"] = "total_amount_quote"
+    await _macdbb_show_amount_step(update, context)
+
+async def _macdbb_show_amount_step(update, context) -> None:
+    """MACD BB Step: Enter Total Amount"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+    pos_mode = config.get("position_mode", "HEDGE")
+
+    context.user_data["bots_state"] = "macdbb_wizard_input"
+    context.user_data["macdbb_wizard_step"] = "total_amount_quote"
+    is_perp = "_perpetual" in connector.lower() or "_margin" in connector.lower()
+    total_steps = 6 if is_perp else 4
+    current_step = 5 if is_perp else 3
+
+    # Fetch balance
+    balance_text = ""
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        balances = await get_cex_balances(context.user_data, client, connector)
+        quote = pair.split("-")[1] if "-" in pair else "USDT"
+        available = balances.get(quote, {}).get("available", 0)
+        if available:
+            balance_text = f"\n\n💰 Available `{escape_markdown_v2(quote)}`: `{available:,.2f}`"
+    except Exception:
+        pass
+
+    # Gestione dinamica del tasto Back
+    back_callback = "bots:macdbb_back_to_position_mode" if is_perp else "bots:macdbb_back_to_pair"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:macdbb_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:macdbb_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:macdbb_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:macdbb_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:macdbb_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:macdbb_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data=back_callback),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    header_info = f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+    if is_perp:
+        header_info += f" \\| ⚡ `{leverage}x` \\| 🎯 `{pos_mode}`"
+
+    message_text = (
+        rf"*📊 MACD BB V1 \- Step {current_step}/{total_steps}*" + "\n\n"
+        + header_info + balance_text + "\n\n"
+        r"💰 *Total Amount \(USDT\)*" + "\n"
+        r"_Select or type an amount:_"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    target_chat_id = chat_id
+    if query and query.message:
+        target_chat_id = query.message.chat_id
+        try:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["macdbb_wizard_message_id"] = query.message.message_id
+            return
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+    new_msg = await context.bot.send_message(
+        chat_id=target_chat_id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data["macdbb_wizard_message_id"] = new_msg.message_id
+    context.user_data["macdbb_wizard_chat_id"] = target_chat_id
+
+async def handle_macdbb_wizard_amount(update, context, amount: float) -> None:
+    """Handle amount selection"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
+
+    pair = config.get("trading_pair", "")
+    await query.message.edit_text(
+        r"*📊 MACD BB V1 \- New Config*" + "\n\n"
+        f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\.  " + "\n\n"
+        r"_Fetching market data\.\.\._",
+        parse_mode="MarkdownV2",
+    )
+
+    context.user_data["macdbb_wizard_step"] = "final"
+    await _macdbb_show_final_step(update, context)
+
+async def _macdbb_show_final_step(update, context, interval: str = None) -> None:
+    """MACD BB Final Step: Chart + Config Summary + Analysis"""
+    query = update.callback_query
+    msg = query.message if query else update.message
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    total_amount = config.get("total_amount_quote", 1000)
+    leverage = config.get("leverage", 1)
+    bb_length = config.get("bb_length", 100)
+    macd_fast = config.get("macd_fast", 21)
+    macd_slow = config.get("macd_slow", 42)
+    macd_signal_period = config.get("macd_signal", 9)
+
+    if interval is None:
+        interval = context.user_data.get("macdbb_chart_interval", config.get("interval", "3m"))
+    context.user_data["macdbb_chart_interval"] = interval
+    config["interval"] = interval
+    set_controller_config(context, config)
+
+    current_price = context.user_data.get("macdbb_current_price")
+    candles = context.user_data.get("macdbb_candles")
+
+    try:
+        cached_interval = context.user_data.get("macdbb_candles_interval", interval)
+        if not current_price or interval != cached_interval:
+            try:
+                await msg.edit_text(
+                    r"*📊 MACD BB V1 \- New Config*" + "\n\n"
+                    f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            candles_connector = connector.replace("_perpetual", "").replace("_margin", "").replace("_spot", "")
+            current_price = await fetch_current_price(client, connector, pair)
+
+            if current_price:
+                # CORREZIONE QUI - usa macdbb_current_price
+                context.user_data["macdbb_current_price"] = current_price
+                candles = await fetch_candles(
+                    client, candles_connector, pair, interval=interval, max_records=420
+                )
+                context.user_data["macdbb_candles"] = candles
+                context.user_data["macdbb_candles_interval"] = interval
+
+        if not current_price:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
+            await msg.edit_text(
+                r"*❌ Error*" + "\n\n"
+                f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        candles_list = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+
+        if candles_list:
+            last_close = candles_list[-1].get("close") or candles_list[-1].get("c")
+            if last_close:
+                current_price = float(last_close)
+                context.user_data["macdbb_current_price"] = current_price
+
+        # Generate config ID if not set
+        if not config.get("id"):
+            existing_configs = context.user_data.get("controller_configs_list", [])
+            from .controllers.macd_bb_v1.config import generate_id as macdbb_generate_id
+            config["id"] = macdbb_generate_id(config, existing_configs)
+
+        from .controllers.macd_bb_v1.analysis import analyze_candles_for_macd_bb, format_macd_bb_analysis
+        analysis = analyze_candles_for_macd_bb(candles_list, bb_length=config.get("bb_length", 100), bb_std=config.get("bb_std", 2.0), macd_fast=macd_fast, macd_slow=macd_slow, macd_signal=macd_signal_period)
+
+        # Auto-save suggested thresholds
+        if config.get("bb_long_threshold", 0.0) == 0.0:
+            config["bb_long_threshold"] = analysis["suggested_long_threshold"]
+        if config.get("bb_short_threshold", 1.0) == 1.0:
+            config["bb_short_threshold"] = analysis["suggested_short_threshold"]
+        set_controller_config(context, config)
+
+        position_mode = config.get("position_mode", "HEDGE")
+        stop_loss = config.get("stop_loss", 0.05)
+        take_profit = config.get("take_profit", 0.03)
+        max_exec = config.get("max_executors_per_side", 1)
+        cooldown = config.get("cooldown_time", 60)
+        bb_std = config.get("bb_std", 2.0)
+        bb_long = config.get("bb_long_threshold", 0.0)
+        bb_short = config.get("bb_short_threshold", 1.0)
+        ts = config.get("trailing_stop", {}) or {}
+        ts_act = ts.get("activation_price", 0.015) if isinstance(ts, dict) else 0.015
+        ts_delta = ts.get("trailing_delta", 0.005) if isinstance(ts, dict) else 0.005
+
+        context.user_data["bots_state"] = "macdbb_wizard_input"
+        context.user_data["macdbb_wizard_step"] = "final"
+
+        interval_options = ["1m", "3m", "5m", "15m", "1h"]
+        interval_row = [
+            InlineKeyboardButton(
+                f"✓ {opt}" if opt == interval else opt,
+                callback_data=f"bots:macdbb_interval:{opt}"
+            )
+            for opt in interval_options
+        ]
+
+        # ========== SALVA ANALISI PER I BOTTONI STRATEGIA ==========
+        context.user_data["macdbb_analysis"] = analysis
+        strategy_row = [
+            InlineKeyboardButton("🎯 Scalp", callback_data="bots:macdbb_set_strat:scalping"),
+            InlineKeyboardButton("⚖️ Swing", callback_data="bots:macdbb_set_strat:swing"),
+            InlineKeyboardButton("🤖 Auto", callback_data="bots:macdbb_set_strat:auto"),
+        ]
+
+
+        is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+        final_step = 6 if is_perp else 4
+
+        keyboard = [
+            interval_row,
+            strategy_row,  # <--- AGGIUNGI QUESTA RIGA
+            [InlineKeyboardButton("💾 Save Config", callback_data="bots:macdbb_save")],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_amount"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+            ],
+        ]
+
+        config_text = (
+            rf"*📊 MACD BB V1 \- Step {final_step}/{final_step} \(Final\)*" + "\n\n"
+            f"*{escape_markdown_v2(pair)}*\n"
+            f"Price: `{current_price:,.6g}` \\| BB: `{bb_length}` \\| MACD: `{macd_fast}/{macd_slow}/{macd_signal_period}` \\| Interval: `{interval}`\n\n"
+            f"`connector_name={escape_markdown_v2(connector)}`\n"
+            f"`trading_pair={escape_markdown_v2(pair)}`\n"
+            f"`total_amount_quote={total_amount:.0f}`\n"
+            f"`leverage={leverage}`\n"
+            f"`position_mode={escape_markdown_v2(position_mode)}`\n"
+            f"`max_executors_per_side={max_exec}`\n"
+            f"`cooldown_time={cooldown}`\n"
+            f"`stop_loss={stop_loss}`\n"
+            f"`take_profit={take_profit}`\n"
+            f"`trailing_stop_activation={ts_act}`\n"
+            f"`trailing_stop_delta={ts_delta}`\n"
+            f"`interval={interval}`\n"
+            f"`bb_length={bb_length}`\n"
+            f"`bb_std={bb_std}`\n"
+            f"`bb_long_threshold={bb_long}`\n"
+            f"`bb_short_threshold={bb_short}`\n"
+            f"`macd_fast={macd_fast}`\n"
+            f"`macd_slow={macd_slow}`\n"
+            f"`macd_signal={macd_signal_period}`\n\n"
+            r"_Edit: `field=value`_"
+        )
+
+        # ========== ANALYSIS TEXT - USARE TRIPLI BACKTICK ==========
+        analysis_text = format_macd_bb_analysis(analysis)
+        config_text += "\n\n```\n" + analysis_text + "\n```"
+        # ==========================================================
+
+        # ========== FIX CAPTION TOO LONG ==========
+        MAX_CAPTION_LEN = 950
+        if len(config_text) > MAX_CAPTION_LEN:
+            truncation_note = "\n\n_...truncated due to length limit. Edit via Configs menu._"
+            max_allowed = MAX_CAPTION_LEN - len(truncation_note)
+            config_text = config_text[:max_allowed] + truncation_note
+        # ==========================================
+
+        # ========== COME DMan V3 ==========
+        if candles_list:
+            from .controllers.macd_bb_v1.chart import generate_chart as macdbb_chart
+            chart_bytes = macdbb_chart(config, candles_list, current_price)
+
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+            new_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_bytes,
+                caption=config_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["macdbb_wizard_message_id"] = new_msg.message_id
+            context.user_data["macdbb_wizard_chat_id"] = chat_id
+        else:
+            try:
+                await msg.edit_text(
+                    text=config_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            except Exception:
+                new_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=config_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["macdbb_wizard_message_id"] = new_msg.message_id
+
+    except Exception as e:
+        logger.error(f"MACD BB final step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        try:
+            await msg.edit_text(
+                format_error_message(f"Error: {str(e)}"),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            pass
+
+
+async def handle_macdbb_interval_change(update, context, interval: str) -> None:
+    """Change chart interval"""
+    context.user_data["macdbb_candles"] = None
+    context.user_data["macdbb_candles_interval"] = None
+    await _macdbb_show_final_step(update, context, interval=interval)
+
+async def handle_macdbb_set_strategy(update, context, strat_key: str) -> None:
+    """Handle MACD BB strategy selection from final step buttons."""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    analysis = context.user_data.get("macdbb_analysis", {})
+    natr = analysis.get("natr", 0.01)
+
+    from .controllers.macd_bb_v1.analysis import get_macd_bb_strategy_suggestions
+    strats = get_macd_bb_strategy_suggestions(natr, analysis)
+
+    if strat_key in strats:
+        selected = strats[strat_key]
+
+        # Aggiorna i parametri
+        config["bb_length"] = selected.get("bb_length", 100)
+        config["bb_std"] = selected.get("bb_std", 2.0)
+        config["macd_fast"] = selected.get("macd_fast", 21)
+        config["macd_slow"] = selected.get("macd_slow", 42)
+        config["macd_signal"] = selected.get("macd_signal", 9)
+        config["bb_long_threshold"] = selected.get("bb_long_threshold", 0.0)
+        config["bb_short_threshold"] = selected.get("bb_short_threshold", 1.0)
+        config["take_profit"] = selected.get("take_profit", 0.03)
+        config["stop_loss"] = selected.get("stop_loss", 0.05)
+
+        # ========== AGGIUNGI TRAILING STOP ==========
+        if "trailing_stop_activation" in selected:
+            if not isinstance(config.get("trailing_stop"), dict):
+                config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+            config["trailing_stop"]["activation_price"] = selected["trailing_stop_activation"]
+            config["trailing_stop"]["trailing_delta"] = selected["trailing_stop_delta"]
+        # ===========================================
+
+        set_controller_config(context, config)
+
+        vol_regime = selected.get("volatility_regime", "moderate")
+        await query.answer(f"✅ {selected['label']} applicata (vol: {vol_regime})")
+
+        return await _macdbb_show_final_step(update, context)
+
+async def handle_macdbb_save(update, context) -> None:
+    """Save MACD BB V1 configuration"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    # ========== PULISCI I CAMPI NON NECESSARI ==========
+    config.pop("candles_config", None)
+    config.pop("manual_kill_switch", None)
+    # ===================================================
+
+    config_id = config.get("id", "")
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving `" + escape_markdown_v2(config_id) + "`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+
+        for key in ["macdbb_wizard_step", "macdbb_wizard_message_id", "macdbb_wizard_chat_id",
+                    "macdbb_current_price", "macdbb_candles", "macdbb_candles_interval",
+                    "macdbb_chart_interval"]:
+            context.user_data.pop(key, None)
+        context.user_data.pop("bots_state", None)
+
+        keyboard = [
+            [InlineKeyboardButton("Create Another", callback_data="bots:new_macd_bb_v1")],
+            [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            "*Config Saved\\!*\n\n"
+            "Controller `" + escape_markdown_v2(config_id) + "` saved successfully\\.",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"MACD BB save error: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:macdbb_save")],
+            [InlineKeyboardButton("Back", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            format_error_message(f"Failed to save: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+# Back handlers
+async def handle_macdbb_back_to_connector(update, context) -> None:
+    context.user_data["macdbb_wizard_step"] = "connector_name"
+    await _macdbb_show_connector_step(update, context)
+
+
+async def handle_macdbb_back_to_pair(update, context) -> None:
+    context.user_data["macdbb_wizard_step"] = "trading_pair"
+    await _macdbb_show_pair_step(update, context)
+
+
+async def handle_macdbb_back_to_leverage(update, context) -> None:
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    # Usa la stessa logica degli altri wizard
+    is_perp = "_perpetual" in connector or "_margin" in connector
+    if is_perp:
+        context.user_data["macdbb_wizard_step"] = "leverage"
+        await _macdbb_show_leverage_step(update, context)
+    else:
+        await handle_macdbb_back_to_pair(update, context)
+
+async def handle_macdbb_back_to_amount(update, context) -> None:
+    """Go back to amount step"""
+    # Non cancellare il messaggio!
+    # Lascia che _macdbb_show_amount_step lo editi
+
+    context.user_data["macdbb_wizard_step"] = "total_amount_quote"
+    context.user_data.pop("macdbb_current_price", None)
+    context.user_data.pop("macdbb_candles", None)
+    context.user_data.pop("macdbb_candles_interval", None)
+
+    await _macdbb_show_amount_step(update, context)
+
+async def handle_macdbb_back_to_position_mode(update, context) -> None:
+    """Go back to position mode step"""
+    context.user_data["macdbb_wizard_step"] = "position_mode"
+    await _macdbb_show_position_mode_step(update, context)
+
+async def handle_macdbb_pair_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str
+) -> None:
+    """Handle selection of a suggested trading pair in MACD BB V1 wizard"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    chat_id = update.effective_chat.id
+
+    # Clear old market data
+    for key in ["macdbb_current_price", "macdbb_candles", "macdbb_candles_interval"]:
+        context.user_data.pop(key, None)
+
+    config["trading_pair"] = trading_pair
+    config["candles_trading_pair"] = trading_pair
+    set_controller_config(context, config)
+
+    # Move to next step based on connector type
+    connector = config.get("connector_name", "")
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    if is_perp:
+        context.user_data["macdbb_wizard_step"] = "leverage"
+        await _macdbb_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["macdbb_wizard_step"] = "total_amount_quote"
+        await _macdbb_show_amount_step(update, context)
+
+async def process_macdbb_wizard_input(update, context, user_input: str) -> None:
+    """Process text input during MACD BB V1 wizard"""
+    step = context.user_data.get("macdbb_wizard_step")
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    message_id = context.user_data.get("macdbb_wizard_message_id")
+    wizard_chat_id = context.user_data.get("macdbb_wizard_chat_id", chat_id)
+
+    try:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        # ========== GESTISCI INPUT MANUALE PER TRADING PAIR ==========
+        if step == "trading_pair":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("connector_name", "")
+
+            # ========== VALIDAZIONE BASE: DEVE CONTENERE IL TRATTINO (come DMan/Arb) ==========
+            if "-" not in pair:
+                message_id = context.user_data.get("macdbb_wizard_message_id")
+                wizard_chat_id = context.user_data.get("macdbb_wizard_chat_id", chat_id)
+
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_connector")]
+                ]
+
+                # Mostra il contesto con exchange selezionato (come DMan/Arb)
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*📊 MACD BB V1 \- Step 2*" + "\n\n"
+                    + context_text
+                    + r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. BTC\-USDT\)*" + "\n\n"
+                    + r"Type the pair again:"
+                )
+
+                if message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id, message_id=message_id,
+                            text=err_text, parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                    except Exception as e:
+                        logger.error(f"Error editing message: {e}")
+                        # Fallback: invia nuovo messaggio
+                        msg = await context.bot.send_message(
+                            chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                        context.user_data["macdbb_wizard_message_id"] = msg.message_id
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["macdbb_wizard_message_id"] = msg.message_id
+                return
+
+            # ========== 2. VALIDAZIONE SULL'EXCHANGE (CON SUGGERIMENTI) come DMan/Arb ==========
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            is_valid, error_msg, suggestions, correct_pair = (
+                await validate_trading_pair(context.user_data, client, connector, pair)
+            )
+
+            if not is_valid:
+                message_id = context.user_data.get("macdbb_wizard_message_id")
+                wizard_chat_id = context.user_data.get("macdbb_wizard_chat_id", chat_id)
+
+                keyboard = []
+                for sugg in suggestions[:4]:
+                    keyboard.append([InlineKeyboardButton(sugg, callback_data=f"bots:macdbb_pair_select:{sugg}")])
+                keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_connector")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+                # Mostra il contesto con exchange selezionato (come DMan/Arb)
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*📊 MACD BB V1 \- Step 2*" + "\n\n"
+                    + context_text
+                    + f"❌ `{escape_markdown_v2(pair)}` not found on `{escape_markdown_v2(connector)}`\\.\n\n"
+                    + r"*Did you mean?*"
+                )
+
+                if message_id:
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id, message_id=message_id,
+                            text=err_text, parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                    except Exception as e:
+                        logger.error(f"Error editing message: {e}")
+                        msg = await context.bot.send_message(
+                            chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                        context.user_data["macdbb_wizard_message_id"] = msg.message_id
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["macdbb_wizard_message_id"] = msg.message_id
+                return
+
+            if correct_pair:
+                pair = correct_pair
+
+            config["trading_pair"] = pair
+            config["candles_trading_pair"] = pair
+            for key in ["macdbb_current_price", "macdbb_candles", "macdbb_candles_interval"]:
+                context.user_data.pop(key, None)
+            set_controller_config(context, config)
+            # Vai al passo successivo (leverage o amount)
+            connector = config.get("connector_name", "")
+            is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+
+            if is_perp:
+                context.user_data["macdbb_wizard_step"] = "leverage"
+                # ========== RICOSTRUISCI IL MESSAGGIO QUI (come DMan) ==========
+                message_id = context.user_data.get("macdbb_wizard_message_id")
+                wizard_chat_id = context.user_data.get("macdbb_wizard_chat_id", chat_id)
+
+                keyboard = [
+                    [
+                        InlineKeyboardButton("1x", callback_data="bots:macdbb_leverage:1"),
+                        InlineKeyboardButton("5x", callback_data="bots:macdbb_leverage:5"),
+                        InlineKeyboardButton("10x", callback_data="bots:macdbb_leverage:10"),
+                    ],
+                    [
+                        InlineKeyboardButton("20x", callback_data="bots:macdbb_leverage:20"),
+                        InlineKeyboardButton("50x", callback_data="bots:macdbb_leverage:50"),
+                        InlineKeyboardButton("75x", callback_data="bots:macdbb_leverage:75"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+
+                text = (
+                    r"*📊 MACD BB V1 \- Step 3/6*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"⚡ *Select Leverage*" + "\n"
+                    r"_Or type a value \(e\.g\. 20\)_"
+                )
+
+                try:
+                    if message_id:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id,
+                            message_id=message_id,
+                            text=text,
+                            parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                        context.user_data["macdbb_wizard_message_id"] = message_id
+                except Exception as e:
+                    logger.error(f"Error showing leverage step: {e}")
+                    # Fallback: invia nuovo messaggio
+                    new_msg = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["macdbb_wizard_message_id"] = new_msg.message_id
+                    context.user_data["macdbb_wizard_chat_id"] = chat_id
+                return  # <--- IMPORTANTE: esci qui
+
+            else:
+                # Spot: vai direttamente all'amount
+                config["leverage"] = 1
+                config["position_mode"] = "ONEWAY"
+                set_controller_config(context, config)
+                context.user_data["macdbb_wizard_step"] = "total_amount_quote"
+                context.user_data["bots_state"] = "macdbb_wizard_input"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("$100", callback_data="bots:macdbb_amount:100"),
+                        InlineKeyboardButton("$500", callback_data="bots:macdbb_amount:500"),
+                        InlineKeyboardButton("$1000", callback_data="bots:macdbb_amount:1000"),
+                    ],
+                    [
+                        InlineKeyboardButton("$2000", callback_data="bots:macdbb_amount:2000"),
+                        InlineKeyboardButton("$5000", callback_data="bots:macdbb_amount:5000"),
+                        InlineKeyboardButton("$10000", callback_data="bots:macdbb_amount:10000"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:macdbb_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+                text = (
+                    r"*📊 MACD BB V1 \- Step 3/4*" + "\n\n"  # <--- CAMBIA DA 3/5 A 3/4
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"💰 *Total Amount \(USDT\)*" + "\n"
+                    r"_Select or type an amount:_"
+                )
+
+                try:
+                    if message_id:
+                        await context.bot.edit_message_text(
+                            chat_id=wizard_chat_id, message_id=message_id,
+                            text=text, parse_mode="MarkdownV2",
+                            reply_markup=InlineKeyboardMarkup(keyboard),
+                        )
+                        context.user_data["macdbb_wizard_message_id"] = message_id
+                except Exception:
+                    pass
+                return  # <--- AGGIUNGI QUESTO return
+
+        # ========== GESTISCI INPUT PER LEVERAGE ==========
+        elif step == "leverage":
+            try:
+                val = int(float(user_input.strip().lower().replace("x", "")))
+                config["leverage"] = val
+                set_controller_config(context, config)
+                context.user_data["macdbb_wizard_step"] = "total_amount_quote"
+                await _macdbb_show_amount_step(update, context)
+            except ValueError:
+                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:macdbb_back_to_leverage")]]
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=message_id,
+                    text=r"*📊 MACD BB V1*" + "\n\n"
+                    r"❌ *Invalid leverage*" + "\n\n"
+                    r"Enter a positive number \(e\.g\. 20\):",
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+        # ========== GESTISCI INPUT PER TOTAL_AMOUNT_QUOTE ==========
+        elif step == "total_amount_quote":
+            try:
+                amount = float(user_input.strip().replace("$", "").replace(",", ""))
+                config["total_amount_quote"] = amount
+                set_controller_config(context, config)
+                context.user_data["macdbb_wizard_step"] = "final"
+
+                # Mostra loading
+                pair = config.get("trading_pair", "")
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id,
+                        message_id=message_id,
+                        text=r"*📊 MACD BB V1*" + "\n\n"
+                             f"⏳ Loading chart for `{escape_markdown_v2(pair)}`\\.\\.\\.  ",
+                        parse_mode="MarkdownV2",
+                    )
+                else:
+                    tmp = await context.bot.send_message(
+                        chat_id=wizard_chat_id,
+                        text=r"*📊 MACD BB V1*" + "\n\n"
+                             f"⏳ Loading chart for `{escape_markdown_v2(pair)}`\\.\\.\\.  ",
+                        parse_mode="MarkdownV2",
+                    )
+                    context.user_data["macdbb_wizard_message_id"] = tmp.message_id
+                await _macdbb_show_final_step(update, context)
+
+            except ValueError:
+                keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="bots:macdbb_back_to_amount")]]
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id,
+                    message_id=message_id,
+                    text=r"*📊 MACD BB V1*" + "\n\n"
+                    r"❌ *Invalid amount*" + "\n\n"
+                    r"Enter a positive number \(e\.g\. 500\):",
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+        # ========== GESTISCI INPUT PER FINAL (EDIT CAMPI) ==========
+        elif step == "final":
+            if "=" in user_input:
+                supported_fields = [
+                    "id", "connector_name", "trading_pair", "leverage", "position_mode",
+                    "total_amount_quote", "max_executors_per_side", "cooldown_time",
+                    "stop_loss", "take_profit", "take_profit_order_type", "time_limit",
+                    "trailing_stop_activation", "trailing_stop_delta",
+                    "candles_connector", "candles_trading_pair", "interval",
+                    "bb_length", "bb_std", "bb_long_threshold", "bb_short_threshold",
+                    "macd_fast", "macd_slow", "macd_signal",
+                ]
+
+                for line in user_input.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+
+                    if field not in supported_fields:
+                        continue
+
+                    try:
+                        if field in ("total_amount_quote", "stop_loss", "take_profit",
+                                     "bb_std", "bb_long_threshold", "bb_short_threshold",
+                                     "trailing_stop_activation", "trailing_stop_delta"):
+                            config[field] = float(value)
+                        elif field in ("leverage", "max_executors_per_side", "cooldown_time",
+                                       "take_profit_order_type", "bb_length",
+                                       "macd_fast", "macd_slow", "macd_signal"):
+                            config[field] = int(float(value))
+                        elif field in ("position_mode", "interval"):
+                            config[field] = value.upper()
+                        else:
+                            config[field] = value
+                    except Exception:
+                        pass
+
+                set_controller_config(context, config)
+                await _macdbb_show_final_step(update, context)
+
+    except Exception as e:
+        logger.error(f"MACD BB wizard input error: {e}", exc_info=True)
+
+# ============================================
+# SUPERTREND V1 WIZARD
+# ============================================
+# Steps: connector → pair → (leverage) → amount → interval+chart → save
+# Prefisso handler: st_
+
+async def show_new_supertrend_v1_form(update, context) -> None:
+    """Start the SuperTrend V1 wizard - Step 1: Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    for key in ["st_current_price", "st_candles", "st_candles_interval", "st_chart_interval"]:
+        context.user_data.pop(key, None)
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    init_new_controller_config(context, "supertrend_v1")
+    context.user_data["bots_state"] = "st_wizard"
+    context.user_data["st_wizard_step"] = "connector_name"
+    context.user_data["st_wizard_message_id"] = query.message.message_id
+    context.user_data["st_wizard_chat_id"] = query.message.chat_id
+
+    await _st_show_connector_step(update, context)
+
+
+async def _st_show_connector_step(update, context) -> None:
+    """ST Step 1: Select Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+
+        if not cex_connectors:
+            keyboard = [
+                [InlineKeyboardButton("🔑 Configure API Keys", callback_data="config_api_keys")],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
+            ]
+            await query.message.edit_text(
+                r"*📈 SuperTrend V1 \- New Config*" + "\n\n"
+                r"⚠️ No CEX connectors available\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        keyboard = []
+        row = []
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(
+                f"🏦 {connector}", callback_data=f"bots:st_connector:{connector}"
+            ))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+        await query.message.edit_text(
+            r"*📈 SuperTrend V1*" + "\n\n"
+            r"Trend\-following strategy using the SuperTrend indicator\. "
+            r"Enters LONG when price is above the ST line and within threshold\. "
+            r"Enters SHORT when price is below the ST line and within threshold\." + "\n\n"
+            r"─────────────────────────" + "\n\n"
+            r"*Step 1: Select Exchange*",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"ST connector step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        await query.message.edit_text(
+            format_error_message(f"Error: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+async def handle_st_wizard_connector(update, context, connector: str) -> None:
+    config = get_controller_config(context)
+    config["connector_name"] = connector
+    config["candles_connector"] = connector
+    set_controller_config(context, config)
+    context.user_data["st_wizard_step"] = "trading_pair"
+    await _st_show_pair_step(update, context)
+
+async def _st_show_pair_step(update, context) -> None:
+    """ST Step 2: Select Trading Pair"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+
+    context.user_data["bots_state"] = "st_wizard_input"
+    context.user_data["st_wizard_step"] = "trading_pair"
+
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:st_pair:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    total_steps = 6 if is_perp else 4
+    current_step = 2
+
+    message_text = (
+        rf"*📈 SuperTrend V1 \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}`" + "\n\n"
+        r"🔗 *Trading Pair*" + "\n\n"
+        r"Select a recent pair or type a new one:"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    try:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["st_wizard_message_id"] = query.message.message_id
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        new_msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["st_wizard_message_id"] = new_msg.message_id
+        context.user_data["st_wizard_chat_id"] = query.message.chat_id
+
+async def handle_st_wizard_pair(update, context, pair: str) -> None:
+    """Handle pair selection"""
+    config = get_controller_config(context)
+    config["trading_pair"] = pair
+    config["candles_trading_pair"] = pair
+    set_controller_config(context, config)
+    connector = config.get("connector_name", "")
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+
+    if is_perp:
+        context.user_data["st_wizard_step"] = "leverage"
+        await _st_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["st_wizard_step"] = "total_amount_quote"
+        await _st_show_amount_step(update, context)
+
+async def _st_show_leverage_step(update, context) -> None:
+    """ST Step 3 (perp only): Select Leverage"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "st_wizard_input"
+    context.user_data["st_wizard_step"] = "leverage"
+    context.user_data["st_wizard_message_id"] = query.message.message_id
+    context.user_data["st_wizard_chat_id"] = query.message.chat_id
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1x", callback_data="bots:st_leverage:1"),
+            InlineKeyboardButton("5x", callback_data="bots:st_leverage:5"),
+            InlineKeyboardButton("10x", callback_data="bots:st_leverage:10"),
+        ],
+        [
+            InlineKeyboardButton("20x", callback_data="bots:st_leverage:20"),
+            InlineKeyboardButton("50x", callback_data="bots:st_leverage:50"),
+            InlineKeyboardButton("75x", callback_data="bots:st_leverage:75"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    await query.message.edit_text(
+        r"*📈 SuperTrend V1 \- Step 3/6*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+        r"⚡ *Select Leverage*" + "\n"
+        r"_Or type a value \(e\.g\. 20\)_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_st_wizard_leverage(update, context, leverage: int) -> None:
+    """Handle leverage selection"""
+    config = get_controller_config(context)
+    config["leverage"] = leverage
+    set_controller_config(context, config)
+    # Vai a position_mode (come DMan V3)
+    context.user_data["st_wizard_step"] = "position_mode"
+    await _st_show_position_mode_step(update, context)
+
+async def _st_show_position_mode_step(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """ST Wizard Step: Select Position Mode (Perpetual/Margin only)"""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+    context.user_data["bots_state"] = "st_wizard_input"
+    context.user_data["st_wizard_step"] = "position_mode"
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔒 ONEWAY", callback_data="bots:st_position_mode:ONEWAY"),
+            InlineKeyboardButton("🔄 HEDGE", callback_data="bots:st_position_mode:HEDGE"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_leverage"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    total_steps = 6
+    current_step = 4
+
+    await query.message.edit_text(
+        f"*📈 SuperTrend V1 \\- Step {current_step}/{total_steps}*\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}` \\| ⚡ `{leverage}x`\n\n"
+        r"🎯 *Position Mode*\n\n"
+        r"• *ONEWAY*: Can only hold positions in one direction\n"
+        r"• *HEDGE*: Can hold both long and short simultaneously",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_st_back_to_position_mode(update, context) -> None:
+    """Go back to position mode step"""
+    context.user_data["st_wizard_step"] = "position_mode"
+    await _st_show_position_mode_step(update, context)
+
+async def _st_show_amount_step(update, context) -> None:
+    """ST Step: Enter Total Amount"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+    pos_mode = config.get("position_mode", "HEDGE")
+
+    context.user_data["bots_state"] = "st_wizard_input"
+    context.user_data["st_wizard_step"] = "total_amount_quote"
+
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    total_steps = 6 if is_perp else 4
+    current_step = 5 if is_perp else 3
+
+    # Back callback
+    if is_perp:
+        back_callback = "bots:st_back_to_position_mode"
+    else:
+        back_callback = "bots:st_back_to_pair"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:st_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:st_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:st_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:st_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:st_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:st_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data=back_callback),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    header_info = f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+    if is_perp:
+        header_info += f" \\| ⚡ `{leverage}x` \\| 🎯 `{escape_markdown_v2(pos_mode)}`"
+
+    message_text = (
+        rf"*📈 SuperTrend V1 \- Step {current_step}/{total_steps}*" + "\n\n"
+        + header_info + "\n\n"
+        r"💰 *Total Amount \(USDT\)*" + "\n"
+        r"_Select or type an amount:_"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    target_chat_id = chat_id
+    if query and query.message:
+        target_chat_id = query.message.chat_id
+        try:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["st_wizard_message_id"] = query.message.message_id
+            return
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+    new_msg = await context.bot.send_message(
+        chat_id=target_chat_id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data["st_wizard_message_id"] = new_msg.message_id
+    context.user_data["st_wizard_chat_id"] = target_chat_id
+
+async def handle_st_wizard_amount(update, context, amount: float) -> None:
+    query = update.callback_query
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
+
+    pair = config.get("trading_pair", "")
+    await query.message.edit_text(
+        r"*📈 SuperTrend V1 \- New Config*" + "\n\n"
+        f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\.  " + "\n\n"
+        r"_Fetching market data\.\.\._",
+        parse_mode="MarkdownV2",
+    )
+
+    context.user_data["st_wizard_step"] = "final"
+    await _st_show_final_step(update, context)
+
+async def _st_show_final_step(update, context, interval: str = None) -> None:
+    """ST Final Step: Chart + Config Summary + Analysis"""
+    import asyncio
+
+    query = update.callback_query
+    msg = query.message if query else update.message
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    total_amount = config.get("total_amount_quote", 1000)
+    leverage = config.get("leverage", 1)
+    length = config.get("length", 20)
+    multiplier = config.get("multiplier", 4.0)
+    pct_threshold = config.get("percentage_threshold", 0.01)
+
+    if interval is None:
+        interval = context.user_data.get("st_chart_interval", config.get("interval", "3m"))
+    context.user_data["st_chart_interval"] = interval
+    config["interval"] = interval
+    set_controller_config(context, config)
+
+    current_price = context.user_data.get("st_current_price")
+    candles = context.user_data.get("st_candles")
+
+    try:
+        cached_interval = context.user_data.get("st_candles_interval", interval)
+        if not current_price or interval != cached_interval:
+            # Usa MarkdownV2 invece di HTML
+            try:
+                await msg.edit_text(
+                    r"*📈 SuperTrend V1 \- New Config*" + "\n\n"
+                    f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+
+            client, _ = await get_bots_client(chat_id, context.user_data)
+
+            # ========== FIX: USA SEMPRE IL CONNETTORE SPOT PER LE CANDELE ==========
+            candles_connector = connector.replace("_perpetual", "").replace("_margin", "").replace("_spot", "")
+            if not candles_connector or len(candles_connector) < 3:
+                candles_connector = "kucoin"
+
+            logger.info(f"ST: Trading on {connector}, using candles from {candles_connector}")
+
+            # Fetch current price
+            try:
+                current_price = await asyncio.wait_for(
+                    fetch_current_price(client, connector, pair),
+                    timeout=10.0
+                )
+                if current_price:
+                    context.user_data["st_current_price"] = current_price
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"Could not fetch price for {pair}: {e}")
+                current_price = None
+
+            # Fetch candles
+            if current_price:
+                pair_variants = [pair, pair.replace("-", "/")]
+                candles = None
+
+                for try_pair in pair_variants:
+                    try:
+                        logger.info(f"ST: Trying candles from {candles_connector} for {try_pair}")
+                        candles = await asyncio.wait_for(
+                            fetch_candles(client, candles_connector, try_pair, interval=interval, max_records=420),
+                            timeout=15.0
+                        )
+                        if candles:
+                            candles_data = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+                            if candles_data and len(candles_data) > 0:
+                                logger.info(f"ST: Got {len(candles_data)} candles from {candles_connector} for {try_pair}")
+                                break
+                            else:
+                                candles = None
+                        else:
+                            candles = None
+                    except asyncio.TimeoutError:
+                        logger.warning(f"ST: Timeout fetching candles from {candles_connector} for {try_pair}")
+                    except Exception as e:
+                        logger.warning(f"ST: Error fetching candles from {candles_connector} for {try_pair}: {e}")
+
+                if candles:
+                    context.user_data["st_candles"] = candles
+                    context.user_data["st_candles_interval"] = interval
+                else:
+                    logger.warning(f"ST: Could not fetch candles for {pair}")
+
+        if not current_price:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
+            await msg.edit_text(
+                r"*❌ Error*" + "\n\n"
+                f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        candles_list = []
+        if candles:
+            candles_list = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+            if candles_list:
+                last_close = candles_list[-1].get("close") or candles_list[-1].get("c")
+                if last_close:
+                    current_price = float(last_close)
+                    context.user_data["st_current_price"] = current_price
+
+        # Generate config ID if not set
+        if not config.get("id"):
+            existing_configs = context.user_data.get("controller_configs_list", [])
+            from .controllers.supertrend_v1.config import generate_id as st_generate_id
+            config["id"] = st_generate_id(config, existing_configs)
+
+        # Run analysis
+        from .controllers.supertrend_v1.analysis import analyze_candles_for_supertrend, format_supertrend_analysis
+        analysis = analyze_candles_for_supertrend(
+            candles_list,
+            length=length,
+            multiplier=multiplier,
+            percentage_threshold=pct_threshold,
+        )
+
+        # Auto-save suggested threshold
+        config["percentage_threshold"] = analysis["suggested_percentage_threshold"]
+        pct_threshold = config["percentage_threshold"]
+        set_controller_config(context, config)
+
+        position_mode = config.get("position_mode", "HEDGE")
+        stop_loss = config.get("stop_loss", 0.05)
+        take_profit = config.get("take_profit", 0.03)
+        max_exec = config.get("max_executors_per_side", 1)
+        cooldown = config.get("cooldown_time", 60)
+        ts = config.get("trailing_stop", {}) or {}
+        ts_act = ts.get("activation_price", 0.015) if isinstance(ts, dict) else 0.015
+        ts_delta = ts.get("trailing_delta", 0.005) if isinstance(ts, dict) else 0.005
+
+        context.user_data["bots_state"] = "st_wizard_input"
+        context.user_data["st_wizard_step"] = "final"
+
+        interval_options = ["1m", "3m", "5m", "15m", "1h"]
+        interval_row = [
+            InlineKeyboardButton(
+                f"✓ {opt}" if opt == interval else opt,
+                callback_data=f"bots:st_interval:{opt}"
+            )
+            for opt in interval_options
+        ]
+
+        context.user_data["st_analysis"] = analysis
+
+        strategy_row = [
+            InlineKeyboardButton("🎯 Scalp", callback_data="bots:st_set_strat:scalping"),
+            InlineKeyboardButton("⚖️ Swing", callback_data="bots:st_set_strat:swing"),
+            InlineKeyboardButton("🤖 Auto", callback_data="bots:st_set_strat:auto"),
+        ]
+
+        is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+        final_step = 6 if is_perp else 4
+
+        keyboard = [
+            interval_row,
+            strategy_row,
+            [InlineKeyboardButton("💾 Save Config", callback_data="bots:st_save")],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_amount"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+            ],
+        ]
+
+        # ========== COSTRUISCI CONFIG_TEXT IN MARKDOWNV2 (COME MACD BB) ==========
+        escaped_pair = escape_markdown_v2(pair)
+        escaped_connector = escape_markdown_v2(connector)
+        escaped_position_mode = escape_markdown_v2(position_mode)
+        escaped_interval = escape_markdown_v2(interval)
+        escaped_title = escape_markdown_v2(f"📈 SuperTrend V1 - Step {final_step}/{final_step} (Final)")
+
+        # IMPORTANTE: escapa anche il pipe e il punto
+        price_line = f"Price: `{current_price:,.6g}` | ST length: `{length}` | Multiplier: `{multiplier}` | Interval: `{escaped_interval}`"
+        escaped_price_line = escape_markdown_v2(price_line)
+
+        config_text = (
+            f"*{escaped_title}*\n\n"
+            f"*{escaped_pair}*\n"
+            f"{escaped_price_line}\n\n"
+            f"`connector_name={escaped_connector}`\n"
+            f"`trading_pair={escaped_pair}`\n"
+            f"`total_amount_quote={total_amount:.0f}`\n"
+            f"`leverage={leverage}`\n"
+            f"`position_mode={escaped_position_mode}`\n"
+            f"`max_executors_per_side={max_exec}`\n"
+            f"`cooldown_time={cooldown}`\n"
+            f"`stop_loss={stop_loss}`\n"
+            f"`take_profit={take_profit}`\n"
+            f"`trailing_stop_activation={ts_act}`\n"
+            f"`trailing_stop_delta={ts_delta}`\n"
+            f"`interval={escaped_interval}`\n"
+            f"`length={length}`\n"
+            f"`multiplier={multiplier}`\n"
+            f"`percentage_threshold={pct_threshold}`\n\n"
+            r"_Edit: `field=value`_"
+        )
+
+        # Analysis con tripli backtick (non serve escape qui)
+        analysis_text = format_supertrend_analysis(analysis)
+        config_text += "\n\n```\n" + analysis_text + "\n```"
+
+        # ========== INVIA CON MARKDOWNV2 (NON HTML) ==========
+        if not candles_list:
+            try:
+                await msg.edit_text(
+                    text=config_text,
+                    parse_mode="MarkdownV2",  # <-- CAMBIATO
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["st_wizard_message_id"] = msg.message_id
+            except Exception:
+                new_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=config_text,
+                    parse_mode="MarkdownV2",  # <-- CAMBIATO
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["st_wizard_message_id"] = new_msg.message_id
+            return
+
+        # ========== TENTA DI GENERARE IL GRAFICO ==========
+        try:
+            from .controllers.supertrend_v1.chart import generate_chart as st_chart
+            chart_bytes = st_chart(config, candles_list, current_price)
+            chart_bytes.seek(0)
+
+            stored_msg_id = context.user_data.get("st_wizard_message_id")
+            stored_chat_id = context.user_data.get("st_wizard_chat_id", chat_id)
+            if stored_msg_id:
+                try:
+                    await context.bot.delete_message(chat_id=stored_chat_id, message_id=stored_msg_id)
+                except Exception:
+                    pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+            new_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_bytes,
+                caption=config_text,
+                parse_mode="MarkdownV2",  # <-- CAMBIATO
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["st_wizard_message_id"] = new_msg.message_id
+            context.user_data["st_wizard_chat_id"] = chat_id
+        except Exception as chart_err:
+            logger.warning(f"Chart generation failed: {chart_err}, sending text-only")
+            try:
+                await msg.edit_text(
+                    text=config_text,
+                    parse_mode="MarkdownV2",  # <-- CAMBIATO
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["st_wizard_message_id"] = msg.message_id
+            except Exception:
+                new_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=config_text,
+                    parse_mode="MarkdownV2",  # <-- CAMBIATO
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["st_wizard_message_id"] = new_msg.message_id
+
+    except Exception as e:
+        logger.error(f"ST final step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        try:
+            await msg.edit_text(
+                format_error_message(f"Error: {str(e)}"),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            pass
+
+async def handle_st_interval_change(update, context, interval: str) -> None:
+    context.user_data["st_candles"] = None
+    context.user_data["st_candles_interval"] = None
+    await _st_show_final_step(update, context, interval=interval)
+
+async def handle_st_set_strategy(update, context, strat_key: str) -> None:
+    """Handle SuperTrend strategy selection from final step buttons."""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    analysis = context.user_data.get("st_analysis", {})
+    natr = analysis.get("natr", 0.01)
+
+    from .controllers.supertrend_v1.analysis import get_st_strategy_suggestions
+    strats = get_st_strategy_suggestions(natr, analysis)
+
+    if strat_key in strats:
+        selected = strats[strat_key]
+
+        # Aggiorna i parametri
+        config["length"] = selected.get("length", 20)
+        config["multiplier"] = selected.get("multiplier", 4.0)
+        config["percentage_threshold"] = selected.get("percentage_threshold", 0.01)
+        config["take_profit"] = selected.get("take_profit", 0.03)
+        config["stop_loss"] = selected.get("stop_loss", 0.05)
+
+        # Trailing stop
+        if "trailing_stop_activation" in selected:
+            if not isinstance(config.get("trailing_stop"), dict):
+                config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+            config["trailing_stop"]["activation_price"] = selected["trailing_stop_activation"]
+            config["trailing_stop"]["trailing_delta"] = selected["trailing_stop_delta"]
+
+        set_controller_config(context, config)
+
+        vol_regime = selected.get("volatility_regime", "moderate")
+        await query.answer(f"✅ {selected['label']} applicata (vol: {vol_regime})")
+
+        return await _st_show_final_step(update, context)
+
+async def handle_st_save(update, context) -> None:
+    """Save SuperTrend V1 configuration"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config.pop("candles_config", None)
+    config_id = config.get("id", "")
+    chat_id = query.message.chat_id
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving `" + escape_markdown_v2(config_id) + "`\\.\\.\\.",
+        parse_mode="MarkdownV2",
+    )
+
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+
+        for key in ["st_wizard_step", "st_wizard_message_id", "st_wizard_chat_id",
+                    "st_current_price", "st_candles", "st_candles_interval", "st_chart_interval"]:
+            context.user_data.pop(key, None)
+        context.user_data.pop("bots_state", None)
+
+        keyboard = [
+            [InlineKeyboardButton("Create Another", callback_data="bots:new_supertrend_v1")],
+            [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            "*Config Saved\\!*\n\n"
+            "Controller `" + escape_markdown_v2(config_id) + "` saved successfully\\.",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    except Exception as e:
+        logger.error(f"ST save error: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:st_save")],
+            [InlineKeyboardButton("Back", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            format_error_message(f"Failed to save: {str(e)}"),
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+async def handle_st_back_to_connector(update, context) -> None:
+    context.user_data["st_wizard_step"] = "connector_name"
+    await _st_show_connector_step(update, context)
+
+async def handle_st_back_to_pair(update, context) -> None:
+    context.user_data["st_wizard_step"] = "trading_pair"
+    await _st_show_pair_step(update, context)
+
+async def handle_st_back_to_leverage(update, context) -> None:
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    # CORREZIONE: supporta _margin
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    if is_perp:
+        context.user_data["st_wizard_step"] = "leverage"
+        await _st_show_leverage_step(update, context)
+    else:
+        await handle_st_back_to_pair(update, context)
+
+
+async def handle_st_back_to_amount(update, context) -> None:
+    context.user_data["st_wizard_step"] = "total_amount_quote"
+    context.user_data.pop("st_current_price", None)
+    context.user_data.pop("st_candles", None)
+    await _st_show_amount_step(update, context)
+
+async def handle_st_position_mode(update, context, mode: str) -> None:
+    """Handle position mode selection"""
+    config = get_controller_config(context)
+    config["position_mode"] = mode
+    set_controller_config(context, config)
+    context.user_data["st_wizard_step"] = "total_amount_quote"
+    await _st_show_amount_step(update, context)
+
+async def handle_st_pair_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str
+) -> None:
+    """Handle selection of a suggested trading pair in SuperTrend wizard"""
+    config = get_controller_config(context)
+    chat_id = update.effective_chat.id
+
+    # Clear old market data
+    for key in ["st_current_price", "st_candles", "st_candles_interval"]:
+        context.user_data.pop(key, None)
+
+    config["trading_pair"] = trading_pair
+    config["candles_trading_pair"] = trading_pair
+    set_controller_config(context, config)
+
+    connector = config.get("connector_name", "")
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+
+    if is_perp:
+        context.user_data["st_wizard_step"] = "leverage"
+        await _st_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["st_wizard_step"] = "total_amount_quote"
+        await _st_show_amount_step(update, context)
+
+async def process_st_wizard_input(update, context, user_input: str) -> None:
+    """Process text input during Supertrend V1 wizard"""
+    step = context.user_data.get("st_wizard_step")
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    message_id = context.user_data.get("st_wizard_message_id")
+    wizard_chat_id = context.user_data.get("st_wizard_chat_id", chat_id)
+    try:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        if step == "trading_pair":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("connector_name", "")
+
+            # ========== VALIDAZIONE BASE: DEVE CONTENERE IL TRATTINO ==========
+            if "-" not in pair:
+                message_id = context.user_data.get("st_wizard_message_id")
+                wizard_chat_id = context.user_data.get("st_wizard_chat_id", chat_id)
+
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_connector")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*📈 Supertrend V1 \- Step 2*" + "\n\n"
+                    + context_text
+                    + r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. BTC\-USDT\)*" + "\n\n"
+                    r"Type the pair again:"
+                )
+
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["st_wizard_message_id"] = msg.message_id
+                return
+
+            # ========== 2. VALIDAZIONE SULL'EXCHANGE (CON SUGGERIMENTI) ==========
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            is_valid, error_msg, suggestions, correct_pair = (
+                await validate_trading_pair(context.user_data, client, connector, pair)
+            )
+
+            if not is_valid:
+                message_id = context.user_data.get("st_wizard_message_id")
+                wizard_chat_id = context.user_data.get("st_wizard_chat_id", chat_id)
+
+                keyboard = []
+                for sugg in suggestions[:4]:
+                    keyboard.append([InlineKeyboardButton(sugg, callback_data=f"bots:st_pair_select:{sugg}")])
+                keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_connector")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*📈 Supertrend V1 \- Step 2*" + "\n\n"
+                    + context_text
+                    + f"❌ `{escape_markdown_v2(pair)}` not found on `{escape_markdown_v2(connector)}`\\.\n\n"
+                    r"*Did you mean?*"
+                )
+
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["st_wizard_message_id"] = msg.message_id
+                return
+
+            if correct_pair:
+                pair = correct_pair
+
+            config["trading_pair"] = pair
+            config["candles_trading_pair"] = pair
+            for key in ["st_current_price", "st_candles", "st_candles_interval"]:
+                context.user_data.pop(key, None)
+            set_controller_config(context, config)
+
+            connector = config.get("connector_name", "")
+            is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+            message_id = context.user_data.get("st_wizard_message_id")
+            wizard_chat_id = context.user_data.get("st_wizard_chat_id", chat_id)
+
+            if is_perp:
+                context.user_data["st_wizard_step"] = "leverage"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("1x", callback_data="bots:st_leverage:1"),
+                        InlineKeyboardButton("5x", callback_data="bots:st_leverage:5"),
+                        InlineKeyboardButton("10x", callback_data="bots:st_leverage:10"),
+                    ],
+                    [
+                        InlineKeyboardButton("20x", callback_data="bots:st_leverage:20"),
+                        InlineKeyboardButton("50x", callback_data="bots:st_leverage:50"),
+                        InlineKeyboardButton("75x", callback_data="bots:st_leverage:75"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+                text = (
+                    r"*📈 Supertrend V1 \- Step 3/6*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"⚡ *Select Leverage*" + "\n"
+                    r"_Or type a value \(e\.g\. 20\)_"
+                )
+            else:
+                config["leverage"] = 1
+                set_controller_config(context, config)
+                context.user_data["st_wizard_step"] = "total_amount_quote"
+                context.user_data["bots_state"] = "st_wizard_input"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("$100", callback_data="bots:st_amount:100"),
+                        InlineKeyboardButton("$500", callback_data="bots:st_amount:500"),
+                        InlineKeyboardButton("$1000", callback_data="bots:st_amount:1000"),
+                    ],
+                    [
+                        InlineKeyboardButton("$2000", callback_data="bots:st_amount:2000"),
+                        InlineKeyboardButton("$5000", callback_data="bots:st_amount:5000"),
+                        InlineKeyboardButton("$10000", callback_data="bots:st_amount:10000"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+                text = (
+                    r"*📈 Supertrend V1 \- Step 3/4*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"💰 *Total Amount \(USDT\)*" + "\n"
+                    r"_Select or type an amount:_"
+                )
+
+            try:
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["st_wizard_message_id"] = message_id
+            except Exception:
+                pass
+            return
+
+        elif step == "leverage":
+            val = int(float(user_input.strip().lower().replace("x", "")))
+            config["leverage"] = val
+            set_controller_config(context, config)
+            context.user_data["st_wizard_step"] = "total_amount_quote"
+            message_id = context.user_data.get("st_wizard_message_id")
+            wizard_chat_id = context.user_data.get("st_wizard_chat_id", chat_id)
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+            keyboard = [
+                [
+                    InlineKeyboardButton("$100", callback_data="bots:st_amount:100"),
+                    InlineKeyboardButton("$500", callback_data="bots:st_amount:500"),
+                    InlineKeyboardButton("$1000", callback_data="bots:st_amount:1000"),
+                ],
+                [
+                    InlineKeyboardButton("$2000", callback_data="bots:st_amount:2000"),
+                    InlineKeyboardButton("$5000", callback_data="bots:st_amount:5000"),
+                    InlineKeyboardButton("$10000", callback_data="bots:st_amount:10000"),
+                ],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data="bots:st_back_to_leverage"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                ],
+            ]
+            text = (
+                r"*📈 Supertrend V1 \- Step 4/6*" + "\n\n"
+                f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}` \\| ⚡ `{val}x`" + "\n\n"
+                r"💰 *Total Amount \(USDT\)*" + "\n"
+                r"_Select or type an amount:_"
+            )
+            context.user_data["bots_state"] = "st_wizard_input"
+            if message_id:
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id, message_id=message_id,
+                    text=text, parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+        elif step == "total_amount_quote":
+            amount = float(user_input.strip().replace("$", "").replace(",", ""))
+            config["total_amount_quote"] = amount
+            set_controller_config(context, config)
+            context.user_data["st_wizard_step"] = "final"
+            wizard_chat_id = context.user_data.get("st_wizard_chat_id", chat_id)
+            pair = config.get("trading_pair", "")
+            tmp = await context.bot.send_message(
+                chat_id=wizard_chat_id,
+                text=r"*📈 Supertrend V1*" + "\n\n"
+                     f"⏳ Loading chart for `{escape_markdown_v2(pair)}`\\.\\.\\.  ",
+                parse_mode="MarkdownV2",
+            )
+            context.user_data["st_wizard_message_id"] = tmp.message_id
+            await _st_show_final_step(update, context)
+
+        elif step == "final":
+            # Handle field=value edits
+            if "=" in user_input:
+                for line in user_input.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+                    try:
+                        if field in ("total_amount_quote", "stop_loss", "take_profit",
+                                     "trailing_stop_activation", "trailing_stop_delta",
+                                     "supertrend_multiplier", "supertrend_period"):
+                            val = float(value)
+                            if field == "trailing_stop_activation":
+                                if not isinstance(config.get("trailing_stop"), dict):
+                                    config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+                                config["trailing_stop"]["activation_price"] = val
+                            elif field == "trailing_stop_delta":
+                                if not isinstance(config.get("trailing_stop"), dict):
+                                    config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+                                config["trailing_stop"]["trailing_delta"] = val
+                            else:
+                                config[field] = val
+                        elif field in ("leverage", "max_executors_per_side", "cooldown_time",
+                                       "take_profit_order_type"):
+                            config[field] = int(float(value))
+                        elif field == "interval":
+                            config["interval"] = value
+                            context.user_data.pop("st_candles", None)
+                            context.user_data["st_chart_interval"] = value
+                        else:
+                            config[field] = value
+                    except Exception:
+                        pass
+                set_controller_config(context, config)
+
+    except Exception as e:
+        logger.error(f"ST wizard input error: {e}", exc_info=True)
+# =============================================================================
+# ANTIFOLLA
+# =============================================================================
+
+async def show_new_anti_folla_v1_form(update, context) -> None:
+    """Start the Anti-Folla V1 wizard - Step 1: Connector"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+
+    for key in list(context.user_data.keys()):
+        if key.endswith("_wizard_message_id") or key.endswith("_wizard_chat_id"):
+            context.user_data.pop(key, None)
+        if key.endswith("_wizard_step"):
+            context.user_data.pop(key, None)
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        configs = await client.controllers.list_controller_configs()
+        context.user_data["controller_configs_list"] = configs
+    except Exception as e:
+        logger.warning(f"Could not fetch existing configs: {e}")
+
+    init_new_controller_config(context, "anti_folla_v1")
+    context.user_data["bots_state"] = "af_wizard"
+    context.user_data["af_wizard_step"] = "connector_name"
+    context.user_data["af_wizard_message_id"] = query.message.message_id
+    context.user_data["af_wizard_chat_id"] = query.message.chat_id
+
+    await _af_show_connector_step(update, context)
+
+
+async def _af_show_connector_step(update, context) -> None:
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    try:
+        client, server_name = await get_bots_client(chat_id, context.user_data)
+        cex_connectors = await get_available_cex_connectors(
+            context.user_data, client, server_name=server_name
+        )
+        if not cex_connectors:
+            keyboard = [
+                [InlineKeyboardButton("🔑 Configure API Keys", callback_data="config_api_keys")],
+                [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
+            ]
+            await query.message.edit_text(
+                r"*🦅 Anti\-Folla V1 \- New Config*" + "\n\n" r"⚠️ No CEX connectors available\.",
+                parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+        keyboard = []
+        row = []
+        for connector in cex_connectors:
+            row.append(InlineKeyboardButton(f"🏦 {connector}", callback_data=f"bots:af_connector:{connector}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+        await query.message.edit_text(
+            r"*🦅 Anti\-Folla V1*" + "\n\n"
+            r"Crowd\-contrarian: VWAP, Donchian, OBV divergence, OBI, Volume Spike, Whale, Funding Rate\." + "\n\n"
+            r"─────────────────────────" + "\n\n" r"*Step 1: Select Exchange*",
+            parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        logger.error(f"AF connector step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        await query.message.edit_text(format_error_message(f"Error: {str(e)}"),
+                                      parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def handle_af_wizard_connector(update, context, connector: str) -> None:
+    config = get_controller_config(context)
+    config["connector_name"] = connector
+    config["candles_connector"] = connector
+    # Auto-set is_perpetual
+    config["is_perpetual"] = connector.endswith("_perpetual")
+    set_controller_config(context, config)
+    context.user_data["af_wizard_step"] = "trading_pair"
+    await _af_show_pair_step(update, context)
+
+async def _af_show_pair_step(update, context) -> None:
+    """AF Step 2: Select Trading Pair"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+
+    context.user_data["bots_state"] = "af_wizard_input"
+    context.user_data["af_wizard_step"] = "trading_pair"
+
+    # Recent pairs from existing configs
+    existing_configs = context.user_data.get("controller_configs_list", [])
+    recent_pairs = []
+    seen = set()
+    for cfg in reversed(existing_configs):
+        pair = cfg.get("trading_pair", "")
+        if pair and pair not in seen:
+            seen.add(pair)
+            recent_pairs.append(pair)
+            if len(recent_pairs) >= 6:
+                break
+
+    keyboard = []
+    if recent_pairs:
+        row = []
+        for pair in recent_pairs:
+            row.append(InlineKeyboardButton(pair, callback_data=f"bots:af_pair:{pair}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_connector"),
+        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+    ])
+
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+    total_steps = 6 if is_perp else 4
+    current_step = 2
+
+    # NOTA: Il nome "Anti-Folla" ha un trattino che deve essere escapato con \-
+    # Oppure usa r"*🦅 Anti\-Folla V1 ..." come in DMan
+    message_text = (
+        rf"*🦅 Anti\-Folla V1 \- Step {current_step}/{total_steps}*" + "\n\n"
+        f"🏦 `{escape_markdown_v2(connector)}`" + "\n\n"
+        r"🔗 *Trading Pair*" + "\n\n"
+        r"Select a recent pair or type a new one:"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    try:
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["af_wizard_message_id"] = query.message.message_id
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        new_msg = await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        context.user_data["af_wizard_message_id"] = new_msg.message_id
+        context.user_data["af_wizard_chat_id"] = query.message.chat_id
+
+async def handle_af_wizard_pair(update, context, pair: str) -> None:
+    config = get_controller_config(context)
+    config["trading_pair"] = pair
+    config["candles_trading_pair"] = pair
+    for key in list(context.user_data.keys()):
+        if key.endswith("_wizard_message_id") or key.endswith("_wizard_chat_id"):
+            context.user_data.pop(key, None)
+        if key.endswith("_wizard_step"):
+            context.user_data.pop(key, None)
+    set_controller_config(context, config)
+
+    connector = config.get("connector_name", "")
+    # CORREZIONE: supporta _margin
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+
+    if is_perp:
+        context.user_data["af_wizard_step"] = "leverage"
+        await _af_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["af_wizard_step"] = "total_amount_quote"
+        await _af_show_amount_step(update, context)
+
+async def _af_show_leverage_step(update, context) -> None:
+    """AF Step 3 (perp only): Select Leverage"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+
+    context.user_data["bots_state"] = "af_wizard_input"
+    context.user_data["af_wizard_step"] = "leverage"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("1x", callback_data="bots:af_leverage:1"),
+            InlineKeyboardButton("5x", callback_data="bots:af_leverage:5"),
+            InlineKeyboardButton("10x", callback_data="bots:af_leverage:10"),
+        ],
+        [
+            InlineKeyboardButton("20x", callback_data="bots:af_leverage:20"),
+            InlineKeyboardButton("50x", callback_data="bots:af_leverage:50"),
+            InlineKeyboardButton("75x", callback_data="bots:af_leverage:75"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_pair"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    # ========== SALVA message_id ==========
+    context.user_data["af_wizard_message_id"] = query.message.message_id
+    context.user_data["af_wizard_chat_id"] = query.message.chat_id
+    # ======================================
+
+    await query.message.edit_text(
+        r"*🦅 Anti\-Folla V1 \- Step 3/6*" + "\n\n"  # <--- Anti\-Folla con backslash
+        f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+        r"⚡ *Select Leverage*" + "\n"
+        r"_Or type a value \(e\.g\. 20\)_",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_af_wizard_leverage(update, context, leverage: int) -> None:
+    """Handle leverage selection"""
+    config = get_controller_config(context)
+    config["leverage"] = leverage
+    set_controller_config(context, config)
+    # Vai a position_mode
+    context.user_data["af_wizard_step"] = "position_mode"
+    await _af_show_position_mode_step(update, context)
+
+async def _af_show_position_mode_step(update, context) -> None:
+    """AF Step 4 (derivati only): HEDGE vs ONEWAY"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+
+    context.user_data["bots_state"] = "af_wizard_input"
+    context.user_data["af_wizard_step"] = "position_mode"
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔀 HEDGE  ✅ recommended", callback_data="bots:af_position_mode:HEDGE"),
+            InlineKeyboardButton("➡️ ONEWAY", callback_data="bots:af_position_mode:ONEWAY"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_leverage"),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    # CORREZIONE: escape di tutti i caratteri speciali MarkdownV2
+    escaped_connector = escape_markdown_v2(connector)
+    escaped_pair = escape_markdown_v2(pair)
+
+    # NOTA: "Anti-Folla" ha un trattino che deve essere escapato come "Anti\-Folla"
+    await query.message.edit_text(
+        f"*🦅 Anti\\-Folla V1 \\- Step 4/6*\n\n"
+        f"🏦 `{escaped_connector}` \\| 🔗 `{escaped_pair}` \\| ⚡ `{leverage}x`\n\n"
+        r"📐 *Position Mode*" + "\n\n"
+        r"• *HEDGE*: Can hold both long and short positions simultaneously" + "\n"
+        r"• *ONEWAY*: Can only hold positions in one direction \(long OR short\)",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+async def handle_af_position_mode(update, context, mode: str) -> None:
+    """Handle position mode selection for Anti-Folla V1"""
+    config = get_controller_config(context)
+    config["position_mode"] = mode
+    set_controller_config(context, config)
+    context.user_data["af_wizard_step"] = "total_amount_quote"
+    await _af_show_amount_step(update, context)
+
+async def _af_show_amount_step(update, context) -> None:
+    """AF Step: Enter Total Amount"""
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    leverage = config.get("leverage", 1)
+    pos_mode = config.get("position_mode", "HEDGE")
+
+    context.user_data["bots_state"] = "af_wizard_input"
+    context.user_data["af_wizard_step"] = "total_amount_quote"
+    connector = config.get("connector_name", "").lower()
+    is_perp = "_perpetual" in connector or "_margin" in connector
+    total_steps = 6 if is_perp else 4
+    current_step = 5 if is_perp else 3
+
+    back_callback = "bots:af_back_to_position_mode" if is_perp else "bots:af_back_to_pair"
+
+    # Fetch balance
+    balance_text = ""
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        balances = await get_cex_balances(context.user_data, client, connector)
+        quote = pair.split("-")[1] if "-" in pair else "USDT"
+        available = balances.get(quote, {}).get("available", 0)
+        if available:
+            balance_text = f"\n\n💰 Available `{escape_markdown_v2(quote)}`: `{available:,.2f}`"
+    except Exception:
+        pass
+
+    keyboard = [
+        [
+            InlineKeyboardButton("$100", callback_data="bots:af_amount:100"),
+            InlineKeyboardButton("$500", callback_data="bots:af_amount:500"),
+            InlineKeyboardButton("$1000", callback_data="bots:af_amount:1000"),
+        ],
+        [
+            InlineKeyboardButton("$2000", callback_data="bots:af_amount:2000"),
+            InlineKeyboardButton("$5000", callback_data="bots:af_amount:5000"),
+            InlineKeyboardButton("$10000", callback_data="bots:af_amount:10000"),
+        ],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data=back_callback),
+            InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+        ],
+    ]
+
+    header_info = f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
+    if is_perp:
+        header_info += f" \\| ⚡ `{leverage}x` \\| 🎯 `{escape_markdown_v2(pos_mode)}`"
+
+    message_text = (
+        rf"*🦅 Anti\-Folla V1 \- Step {current_step}/{total_steps}*" + "\n\n"
+        + header_info + balance_text + "\n\n"
+        r"💰 *Total Amount \(USDT\)*" + "\n"
+        r"_Select or type an amount:_"
+    )
+
+    # ========== SALVA MESSAGE_ID ==========
+    target_chat_id = chat_id
+    if query and query.message:
+        target_chat_id = query.message.chat_id
+        try:
+            await query.message.edit_text(
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["af_wizard_message_id"] = query.message.message_id
+            return
+        except Exception:
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+    new_msg = await context.bot.send_message(
+        chat_id=target_chat_id,
+        text=message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data["af_wizard_message_id"] = new_msg.message_id
+    context.user_data["af_wizard_chat_id"] = target_chat_id
+
+async def handle_af_wizard_amount(update, context, amount: float) -> None:
+    query = update.callback_query
+    config = get_controller_config(context)
+    config["total_amount_quote"] = amount
+    set_controller_config(context, config)
+    pair = config.get("trading_pair", "")
+    await query.message.edit_text(
+        r"*🦅 Anti\-Folla V1 \- New Config*" + "\n\n"
+        f"⏳ *Loading chart for* `{escape_markdown_v2(pair)}`\\.\\.\\.  " + "\n\n"
+        r"_Fetching market data\.\.\._",
+        parse_mode="MarkdownV2",
+    )
+    context.user_data["af_wizard_step"] = "final"
+    await _af_show_final_step(update, context)
+
+async def _af_show_final_step(update, context, interval: str = None) -> None:
+    """Anti-Folla Final Step: Chart + Config Summary + Analysis"""
+    import asyncio
+
+    query = update.callback_query
+    msg = query.message if query else update.message
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+
+    connector = config.get("connector_name", "")
+    pair = config.get("trading_pair", "")
+    total_amount = config.get("total_amount_quote", 1000)
+    leverage = config.get("leverage", 1)
+    vwap_period = config.get("vwap_period", 20)
+    donchian_period = config.get("donchian_period", 20)
+    score_buy = config.get("score_buy_threshold", 50.0)
+    score_sell = config.get("score_sell_threshold", -50.0)
+
+    if interval is None:
+        interval = context.user_data.get("af_chart_interval", config.get("interval", "3m"))
+    context.user_data["af_chart_interval"] = interval
+    config["interval"] = interval
+    set_controller_config(context, config)
+
+    current_price = context.user_data.get("af_current_price")
+    candles = context.user_data.get("af_candles")
+
+    try:
+        cached_interval = context.user_data.get("af_candles_interval", interval)
+        if not current_price or interval != cached_interval:
+            # Usa MarkdownV2 invece di HTML
+            try:
+                await msg.edit_text(
+                    r"*🦅 Anti\-Folla V1 \- New Config*" + "\n\n"
+                    f"⏳ Fetching market data for `{escape_markdown_v2(pair)}`\\.\\.\\.",
+                    parse_mode="MarkdownV2",
+                )
+            except Exception:
+                pass
+
+            client, _ = await get_bots_client(chat_id, context.user_data)
+
+            # ========== PULISCI IL CONNETTORE PER LE CANDELE ==========
+            candles_connector = connector.replace("_perpetual", "").replace("_margin", "").replace("_spot", "")
+            if not candles_connector or len(candles_connector) < 3:
+                candles_connector = "kucoin"
+            logger.info(f"AF: Trading on {connector}, using candles from {candles_connector}")
+
+            # Fetch current price
+            try:
+                current_price = await asyncio.wait_for(
+                    fetch_current_price(client, connector, pair),
+                    timeout=10.0
+                )
+                if current_price:
+                    context.user_data["af_current_price"] = current_price
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"Could not fetch price for {pair}: {e}")
+                current_price = None
+
+            # Fetch candles
+            if current_price:
+                pair_variants = [pair, pair.replace("-", "/")]
+                candles = None
+
+                for try_pair in pair_variants:
+                    try:
+                        logger.info(f"AF: Trying candles from {candles_connector} for {try_pair}")
+                        candles = await asyncio.wait_for(
+                            fetch_candles(client, candles_connector, try_pair, interval=interval, max_records=420),
+                            timeout=15.0
+                        )
+                        if candles:
+                            candles_data = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+                            if candles_data and len(candles_data) > 0:
+                                logger.info(f"AF: Got {len(candles_data)} candles from {candles_connector} for {try_pair}")
+                                context.user_data["af_candles"] = {"data": candles_data}
+                                context.user_data["af_candles_interval"] = interval
+                                break
+                            else:
+                                candles = None
+                        else:
+                            candles = None
+                    except asyncio.TimeoutError:
+                        logger.warning(f"AF: Timeout fetching candles from {candles_connector} for {try_pair}")
+                    except Exception as e:
+                        logger.warning(f"AF: Error fetching candles from {candles_connector} for {try_pair}: {e}")
+
+        if not current_price:
+            keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]]
+            await msg.edit_text(
+                r"*❌ Error*" + "\n\n"
+                f"Could not fetch price for `{escape_markdown_v2(pair)}`\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        candles_list = []
+        if candles:
+            candles_list = candles.get("data", []) if isinstance(candles, dict) else (candles or [])
+            if candles_list:
+                last_close = candles_list[-1].get("close") or candles_list[-1].get("c")
+                if last_close:
+                    current_price = float(last_close)
+                    context.user_data["af_current_price"] = current_price
+
+        if not config.get("id"):
+            existing_configs = context.user_data.get("controller_configs_list", [])
+            from .controllers.anti_folla_v1.config import generate_id as af_generate_id
+            config["id"] = af_generate_id(config, existing_configs)
+
+        from .controllers.anti_folla_v1.analysis import analyze_candles_for_anti_folla, format_anti_folla_analysis
+        analysis = analyze_candles_for_anti_folla(
+            candles_list, vwap_period=vwap_period, donchian_period=donchian_period,
+            score_buy_threshold=score_buy, score_sell_threshold=score_sell,
+        )
+        set_controller_config(context, config)
+
+        position_mode = config.get("position_mode", "HEDGE")
+        stop_loss = config.get("stop_loss", 0.05)
+        take_profit = config.get("take_profit", 0.03)
+        max_exec = config.get("max_executors_per_side", 1)
+        cooldown = config.get("cooldown_time", 60)
+        ts = config.get("trailing_stop", {}) or {}
+        ts_act = ts.get("activation_price", 0.015) if isinstance(ts, dict) else 0.015
+        ts_delta = ts.get("trailing_delta", 0.005) if isinstance(ts, dict) else 0.005
+        is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+        final_step = 6 if is_perp else 4
+
+        context.user_data["bots_state"] = "af_wizard_input"
+        context.user_data["af_wizard_step"] = "final"
+
+        interval_options = ["1m", "3m", "5m", "15m", "1h"]
+        interval_row = [
+            InlineKeyboardButton(
+                f"✓ {opt}" if opt == interval else opt,
+                callback_data=f"bots:af_interval:{opt}"
+            )
+            for opt in interval_options
+        ]
+
+        context.user_data["af_analysis"] = analysis
+
+        strategy_row = [
+            InlineKeyboardButton("🔥 Aggr", callback_data="bots:af_set_strat:aggressive"),
+            InlineKeyboardButton("⚖️ Balanced", callback_data="bots:af_set_strat:balanced"),
+            InlineKeyboardButton("🛡️ Cons", callback_data="bots:af_set_strat:conservative"),
+        ]
+
+        keyboard = [
+            interval_row,
+            strategy_row,
+            [InlineKeyboardButton("💾 Save Config", callback_data="bots:af_save")],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_amount"),
+                InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+            ],
+        ]
+
+        # ========== COSTRUISCI CONFIG_TEXT IN MARKDOWNV2 (COME MACD BB) ==========
+        escaped_pair = escape_markdown_v2(pair)
+        escaped_connector = escape_markdown_v2(connector)
+        escaped_position_mode = escape_markdown_v2(position_mode)
+        escaped_interval = escape_markdown_v2(interval)
+        escaped_title = escape_markdown_v2(f"🦅 Anti-Folla V1 - Step {final_step}/{final_step} (Final)")
+
+        # Escapa anche il pipe
+        price_line = f"Price: `{current_price:,.6g}` | VWAP: `{vwap_period}` | DC: `{donchian_period}` | Interval: `{escaped_interval}`"
+        escaped_price_line = escape_markdown_v2(price_line)
+
+        config_text = (
+            f"*{escaped_title}*\n\n"
+            f"*{escaped_pair}*\n"
+            f"{escaped_price_line}\n\n"
+            f"`connector_name={escaped_connector}`\n"
+            f"`trading_pair={escaped_pair}`\n"
+            f"`total_amount_quote={total_amount:.0f}`\n"
+            f"`leverage={leverage}`\n"
+            f"`position_mode={escaped_position_mode}`\n"
+            f"`max_executors_per_side={max_exec}`\n"
+            f"`cooldown_time={cooldown}`\n"
+            f"`stop_loss={stop_loss}`\n"
+            f"`take_profit={take_profit}`\n"
+            f"`trailing_stop_activation={ts_act}`\n"
+            f"`trailing_stop_delta={ts_delta}`\n"
+            f"`interval={escaped_interval}`\n"
+            f"`is_perpetual={str(is_perp).lower()}`\n"
+            f"`vwap_period={vwap_period}`\n"
+            f"`donchian_period={donchian_period}`\n"
+            f"`score_buy_threshold={score_buy}`\n"
+            f"`score_sell_threshold={score_sell}`\n\n"
+            r"_Edit: `field=value`_"
+        )
+
+        # Analysis con tripli backtick (non serve escape qui)
+        analysis_text = format_anti_folla_analysis(analysis)
+        config_text += "\n\n```\n" + analysis_text + "\n```"
+
+        # ========== SE NON CI SONO CANDELE, MOSTRA SOLO TESTO ==========
+        if not candles_list:
+            try:
+                await msg.edit_text(
+                    text=config_text,
+                    parse_mode="MarkdownV2",  # <-- CAMBIATO
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["af_wizard_message_id"] = msg.message_id
+            except Exception:
+                new_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=config_text,
+                    parse_mode="MarkdownV2",  # <-- CAMBIATO
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["af_wizard_message_id"] = new_msg.message_id
+            return
+
+        # ========== TENTA DI GENERARE IL GRAFICO ==========
+        chart_bytes = None
+        if candles_list:
+            try:
+                from .controllers.anti_folla_v1.chart import generate_chart as af_chart
+                chart_bytes = af_chart(config, candles_list, current_price)
+            except Exception as chart_err:
+                logger.warning(f"AF chart generation failed: {chart_err}")
+                chart_bytes = None
+
+        stored_msg_id = context.user_data.get("af_wizard_message_id")
+        stored_chat_id = context.user_data.get("af_wizard_chat_id", chat_id)
+
+        if chart_bytes is not None:
+            chart_bytes.seek(0)
+            if stored_msg_id:
+                try:
+                    await context.bot.delete_message(chat_id=stored_chat_id, message_id=stored_msg_id)
+                except Exception:
+                    pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            new_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=chart_bytes,
+                caption=config_text,
+                parse_mode="MarkdownV2",  # <-- CAMBIATO
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            context.user_data["af_wizard_message_id"] = new_msg.message_id
+            context.user_data["af_wizard_chat_id"] = chat_id
+        else:
+            # No chart: edit/send as plain text message
+            try:
+                if stored_msg_id:
+                    await context.bot.edit_message_text(
+                        chat_id=stored_chat_id,
+                        message_id=stored_msg_id,
+                        text=config_text,
+                        parse_mode="MarkdownV2",  # <-- CAMBIATO
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    raise Exception("no stored_msg_id")
+            except Exception:
+                new_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=config_text,
+                    parse_mode="MarkdownV2",  # <-- CAMBIATO
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+                context.user_data["af_wizard_message_id"] = new_msg.message_id
+                context.user_data["af_wizard_chat_id"] = chat_id
+
+    except Exception as e:
+        logger.error(f"AF final step error: {e}", exc_info=True)
+        keyboard = [[InlineKeyboardButton("Back", callback_data="bots:main_menu")]]
+        try:
+            await msg.edit_text(
+                format_error_message(f"Error: {str(e)}"),
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception:
+            pass
+
+async def handle_af_interval_change(update, context, interval: str) -> None:
+    context.user_data["af_candles"] = None
+    context.user_data["af_candles_interval"] = None
+    await _af_show_final_step(update, context, interval=interval)
+
+async def handle_af_set_strategy(update, context, strat_key: str) -> None:
+    """Handle Anti-Folla strategy selection from final step buttons."""
+    query = update.callback_query
+    config = get_controller_config(context)
+
+    analysis = context.user_data.get("af_analysis", {})
+
+    from .controllers.anti_folla_v1.analysis import get_af_strategy_suggestions
+    strats = get_af_strategy_suggestions(analysis)  # ← senza NATR!
+
+    if strat_key in strats:
+        selected = strats[strat_key]
+
+        # Aggiorna i parametri specifici di Anti-Folla
+        config["score_buy_threshold"] = selected.get("score_buy_threshold", 50.0)
+        config["score_sell_threshold"] = selected.get("score_sell_threshold", -50.0)
+
+        # Aggiorna i pesi
+        config["weight_vwap"] = selected.get("weight_vwap", 15)
+        config["weight_donchian"] = selected.get("weight_donchian", 10)
+        config["weight_obv"] = selected.get("weight_obv", 15)
+        config["weight_obi"] = selected.get("weight_obi", 20)
+        config["weight_volume_spike"] = selected.get("weight_volume_spike", 10)
+        config["weight_trade_flow"] = selected.get("weight_trade_flow", 15)
+        config["weight_funding"] = selected.get("weight_funding", 15)
+
+        # TP/SL
+        config["take_profit"] = selected.get("take_profit", 0.03)
+        config["stop_loss"] = selected.get("stop_loss", 0.05)
+
+        # Trailing stop
+        if "trailing_stop_activation" in selected:
+            if not isinstance(config.get("trailing_stop"), dict):
+                config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+            config["trailing_stop"]["activation_price"] = selected["trailing_stop_activation"]
+            config["trailing_stop"]["trailing_delta"] = selected["trailing_stop_delta"]
+
+        set_controller_config(context, config)
+
+        await query.answer(f"✅ {selected['label']} applicata")
+
+        return await _af_show_final_step(update, context)
+
+async def handle_af_save(update, context) -> None:
+    """Save Anti-Folla V1 configuration"""
+    query = update.callback_query
+    config = get_controller_config(context)
+    config.pop("candles_config", None)
+    config.pop("manual_kill_switch", None)
+    # ========== FORZA IL CONNETTORE SPOT PER LE CANDELE ==========
+    connector = config.get("connector_name", "")
+    candles_connector = connector.replace("_perpetual", "").replace("_margin", "").replace("_spot", "")
+    if not candles_connector or len(candles_connector) < 3:
+        candles_connector = "kucoin"
+
+    # Sovrascrivi candles_connector e candles_trading_pair
+    config["candles_connector"] = candles_connector
+    config["candles_trading_pair"] = config.get("trading_pair", "")
+    # =============================================================
+
+    config_id = config.get("id", "")
+    chat_id = query.message.chat_id
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text="Saving `" + escape_markdown_v2(config_id) + "`\\.\\.\\.  ",
+        parse_mode="MarkdownV2",
+    )
+    try:
+        client, _ = await get_bots_client(chat_id, context.user_data)
+        await client.controllers.create_or_update_controller_config(config_id, config)
+        for key in list(context.user_data.keys()):
+            if key.endswith("_wizard_message_id") or key.endswith("_wizard_chat_id"):
+                context.user_data.pop(key, None)
+            if key.endswith("_wizard_step"):
+                context.user_data.pop(key, None)
+        context.user_data.pop("bots_state", None)
+        keyboard = [
+            [InlineKeyboardButton("Create Another", callback_data="bots:new_anti_folla_v1")],
+            [InlineKeyboardButton("Back to Configs", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(
+            "*Config Saved\\!*\n\nController `" + escape_markdown_v2(config_id) + "` saved successfully\\.",
+            parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    except Exception as e:
+        logger.error(f"AF save error: {e}", exc_info=True)
+        keyboard = [
+            [InlineKeyboardButton("Try Again", callback_data="bots:af_save")],
+            [InlineKeyboardButton("Back", callback_data="bots:controller_configs")],
+        ]
+        await status_msg.edit_text(format_error_message(f"Failed to save: {str(e)}"),
+                                   parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# Back handlers
+async def handle_af_back_to_connector(update, context) -> None:
+    context.user_data["af_wizard_step"] = "connector_name"
+    await _af_show_connector_step(update, context)
+
+async def handle_af_back_to_pair(update, context) -> None:
+    context.user_data["af_wizard_step"] = "trading_pair"
+    await _af_show_pair_step(update, context)
+
+async def handle_af_back_to_leverage(update, context) -> None:
+    config = get_controller_config(context)
+    connector = config.get("connector_name", "")
+    is_perp = "_perpetual" in connector or "_margin" in connector
+    if is_perp:
+        context.user_data["af_wizard_step"] = "leverage"
+        await _af_show_leverage_step(update, context)
+    else:
+        await handle_af_back_to_pair(update, context)
+
+async def handle_af_back_to_amount(update, context) -> None:
+    context.user_data["af_wizard_step"] = "total_amount_quote"
+    context.user_data.pop("af_current_price", None)
+    context.user_data.pop("af_candles", None)
+    await _af_show_amount_step(update, context)
+
+async def handle_af_back_to_position_mode(update, context) -> None:
+    """Go back to position mode step"""
+    context.user_data["af_wizard_step"] = "position_mode"
+    await _af_show_position_mode_step(update, context)
+
+async def handle_af_pair_select(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, trading_pair: str
+) -> None:
+    """Handle selection of a suggested trading pair in Anti-Folla wizard"""
+    config = get_controller_config(context)
+    chat_id = update.effective_chat.id
+
+    for key in list(context.user_data.keys()):
+        if key.endswith("_wizard_message_id") or key.endswith("_wizard_chat_id"):
+            context.user_data.pop(key, None)
+        if key.endswith("_wizard_step"):
+            context.user_data.pop(key, None)
+
+    config["trading_pair"] = trading_pair
+    config["candles_trading_pair"] = trading_pair
+    set_controller_config(context, config)
+
+    connector = config.get("connector_name", "")
+    is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+
+    if is_perp:
+        context.user_data["af_wizard_step"] = "leverage"
+        await _af_show_leverage_step(update, context)
+    else:
+        config["leverage"] = 1
+        config["position_mode"] = "ONEWAY"
+        set_controller_config(context, config)
+        context.user_data["af_wizard_step"] = "total_amount_quote"
+        await _af_show_amount_step(update, context)
+
+async def process_af_wizard_input(update, context, user_input: str) -> None:
+    """Process text input during Anti-Folla V1 wizard"""
+    step = context.user_data.get("af_wizard_step")
+    chat_id = update.effective_chat.id
+    config = get_controller_config(context)
+    message_id = context.user_data.get("af_wizard_message_id")
+    wizard_chat_id = context.user_data.get("af_wizard_chat_id", chat_id)
+    try:
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+
+        if step == "trading_pair":
+            pair = user_input.upper().strip().replace("/", "-").replace("_", "-")
+            connector = config.get("connector_name", "")
+
+            # ========== VALIDAZIONE BASE: DEVE CONTENERE IL TRATTINO ==========
+            if "-" not in pair:
+                message_id = context.user_data.get("af_wizard_message_id")
+                wizard_chat_id = context.user_data.get("af_wizard_chat_id", chat_id)
+
+                keyboard = [
+                    [InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_connector")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")],
+                ]
+
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*🦅 Anti\-Folla V1 \- Step 2*" + "\n\n"
+                    + context_text
+                    + r"⚠️ *Invalid format\. Use BASE\-QUOTE \(e\.g\. BTC\-USDT\)*" + "\n\n"
+                    r"Type the pair again:"
+                )
+
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["af_wizard_message_id"] = msg.message_id
+                return
+
+            # ========== 2. VALIDAZIONE SULL'EXCHANGE (CON SUGGERIMENTI) ==========
+            client, _ = await get_bots_client(chat_id, context.user_data)
+            is_valid, error_msg, suggestions, correct_pair = (
+                await validate_trading_pair(context.user_data, client, connector, pair)
+            )
+
+            if not is_valid:
+                message_id = context.user_data.get("af_wizard_message_id")
+                wizard_chat_id = context.user_data.get("af_wizard_chat_id", chat_id)
+
+                keyboard = []
+                for sugg in suggestions[:4]:
+                    keyboard.append([InlineKeyboardButton(sugg, callback_data=f"bots:af_pair_select:{sugg}")])
+                keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_connector")])
+                keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu")])
+
+                context_text = f"🏦 `{escape_markdown_v2(connector)}`\n\n"
+
+                err_text = (
+                    r"*🦅 Anti\-Folla V1 \- Step 2*" + "\n\n"
+                    + context_text
+                    + f"❌ `{escape_markdown_v2(pair)}` not found on `{escape_markdown_v2(connector)}`\\.\n\n"
+                    r"*Did you mean?*"
+                )
+
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    msg = await context.bot.send_message(
+                        chat_id=chat_id, text=err_text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["af_wizard_message_id"] = msg.message_id
+                return
+
+            if correct_pair:
+                pair = correct_pair
+
+            config["trading_pair"] = pair
+            config["candles_trading_pair"] = pair
+            for key in ["af_current_price", "af_candles", "af_candles_interval"]:
+                context.user_data.pop(key, None)
+            set_controller_config(context, config)
+
+            connector = config.get("connector_name", "")
+            is_perp = connector.endswith("_perpetual") or "_margin" in connector.lower()
+            message_id = context.user_data.get("af_wizard_message_id")
+            wizard_chat_id = context.user_data.get("af_wizard_chat_id", chat_id)
+
+            if is_perp:
+                context.user_data["af_wizard_step"] = "leverage"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("1x", callback_data="bots:af_leverage:1"),
+                        InlineKeyboardButton("5x", callback_data="bots:af_leverage:5"),
+                        InlineKeyboardButton("10x", callback_data="bots:af_leverage:10"),
+                    ],
+                    [
+                        InlineKeyboardButton("20x", callback_data="bots:af_leverage:20"),
+                        InlineKeyboardButton("50x", callback_data="bots:af_leverage:50"),
+                        InlineKeyboardButton("75x", callback_data="bots:af_leverage:75"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+                text = (
+                    r"*🦅 Anti\-Folla V1 \- Step 3/6*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"⚡ *Select Leverage*" + "\n"
+                    r"_Or type a value \(e\.g\. 20\)_"
+                )
+            else:
+                config["leverage"] = 1
+                set_controller_config(context, config)
+                context.user_data["af_wizard_step"] = "total_amount_quote"
+                context.user_data["bots_state"] = "af_wizard_input"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("$100", callback_data="bots:af_amount:100"),
+                        InlineKeyboardButton("$500", callback_data="bots:af_amount:500"),
+                        InlineKeyboardButton("$1000", callback_data="bots:af_amount:1000"),
+                    ],
+                    [
+                        InlineKeyboardButton("$2000", callback_data="bots:af_amount:2000"),
+                        InlineKeyboardButton("$5000", callback_data="bots:af_amount:5000"),
+                        InlineKeyboardButton("$10000", callback_data="bots:af_amount:10000"),
+                    ],
+                    [
+                        InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_pair"),
+                        InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                    ],
+                ]
+                text = (
+                    r"*🦅 Anti\-Folla V1 \- Step 3/4*" + "\n\n"
+                    f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`" + "\n\n"
+                    r"💰 *Total Amount \(USDT\)*" + "\n"
+                    r"_Select or type an amount:_"
+                )
+
+            try:
+                if message_id:
+                    await context.bot.edit_message_text(
+                        chat_id=wizard_chat_id, message_id=message_id,
+                        text=text, parse_mode="MarkdownV2",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                    context.user_data["af_wizard_message_id"] = message_id
+            except Exception:
+                pass
+            return
+
+        elif step == "leverage":
+            val = int(float(user_input.strip().lower().replace("x", "")))
+            config["leverage"] = val
+            set_controller_config(context, config)
+            context.user_data["af_wizard_step"] = "total_amount_quote"
+            message_id = context.user_data.get("af_wizard_message_id")
+            wizard_chat_id = context.user_data.get("af_wizard_chat_id", chat_id)
+            connector = config.get("connector_name", "")
+            pair = config.get("trading_pair", "")
+            keyboard = [
+                [
+                    InlineKeyboardButton("$100", callback_data="bots:af_amount:100"),
+                    InlineKeyboardButton("$500", callback_data="bots:af_amount:500"),
+                    InlineKeyboardButton("$1000", callback_data="bots:af_amount:1000"),
+                ],
+                [
+                    InlineKeyboardButton("$2000", callback_data="bots:af_amount:2000"),
+                    InlineKeyboardButton("$5000", callback_data="bots:af_amount:5000"),
+                    InlineKeyboardButton("$10000", callback_data="bots:af_amount:10000"),
+                ],
+                [
+                    InlineKeyboardButton("⬅️ Back", callback_data="bots:af_back_to_leverage"),
+                    InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
+                ],
+            ]
+            text = (
+                r"*🦅 Anti\-Folla V1 \- Step 4/6*" + "\n\n"
+                f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}` \\| ⚡ `{val}x`" + "\n\n"
+                r"💰 *Total Amount \(USDT\)*" + "\n"
+                r"_Select or type an amount:_"
+            )
+            context.user_data["bots_state"] = "af_wizard_input"
+            if message_id:
+                await context.bot.edit_message_text(
+                    chat_id=wizard_chat_id, message_id=message_id,
+                    text=text, parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+        elif step == "total_amount_quote":
+            amount = float(user_input.strip().replace("$", "").replace(",", ""))
+            config["total_amount_quote"] = amount
+            set_controller_config(context, config)
+            context.user_data["af_wizard_step"] = "final"
+            wizard_chat_id = context.user_data.get("af_wizard_chat_id", chat_id)
+            pair = config.get("trading_pair", "")
+            tmp = await context.bot.send_message(
+                chat_id=wizard_chat_id,
+                text=r"*🦅 Anti\-Folla V1*" + "\n\n"
+                     f"⏳ Loading chart for `{escape_markdown_v2(pair)}`\\.\\.\\.  ",
+                parse_mode="MarkdownV2",
+            )
+            context.user_data["af_wizard_message_id"] = tmp.message_id
+            await _af_show_final_step(update, context)
+
+        elif step == "final":
+            # Handle field=value edits
+            if "=" in user_input:
+                for line in user_input.strip().split("\n"):
+                    line = line.strip()
+                    if not line or "=" not in line:
+                        continue
+                    field, value = line.split("=", 1)
+                    field = field.strip().lower()
+                    value = value.strip()
+                    try:
+                        if field in ("total_amount_quote", "stop_loss", "take_profit",
+                                     "volume_spike_threshold", "obi_depth_percentage",
+                                     "obi_buy_threshold", "obi_sell_threshold",
+                                     "score_buy_threshold", "score_sell_threshold",
+                                     "weight_vwap", "weight_donchian", "weight_obv",
+                                     "weight_obi", "weight_volume_spike", "weight_trade_flow",
+                                     "weight_funding", "trailing_stop_activation", "trailing_stop_delta"):
+                            val = float(value)
+                            if field == "trailing_stop_activation":
+                                if not isinstance(config.get("trailing_stop"), dict):
+                                    config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+                                config["trailing_stop"]["activation_price"] = val
+                            elif field == "trailing_stop_delta":
+                                if not isinstance(config.get("trailing_stop"), dict):
+                                    config["trailing_stop"] = {"activation_price": 0.015, "trailing_delta": 0.005}
+                                config["trailing_stop"]["trailing_delta"] = val
+                            else:
+                                config[field] = val
+                        elif field in ("leverage", "max_executors_per_side", "cooldown_time",
+                                       "take_profit_order_type", "vwap_period", "donchian_period",
+                                       "atr_period", "obv_divergence_lookback"):
+                            config[field] = int(float(value))
+                        elif field in ("is_perpetual", "enable_order_book_imbalance"):
+                            config[field] = value.lower() in ("true", "yes", "1")
+                        elif field == "interval":
+                            config["interval"] = value
+                            context.user_data.pop("af_candles", None)
+                            context.user_data["af_chart_interval"] = value
+                        else:
+                            config[field] = value
+                    except Exception:
+                        pass
+                set_controller_config(context, config)
+
+    except Exception as e:
+        logger.error(f"AF wizard input error: {e}", exc_info=True)

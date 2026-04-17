@@ -29,120 +29,252 @@ from .archived import (
     show_bot_chart,
     show_timeline_chart,
 )
-from .controller_handlers import (  # Unified configs menu with multi-select; Edit loop; Progressive deploy flow; Streamlined deploy flow; Progressive Grid Strike wizard; PMM Mister wizard; Custom config upload
-    handle_cfg_branch,
+
+from .controller_handlers import (
+    # ── Shared / Menu ─────────────────────────────────────────────────────────
+    show_controller_configs_menu,
+    show_configs_list,
+    show_configs_by_type,
+    show_type_selector,
+    show_cfg_edit_form,
+    show_config_form,
+    handle_cfg_toggle,
+    handle_cfg_page,
     handle_cfg_clear_selection,
+    handle_cfg_deploy,
     handle_cfg_delete_confirm,
     handle_cfg_delete_execute,
-    handle_cfg_deploy,
-    handle_cfg_edit_cancel,
-    handle_cfg_edit_field,
     handle_cfg_edit_loop,
-    handle_cfg_edit_next,
+    handle_cfg_edit_field,
     handle_cfg_edit_prev,
+    handle_cfg_edit_next,
     handle_cfg_edit_save,
     handle_cfg_edit_save_all,
-    handle_cfg_page,
-    handle_cfg_toggle,
-    handle_clear_all,
-    handle_config_file_upload,
+    handle_cfg_edit_cancel,
+    handle_cfg_branch,
     handle_configs_page,
+    handle_generic_save,
+    handle_edit_config,
+    handle_save_config,
+    handle_set_field,
+    handle_select_connector,
+    handle_toggle_side,
+    handle_toggle_position_mode,
     handle_cycle_order_type,
+    process_cfg_edit_input,
+    process_field_input,
+
+    # ── Upload ─────────────────────────────────────────────────────────────────
+    show_upload_config_prompt,
+    handle_upload_cancel,
+    handle_config_file_upload,
+
+    # ── Deploy ────────────────────────────────────────────────────────────────
+    show_deploy_menu,
+    show_deploy_form,
+    show_deploy_configure,
+    show_deploy_config_step,
+    handle_toggle_deploy_selection,
+    handle_select_all,
+    handle_clear_all,
+    handle_execute_deploy,
     handle_deploy_confirm,
     handle_deploy_custom_name,
-    handle_deploy_edit_field,
-    handle_deploy_prev_field,
-    handle_deploy_progressive_input,
     handle_deploy_set_field,
-    handle_deploy_skip_field,
     handle_deploy_use_default,
-    handle_edit_config,
-    handle_execute_deploy,
-    handle_gs_accept_prices,
-    handle_gs_back_to_amount,
-    handle_gs_back_to_connector,
-    handle_gs_back_to_leverage,
-    handle_gs_back_to_pair,
-    handle_gs_back_to_prices,
-    handle_gs_back_to_side,
-    handle_gs_edit_act,
-    handle_gs_edit_batch,
-    handle_gs_edit_id,
-    handle_gs_edit_keep,
-    handle_gs_edit_max_orders,
-    handle_gs_edit_min_amt,
-    handle_gs_edit_price,
-    handle_gs_edit_spread,
-    handle_gs_edit_tp,
-    handle_gs_interval_change,
-    handle_gs_pair_select,
-    handle_gs_review_back,
-    handle_gs_save,
-    handle_gs_wizard_amount,
-    handle_gs_wizard_connector,
-    handle_gs_wizard_leverage,
-    handle_gs_wizard_pair,
-    handle_gs_wizard_side,
-    handle_gs_wizard_take_profit,
-    handle_pmm_adv_setting,
-    handle_pmm_back,
-    handle_pmm_edit_advanced,
-    handle_pmm_edit_field,
-    handle_pmm_edit_id,
-    handle_pmm_pair_select,
-    handle_pmm_review_back,
-    handle_pmm_save,
-    handle_pmm_set_field,
-    handle_pmm_wizard_allocation,
-    handle_pmm_wizard_amount,
-    handle_pmm_wizard_connector,
-    handle_pmm_wizard_leverage,
-    handle_pmm_wizard_pair,
-    handle_pmm_wizard_spreads,
-    handle_pmm_wizard_tp,
-    handle_pv1_back,
-    handle_pv1_pair_select,
-    handle_pv1_review_back,
-    handle_pv1_save,
-    handle_pv1_wizard_amount,
-    handle_pv1_wizard_connector,
-    handle_pv1_wizard_pair,
-    handle_pv1_wizard_spreads,
-    process_pv1_wizard_input,
-    show_new_pmm_v1_form,
-    handle_save_config,
-    handle_select_all,
-    handle_select_connector,
+    handle_deploy_skip_field,
+    handle_deploy_prev_field,
+    handle_deploy_edit_field,
+    handle_deploy_progressive_input,
     handle_select_credentials,
     handle_select_image,
     handle_select_instance_name,
-    handle_set_field,
-    handle_toggle_deploy_selection,
-    handle_toggle_position_mode,
-    handle_toggle_side,
-    handle_upload_cancel,
-    process_cfg_edit_input,
-    process_deploy_custom_name_input,
     process_deploy_field_input,
-    process_field_input,
-    process_gs_wizard_input,
+    process_deploy_custom_name_input,
     process_instance_name_input,
-    process_pmm_wizard_input,
-    show_cfg_edit_form,
-    show_config_form,
-    show_configs_by_type,
-    show_configs_list,
-    show_controller_configs_menu,
-    show_deploy_config_step,
-    show_deploy_configure,
-    show_deploy_form,
-    show_deploy_menu,
-    show_new_grid_strike_form,
-    show_new_pmm_mister_form,
-    show_type_selector,
-    show_upload_config_prompt,
-)
 
+    # ── Grid Strike ───────────────────────────────────────────────────────────
+    show_new_grid_strike_form,
+    handle_gs_wizard_connector,
+    handle_gs_wizard_pair,
+    handle_gs_wizard_side,
+    handle_gs_wizard_leverage,
+    handle_gs_wizard_amount,
+    handle_gs_wizard_take_profit,
+    handle_gs_pair_select,
+    handle_gs_accept_prices,
+    handle_gs_interval_change,
+    handle_gs_save,
+    handle_gs_review_back,
+    handle_gs_back_to_connector,
+    handle_gs_back_to_pair,
+    handle_gs_back_to_side,
+    handle_gs_back_to_leverage,
+    handle_gs_back_to_amount,
+    handle_gs_back_to_prices,
+    handle_gs_edit_id,
+    handle_gs_edit_keep,
+    handle_gs_edit_tp,
+    handle_gs_edit_act,
+    handle_gs_edit_max_orders,
+    handle_gs_edit_batch,
+    handle_gs_edit_min_amt,
+    handle_gs_edit_spread,
+    handle_gs_edit_price,
+    process_gs_wizard_input,
+
+    # ── Multi Grid Strike ─────────────────────────────────────────────────────
+    show_new_multi_grid_strike_form,
+    handle_mgs_wizard_connector,
+    handle_mgs_wizard_pair,
+    handle_mgs_wizard_leverage,
+    handle_mgs_wizard_amount,
+    handle_mgs_interval_change,
+    handle_mgs_save,
+    handle_mgs_back_to_connector,
+    handle_mgs_back_to_pair,
+    handle_mgs_back_to_leverage,
+    handle_mgs_back_to_amount,
+    handle_mgs_pair_select,
+    handle_mgs_grid_type,           # ← AGGIUNGI QUESTA
+    handle_mgs_num_grids,            # ← AGGIUNGI QUESTA
+    handle_mgs_position_mode,           # ← AGGIUNGI QUESTA
+    handle_mgs_back_to_position_mode,
+    handle_mgs_back_to_grid_type,    # ← AGGIUNGI QUESTA
+    handle_mgs_back_to_num_grids,    # ← AGGIUNGI QUESTA
+    process_mgs_wizard_input,
+
+    # ── DMan V3 ───────────────────────────────────────────────────────────────
+    show_new_dman_v3_form,
+    handle_dman_wizard_connector,
+    handle_dman_wizard_pair,
+    handle_dman_wizard_leverage,
+    handle_dman_wizard_amount,
+    handle_dman_position_mode,
+    handle_dman_back_to_position_mode,
+    handle_dman_interval_change,
+    handle_dman_set_strategy,
+    handle_dman_save,
+    handle_dman_pair_select,
+    handle_dman_back_to_connector,
+    handle_dman_back_to_pair,
+    handle_dman_back_to_leverage,
+    handle_dman_back_to_amount,
+    process_dman_wizard_input,
+
+    # ── PMM Mister ────────────────────────────────────────────────────────────
+    show_new_pmm_mister_form,
+    handle_pmm_wizard_connector,
+    handle_pmm_wizard_pair,
+    handle_pmm_wizard_leverage,
+    handle_pmm_wizard_allocation,
+    handle_pmm_wizard_amount,
+    handle_pmm_wizard_spreads,
+    handle_pmm_wizard_tp,
+    handle_pmm_pair_select,
+    handle_pmm_back,
+    handle_pmm_save,
+    handle_pmm_review_back,
+    handle_pmm_edit_id,
+    handle_pmm_edit_field,
+    handle_pmm_set_field,
+    handle_pmm_edit_advanced,
+    handle_pmm_adv_setting,
+    process_pmm_wizard_input,
+
+    # ── PMM V1 ────────────────────────────────────────────────────────────────
+    show_new_pmm_v1_form,
+    handle_pv1_wizard_connector,
+    handle_pv1_wizard_pair,
+    handle_pv1_wizard_amount,
+    handle_pv1_wizard_spreads,
+    handle_pv1_pair_select,
+    handle_pv1_back,
+    handle_pv1_save,
+    handle_pv1_review_back,
+    process_pv1_wizard_input,
+
+    # ── Arbitrage Controller ──────────────────────────────────────────────────
+    show_new_arbitrage_controller_form,
+    handle_arb_wizard_connector_1,
+    handle_arb_wizard_connector_2,
+    handle_arb_wizard_pair_1,
+    handle_arb_wizard_pair_2,
+    handle_arb_wizard_amount,
+    handle_arb_save,
+    handle_arb_back_to_connector_1,
+    handle_arb_back_to_connector_2,
+    handle_arb_back_to_pair_1,
+    handle_arb_back_to_amount,
+    process_arb_wizard_input,
+    handle_arb_pair_select,
+    handle_arb_proceed_anyway,
+    # ── XEMM Multiple Levels ──────────────────────────────────────────────────
+    show_new_xemm_multiple_levels_form,
+    handle_xemm_maker_connector,
+    handle_xemm_maker_pair,
+    handle_xemm_taker_connector,
+    handle_xemm_taker_pair,
+    handle_xemm_wizard_amount,
+    handle_xemm_save,
+    handle_xemm_back_to_maker_connector,
+    handle_xemm_back_to_taker_connector,
+    handle_xemm_back_to_pair,
+    handle_xemm_back_to_amount,
+    handle_xemm_proceed_anyway,
+    process_xemm_wizard_input,
+
+    # ── MACD-BB Levels ──────────────────────────────────────────────────
+    show_new_macd_bb_v1_form,
+    handle_macdbb_wizard_connector,
+    handle_macdbb_wizard_pair,
+    handle_macdbb_wizard_leverage,
+    handle_macdbb_wizard_amount,
+    handle_macdbb_position_mode,
+    handle_macdbb_back_to_position_mode,
+    handle_macdbb_interval_change,
+    handle_macdbb_save,
+    handle_macdbb_back_to_connector,
+    handle_macdbb_back_to_pair,
+    handle_macdbb_back_to_leverage,
+    handle_macdbb_back_to_amount,
+    process_macdbb_wizard_input,
+    handle_macdbb_pair_select,
+    handle_macdbb_set_strategy,
+    # ── Supertrend ──────────────────────────────────────────────────
+    show_new_supertrend_v1_form,
+    handle_st_wizard_connector,
+    handle_st_wizard_pair,
+    handle_st_wizard_leverage,
+    handle_st_wizard_amount,
+    handle_st_interval_change,
+    handle_st_save,
+    handle_st_back_to_connector,
+    handle_st_back_to_pair,
+    handle_st_back_to_leverage,
+    handle_st_back_to_amount,
+    handle_st_position_mode,
+    handle_st_back_to_position_mode,
+    handle_st_set_strategy, 
+    process_st_wizard_input,
+
+    # ── Anti-Folla ──────────────────────────────────────────────────────────
+    show_new_anti_folla_v1_form,
+    handle_af_wizard_connector,
+    handle_af_wizard_pair,
+    handle_af_wizard_leverage,
+    handle_af_wizard_amount,
+    handle_af_interval_change,
+    handle_af_save,
+    handle_af_back_to_connector,
+    handle_af_back_to_pair,
+    handle_af_back_to_leverage,
+    handle_af_back_to_amount,
+    process_af_wizard_input,
+    handle_af_position_mode,
+    handle_af_back_to_position_mode,
+    handle_af_set_strategy, 
+)
 # Import submodule handlers
 from .menu import (  # Controller chart & edit
     handle_back_to_bot,
@@ -354,11 +486,361 @@ async def bots_callback_handler(
         elif main_action == "noop":
             pass  # Do nothing - used for pagination display button
 
+        elif main_action == "generic_save":
+            if len(action_parts) > 1:
+                ctrl_type = action_parts[1]
+                await handle_generic_save(update, context, ctrl_type)
+
+        elif main_action == "new_multi_grid_strike":
+            await show_new_multi_grid_strike_form(update, context)
+
+        elif main_action == "mgs_connector":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_connector(update, context, action_parts[1])
+
+        elif main_action == "mgs_pair":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_pair(update, context, action_parts[1])
+
+        elif main_action == "mgs_pair_select":
+            if len(action_parts) > 1:
+                await handle_mgs_pair_select(update, context, action_parts[1])
+
+        elif main_action == "mgs_leverage":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_leverage(update, context, int(action_parts[1]))
+
+        elif main_action == "mgs_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_mgs_position_mode(update, context, mode)
+
+        elif main_action == "mgs_back_to_position_mode":
+            await handle_mgs_back_to_position_mode(update, context)
+
+        elif main_action == "mgs_amount":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_amount(update, context, float(action_parts[1]))
+
+        elif main_action == "mgs_interval":
+            if len(action_parts) > 1:
+                await handle_mgs_interval_change(update, context, action_parts[1])
+
+        elif main_action == "mgs_save":
+            await handle_mgs_save(update, context)
+
+        elif main_action == "mgs_back_to_connector":
+            await handle_mgs_back_to_connector(update, context)
+
+        elif main_action == "mgs_back_to_pair":
+            await handle_mgs_back_to_pair(update, context)
+
+        elif main_action == "mgs_back_to_leverage":
+            await handle_mgs_back_to_leverage(update, context)
+
+        elif main_action == "mgs_back_to_amount":
+            await handle_mgs_back_to_amount(update, context)
+
+        elif main_action == "mgs_grid_type":
+            if len(action_parts) > 1:
+                grid_type = action_parts[1]
+                await handle_mgs_grid_type(update, context, grid_type)
+
+        elif main_action == "mgs_num_grids":
+            if len(action_parts) > 1:
+                num_grids = action_parts[1]
+                await handle_mgs_num_grids(update, context, num_grids)
+
+        elif main_action == "mgs_back_to_grid_type":
+            await handle_mgs_back_to_grid_type(update, context)
+
+        elif main_action == "mgs_back_to_num_grids":
+            await handle_mgs_back_to_num_grids(update, context)
+
         elif main_action == "new_grid_strike":
             await show_new_grid_strike_form(update, context)
 
         elif main_action == "new_pmm_mister":
             await show_new_pmm_mister_form(update, context)
+
+        elif main_action == "generic_save":
+            if len(action_parts) > 1:
+                ctrl_type = action_parts[1]
+                await handle_generic_save(update, context, ctrl_type)
+
+        elif main_action == "new_multi_grid_strike":
+            await show_new_multi_grid_strike_form(update, context)
+
+        elif main_action == "mgs_connector":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_connector(update, context, action_parts[1])
+
+        elif main_action == "mgs_pair":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_pair(update, context, action_parts[1])
+
+        elif main_action == "mgs_pair_select":
+            if len(action_parts) > 1:
+                await handle_mgs_pair_select(update, context, action_parts[1])
+
+        elif main_action == "mgs_leverage":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_leverage(update, context, int(action_parts[1]))
+
+        elif main_action == "mgs_amount":
+            if len(action_parts) > 1:
+                await handle_mgs_wizard_amount(update, context, float(action_parts[1]))
+
+        elif main_action == "mgs_interval":
+            if len(action_parts) > 1:
+                await handle_mgs_interval_change(update, context, action_parts[1])
+
+        elif main_action == "mgs_save":
+            await handle_mgs_save(update, context)
+
+        elif main_action == "mgs_back_to_pair":
+            await handle_mgs_back_to_pair(update, context)
+
+        elif main_action == "mgs_back_to_leverage":
+            await handle_mgs_back_to_leverage(update, context)
+
+        elif main_action == "mgs_back_to_amount":
+            await handle_mgs_back_to_amount(update, context)
+
+        elif main_action == "new_dman_v3":
+            await show_new_dman_v3_form(update, context)
+
+        elif main_action == "dman_connector":
+            if len(action_parts) > 1:
+                await handle_dman_wizard_connector(update, context, action_parts[1])
+
+        elif main_action == "dman_pair":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_dman_wizard_pair(update, context, pair)
+        elif main_action == "dman_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_dman_pair_select(update, context, pair)
+        elif main_action == "dman_leverage":
+            if len(action_parts) > 1:
+                await handle_dman_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "dman_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_dman_position_mode(update, context, mode)
+
+        elif main_action == "dman_back_to_position_mode":
+            await handle_dman_back_to_position_mode(update, context)
+
+        elif main_action == "dman_amount":
+            if len(action_parts) > 1:
+                await handle_dman_wizard_amount(update, context, float(action_parts[1]))
+
+        elif main_action == "dman_interval":
+            if len(action_parts) > 1:
+                await handle_dman_interval_change(update, context, action_parts[1])
+        elif main_action == "dman_set_strat":
+                    if len(action_parts) > 1:
+                        strategy_name = action_parts[1]
+                        await handle_dman_set_strategy(update, context, strategy_name)
+
+        elif main_action == "dman_save":
+            await handle_dman_save(update, context)
+
+        elif main_action == "dman_back_to_connector":
+            await handle_dman_back_to_connector(update, context)
+
+        elif main_action == "dman_back_to_pair":
+            await handle_dman_back_to_pair(update, context)
+
+        elif main_action == "dman_back_to_leverage":
+            await handle_dman_back_to_leverage(update, context)
+
+        elif main_action == "dman_back_to_amount":
+            await handle_dman_back_to_amount(update, context)
+
+        elif main_action == "new_arbitrage_controller":
+            await show_new_arbitrage_controller_form(update, context)
+
+        elif main_action == "arb_connector_1":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_connector_1(update, context, action_parts[1])
+
+        elif main_action == "arb_connector_2":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_connector_2(update, context, action_parts[1])
+
+        elif main_action == "arb_pair_1":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_pair_1(update, context, action_parts[1])
+                
+        elif main_action == "arb_pair_2":
+            if len(action_parts) > 1:
+                pair = ":".join(action_parts[1:])
+                await handle_arb_wizard_pair_2(update, context, pair)
+
+        elif main_action == "arb_amount":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_amount(update, context, float(action_parts[1]))
+
+        elif main_action == "arb_save":
+            await handle_arb_save(update, context)
+
+        elif main_action == "arb_back_to_connector_1":
+            await handle_arb_back_to_connector_1(update, context)
+
+        elif main_action == "arb_back_to_connector_2":
+            await handle_arb_back_to_connector_2(update, context)
+
+        elif main_action == "arb_back_to_pair_1":
+            await handle_arb_back_to_pair_1(update, context)
+
+        elif main_action == "arb_back_to_pair_2":
+            await handle_arb_back_to_pair_1(update, context)
+
+        elif main_action == "arb_back_to_amount":
+            await handle_arb_back_to_amount(update, context)
+        elif main_action == "arb_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_arb_pair_select(update, context, pair)
+
+        elif main_action == "arb_proceed_anyway":
+            await handle_arb_proceed_anyway(update, context)
+        elif main_action == "new_xemm_multiple_levels":
+            await show_new_xemm_multiple_levels_form(update, context)
+
+        elif main_action == "xemm_maker_connector":
+            if len(action_parts) > 1:
+                await handle_xemm_maker_connector(update, context, action_parts[1])
+
+        elif main_action == "xemm_taker_connector":
+            if len(action_parts) > 1:
+                await handle_xemm_taker_connector(update, context, action_parts[1])
+
+        elif main_action == "xemm_maker_pair":
+                    if len(action_parts) > 1:
+                        pair = ":".join(action_parts[1:])
+                        await handle_xemm_maker_pair(update, context, pair)
+        elif main_action == "xemm_taker_pair":
+            if len(action_parts) > 1:
+                pair = ":".join(action_parts[1:])
+                await handle_xemm_taker_pair(update, context, pair)
+                
+        elif main_action == "xemm_amount":
+            if len(action_parts) > 1:
+                await handle_xemm_wizard_amount(update, context, float(action_parts[1]))
+
+        elif main_action == "xemm_save":
+            await handle_xemm_save(update, context)
+
+        elif main_action == "xemm_back_to_maker_connector":
+            await handle_xemm_back_to_maker_connector(update, context)
+
+        elif main_action == "xemm_back_to_taker_connector":
+            await handle_xemm_back_to_taker_connector(update, context)
+
+        elif main_action == "xemm_back_to_pair":
+            await handle_xemm_back_to_pair(update, context)
+
+        elif main_action == "xemm_back_to_amount":
+            await handle_xemm_back_to_amount(update, context)
+
+        elif main_action == "xemm_proceed_anyway":
+            await handle_xemm_proceed_anyway(update, context)
+
+
+#MACDBB
+        elif main_action == "new_macd_bb_v1":
+            await show_new_macd_bb_v1_form(update, context)
+        elif main_action == "macdbb_connector":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_connector(update, context, action_parts[1])
+        elif main_action == "macdbb_pair":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_pair(update, context, action_parts[1])
+        elif main_action == "macdbb_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_macdbb_pair_select(update, context, pair)
+
+        elif main_action == "macdbb_leverage":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "macdbb_amount":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "macdbb_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_macdbb_position_mode(update, context, mode)
+        elif main_action == "macdbb_interval":
+            if len(action_parts) > 1:
+                await handle_macdbb_interval_change(update, context, action_parts[1])
+        elif main_action == "macdbb_save":
+            await handle_macdbb_save(update, context)
+        elif main_action == "macdbb_back_to_connector":
+            await handle_macdbb_back_to_connector(update, context)
+        elif main_action == "macdbb_back_to_pair":
+            await handle_macdbb_back_to_pair(update, context)
+        elif main_action == "macdbb_back_to_leverage":
+            await handle_macdbb_back_to_leverage(update, context)
+        elif main_action == "macdbb_back_to_amount":
+            await handle_macdbb_back_to_amount(update, context)
+        elif main_action == "macdbb_back_to_position_mode":
+            await handle_macdbb_back_to_position_mode(update, context)
+        elif main_action == "macdbb_set_strat":
+            if len(action_parts) > 1:
+                strategy_name = action_parts[1]
+                await handle_macdbb_set_strategy(update, context, strategy_name)
+
+#SUPERTREND
+        elif main_action == "new_supertrend_v1":
+            await show_new_supertrend_v1_form(update, context)
+        elif main_action == "st_connector":
+            if len(action_parts) > 1:
+                await handle_st_wizard_connector(update, context, action_parts[1])
+        elif main_action == "st_pair":
+            if len(action_parts) > 1:
+                await handle_st_wizard_pair(update, context, action_parts[1])
+        elif main_action == "st_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_st_wizard_pair(update, context, pair)
+        elif main_action == "st_leverage":
+            if len(action_parts) > 1:
+                await handle_st_wizard_leverage(update, context, int(action_parts[1]))
+
+        elif main_action == "st_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_st_position_mode(update, context, mode)
+
+        elif main_action == "st_back_to_position_mode":
+            await handle_st_back_to_position_mode(update, context)
+
+
+        elif main_action == "st_amount":
+            if len(action_parts) > 1:
+                await handle_st_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "st_interval":
+            if len(action_parts) > 1:
+                await handle_st_interval_change(update, context, action_parts[1])
+        elif main_action == "st_set_strat":
+            if len(action_parts) > 1:
+                strategy_name = action_parts[1]
+                await handle_st_set_strategy(update, context, strategy_name)
+        elif main_action == "st_save":
+            await handle_st_save(update, context)
+        elif main_action == "st_back_to_connector":
+            await handle_st_back_to_connector(update, context)
+        elif main_action == "st_back_to_pair":
+            await handle_st_back_to_pair(update, context)
+        elif main_action == "st_back_to_leverage":
+            await handle_st_back_to_leverage(update, context)
+        elif main_action == "st_back_to_amount":
+            await handle_st_back_to_amount(update, context)
 
         elif main_action == "new_pmm_v1":
             await show_new_pmm_v1_form(update, context)
@@ -431,6 +913,50 @@ async def bots_callback_handler(
         elif main_action == "save_config":
             await handle_save_config(update, context)
 
+        #ANTI-FOLLA
+        elif main_action == "new_anti_folla_v1":
+            await show_new_anti_folla_v1_form(update, context)
+        elif main_action == "af_connector":
+            if len(action_parts) > 1:
+                await handle_af_wizard_connector(update, context, action_parts[1])
+        elif main_action == "af_pair":
+            if len(action_parts) > 1:
+                await handle_af_wizard_pair(update, context, action_parts[1])
+
+        elif main_action == "af_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_af_wizard_pair(update, context, pair)
+        elif main_action == "af_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_af_position_mode(update, context, mode)
+
+        elif main_action == "af_back_to_position_mode":
+            await handle_af_back_to_position_mode(update, context)
+        elif main_action == "af_leverage":
+            if len(action_parts) > 1:
+                await handle_af_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "af_amount":
+            if len(action_parts) > 1:
+                await handle_af_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "af_interval":
+            if len(action_parts) > 1:
+                await handle_af_interval_change(update, context, action_parts[1])
+        elif main_action == "af_set_strat":
+            if len(action_parts) > 1:
+                strategy_name = action_parts[1]
+                await handle_af_set_strategy(update, context, strategy_name)
+        elif main_action == "af_save":
+            await handle_af_save(update, context)
+        elif main_action == "af_back_to_connector":
+            await handle_af_back_to_connector(update, context)
+        elif main_action == "af_back_to_pair":
+            await handle_af_back_to_pair(update, context)
+        elif main_action == "af_back_to_leverage":
+            await handle_af_back_to_leverage(update, context)
+        elif main_action == "af_back_to_amount":
+            await handle_af_back_to_amount(update, context)
         # Deploy menu
         elif main_action == "deploy_menu":
             await show_deploy_menu(update, context)
@@ -849,12 +1375,27 @@ async def bots_message_handler(
         # Handle Grid Strike wizard input
         elif bots_state == "gs_wizard_input":
             await process_gs_wizard_input(update, context, user_input)
+        # Handle Multi Grid Strike wizard input
+        elif bots_state == "mgs_wizard_input":
+            await process_mgs_wizard_input(update, context, user_input)
         # Handle PMM Mister wizard input
         elif bots_state == "pmm_wizard_input":
             await process_pmm_wizard_input(update, context, user_input)
         # Handle PMM V1 wizard input
         elif bots_state == "pv1_wizard_input":
             await process_pv1_wizard_input(update, context, user_input)
+        elif bots_state == "dman_wizard_input":
+            await process_dman_wizard_input(update, context, user_input)
+        elif bots_state == "arb_wizard_input":
+            await process_arb_wizard_input(update, context, user_input)
+        elif bots_state == "xemm_wizard_input":
+            await process_xemm_wizard_input(update, context, update.message.text)
+        elif bots_state == "macdbb_wizard_input":
+            await process_macdbb_wizard_input(update, context, user_input)
+        elif bots_state == "st_wizard_input":
+            await process_st_wizard_input(update, context, user_input)
+        elif bots_state == "af_wizard_input":
+            await process_af_wizard_input(update, context, user_input)
         # Handle config edit loop field input (legacy single field)
         elif bots_state.startswith("cfg_edit_input:"):
             await process_cfg_edit_input(update, context, user_input)
