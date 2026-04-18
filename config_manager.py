@@ -15,6 +15,21 @@ from aiohttp import ClientTimeout
 
 logger = logging.getLogger(__name__)
 
+def _build_server_url(server: dict) -> str:
+    """Build the full URL for a server, supporting http and https."""
+    host = server.get("host", "localhost")
+    port = server.get("port", 8000)
+
+    # If host already includes protocol, use it as-is
+    if host.startswith(("http://", "https://")):
+        # If port is 443 for https or 80 for http, don't add it
+        if (host.startswith("https://") and port == 443) or (host.startswith("http://") and port == 80):
+            return host.rstrip("/")
+        return f"{host.rstrip('/')}:{port}"
+
+    # Default to http unless port is 443
+    protocol = "https" if port == 443 else "http"
+    return f"{protocol}://{host}:{port}"
 
 class UserRole(str, Enum):
     """User roles in the system"""
@@ -385,7 +400,7 @@ class ConfigManager:
 
         # Create new client
         server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
+        base_url = _build_server_url(server)
         client = HummingbotAPIClient(
             base_url=base_url,
             username=server["username"],
@@ -448,7 +463,7 @@ class ConfigManager:
             return {"status": "error", "message": "Server not found"}
 
         server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
+        base_url = _build_server_url(server)
 
         client = HummingbotAPIClient(
             base_url=base_url,

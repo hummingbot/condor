@@ -6,6 +6,22 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+def _build_server_url(server: dict) -> str:
+    """Build the full URL for a server, supporting http and https."""
+    host = server.get("host", "localhost")
+    port = server.get("port", 8000)
+
+    # If host already includes protocol, use it as-is
+    if host.startswith(("http://", "https://")):
+        # If port is 443 for https or 80 for http, don't add it
+        if (host.startswith("https://") and port == 443) or (host.startswith("http://") and port == 80):
+            return host.rstrip("/")
+        return f"{host.rstrip('/')}:{port}"
+
+    # Default to http unless port is 443
+    protocol = "https" if port == 443 else "http"
+    return f"{protocol}://{host}:{port}"
+
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
@@ -389,7 +405,7 @@ def build_mcp_servers_for_session(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = _build_server_url(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
@@ -436,7 +452,7 @@ def build_mcp_servers_for_agent(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = _build_server_url(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",

@@ -9,6 +9,19 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
+def _build_server_url(host: str, port: int) -> str:
+    """Build the full URL for a server, supporting http and https."""
+    # If host already includes protocol, use it as-is
+    if host.startswith(("http://", "https://")):
+        # If port is 443 for https or 80 for http, don't add it
+        if (host.startswith("https://") and port == 443) or (host.startswith("http://") and port == 80):
+            return host.rstrip("/")
+        return f"{host.rstrip('/')}:{port}"
+
+    # Default to http unless port is 443
+    protocol = "https" if port == 443 else "http"
+    return f"{protocol}://{host}:{port}"
+
 from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_bot_logs_as_table,
@@ -152,7 +165,7 @@ async def configure_server(
 
     new_config = ServerConfig(
         name=final_name,
-        url=f"http://{final_host}:{final_port}",
+        url=_build_server_url(final_host, final_port),
         username=final_username,
         password=final_password,
     )
