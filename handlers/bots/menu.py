@@ -50,29 +50,36 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
 
     # For 1-3 bots: one per row
     # For 4+ bots: two per row for better space utilization
+    #
+    # Use index-based callback_data (bots:bot_idx:{i}) instead of embedding
+    # bot_name directly. Telegram's InlineKeyboardButton.callback_data cap is
+    # 64 bytes; long bot_names (e.g. "pmm-EPIC-USDT-kucoin-v1-<ts>-<ts>") plus
+    # the "bots:bot_detail:" prefix (16 bytes) routinely overflow and trigger
+    # telegram.error.BadRequest: Button_data_invalid. The dispatcher resolves
+    # the index back to the bot_name from context.chat_data["bots_main_list"].
     if len(bot_names) <= 3:
-        for bot_name in bot_names:
+        for i, bot_name in enumerate(bot_names):
             display_name = bot_name[:30] + "..." if len(bot_name) > 30 else bot_name
             keyboard.append(
                 [
                     InlineKeyboardButton(
                         f"📊 {display_name}",
-                        callback_data=f"bots:bot_detail:{bot_name}",
+                        callback_data=f"bots:bot_idx:{i}",
                     )
                 ]
             )
     else:
         # Two bots per row for better space utilization
-        for i in range(0, len(bot_names), 2):
+        for row_start in range(0, len(bot_names), 2):
             row = []
-            for j in range(i, min(i + 2, len(bot_names))):
+            for j in range(row_start, min(row_start + 2, len(bot_names))):
                 bot_name = bot_names[j]
                 # Shorter display name when two per row
                 display_name = bot_name[:25] + "..." if len(bot_name) > 25 else bot_name
                 row.append(
                     InlineKeyboardButton(
                         f"📊 {display_name}",
-                        callback_data=f"bots:bot_detail:{bot_name}",
+                        callback_data=f"bots:bot_idx:{j}",
                     )
                 )
             keyboard.append(row)
@@ -170,6 +177,12 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Format the bot status message
         status_message = format_active_bots(bots_data, bot_runs=bot_runs_map)
+
+        # Cache the ordered bot-name list so the dispatcher can resolve the
+        # index-based callback (bots:bot_idx:{i}) back to a name. Must be set
+        # BEFORE building the keyboard so the indices we stash match the
+        # indices embedded in the buttons.
+        context.chat_data["bots_main_list"] = list(bots_dict.keys())
 
         # Build the menu with bot buttons
         reply_markup = _build_main_menu_keyboard(bots_dict)
