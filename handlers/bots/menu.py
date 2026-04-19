@@ -51,12 +51,23 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
     # For 1-3 bots: one per row
     # For 4+ bots: two per row for better space utilization
     #
-    # Use index-based callback_data (bots:bot_idx:{i}) instead of embedding
-    # bot_name directly. Telegram's InlineKeyboardButton.callback_data cap is
-    # 64 bytes; long bot_names (e.g. "pmm-EPIC-USDT-kucoin-v1-<ts>-<ts>") plus
-    # the "bots:bot_detail:" prefix (16 bytes) routinely overflow and trigger
-    # telegram.error.BadRequest: Button_data_invalid. The dispatcher resolves
-    # the index back to the bot_name from context.chat_data["bots_main_list"].
+    # callback_data strategy: Telegram caps InlineKeyboardButton.callback_data
+    # at 64 bytes. The original `bots:bot_detail:{bot_name}` form (16-byte
+    # prefix + name) overflows for any bot_name >= 49 chars — e.g. names
+    # produced by hummingbot-api's deploy-v2-controllers endpoint, which
+    # auto-appends a deploy-time timestamp, routinely run past 70 bytes and
+    # crash /bots with telegram.error.BadRequest: Button_data_invalid.
+    #
+    # Strategy: prefer the stable name-based form when it fits (preserves the
+    # original behavior — stale buttons from an earlier /bots message still
+    # open the correct bot regardless of list reordering). Fall back to the
+    # index-based form only when the name-based form would overflow. The
+    # dispatcher resolves the index against a per-user cache stashed in
+    # context.user_data["bots_main_list"] by show_bots_menu.
+    def _bot_callback(i: int, name: str) -> str:
+        cb = f"bots:bot_detail:{name}"
+        return cb if len(cb.encode("utf-8")) <= 64 else f"bots:bot_idx:{i}"
+
     if len(bot_names) <= 3:
         for i, bot_name in enumerate(bot_names):
             display_name = bot_name[:30] + "..." if len(bot_name) > 30 else bot_name
@@ -64,7 +75,7 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
                 [
                     InlineKeyboardButton(
                         f"📊 {display_name}",
-                        callback_data=f"bots:bot_idx:{i}",
+                        callback_data=_bot_callback(i, bot_name),
                     )
                 ]
             )
@@ -79,7 +90,7 @@ def _build_main_menu_keyboard(bots_dict: Dict[str, Any]) -> InlineKeyboardMarkup
                 row.append(
                     InlineKeyboardButton(
                         f"📊 {display_name}",
-                        callback_data=f"bots:bot_idx:{j}",
+                        callback_data=_bot_callback(j, bot_name),
                     )
                 )
             keyboard.append(row)
@@ -181,8 +192,11 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Cache the ordered bot-name list so the dispatcher can resolve the
         # index-based callback (bots:bot_idx:{i}) back to a name. Must be set
         # BEFORE building the keyboard so the indices we stash match the
-        # indices embedded in the buttons.
-        context.chat_data["bots_main_list"] = list(bots_dict.keys())
+        # indices embedded in the buttons. Stored in user_data (not chat_data)
+        # so two users sharing a group chat don't overwrite each other's
+        # cached list — matches the per-user convention used elsewhere in
+        # this handler (e.g. current_controllers in __init__.py).
+        context.user_data["bots_main_list"] = list(bots_dict.keys())
 
         # Build the menu with bot buttons
         reply_markup = _build_main_menu_keyboard(bots_dict)
