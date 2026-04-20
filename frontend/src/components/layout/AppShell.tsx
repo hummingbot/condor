@@ -5,6 +5,7 @@ import {
   Bot,
   Brain,
   CandlestickChart,
+  Swords,
   LogOut,
   Moon,
   PanelLeftClose,
@@ -24,6 +25,7 @@ import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
   { to: "/", icon: Wallet, label: "Portfolio" },
+  { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
   { to: "/positions", icon: Anchor, label: "Positions" },

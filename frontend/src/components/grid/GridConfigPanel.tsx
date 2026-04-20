@@ -8,6 +8,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
+import { SelectField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
 import type { GridState, GridAction } from "@/pages/CreateGridExecutor";
 
 interface GridConfigPanelProps {
@@ -153,34 +154,6 @@ function NumberField({
   );
 }
 
-function SelectField({
-  label,
-  value,
-  field,
-  dispatch,
-  options,
-}: {
-  label: string;
-  value: number;
-  field: string;
-  dispatch: React.Dispatch<GridAction>;
-  options: { value: number; label: string }[];
-}) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
-      <select
-        value={value}
-        onChange={(e) => dispatch({ type: "SET_FIELD", field, value: parseInt(e.target.value) })}
-        className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-xs text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>{opt.label}</option>
-        ))}
-      </select>
-    </div>
-  );
-}
 
 function ToggleField({
   label,
@@ -219,12 +192,6 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
     </span>
   );
 }
-
-const ORDER_TYPE_OPTIONS = [
-  { value: 1, label: "Market" },
-  { value: 2, label: "Limit" },
-  { value: 3, label: "Limit Maker" },
-];
 
 export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false }: GridConfigPanelProps) {
   const validation = useMemo(() => {
@@ -298,6 +265,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
       dispatch({ type: "SET_FIELD", field: "end_price", value: parseFloat(end.toPrecision(6)) });
       dispatch({ type: "SET_FIELD", field: "limit_price", value: parseFloat(limit.toPrecision(6)) });
     }
+    dispatch({ type: "SET_FIELD", field: "open_order_type", value: 1 });
   };
 
   const perLevel = validation.levels > 0 ? state.total_amount_quote / validation.levels : 0;
@@ -517,14 +485,14 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
               label="Open Order Type"
               value={state.open_order_type}
               field="open_order_type"
-              dispatch={dispatch}
+              dispatch={dispatch as unknown as FieldDispatch}
               options={ORDER_TYPE_OPTIONS}
             />
             <SelectField
               label="Take Profit Order Type"
               value={state.take_profit_order_type}
               field="take_profit_order_type"
-              dispatch={dispatch}
+              dispatch={dispatch as unknown as FieldDispatch}
               options={ORDER_TYPE_OPTIONS}
             />
           </div>

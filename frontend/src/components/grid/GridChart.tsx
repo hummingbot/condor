@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type CandleData } from "@/lib/api";
+import type { ExtraLine } from "@/components/executor/types";
+import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 
 type PickField = "start" | "end" | "limit" | null;
 
@@ -19,6 +21,9 @@ interface GridChartProps {
   minSpread: number;
   activePickField: PickField;
   onPriceSet: (field: "start" | "end" | "limit", price: number) => void;
+  pricePrecision?: number;
+  extraLines?: ExtraLine[];
+  executorOverlays?: ExecutorOverlay[];
 }
 
 function getChartColors() {
@@ -45,6 +50,9 @@ export function GridChart({
   minSpread,
   activePickField,
   onPriceSet,
+  pricePrecision,
+  extraLines,
+  executorOverlays,
 }: GridChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
@@ -58,6 +66,8 @@ export function GridChart({
   const endLineRef = useRef<import("lightweight-charts").IPriceLine | null>(null);
   const limitLineRef = useRef<import("lightweight-charts").IPriceLine | null>(null);
   const gridLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
+  const extraLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
+  const overlaySeriesRef = useRef<import("lightweight-charts").ISeriesApi<"Line">[]>([]);
 
   const channel = `candles:${server}:${connector}:${pair}:${interval}`;
   const channels = useMemo(() => [channel], [channel]);
@@ -105,6 +115,9 @@ export function GridChart({
         wickUpColor: colors.up,
         wickDownColor: colors.down,
         borderVisible: false,
+        ...(pricePrecision != null && {
+          priceFormat: { type: "price" as const, precision: pricePrecision, minMove: 1 / 10 ** pricePrecision },
+        }),
       });
       seriesRef.current = series;
 
@@ -136,11 +149,12 @@ export function GridChart({
         endLineRef.current = null;
         limitLineRef.current = null;
         gridLinesRef.current = [];
+        extraLinesRef.current = [];
       }
     };
   }, []);
 
-  // Handle WebSocket candle updates
+  // Handle WebSocket candle data (both bulk history and live updates)
   useEffect(() => {
     const currentWs = wsRef.current;
     if (!currentWs) return;
@@ -165,22 +179,37 @@ export function GridChart({
           close: c.close,
         });
       } else if (payload.type === "candles" && payload.data?.length) {
-        const c = payload.data[payload.data.length - 1];
-        const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-        seriesRef.current.update({
-          time: ts as import("lightweight-charts").UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
+        // Bulk candle data (pre-fetch broadcast or batch update)
+        const mapped = payload.data.map((c) => {
+          const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
+          return {
+            time: ts as import("lightweight-charts").UTCTimestamp,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+          };
         });
+        if (mapped.length > 50) {
+          // Large batch = historical pre-fetch → setData
+          seriesRef.current.setData(mapped);
+          if (!initializedRef.current) {
+            chartRef.current?.timeScale().fitContent();
+            initializedRef.current = true;
+          }
+        } else {
+          // Small batch → update individually
+          for (const bar of mapped) {
+            seriesRef.current.update(bar);
+          }
+        }
       }
     });
 
     return removeHandler;
   }, [channel, wsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Set initial candle data
+  // Set initial candle data from REST query
   useEffect(() => {
     if (!seriesRef.current || !candles?.length || !chartModuleRef.current) return;
 
@@ -205,6 +234,14 @@ export function GridChart({
   useEffect(() => {
     initializedRef.current = false;
   }, [pair, interval]);
+
+  // Update price precision when it changes
+  useEffect(() => {
+    if (!seriesRef.current || pricePrecision == null) return;
+    seriesRef.current.applyOptions({
+      priceFormat: { type: "price" as const, precision: pricePrecision, minMove: 1 / 10 ** pricePrecision },
+    });
+  }, [pricePrecision]);
 
   // Update price lines
   useEffect(() => {
@@ -258,6 +295,12 @@ export function GridChart({
       });
     }
 
+    // Clear extra lines
+    for (const el of extraLinesRef.current) {
+      try { series.removePriceLine(el); } catch { /* ok */ }
+    }
+    extraLinesRef.current = [];
+
     // Grid level preview lines
     if (startPrice > 0 && endPrice > 0 && minSpread > 0 && startPrice < endPrice) {
       const range = endPrice - startPrice;
@@ -287,7 +330,150 @@ export function GridChart({
         }
       }
     }
-  }, [startPrice, endPrice, limitPrice, side, minSpread, activePickField]);
+
+    // Render extra lines
+    if (extraLines?.length) {
+      const styleMap: Record<string, number> = {
+        solid: mod.LineStyle.Solid,
+        dashed: mod.LineStyle.Dashed,
+        dotted: mod.LineStyle.Dotted,
+      };
+      for (const el of extraLines) {
+        if (el.price <= 0) continue;
+        const pl = series.createPriceLine({
+          price: el.price,
+          color: el.color,
+          lineWidth: (el.lineWidth ?? 1) as import("lightweight-charts").LineWidth,
+          lineStyle: styleMap[el.lineStyle] ?? mod.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: el.label,
+        });
+        extraLinesRef.current.push(pl);
+      }
+    }
+  }, [startPrice, endPrice, limitPrice, side, minSpread, activePickField, extraLines]);
+
+  // Render executor overlays as line series
+  useEffect(() => {
+    const chart = chartRef.current;
+    const mod = chartModuleRef.current;
+    if (!chart || !mod) return;
+
+    // Clean up old overlay series
+    for (const s of overlaySeriesRef.current) {
+      try { chart.removeSeries(s); } catch { /* ok */ }
+    }
+    overlaySeriesRef.current = [];
+
+    if (!executorOverlays?.length) return;
+
+    const isMulti = executorOverlays.length > 1;
+
+    executorOverlays.forEach((overlay, idx) => {
+      const color = isMulti ? getExecutorColor(idx, overlay.pnl) : undefined;
+
+      // Grid executor → draw a box
+      const box = overlay.gridBox;
+      if (box) {
+        const boxColor = color ?? box.color;
+        const t1 = box.startTime > 1e12 ? Math.floor(box.startTime / 1000) : box.startTime;
+        const t2 = box.endTime > 1e12 ? Math.floor(box.endTime / 1000) : box.endTime;
+        type TS = import("lightweight-charts").UTCTimestamp;
+
+        const span = t2 - t1;
+        if (span < 4) {
+          const seg = chart.addSeries(mod.LineSeries, {
+            color: boxColor, lineWidth: 2,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+          });
+          seg.setData([
+            { time: t1 as TS, value: box.startPrice },
+            { time: (t1 + 1) as TS, value: box.endPrice },
+          ]);
+          overlaySeriesRef.current.push(seg);
+          return;
+        }
+
+        try {
+          // Top edge
+          const top = chart.addSeries(mod.LineSeries, {
+            color: boxColor, lineWidth: 2,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+          });
+          top.setData([
+            { time: t1 as TS, value: box.endPrice },
+            { time: t2 as TS, value: box.endPrice },
+          ]);
+          overlaySeriesRef.current.push(top);
+
+          // Bottom edge — dashed
+          const bottom = chart.addSeries(mod.LineSeries, {
+            color: boxColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+          });
+          bottom.setData([
+            { time: t1 as TS, value: box.startPrice },
+            { time: t2 as TS, value: box.startPrice },
+          ]);
+          overlaySeriesRef.current.push(bottom);
+
+          // Left edge
+          const left = chart.addSeries(mod.LineSeries, {
+            color: boxColor, lineWidth: 1,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+          });
+          left.setData([
+            { time: t1 as TS, value: box.startPrice },
+            { time: (t1 + 1) as TS, value: box.endPrice },
+          ]);
+          overlaySeriesRef.current.push(left);
+
+          // Right edge
+          const right = chart.addSeries(mod.LineSeries, {
+            color: boxColor, lineWidth: 1,
+            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+          });
+          right.setData([
+            { time: (t2 - 1) as TS, value: box.endPrice },
+            { time: t2 as TS, value: box.startPrice },
+          ]);
+          overlaySeriesRef.current.push(right);
+
+          // Limit price line
+          if (box.limitPrice) {
+            const limit = chart.addSeries(mod.LineSeries, {
+              color: "#ef4444", lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
+              priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+            });
+            limit.setData([
+              { time: t1 as TS, value: box.limitPrice },
+              { time: t2 as TS, value: box.limitPrice },
+            ]);
+            overlaySeriesRef.current.push(limit);
+          }
+        } catch { /* grid box rendering failed */ }
+        return;
+      }
+
+      // Position/generic executor → dashed segment line
+      const seg = overlay.segment;
+      if (!seg) return;
+
+      const segColor = color ?? seg.color;
+      const entryT = seg.entryTime > 1e12 ? Math.floor(seg.entryTime / 1000) : seg.entryTime;
+      const exitT = seg.exitTime > 1e12 ? Math.floor(seg.exitTime / 1000) : seg.exitTime;
+
+      const lineSeries = chart.addSeries(mod.LineSeries, {
+        color: segColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+      });
+      lineSeries.setData([
+        { time: entryT as import("lightweight-charts").UTCTimestamp, value: seg.entryPrice },
+        { time: exitT as import("lightweight-charts").UTCTimestamp, value: seg.exitPrice },
+      ]);
+      overlaySeriesRef.current.push(lineSeries);
+    });
+  }, [executorOverlays]);
 
   // Handle click-to-set price
   const handleClick = () => {
