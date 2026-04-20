@@ -217,6 +217,17 @@ export function CreateGridExecutor() {
 
   const currentPrice = priceData?.mid_price ?? null;
 
+  // Derive price precision from trading rules
+  const pricePrecision = useMemo(() => {
+    if (!rulesData?.rules) return undefined;
+    const rule = rulesData.rules.find((r) => r.trading_pair === state.pair);
+    if (!rule || !rule.min_price_increment) return undefined;
+    const inc = rule.min_price_increment;
+    // Count decimals: e.g. 0.00001 → 5
+    if (inc >= 1) return 0;
+    return Math.max(0, Math.ceil(-Math.log10(inc)));
+  }, [rulesData, state.pair]);
+
   // Create executor mutation
   const createMutation = useMutation({
     mutationFn: () => {
@@ -370,6 +381,7 @@ export function CreateGridExecutor() {
               minSpread={state.min_spread_between_orders}
               activePickField={state.activePickField}
               onPriceSet={handlePriceSet}
+              pricePrecision={pricePrecision}
             />
           </div>
         </div>

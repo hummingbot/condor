@@ -1,6 +1,7 @@
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
+  Check,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -8,16 +9,15 @@ import {
   Clock,
   Download,
   Filter,
-  Grid3X3,
   Layers,
-  List,
   Percent,
+  Plus,
   Square,
   TrendingUp,
   Volume2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
@@ -86,6 +86,111 @@ export function isExecutorActive(status: string) {
   return status === "active" || status === "running";
 }
 
+// ── Multi-select dropdown ──
+
+function MultiSelect({
+  options,
+  selected,
+  onChange,
+  placeholder,
+  label,
+}: {
+  options: string[];
+  selected: string[];
+  onChange: (selected: string[]) => void;
+  placeholder: string;
+  label?: (value: string) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const toggle = (value: string) => {
+    if (selected.includes(value)) {
+      onChange(selected.filter((v) => v !== value));
+    } else {
+      onChange([...selected, value]);
+    }
+  };
+
+  const display = label ?? ((v: string) => v);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-left text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
+      >
+        <span className="truncate max-w-[180px] text-[var(--color-text)]">
+          {selected.length === 0
+            ? placeholder
+            : selected.length === 1
+              ? display(selected[0])
+              : `${selected.length} selected`}
+        </span>
+        {selected.length > 0 && (
+          <span
+            className="flex h-4 w-4 items-center justify-center rounded-full bg-[var(--color-primary)]/15 text-[10px] font-bold text-[var(--color-primary)]"
+          >
+            {selected.length}
+          </span>
+        )}
+        <ChevronDown className={`h-3.5 w-3.5 flex-shrink-0 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 z-50 mt-1 max-h-64 w-max min-w-full overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
+          {selected.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onChange([])}
+              className="flex w-full items-center gap-2 border-b border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] transition-colors"
+            >
+              <X className="h-3 w-3" />
+              Clear all
+            </button>
+          )}
+          {options.map((opt) => {
+            const isActive = selected.includes(opt);
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => toggle(opt)}
+                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
+                  isActive
+                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                    : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                <div className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition-colors ${
+                  isActive
+                    ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white"
+                    : "border-[var(--color-border)]"
+                }`}>
+                  {isActive && <Check className="h-3 w-3" />}
+                </div>
+                <span className="truncate">{display(opt)}</span>
+              </button>
+            );
+          })}
+          {options.length === 0 && (
+            <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">No options</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Sort types ──
 
 export type SortKey =
@@ -125,70 +230,6 @@ function compareExecutors(a: ExecutorInfo, b: ExecutorInfo, key: SortKey, dir: S
       break;
   }
   return dir === "asc" ? cmp : -cmp;
-}
-
-type ControllerSortKey = "pnl" | "volume" | "winRate" | "activeCount";
-
-// ── Controller Summary ──
-
-interface ControllerSummary {
-  controllerId: string;
-  displayName: string;
-  executors: ExecutorInfo[];
-  totalPnl: number;
-  totalVolume: number;
-  totalFees: number;
-  activeCount: number;
-  closedCount: number;
-  winRate: number;
-  typeBreakdown: Record<string, number>;
-}
-
-function buildControllerSummaries(executors: ExecutorInfo[]): ControllerSummary[] {
-  const groups = new Map<string, ExecutorInfo[]>();
-  for (const ex of executors) {
-    const key = ex.controller_id || "__standalone__";
-    const arr = groups.get(key);
-    if (arr) arr.push(ex);
-    else groups.set(key, [ex]);
-  }
-
-  const summaries: ControllerSummary[] = [];
-  for (const [key, execs] of groups) {
-    const totalPnl = execs.reduce((s, e) => s + e.pnl, 0);
-    const totalVolume = execs.reduce((s, e) => s + e.volume, 0);
-    const totalFees = execs.reduce((s, e) => s + e.cum_fees_quote, 0);
-    const activeCount = execs.filter(
-      (e) => isExecutorActive(e.status),
-    ).length;
-    const closedCount = execs.filter(
-      (e) => !isExecutorActive(e.status),
-    ).length;
-    const closedWithPnl = execs.filter(
-      (e) => !isExecutorActive(e.status),
-    );
-    const wins = closedWithPnl.filter((e) => e.pnl > 0).length;
-    const winRate = closedWithPnl.length > 0 ? wins / closedWithPnl.length : 0;
-
-    const typeBreakdown: Record<string, number> = {};
-    for (const e of execs) {
-      typeBreakdown[e.type] = (typeBreakdown[e.type] || 0) + 1;
-    }
-
-    summaries.push({
-      controllerId: key,
-      displayName: key === "__standalone__" ? "Standalone" : key,
-      executors: execs,
-      totalPnl,
-      totalVolume,
-      totalFees,
-      activeCount,
-      closedCount,
-      winRate,
-      typeBreakdown,
-    });
-  }
-  return summaries;
 }
 
 // ── Stat Card ──
@@ -311,83 +352,6 @@ function exportCsv(executors: ExecutorInfo[], filename = "executors.csv") {
 }
 
 // ── Controller Card ──
-
-function ControllerCard({
-  summary,
-  isExpanded,
-  onToggle,
-}: {
-  summary: ControllerSummary;
-  isExpanded: boolean;
-  onToggle: () => void;
-}) {
-  const hasActive = summary.activeCount > 0;
-
-  return (
-    <div
-      className={`rounded-lg border transition-colors cursor-pointer ${
-        isExpanded
-          ? "border-[var(--color-primary)]/50 bg-[var(--color-surface)]"
-          : "border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-border-hover)]"
-      }`}
-      onClick={onToggle}
-    >
-      <div className="px-4 py-3">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2 min-w-0">
-            {isExpanded ? (
-              <ChevronDown className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
-            ) : (
-              <ChevronRight className="h-4 w-4 shrink-0 text-[var(--color-text-muted)]" />
-            )}
-            <div className={`h-2 w-2 rounded-full shrink-0 ${hasActive ? "bg-[var(--color-green)]" : "bg-[var(--color-text-muted)]/40"}`} />
-            <span className="font-medium text-sm truncate" title={summary.displayName}>
-              {summary.displayName}
-            </span>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)] shrink-0">
-            <span>{summary.activeCount} running</span>
-            <span className="text-[var(--color-border)]">/</span>
-            <span>{summary.closedCount} closed</span>
-          </div>
-        </div>
-
-        {/* Stats row */}
-        <div className="flex items-center gap-4 text-sm">
-          <span className="font-medium tabular-nums" style={{ color: pnlColor(summary.totalPnl) }}>
-            {formatPnl(summary.totalPnl)}
-          </span>
-          <span className="text-[var(--color-text-muted)] tabular-nums">
-            {formatVolume(summary.totalVolume)} vol
-          </span>
-          {summary.winRate > 0 && (
-            <span className="text-[var(--color-text-muted)] tabular-nums">
-              {(summary.winRate * 100).toFixed(0)}% WR
-            </span>
-          )}
-          {summary.totalFees > 0 && (
-            <span className="text-[var(--color-text-muted)] tabular-nums">
-              {formatUsd(summary.totalFees)} fees
-            </span>
-          )}
-        </div>
-
-        {/* Type badges */}
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          {Object.entries(summary.typeBreakdown).map(([type, count]) => (
-            <span
-              key={type}
-              className="rounded bg-[var(--color-bg)] px-2 py-0.5 text-xs border border-[var(--color-border)]/50"
-            >
-              {type}: {count}
-            </span>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // ── Executor Table ──
 
@@ -599,6 +563,16 @@ export function DetailPanel({
   const isPosition = executor.type === "position";
   const isGrid = executor.type === "grid";
 
+  // Parse triple_barrier_config (may be a JSON string or object)
+  const tripleBarrier: Record<string, unknown> = (() => {
+    const raw = config.triple_barrier_config;
+    if (!raw) return {};
+    if (typeof raw === "string") {
+      try { return JSON.parse(raw); } catch { return {}; }
+    }
+    return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  })();
+
   return (
       <div
         className="h-full bg-[var(--color-bg)] border-l border-[var(--color-border)] overflow-y-auto shadow-xl shrink-0 relative"
@@ -651,6 +625,11 @@ export function DetailPanel({
             >
               {sideLabel}
             </span>
+            {executor.close_type && (
+              <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
+                {executor.close_type}
+              </span>
+            )}
           </div>
 
           {/* Controller ID */}
@@ -702,17 +681,17 @@ export function DetailPanel({
             <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
               PnL & Volume
             </h3>
-            <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="grid grid-cols-4 gap-3 text-sm">
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Net PnL</div>
-                <div className="font-medium tabular-nums text-lg" style={{ color: pnlColor(executor.pnl) }}>
+                <div className="font-medium tabular-nums" style={{ color: pnlColor(executor.pnl) }}>
                   {formatPnl(executor.pnl)}
                 </div>
               </div>
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">PnL %</div>
                 <div
-                  className="font-medium tabular-nums text-lg"
+                  className="font-medium tabular-nums"
                   style={{ color: executor.net_pnl_pct ? pnlColor(executor.net_pnl_pct) : undefined }}
                 >
                   {formatPct(executor.net_pnl_pct)}
@@ -729,12 +708,6 @@ export function DetailPanel({
                 </div>
               </div>
             </div>
-            {executor.close_type && (
-              <div className="pt-2 border-t border-[var(--color-border)]/50 text-sm">
-                <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Close Type</div>
-                <div className="font-medium">{executor.close_type}</div>
-              </div>
-            )}
           </div>
 
           {/* Position-specific details */}
@@ -795,6 +768,12 @@ export function DetailPanel({
                     <div className="font-medium tabular-nums">{formatPrice(Number(config.end_price))}</div>
                   </div>
                 )}
+                {config.limit_price != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Limit Price</div>
+                    <div className="font-medium tabular-nums">{formatPrice(Number(config.limit_price))}</div>
+                  </div>
+                )}
                 {config.leverage != null && (
                   <div>
                     <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Leverage</div>
@@ -805,6 +784,32 @@ export function DetailPanel({
                   <div>
                     <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Amount</div>
                     <div className="font-medium tabular-nums">{formatUsd(Number(config.total_amount_quote))}</div>
+                  </div>
+                )}
+                {tripleBarrier.take_profit != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Take Profit</div>
+                    <div className="font-medium tabular-nums text-[var(--color-green)]">
+                      {(Number(tripleBarrier.take_profit) * 100).toFixed(2)}%
+                    </div>
+                  </div>
+                )}
+                {config.keep_position != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Keep Position</div>
+                    <div className="font-medium">{String(config.keep_position) === "true" ? "Yes" : "No"}</div>
+                  </div>
+                )}
+                {tripleBarrier.open_order_type != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Open Order Type</div>
+                    <div className="font-medium text-xs">{String(tripleBarrier.open_order_type)}</div>
+                  </div>
+                )}
+                {tripleBarrier.take_profit_order_type != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">TP Order Type</div>
+                    <div className="font-medium text-xs">{String(tripleBarrier.take_profit_order_type)}</div>
                   </div>
                 )}
               </div>
@@ -864,16 +869,44 @@ export function DetailPanel({
                 Raw Config ({configEntries.length} fields)
               </summary>
               <div className="px-4 pb-3 space-y-1 text-xs">
-                {configEntries.map(([key, val]) => (
-                  <div key={key} className="flex justify-between gap-3 py-0.5">
-                    <span className="text-[var(--color-text-muted)] shrink-0">{key}</span>
-                    <span className="tabular-nums text-right truncate" title={String(val ?? "")}>
-                      {typeof val === "object" && val !== null
-                        ? JSON.stringify(val)
-                        : String(val ?? "")}
-                    </span>
-                  </div>
-                ))}
+                {configEntries.map(([key, val]) => {
+                  // Parse JSON strings into objects for display
+                  let parsed = val;
+                  if (typeof val === "string") {
+                    try { const p = JSON.parse(val); if (typeof p === "object" && p !== null) parsed = p; } catch {}
+                  }
+                  const isNested = typeof parsed === "object" && parsed !== null;
+
+                  if (isNested) {
+                    return (
+                      <details key={key} className="py-0.5">
+                        <summary className="flex justify-between gap-3 cursor-pointer hover:text-[var(--color-text)]">
+                          <span className="text-[var(--color-text-muted)] shrink-0">{key}</span>
+                          <span className="text-[var(--color-text-muted)]">{Object.keys(parsed as object).length} fields</span>
+                        </summary>
+                        <div className="ml-3 pl-3 border-l border-[var(--color-border)]/50 mt-1 space-y-0.5">
+                          {Object.entries(parsed as Record<string, unknown>).map(([k, v]) => (
+                            <div key={k} className="flex justify-between gap-3 py-0.5">
+                              <span className="text-[var(--color-text-muted)] shrink-0">{k}</span>
+                              <span className="tabular-nums text-right truncate" title={String(v ?? "")}>
+                                {v == null ? "null" : String(v)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    );
+                  }
+
+                  return (
+                    <div key={key} className="flex justify-between gap-3 py-0.5">
+                      <span className="text-[var(--color-text-muted)] shrink-0">{key}</span>
+                      <span className="tabular-nums text-right truncate" title={String(val ?? "")}>
+                        {String(val ?? "")}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </details>
           )}
@@ -927,33 +960,97 @@ function BulkActionBar({
   );
 }
 
-// ── Main Page ──
+// ── Stop Confirm Dialog ──
 
-type ViewMode = "controllers" | "flat";
+function StopConfirmDialog({
+  ids,
+  onConfirm,
+  onCancel,
+}: {
+  ids: string[];
+  onConfirm: (ids: string[], keepPosition: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [keepPosition, setKeepPosition] = useState(false);
+  const count = ids.length;
+
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    onConfirm(ids, keepPosition);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onCancel}>
+      <div
+        className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl shadow-xl p-6 w-full max-w-sm space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold">
+          Stop {count === 1 ? "Executor" : `${count} Executors`}?
+        </h3>
+        <p className="text-xs text-[var(--color-text-muted)]">
+          {count === 1
+            ? "This will stop the executor."
+            : `This will stop ${count} active executors.`}
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={keepPosition}
+              onChange={(e) => setKeepPosition(e.target.checked)}
+              className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
+            />
+            <span className="text-sm">Keep position open</span>
+          </label>
+          <p className="text-[10px] text-[var(--color-text-muted)] -mt-2 ml-6">
+            {keepPosition
+              ? "The executor will stop but the position will remain open on the exchange."
+              : "The executor will stop and close any open position."}
+          </p>
+
+          <div className="flex items-center gap-2 justify-end">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="rounded-md bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 transition-colors"
+            >
+              Confirm Stop
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Main Page ──
 
 export function Executors() {
   const { server } = useServer();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [viewMode, setViewMode] = useState<ViewMode>("controllers");
-  const [expandedController, setExpandedController] = useState<string | null>(null);
   const [selectedExecutor, setSelectedExecutor] = useState<ExecutorInfo | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [filters, setFilters] = useState({
-    executor_type: "",
+    executor_types: [] as string[],
     trading_pair: "",
-    controller_id: "",
+    controller_ids: [] as string[],
   });
   const [maxPages, setMaxPages] = useState<number>(40); // 40 * 50 = 2000 cap by default
   const PAGE_SIZE = 50;
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [controllerSort, setControllerSort] = useState<{ key: ControllerSortKey; dir: SortDir }>({
-    key: "pnl",
-    dir: "desc",
-  });
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
+  const [pendingStopIds, setPendingStopIds] = useState<string[] | null>(null);
 
   // WebSocket for real-time updates
   const wsChannels = useMemo(
@@ -971,14 +1068,13 @@ export function Executors() {
     isFetchingNextPage,
     refetch,
   } = useInfiniteQuery({
-    queryKey: ["executors-infinite", server, filters.controller_id],
+    queryKey: ["executors-infinite", server],
     enabled: !!server,
     initialPageParam: "" as string,
     queryFn: ({ pageParam }) =>
       api.getExecutorsPage(server!, {
         cursor: pageParam || undefined,
         limit: PAGE_SIZE,
-        controller_id: filters.controller_id || undefined,
       }),
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: 10000,
@@ -994,17 +1090,17 @@ export function Executors() {
   }, [hasNextPage, isFetchingNextPage, loadedPages, maxPages, fetchNextPage]);
 
   const stopMutation = useMutation({
-    mutationFn: async (ids: string[]) => {
+    mutationFn: async ({ ids, keepPosition }: { ids: string[]; keepPosition: boolean }) => {
       setStoppingIds((prev) => new Set([...prev, ...ids]));
       const results = await Promise.allSettled(
-        ids.map((id) => api.stopExecutor(server!, id)),
+        ids.map((id) => api.stopExecutor(server!, id, keepPosition)),
       );
       return results;
     },
-    onSettled: (_data, _error, ids) => {
+    onSettled: (_data, _error, vars) => {
       setStoppingIds((prev) => {
         const next = new Set(prev);
-        ids?.forEach((id) => next.delete(id));
+        vars?.ids.forEach((id) => next.delete(id));
         return next;
       });
       setSelectedIds(new Set());
@@ -1013,7 +1109,15 @@ export function Executors() {
   });
 
   const handleStopOne = useCallback(
-    (id: string) => stopMutation.mutate([id]),
+    (id: string) => setPendingStopIds([id]),
+    [],
+  );
+
+  const handleConfirmStop = useCallback(
+    (ids: string[], keepPosition: boolean) => {
+      setPendingStopIds(null);
+      stopMutation.mutate({ ids, keepPosition });
+    },
     [stopMutation],
   );
 
@@ -1024,14 +1128,6 @@ export function Executors() {
       setSortKey(key);
       setSortDir("desc");
     }
-  };
-
-  const handleControllerSort = (key: ControllerSortKey) => {
-    setControllerSort((prev) =>
-      prev.key === key
-        ? { key, dir: prev.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: "desc" },
-    );
   };
 
   const executors = useMemo(
@@ -1059,11 +1155,14 @@ export function Executors() {
       const q = filters.trading_pair.toLowerCase();
       result = result.filter((ex) => ex.trading_pair.toLowerCase().includes(q));
     }
-    if (filters.executor_type) {
-      result = result.filter((ex) => ex.type === filters.executor_type);
+    if (filters.executor_types.length > 0) {
+      result = result.filter((ex) => filters.executor_types.includes(ex.type));
+    }
+    if (filters.controller_ids.length > 0) {
+      result = result.filter((ex) => ex.controller_id && filters.controller_ids.includes(ex.controller_id));
     }
     return result;
-  }, [executors, filters.trading_pair, filters.executor_type]);
+  }, [executors, filters.trading_pair, filters.executor_types, filters.controller_ids]);
 
   // Split into active and archived
   const activeExecutors = useMemo(
@@ -1086,28 +1185,6 @@ export function Executors() {
     return archivedExecutors.filter((ex) => ex.pnl > 0).length / archivedExecutors.length;
   }, [archivedExecutors]);
 
-  // Controller summaries (archived only — active shown separately)
-  const controllerSummaries = useMemo(
-    () => buildControllerSummaries(archivedExecutors),
-    [archivedExecutors],
-  );
-
-  const sortedControllers = useMemo(() => {
-    const arr = [...controllerSummaries];
-    const { key, dir } = controllerSort;
-    arr.sort((a, b) => {
-      let cmp = 0;
-      switch (key) {
-        case "pnl": cmp = a.totalPnl - b.totalPnl; break;
-        case "volume": cmp = a.totalVolume - b.totalVolume; break;
-        case "winRate": cmp = a.winRate - b.winRate; break;
-        case "activeCount": cmp = a.activeCount - b.activeCount; break;
-      }
-      return dir === "asc" ? cmp : -cmp;
-    });
-    return arr;
-  }, [controllerSummaries, controllerSort]);
-
   // Selection helpers
   const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -1118,12 +1195,7 @@ export function Executors() {
     });
   }, []);
 
-  const currentTableExecutors = useMemo(() => {
-    if (viewMode === "flat") return archivedExecutors;
-    if (!expandedController) return [];
-    const summary = controllerSummaries.find((s) => s.controllerId === expandedController);
-    return summary?.executors ?? [];
-  }, [viewMode, archivedExecutors, expandedController, controllerSummaries]);
+  const currentTableExecutors = useMemo(() => archivedExecutors, [archivedExecutors]);
 
   const allSelected = currentTableExecutors.length > 0 && currentTableExecutors.every((ex) => selectedIds.has(ex.id));
 
@@ -1141,9 +1213,9 @@ export function Executors() {
       return ex && isExecutorActive(ex.status);
     });
     if (activeIds.length > 0) {
-      stopMutation.mutate(activeIds);
+      setPendingStopIds(activeIds);
     }
-  }, [selectedIds, executors, stopMutation]);
+  }, [selectedIds, executors]);
 
   const handleBulkExport = useCallback(() => {
     const selected = executors.filter((ex) => selectedIds.has(ex.id));
@@ -1162,39 +1234,14 @@ export function Executors() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h2 className="text-xl font-bold">Executors</h2>
         <div className="flex items-center gap-2">
-          {/* New Grid button */}
+          {/* New Executor button */}
           <button
-            onClick={() => navigate("/executors/new-grid")}
+            onClick={() => navigate("/trade")}
             className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110"
           >
-            <Grid3X3 className="h-3.5 w-3.5" />
-            New Grid
+            <Plus className="h-3.5 w-3.5" />
+            New Executor
           </button>
-          {/* View toggle */}
-          <div className="flex rounded-md border border-[var(--color-border)] overflow-hidden">
-            <button
-              onClick={() => setViewMode("controllers")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${
-                viewMode === "controllers"
-                  ? "bg-[var(--color-primary)] text-white"
-                  : "bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)]"
-              }`}
-            >
-              <Grid3X3 className="h-3.5 w-3.5" />
-              Controllers
-            </button>
-            <button
-              onClick={() => { setViewMode("flat"); setExpandedController(null); }}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${
-                viewMode === "flat"
-                  ? "bg-[var(--color-primary)] text-white"
-                  : "bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)]"
-              }`}
-            >
-              <List className="h-3.5 w-3.5" />
-              Flat List
-            </button>
-          </div>
           {/* Export all */}
           <button
             onClick={() => exportCsv(filteredExecutors)}
@@ -1216,32 +1263,20 @@ export function Executors() {
           onChange={(e) =>
             setFilters((f) => ({ ...f, trading_pair: e.target.value }))
           }
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
         />
-        <select
-          value={filters.executor_type}
-          onChange={(e) =>
-            setFilters((f) => ({ ...f, executor_type: e.target.value }))
-          }
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
-        >
-          <option value="">All types</option>
-          {executorTypes.map((t) => (
-            <option key={t} value={t}>{t}</option>
-          ))}
-        </select>
-        <select
-          value={filters.controller_id}
-          onChange={(e) =>
-            setFilters((f) => ({ ...f, controller_id: e.target.value }))
-          }
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none max-w-[220px] truncate"
-        >
-          <option value="">All controllers</option>
-          {controllerOptions.map((id) => (
-            <option key={id} value={id}>{id}</option>
-          ))}
-        </select>
+        <MultiSelect
+          options={executorTypes}
+          selected={filters.executor_types}
+          onChange={(v) => setFilters((f) => ({ ...f, executor_types: v }))}
+          placeholder="All types"
+        />
+        <MultiSelect
+          options={controllerOptions}
+          selected={filters.controller_ids}
+          onChange={(v) => setFilters((f) => ({ ...f, controller_ids: v }))}
+          placeholder="All controllers"
+        />
         <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
           {executors.length} loaded
           {isFetchingNextPage && " · loading…"}
@@ -1366,122 +1401,20 @@ export function Executors() {
               </button>
 
               {!historyCollapsed && (
-                <>
-                  {/* Controller View */}
-                  {viewMode === "controllers" && (
-                    <div className="space-y-4">
-                      {/* Controller sort bar */}
-                      <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
-                        <span>Sort by:</span>
-                        {(["pnl", "volume", "winRate"] as ControllerSortKey[]).map((key) => (
-                          <button
-                            key={key}
-                            onClick={() => handleControllerSort(key)}
-                            className={`px-2 py-1 rounded transition-colors ${
-                              controllerSort.key === key
-                                ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                                : "hover:bg-[var(--color-surface)]"
-                            }`}
-                          >
-                            {key === "pnl" ? "PnL" : key === "volume" ? "Volume" : "Win Rate"}
-                            {controllerSort.key === key && (controllerSort.dir === "asc" ? " ↑" : " ↓")}
-                          </button>
-                        ))}
-                      </div>
-
-                      {/* Controller cards */}
-                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {sortedControllers.map((summary) => (
-                          <ControllerCard
-                            key={summary.controllerId}
-                            summary={summary}
-                            isExpanded={expandedController === summary.controllerId}
-                            onToggle={() =>
-                              setExpandedController((prev) =>
-                                prev === summary.controllerId ? null : summary.controllerId,
-                              )
-                            }
-                          />
-                        ))}
-                      </div>
-
-                      {/* Expanded controller's executor table */}
-                      {expandedController && (
-                        <div>
-                          <div className="flex items-center gap-2 mb-2 text-sm text-[var(--color-text-muted)]">
-                            <Layers className="h-4 w-4" />
-                            <span>
-                              Executors for{" "}
-                              <span className="font-medium text-[var(--color-text)]">
-                                {controllerSummaries.find((s) => s.controllerId === expandedController)?.displayName}
-                              </span>
-                            </span>
-                          </div>
-                          {/* Controller executor chart overlay */}
-                          {(() => {
-                            const summary = controllerSummaries.find((s) => s.controllerId === expandedController);
-                            const execs = summary?.executors ?? [];
-                            const first = execs[0];
-                            if (first && server) {
-                              // Group by trading pair for multi-pair controllers
-                              const pairGroups = new Map<string, ExecutorInfo[]>();
-                              for (const ex of execs) {
-                                const key = `${ex.connector}:${ex.trading_pair}`;
-                                const arr = pairGroups.get(key);
-                                if (arr) arr.push(ex);
-                                else pairGroups.set(key, [ex]);
-                              }
-                              return Array.from(pairGroups.entries()).map(([key, group]) => (
-                                <div key={key} className="mb-3">
-                                  <ExecutorChart
-                                    server={server}
-                                    executors={group}
-                                    connector={group[0].connector}
-                                    tradingPair={group[0].trading_pair}
-                                    height={280}
-                                  />
-                                </div>
-                              ));
-                            }
-                            return null;
-                          })()}
-                          <ExecutorTable
-                            executors={currentTableExecutors}
-                            sortKey={sortKey}
-                            sortDir={sortDir}
-                            onSort={handleSort}
-                            selectedIds={selectedIds}
-                            onToggleSelect={toggleSelect}
-                            onSelectAll={selectAll}
-                            allSelected={allSelected}
-                            onRowClick={setSelectedExecutor}
-                            selectedExecutorId={selectedExecutor?.id ?? null}
-                            onStop={handleStopOne}
-                            stoppingIds={stoppingIds}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Flat View */}
-                  {viewMode === "flat" && (
-                    <ExecutorTable
-                      executors={archivedExecutors}
-                      sortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                      selectedIds={selectedIds}
-                      onToggleSelect={toggleSelect}
-                      onSelectAll={selectAll}
-                      allSelected={allSelected}
-                      onRowClick={setSelectedExecutor}
-                      selectedExecutorId={selectedExecutor?.id ?? null}
-                      onStop={handleStopOne}
-                      stoppingIds={stoppingIds}
-                    />
-                  )}
-                </>
+                <ExecutorTable
+                  executors={archivedExecutors}
+                  sortKey={sortKey}
+                  sortDir={sortDir}
+                  onSort={handleSort}
+                  selectedIds={selectedIds}
+                  onToggleSelect={toggleSelect}
+                  onSelectAll={selectAll}
+                  allSelected={allSelected}
+                  onRowClick={setSelectedExecutor}
+                  selectedExecutorId={selectedExecutor?.id ?? null}
+                  onStop={handleStopOne}
+                  stoppingIds={stoppingIds}
+                />
               )}
             </div>
           )}
@@ -1499,6 +1432,15 @@ export function Executors() {
           onClose={() => setSelectedExecutor(null)}
           onStop={handleStopOne}
           stopping={stoppingIds.has(selectedExecutor.id)}
+        />
+      )}
+
+      {/* Stop confirmation dialog */}
+      {pendingStopIds && (
+        <StopConfirmDialog
+          ids={pendingStopIds}
+          onConfirm={handleConfirmStop}
+          onCancel={() => setPendingStopIds(null)}
         />
       )}
     </div>
