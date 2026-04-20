@@ -16,11 +16,7 @@ You are an autonomous trading agent running inside Condor.
 
 RULES:
 - Trade ONLY via manage_executors(action="create"). NEVER use place_order.
-- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
 - Be conservative. When in doubt, hold and journal why.
-- Keep tool chains short (1-5 calls per tick).
-- ALWAYS pass controller_id=YOUR_AGENT_ID as a top-level argument to manage_executors(action="create", controller_id="..."). It is NOT inside executor_config — it is a separate parameter. NEVER omit it or use "main".
-- Your executor state and positions are pre-loaded in [CORE DATA] below. Do NOT call manage_executors(action="search") or manage_executors(action="positions_summary") to check your own state — it's already here.
 
 ERROR RECOVERY:
 - If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
@@ -35,9 +31,6 @@ RULES:
 - This is OBSERVATION ONLY. Do NOT create or stop executors.
 - manage_executors is available for read-only queries (performance_report).
 - Analyze the market and describe what you WOULD do, but take NO trading action.
-- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
-- Keep tool chains short (1-5 calls per tick).
-- Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
 
 DRY RUN MESSAGING:
 - Use conditional language: "Would place grid..." not "Grid placed"
@@ -46,6 +39,11 @@ DRY RUN MESSAGING:
 """
 
 BASE_PROMPT_COMMON = """\
+GENERAL:
+- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
+- Keep tool chains short (1-5 calls per tick).
+- Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
+
 JOURNAL:
 - Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
@@ -122,6 +120,7 @@ def build_tick_prompt(
     risk_state: dict[str, Any],
     tick_number: int = 1,
     agent_id: str = "",
+    cached_routines_section: str | None = None,
 ) -> str:
     """Build the full prompt for one agent tick."""
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
@@ -142,8 +141,7 @@ def build_tick_prompt(
     else:
         sections.append(
             "TOOLS:\n"
-            "All MCP tools are pre-loaded and available. Call them directly by name.\n"
-            "Do NOT call configure_server — the server is pre-configured."
+            "All MCP tools are pre-loaded and available. Call them directly by name."
         )
 
     # Tick identity
@@ -168,11 +166,14 @@ def build_tick_prompt(
     # Strategy instructions
     sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
 
-    # Available routines
-    try:
-        sections.append(_build_routines_section(strategy))
-    except Exception:
-        pass  # Don't fail the tick if routine discovery fails
+    # Available routines (use cached version if provided)
+    if cached_routines_section:
+        sections.append(cached_routines_section)
+    else:
+        try:
+            sections.append(_build_routines_section(strategy))
+        except Exception:
+            pass  # Don't fail the tick if routine discovery fails
 
     # Session trading context (natural language directives for this session)
     trading_context = config.get("trading_context", "")
@@ -184,12 +185,14 @@ def build_tick_prompt(
             f"{trading_context}"
         )
 
-    # Current config (exclude trading_context and risk_limits -- risk is shown in RISK STATE)
-    config_lines = [f"[CURRENT CONFIG]"]
-    if agent_id:
-        config_lines.append(f"controller_id: {agent_id}  ← pass as top-level arg to manage_executors, NOT inside executor_config")
+    # Current config (exclude keys shown elsewhere or not useful to the LLM)
+    _CONFIG_EXCLUDE = {
+        "trading_context", "risk_limits",  # shown in dedicated sections
+        "agent_key", "server_name", "frequency_sec", "execution_mode",  # noise / internal
+    }
+    config_lines = ["[CURRENT CONFIG]"]
     for k, v in config.items():
-        if k in ("trading_context", "risk_limits"):
+        if k in _CONFIG_EXCLUDE:
             continue
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))

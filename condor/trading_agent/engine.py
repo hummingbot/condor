@@ -80,6 +80,7 @@ class TickEngine:
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
+    _cached_routines_section: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         agent_dir = self.strategy.agent_dir
@@ -261,6 +262,14 @@ class TickEngine:
             return
 
         # 5. Build prompt (server credentials are injected via env into MCP process)
+        # Cache routine discovery on first tick — routines rarely change mid-session
+        if self._cached_routines_section is None:
+            from .prompts import _build_routines_section
+            try:
+                self._cached_routines_section = _build_routines_section(self.strategy)
+            except Exception:
+                self._cached_routines_section = ""
+
         next_tick = self.journal.tick_count + 1 if self.journal else 1
         prompt = build_tick_prompt(
             strategy=self.strategy,
@@ -272,6 +281,7 @@ class TickEngine:
             risk_state=risk_state.to_dict(),
             tick_number=next_tick,
             agent_id=self.agent_id,
+            cached_routines_section=self._cached_routines_section or None,
         )
 
         # Inject pending user directives

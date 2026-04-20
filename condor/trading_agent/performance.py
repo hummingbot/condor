@@ -67,6 +67,12 @@ def _executor_row(ex: dict) -> dict[str, Any]:
         or float(custom_info.get("close_price") or 0)
     )
 
+    ex_id = ex.get("id") or ex.get("executor_id") or "unknown"
+    if entry_price == 0.0:
+        log.warning("Executor %s: entry_price fell back to 0.0 — PnL may be misleading", ex_id)
+    if current_price == 0.0:
+        log.warning("Executor %s: current_price fell back to 0.0 — PnL may be misleading", ex_id)
+
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
         "type": cfg.get("type") or ex.get("type") or "",

@@ -363,34 +363,8 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
-        # REST pre-fetch: broadcast historical candles immediately if no cached data
-        if channel not in self._last_data:
-            try:
-                client = await cm.get_client(server_name)
-                # Calculate lookback: 3 days or 500 candles worth, whichever is larger
-                _interval_seconds = {
-                    "1s": 1, "1m": 60, "3m": 180, "5m": 300, "15m": 900,
-                    "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400, "1w": 604800,
-                }
-                secs = _interval_seconds.get(interval, 60)
-                end_time = int(time.time())
-                three_days = 3 * 86400
-                start_time = end_time - max(500 * secs, three_days)
-                result = await client.market_data.get_historical_candles(
-                    connector, pair, interval, start_time=start_time, end_time=end_time,
-                )
-                candles_raw = result if isinstance(result, list) else result.get("data", []) if isinstance(result, dict) else []
-                candles = [
-                    nc for c in candles_raw
-                    if (nc := self._normalize_candle(c)) is not None
-                ]
-                if candles:
-                    await self.broadcast(channel, {"type": "candles", "data": candles})
-                    logger.info("Candle REST pre-fetch broadcast %d candles for %s", len(candles), channel)
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                logger.warning("Candle REST pre-fetch failed for %s: %s", channel, e)
+        # Historical candles are fetched by the frontend via REST endpoint.
+        # WS stream only handles live updates to avoid duplicate slow API calls.
 
         while True:
             try:

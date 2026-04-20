@@ -516,7 +516,8 @@ class ServerDataService:
         """Subscribe to core data types for all configured servers.
 
         Called at startup so the cache is warm before any client connects.
-        Subscribes to: PORTFOLIO, EXECUTORS, BOTS_STATUS for every server.
+        Subscribes to: PORTFOLIO, EXECUTORS, BOTS_STATUS, CONNECTORS,
+        and TRADING_RULES (per connector) for every server.
         """
         from config_manager import get_config_manager
 
@@ -530,6 +531,8 @@ class ServerDataService:
             ServerDataType.PORTFOLIO,
             ServerDataType.EXECUTORS,
             ServerDataType.BOTS_STATUS,
+            ServerDataType.CONNECTORS,
+            ServerDataType.CANDLE_CONNECTORS,
         ]
         subscriber_id = "_auto"
         count = 0
@@ -544,6 +547,25 @@ class ServerDataService:
                     count += 1
                 except Exception as e:
                     logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
+
+            # Pre-subscribe trading rules for each discovered connector
+            connectors = self.get(name, ServerDataType.CONNECTORS)
+            if connectors:
+                for connector in connectors:
+                    try:
+                        await self.subscribe(
+                            server=name,
+                            data_type=ServerDataType.TRADING_RULES,
+                            subscriber_id=subscriber_id,
+                            connector_name=connector,
+                        )
+                        count += 1
+                    except Exception as e:
+                        logger.debug(
+                            "SDS auto-subscribe failed for %s/trading_rules/%s: %s",
+                            name, connector, e,
+                        )
+
         logger.info("SDS auto-subscribe: %d subscriptions for %d servers", count, len(servers))
 
     def stop(self) -> None:
