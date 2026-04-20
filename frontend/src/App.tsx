@@ -9,7 +9,7 @@ import { AgentDetail } from "@/pages/AgentDetail";
 import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
-import { CreateGridExecutor } from "@/pages/CreateGridExecutor";
+import { CreateExecutor } from "@/pages/CreateExecutor";
 import { Executors } from "@/pages/Executors";
 import { Login } from "@/pages/Login";
 import { Positions } from "@/pages/Positions";
@@ -59,8 +59,10 @@ export default function App() {
                 <Route path="/" element={<Portfolio />} />
                 <Route path="/bots" element={<Bots />} />
                 <Route path="/bots/:id" element={<BotDetail />} />
+                <Route path="/trade" element={<CreateExecutor />} />
                 <Route path="/executors" element={<Executors />} />
-                <Route path="/executors/new-grid" element={<CreateGridExecutor />} />
+                <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
+                <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />
                 <Route path="/positions" element={<Positions />} />
                 <Route path="/agents" element={<Agents />} />
                 <Route path="/agents/:slug" element={<AgentDetail />} />
