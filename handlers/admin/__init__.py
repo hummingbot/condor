@@ -31,6 +31,9 @@ def _get_admin_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📊 Stats", callback_data="admin:stats"),
         ],
         [
+            InlineKeyboardButton("Update", callback_data="admin:update_check"),
+        ],
+        [
             InlineKeyboardButton("« Close", callback_data="config_close"),
         ],
     ]
@@ -119,6 +122,10 @@ async def admin_callback_handler(
     elif action.startswith("unblock_"):
         user_id = int(action.replace("unblock_", ""))
         await _unblock_user(query, context, user_id)
+    elif action.startswith("update_"):
+        from handlers.admin.update import handle_update_callback
+
+        await handle_update_callback(query, context, action)
     elif action.startswith("user_"):
         user_id = int(action.replace("user_", ""))
         await _show_user_details(query, context, user_id)
