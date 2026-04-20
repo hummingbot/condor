@@ -128,14 +128,16 @@ You will be notified when approved."""
 
     reply_text = """I can help you create and manage trading bots on any CEX or DEX using Hummingbot API servers\\.
 
-See [this manual](https://hummingbot.org/condor/) if you're new to Condor\\.
+See [this manual](https://condor.hummingbot.org/introduction) if you're new to Condor\\.
 
 You can control me by sending these commands:
 
 /keys \\- add exchange API keys
 /portfolio \\- view balances across exchanges
 /bots \\- deploy and manage trading bots
-/trade \\- place CEX and DEX orders"""
+/trade \\- place CEX and DEX orders
+/agent \\- AI trading assistant
+/web \\- open the web dashboard"""
 
     await update.message.reply_text(
         reply_text, parse_mode="MarkdownV2", disable_web_page_preview=True
@@ -229,6 +231,7 @@ def reload_handlers():
         "handlers.agents.confirmation",
         "handlers.agents._shared",
         "handlers.admin",
+        "handlers.admin.update",
         "routines.base",
         "utils.auth",
         "utils.telegram_formatters",
@@ -261,6 +264,7 @@ def register_handlers(application: Application) -> None:
     """Register all command handlers."""
     # Import fresh versions after reload
     from handlers.admin import admin_command
+    from handlers.admin.update import update_command
     from handlers.agents import agent_callback_handler, agent_command, agent_voice_handler
     from handlers.bots import (
         bots_callback_handler,
@@ -304,6 +308,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("keys", keys_command))
     application.add_handler(CommandHandler("gateway", gateway_command))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("update", update_command))
     application.add_handler(CommandHandler("web", web_command))
 
     # Add callback query handler for start menu navigation
@@ -422,13 +427,14 @@ async def post_init(application: Application) -> None:
     if ADMIN_USER_ID:
         admin_commands = commands + [
             BotCommand("admin", "Admin panel - manage users and access"),
+            BotCommand("update", "Check for updates and restart"),
         ]
         try:
             await application.bot.set_my_commands(
                 admin_commands, scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID))
             )
         except Exception as e:
-            logger.warning(f"Failed to set admin-specific commands: {e}")
+            logger.warning(f"Failed to set admin-specific commands: {e}", exc_info=True)
 
     # Restore scheduled routine jobs from persistence
     from handlers.routines import restore_scheduled_jobs
@@ -454,6 +460,11 @@ async def post_init(application: Application) -> None:
     from handlers.agents.session import start_health_monitor
 
     await start_health_monitor(application.bot)
+
+    # Schedule periodic update checks (notifies admin)
+    from handlers.admin.update import schedule_update_checks
+
+    schedule_update_checks(application)
 
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
