@@ -1,0 +1,615 @@
+import { useMutation, useQuery } from "@tanstack/react-query";
+import React, { useEffect, useMemo, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import {
+  ArrowLeft,
+  ArrowUpDown,
+  CheckCircle,
+  Grid3X3,
+  Layers,
+  Loader2,
+  Rocket,
+  TrendingUp,
+} from "lucide-react";
+
+import { ExchangeSelector } from "@/components/market/ExchangeSelector";
+import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
+import { PriceTicker } from "@/components/market/PriceTicker";
+import { GridChart } from "@/components/grid/GridChart";
+import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
+import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
+import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
+import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
+import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
+import { useServer } from "@/hooks/useServer";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import { useMainControllerData } from "@/hooks/useMainControllerData";
+import { api } from "@/lib/api";
+import type { ExecutorType } from "@/components/executor/types";
+import {
+  type GridState,
+  type GridAction,
+  isSpotConnector,
+} from "@/pages/CreateGridExecutor";
+
+// ── Grid state management (reuse from CreateGridExecutor) ──
+
+const GRID_DEFAULTS: GridState = {
+  connector: "binance_perpetual",
+  pair: "BTC-USDT",
+  interval: "5m",
+  lookbackSeconds: 3 * 86400,
+  side: 1,
+  start_price: 0,
+  end_price: 0,
+  limit_price: 0,
+  total_amount_quote: 300,
+  min_order_amount_quote: 10,
+  min_spread_between_orders: 0.0001,
+  max_open_orders: 5,
+  max_orders_per_batch: 2,
+  order_frequency: 1,
+  leverage: 10,
+  take_profit: 0.0002,
+  open_order_type: 2,
+  take_profit_order_type: 2,
+  activation_bounds: 0.05,
+  keep_position: false,
+  coerce_tp_to_step: false,
+  activePickField: null,
+  showAdvanced: false,
+};
+
+const GRID_STORAGE_KEY = "condor_grid_defaults";
+
+const GRID_PERSISTED_FIELDS: (keyof GridState)[] = [
+  "connector", "pair", "interval", "lookbackSeconds", "side",
+  "total_amount_quote", "min_order_amount_quote", "min_spread_between_orders",
+  "max_open_orders", "max_orders_per_batch", "order_frequency", "leverage",
+  "take_profit", "open_order_type", "take_profit_order_type",
+  "activation_bounds", "keep_position", "coerce_tp_to_step",
+];
+
+function loadGridDefaults(): GridState {
+  try {
+    const raw = localStorage.getItem(GRID_STORAGE_KEY);
+    if (!raw) return GRID_DEFAULTS;
+    const saved = JSON.parse(raw);
+    const merged = { ...GRID_DEFAULTS };
+    for (const key of GRID_PERSISTED_FIELDS) {
+      if (key in saved && saved[key] !== undefined) {
+        (merged as Record<string, unknown>)[key] = saved[key];
+      }
+    }
+    return merged;
+  } catch {
+    return GRID_DEFAULTS;
+  }
+}
+
+function saveGridDefaults(state: GridState) {
+  const toSave: Record<string, unknown> = {};
+  for (const key of GRID_PERSISTED_FIELDS) toSave[key] = state[key];
+  localStorage.setItem(GRID_STORAGE_KEY, JSON.stringify(toSave));
+}
+
+function gridReducer(state: GridState, action: GridAction): GridState {
+  switch (action.type) {
+    case "SET_FIELD": {
+      const next = { ...state, [action.field]: action.value };
+      if (action.field === "leverage" && isSpotConnector(next.connector)) {
+        next.leverage = 1;
+      }
+      return next;
+    }
+    case "SET_CONNECTOR": {
+      const spot = isSpotConnector(action.value);
+      return {
+        ...state,
+        connector: action.value,
+        start_price: 0,
+        end_price: 0,
+        limit_price: 0,
+        leverage: spot ? 1 : state.leverage,
+      };
+    }
+    case "SET_PAIR":
+      return { ...state, pair: action.value, start_price: 0, end_price: 0, limit_price: 0 };
+    default:
+      return state;
+  }
+}
+
+// ── Intervals ──
+
+const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
+
+const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
+  { label: "1h", seconds: 3600 },
+  { label: "6h", seconds: 6 * 3600 },
+  { label: "1d", seconds: 86400 },
+  { label: "3d", seconds: 3 * 86400 },
+  { label: "7d", seconds: 7 * 86400 },
+  { label: "14d", seconds: 14 * 86400 },
+  { label: "30d", seconds: 30 * 86400 },
+];
+
+// ── Type tabs config ──
+
+const TYPE_TABS: { value: ExecutorType; label: string; icon: React.ReactNode }[] = [
+  { value: "order", label: "Order", icon: <ArrowUpDown className="h-3.5 w-3.5" /> },
+  { value: "position", label: "Position", icon: <TrendingUp className="h-3.5 w-3.5" /> },
+  { value: "grid", label: "Grid", icon: <Grid3X3 className="h-3.5 w-3.5" /> },
+  { value: "dca", label: "DCA", icon: <Layers className="h-3.5 w-3.5" /> },
+];
+
+const TYPE_LABELS: Record<ExecutorType, string> = {
+  grid: "Grid Executor",
+  position: "Position Executor",
+  order: "Order Executor",
+  dca: "DCA Executor",
+};
+
+// ── Page ──
+
+export function CreateExecutor() {
+  const { server } = useServer();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Executor type from URL param or default to grid
+  const [executorType, setExecutorType] = useState<ExecutorType>(
+    () => (searchParams.get("type") as ExecutorType) || "grid",
+  );
+
+  // Update URL when type changes
+  const handleTypeChange = (type: ExecutorType) => {
+    setExecutorType(type);
+    setSearchParams({ type }, { replace: true });
+  };
+
+  // ── Grid state (always initialized for hooks rules) ──
+  const [gridState, gridDispatch] = React.useReducer(gridReducer, undefined, loadGridDefaults);
+  const gridValidation = useGridValidation(gridState);
+
+  // ── Other executor configs ──
+  const positionConfig = usePositionConfig();
+  const orderConfig = useOrderConfig();
+  const dcaConfig = useDCAConfig();
+
+  // ── Shared market state ──
+  // Use grid state for connector/pair/interval since it's always present
+  // Sync other types' connector/pair changes through grid state
+  const connector = gridState.connector;
+  const pair = gridState.pair;
+  const isSpot = isSpotConnector(connector);
+
+  const [successId, setSuccessId] = useState<string | null>(null);
+  const [onlyConnected, setOnlyConnected] = useState(true);
+
+  const { data: allConnectors } = useQuery({
+    queryKey: ["connectors", server],
+    queryFn: () => api.getConnectors(server!),
+    enabled: !!server,
+  });
+
+  const { data: connectedExchanges } = useQuery({
+    queryKey: ["connected-exchanges", server],
+    queryFn: () => api.getConnectedExchanges(server!),
+    enabled: !!server,
+  });
+
+  const connectors = useMemo(() => {
+    if (!allConnectors) return [];
+    if (!onlyConnected || !connectedExchanges?.length) return allConnectors;
+    const connectedBases = new Set(connectedExchanges.map((c) => c.replace(/_perpetual$/, "")));
+    return allConnectors.filter((c) => {
+      const base = c.replace(/_perpetual$/, "");
+      return connectedBases.has(base);
+    });
+  }, [allConnectors, connectedExchanges, onlyConnected]);
+
+  // WS subscription for executor data
+  const execChannels = useMemo(() => server ? [`executors:${server}`] : [], [server]);
+  useCondorWebSocket(execChannels, server);
+
+  // Main controller data (executors + positions filtered by connector/pair)
+  const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
+    useMainControllerData(server, connector, pair);
+
+  const rulesData = useTradingRules(server ?? "", connector);
+
+  // Sync connector to filtered list
+  useEffect(() => {
+    if (connectors.length && !connectors.includes(connector)) {
+      gridDispatch({ type: "SET_CONNECTOR", value: connectors[0] });
+    }
+  }, [connectors, connector]);
+
+  // Reset pair when connector changes
+  useEffect(() => {
+    if (rulesData?.rules?.length) {
+      const pairs = rulesData.rules.map((r) => r.trading_pair);
+      if (!pairs.includes(pair)) {
+        const defaultPair = pairs.find((p) => p === "BTC-USDT") ?? pairs[0];
+        gridDispatch({ type: "SET_PAIR", value: defaultPair });
+      }
+    }
+  }, [rulesData, connector]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Propagate connector/pair changes to other config types
+  useEffect(() => {
+    positionConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
+    orderConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
+    dcaConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
+  }, [connector]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    positionConfig.dispatch({ type: "SET_PAIR", value: pair });
+    orderConfig.dispatch({ type: "SET_PAIR", value: pair });
+    dcaConfig.dispatch({ type: "SET_PAIR", value: pair });
+  }, [pair]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Current price
+  const { data: priceData } = useQuery({
+    queryKey: ["price", server, connector, pair],
+    queryFn: () => api.getPrice(server!, connector, pair),
+    enabled: !!server && !!connector && !!pair,
+    refetchInterval: 5000,
+  });
+
+  const currentPrice = priceData?.mid_price ?? null;
+
+  // Price precision
+  const pricePrecision = useMemo(() => {
+    if (!rulesData?.rules) return undefined;
+    const rule = rulesData.rules.find((r) => r.trading_pair === pair);
+    if (!rule || !rule.min_price_increment) return undefined;
+    const inc = rule.min_price_increment;
+    if (inc >= 1) return 0;
+    return Math.max(0, Math.ceil(-Math.log10(inc)));
+  }, [rulesData, pair]);
+
+  // ── Active config derived values ──
+  const activeValidation = useMemo(() => {
+    switch (executorType) {
+      case "grid": return gridValidation;
+      case "position": return positionConfig.validation;
+      case "order": return orderConfig.validation;
+      case "dca": return dcaConfig.validation;
+    }
+  }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation]);
+
+  const activeSide = useMemo(() => {
+    switch (executorType) {
+      case "grid": return gridState.side;
+      case "position": return positionConfig.state.side;
+      case "order": return orderConfig.state.side;
+      case "dca": return dcaConfig.state.side;
+    }
+  }, [executorType, gridState.side, positionConfig.state.side, orderConfig.state.side, dcaConfig.state.side]);
+
+  // Chart props depend on active type
+  const chartProps = useMemo(() => {
+    switch (executorType) {
+      case "grid":
+        return {
+          startPrice: gridState.start_price,
+          endPrice: gridState.end_price,
+          limitPrice: gridState.limit_price,
+          side: gridState.side,
+          minSpread: gridState.min_spread_between_orders,
+          activePickField: gridState.activePickField,
+        };
+      case "position": return positionConfig.chartProps;
+      case "order": return orderConfig.chartProps;
+      case "dca": return dcaConfig.chartProps;
+    }
+  }, [executorType, gridState, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps]);
+
+  // Chart price set handler
+  const handlePriceSet = useMemo(
+    () => (field: "start" | "end" | "limit", price: number) => {
+      switch (executorType) {
+        case "grid":
+          gridDispatch({ type: "SET_FIELD", field: `${field}_price`, value: price });
+          gridDispatch({ type: "SET_FIELD", field: "activePickField", value: null });
+          break;
+        case "position":
+          positionConfig.handleChartPriceSet(field, price);
+          break;
+        case "order":
+          orderConfig.handleChartPriceSet(field, price);
+          break;
+        case "dca":
+          dcaConfig.handleChartPriceSet(field, price);
+          break;
+      }
+    },
+    [executorType], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // Create mutation
+  const createMutation = useMutation({
+    mutationFn: () => {
+      if (!server) throw new Error("No server");
+
+      let payload: { executor_type: string; config: Record<string, unknown> };
+
+      switch (executorType) {
+        case "grid":
+          payload = {
+            executor_type: "grid_executor",
+            config: {
+              connector_name: connector,
+              trading_pair: pair,
+              side: gridState.side,
+              start_price: gridState.start_price,
+              end_price: gridState.end_price,
+              limit_price: gridState.limit_price,
+              total_amount_quote: gridState.total_amount_quote,
+              min_order_amount_quote: gridState.min_order_amount_quote,
+              min_spread_between_orders: gridState.min_spread_between_orders,
+              max_open_orders: gridState.max_open_orders,
+              max_orders_per_batch: gridState.max_orders_per_batch,
+              order_frequency: gridState.order_frequency,
+              leverage: isSpot ? 1 : gridState.leverage,
+              activation_bounds: gridState.activation_bounds,
+              keep_position: gridState.keep_position,
+              coerce_tp_to_step: gridState.coerce_tp_to_step,
+              triple_barrier_config: {
+                take_profit: gridState.take_profit,
+                open_order_type: gridState.open_order_type,
+                take_profit_order_type: gridState.take_profit_order_type,
+              },
+            },
+          };
+          break;
+        case "position":
+          payload = positionConfig.buildPayload(connector, pair, isSpot);
+          break;
+        case "order":
+          payload = orderConfig.buildPayload(connector, pair, isSpot);
+          break;
+        case "dca":
+          payload = dcaConfig.buildPayload(connector, pair, isSpot);
+          break;
+      }
+
+      return api.createExecutor(server, payload);
+    },
+    onSuccess: (data) => {
+      // Save defaults for the active type
+      switch (executorType) {
+        case "grid": saveGridDefaults(gridState); break;
+        case "position": positionConfig.save(); break;
+        case "order": orderConfig.save(); break;
+        case "dca": dcaConfig.save(); break;
+      }
+      setSuccessId(data.executor_id);
+      setTimeout(() => navigate("/executors"), 2500);
+    },
+  });
+
+  if (!server) {
+    return <p className="p-6 text-[var(--color-text-muted)]">Select a server</p>;
+  }
+
+  return (
+    <div className="-m-6 flex h-[calc(100%+3rem)] flex-col">
+      {/* Top Bar */}
+      <div className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+        {/* Back button */}
+        <button
+          onClick={() => navigate("/executors")}
+          className="flex items-center gap-1 border-r border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+        </button>
+
+        {/* Pair + Exchange */}
+        <div className="flex items-center border-r border-[var(--color-border)]">
+          <PairSelector
+            server={server}
+            connector={connector}
+            value={pair}
+            onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
+          />
+          <div className="relative border-l border-[var(--color-border)]">
+            <ExchangeSelector
+              connectors={connectors}
+              value={connector}
+              onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
+            />
+          </div>
+          {connectedExchanges && connectedExchanges.length > 0 && (
+            <label className="flex cursor-pointer items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-[10px] text-[var(--color-text-muted)] select-none hover:bg-[var(--color-surface-hover)]">
+              <input
+                type="checkbox"
+                checked={onlyConnected}
+                onChange={(e) => setOnlyConnected(e.target.checked)}
+                className="h-3 w-3 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
+              />
+              Connected only
+            </label>
+          )}
+        </div>
+
+        {/* Price ticker */}
+        <div className="flex flex-1 items-center px-4 py-2">
+          <PriceTicker server={server} connector={connector} pair={pair} />
+        </div>
+
+        {/* Interval + Range */}
+        <div className="flex items-center gap-3 border-l border-[var(--color-border)] px-4 py-2">
+          <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
+            {INTERVALS.map((iv) => (
+              <button
+                key={iv}
+                onClick={() => gridDispatch({ type: "SET_FIELD", field: "interval", value: iv })}
+                className={`px-2.5 py-1 text-xs ${
+                  gridState.interval === iv
+                    ? "bg-[var(--color-primary)] text-white"
+                    : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                {iv}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-[var(--color-text-muted)]">Range:</span>
+            <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
+              {LOOKBACK_OPTIONS.map((opt) => (
+                <button
+                  key={opt.label}
+                  onClick={() => gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: opt.seconds })}
+                  className={`px-2 py-1 text-xs ${
+                    gridState.lookbackSeconds === opt.seconds
+                      ? "bg-[var(--color-primary)] text-white"
+                      : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Area: Chart + Right Panel */}
+      <div className="flex min-h-0 flex-1">
+        {/* Chart + Bottom Pane */}
+        <div className="min-w-0 flex-1 flex flex-col border-r border-[var(--color-border)]">
+          <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
+            <GridChart
+              key={`${connector}:${pair}:${gridState.interval}:${gridState.lookbackSeconds}`}
+              server={server}
+              connector={connector}
+              pair={pair}
+              interval={gridState.interval}
+              lookbackSeconds={gridState.lookbackSeconds}
+              startPrice={chartProps.startPrice}
+              endPrice={chartProps.endPrice}
+              limitPrice={chartProps.limitPrice}
+              side={chartProps.side}
+              minSpread={chartProps.minSpread}
+              activePickField={chartProps.activePickField}
+              onPriceSet={handlePriceSet}
+              pricePrecision={pricePrecision}
+              extraLines={chartProps.extraLines}
+              executorOverlays={mainOverlays}
+            />
+          </div>
+          <TradeBottomPane
+            executors={mainExecutors}
+            positions={mainPositions}
+            isLoadingPositions={isLoadingPositions}
+          />
+        </div>
+
+        {/* Right Panel */}
+        <div className="flex w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
+          {/* Type Tabs */}
+          <div className="border-b border-[var(--color-border)]">
+            <div className="flex">
+              {TYPE_TABS.map((tab) => (
+                <button
+                  key={tab.value}
+                  onClick={() => handleTypeChange(tab.value)}
+                  className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
+                    executorType === tab.value
+                      ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  {tab.icon}
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Config Panel */}
+          <div className="flex-1 overflow-y-auto">
+            {executorType === "grid" && (
+              <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
+            )}
+            {executorType === "position" && (
+              <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+            )}
+            {executorType === "order" && (
+              <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+            )}
+            {executorType === "dca" && (
+              <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom Bar */}
+      <div className="flex items-center justify-between border-t border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
+        <div className="flex items-center gap-3 text-xs">
+          {activeValidation.valid ? (
+            <span className="text-[var(--color-green)]">Ready to launch</span>
+          ) : (
+            <span className="text-[var(--color-red)]">
+              {activeValidation.errors[0]}
+            </span>
+          )}
+          {activeSide === 1 ? (
+            <span className="rounded bg-[var(--color-green)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-green)]">LONG</span>
+          ) : (
+            <span className="rounded bg-[var(--color-red)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-red)]">SHORT</span>
+          )}
+          <span className="text-[var(--color-text-muted)]">
+            {connector} / {pair}
+          </span>
+        </div>
+
+        <button
+          onClick={() => createMutation.mutate()}
+          disabled={!activeValidation.valid || createMutation.isPending}
+          className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {createMutation.isPending ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Rocket className="h-4 w-4" />
+          )}
+          Create {TYPE_LABELS[executorType]}
+        </button>
+      </div>
+
+      {/* Success modal */}
+      {successId && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="flex flex-col items-center gap-3 rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-8 py-6 shadow-2xl shadow-black/40">
+            <CheckCircle className="h-10 w-10 text-[var(--color-green)]" />
+            <div className="text-center">
+              <p className="text-sm font-semibold text-[var(--color-text)]">{TYPE_LABELS[executorType]} Created</p>
+              <p className="mt-1 font-mono text-xs text-[var(--color-text-muted)]">{successId}</p>
+            </div>
+            <p className="text-[10px] text-[var(--color-text-muted)]">Redirecting to executors...</p>
+            <button
+              onClick={() => navigate("/executors")}
+              className="mt-1 rounded-lg bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white hover:brightness-110"
+            >
+              Go now
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Error toast */}
+      {createMutation.isError && (
+        <div className="absolute bottom-16 right-4 rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-4 py-2 text-sm text-[var(--color-red)]">
+          {(createMutation.error as Error).message}
+        </div>
+      )}
+    </div>
+  );
+}
