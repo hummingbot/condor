@@ -3,7 +3,9 @@ import { Minus, Plus, Sparkles } from "lucide-react";
 
 import {
   AdvancedSection,
+  LeverageField,
   NumberField,
+  PriceField,
   SectionHeader,
   SelectField,
   SideSelector,
@@ -26,6 +28,7 @@ export interface DCAState {
   trailing_stop_trailing_delta: number;
   mode: string;
   activation_bounds: number;
+  activePickField: string | null;
   showAdvanced: boolean;
 }
 
@@ -51,6 +54,7 @@ const DEFAULTS: DCAState = {
   trailing_stop_trailing_delta: 0,
   mode: "MAKER",
   activation_bounds: 0,
+  activePickField: null,
   showAdvanced: false,
 };
 
@@ -90,8 +94,18 @@ function saveDefaults(state: DCAState) {
 
 function dcaReducer(state: DCAState, action: DCAAction): DCAState {
   switch (action.type) {
-    case "SET_FIELD":
+    case "SET_FIELD": {
+      // Intercept dca_price_N fields → update prices array
+      if (typeof action.field === "string" && action.field.startsWith("dca_price_")) {
+        const idx = parseInt(action.field.replace("dca_price_", ""), 10);
+        if (!isNaN(idx) && idx >= 0 && idx < state.prices.length) {
+          const prices = [...state.prices];
+          prices[idx] = action.value as number;
+          return { ...state, prices };
+        }
+      }
       return { ...state, [action.field]: action.value };
+    }
     case "SET_LEVEL_AMOUNT": {
       const amounts = [...state.amounts_quote];
       amounts[action.index] = action.value;
@@ -251,10 +265,10 @@ export function useDCAConfig() {
       limitPrice: 0,
       side: state.side,
       minSpread: 0,
-      activePickField: null,
+      activePickField: state.activePickField ? "start" as const : null,
       extraLines: extras,
     };
-  }, [state.prices, state.amounts_quote, state.side, state.take_profit, state.stop_loss]);
+  }, [state.prices, state.amounts_quote, state.side, state.take_profit, state.stop_loss, state.activePickField]);
 
   const buildPayload = (connector: string, pair: string, isSpot: boolean) => {
     const config: Record<string, unknown> = {
@@ -282,8 +296,15 @@ export function useDCAConfig() {
 
   const save = () => saveDefaults(state);
 
-  const handleChartPriceSet = (_field: "start" | "end" | "limit", _price: number) => {
-    // DCA doesn't use chart price picking directly
+  const handleChartPriceSet = (_field: "start" | "end" | "limit", price: number) => {
+    const pick = state.activePickField;
+    if (pick && pick.startsWith("dca_price_")) {
+      const idx = parseInt(pick.replace("dca_price_", ""), 10);
+      if (!isNaN(idx)) {
+        dispatch({ type: "SET_LEVEL_PRICE", index: idx, value: parseFloat(price.toPrecision(6)) });
+      }
+    }
+    dispatch({ type: "SET_FIELD", field: "activePickField", value: null });
   };
 
   return { state, dispatch, validation, chartProps, buildPayload, save, handleChartPriceSet };
@@ -301,9 +322,10 @@ interface Props {
   dispatch: React.Dispatch<DCAAction>;
   currentPrice: number | null;
   isSpot?: boolean;
+  pair?: string;
 }
 
-export function DCAConfigPanel({ state, dispatch, currentPrice, isSpot = false }: Props) {
+export function DCAConfigPanel({ state, dispatch, currentPrice, isSpot = false, pair: _pair }: Props) {
   const validation = useDCAValidation(state);
   const d = dispatch as unknown as FieldDispatch;
   const totalQuote = state.amounts_quote.reduce((s, a) => s + a, 0);
@@ -365,17 +387,13 @@ export function DCAConfigPanel({ state, dispatch, currentPrice, isSpot = false }
               />
             </div>
             <div className="flex-1">
-              <label className="mb-1 block text-[10px] text-[var(--color-text-muted)]">
-                Price
-              </label>
-              <input
-                type="number"
-                step="any"
-                min="0"
-                value={state.prices[i] || ""}
-                onChange={(e) => dispatch({ type: "SET_LEVEL_PRICE", index: i, value: parseFloat(e.target.value) || 0 })}
-                placeholder="0.00"
-                className="w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]/40 focus:border-[var(--color-primary)] focus:outline-none"
+              <PriceField
+                label="Price"
+                value={state.prices[i]}
+                field={`dca_price_${i}`}
+                activePickField={state.activePickField}
+                dispatch={d}
+                valid={state.prices[i] > 0}
               />
             </div>
             {state.amounts_quote.length > 1 && (
@@ -393,6 +411,7 @@ export function DCAConfigPanel({ state, dispatch, currentPrice, isSpot = false }
           {state.amounts_quote.length} levels &middot; Total: ${totalQuote.toFixed(2)}
           {bep > 0 && <> &middot; BEP: <span className="font-mono text-amber-400">{bep.toPrecision(6)}</span></>}
         </p>
+        <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
       </div>
 
       {/* Exit Strategy */}
@@ -409,17 +428,6 @@ export function DCAConfigPanel({ state, dispatch, currentPrice, isSpot = false }
         onToggle={() => d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
       >
         <SelectField label="Mode" value={state.mode} field="mode" dispatch={d} options={MODE_OPTIONS} />
-        {isSpot ? (
-          <div>
-            <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Leverage</label>
-            <div className="flex items-center gap-1">
-              <input type="text" value="1" disabled className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text-muted)] opacity-60" />
-              <span className="text-[10px] text-[var(--color-text-muted)]">x (spot)</span>
-            </div>
-          </div>
-        ) : (
-          <NumberField label="Leverage" value={state.leverage} field="leverage" dispatch={d} step={1} min={1} suffix="x" />
-        )}
         <NumberField label="Activation Bounds (0 = disabled)" value={state.activation_bounds} field="activation_bounds" dispatch={d} step={0.01} isPercent suffix="%" />
         <div className="space-y-2.5">
           <SectionHeader>Trailing Stop</SectionHeader>

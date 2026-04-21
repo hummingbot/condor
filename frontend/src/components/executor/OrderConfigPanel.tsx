@@ -3,6 +3,8 @@ import { Sparkles } from "lucide-react";
 
 import {
   AdvancedSection,
+  AmountField,
+  LeverageField,
   NumberField,
   PriceField,
   SectionHeader,
@@ -178,9 +180,10 @@ interface Props {
   dispatch: React.Dispatch<OrderAction>;
   currentPrice: number | null;
   isSpot?: boolean;
+  pair?: string;
 }
 
-export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false }: Props) {
+export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false, pair }: Props) {
   const validation = useOrderValidation(state);
   const d = dispatch as FieldDispatch;
   const needsPrice = state.execution_strategy === "LIMIT" || state.execution_strategy === "LIMIT_MAKER";
@@ -194,13 +197,13 @@ export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false
       {/* Order Config */}
       <div className="space-y-2.5">
         <SectionHeader>Order</SectionHeader>
-        <NumberField
-          label="Amount (base currency)"
+        <AmountField
           value={state.amount}
           field="amount"
           dispatch={d}
+          currentPrice={currentPrice}
           step={0.001}
-          min={0}
+          pair={pair}
         />
         <SelectField
           label="Execution Strategy"
@@ -209,6 +212,7 @@ export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false
           dispatch={d}
           options={STRATEGY_OPTIONS}
         />
+        <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
       </div>
 
       {/* Price (for LIMIT strategies) */}
@@ -270,17 +274,6 @@ export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false
         open={state.showAdvanced}
         onToggle={() => d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
       >
-        {isSpot ? (
-          <div>
-            <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Leverage</label>
-            <div className="flex items-center gap-1">
-              <input type="text" value="1" disabled className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text-muted)] opacity-60" />
-              <span className="text-[10px] text-[var(--color-text-muted)]">x (spot)</span>
-            </div>
-          </div>
-        ) : (
-          <NumberField label="Leverage" value={state.leverage} field="leverage" dispatch={d} step={1} min={1} suffix="x" />
-        )}
         <SelectField
           label="Position Action"
           value={state.position_action}

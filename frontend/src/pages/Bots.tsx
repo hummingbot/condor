@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   Bot,
   Check,
   ChevronDown,
   ChevronRight,
   ChevronUp,
   Circle,
+  Code2,
   Layers,
   Loader2,
   Package,
@@ -19,13 +21,11 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
+import yaml from "js-yaml";
 
-import {
-  HIDDEN_KEYS,
-  inferInputType,
-  parseValue,
-} from "@/components/bots/DeployBotDialog";
+import { HIDDEN_KEYS } from "@/components/bots/DeployBotDialog";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { CodeEditor } from "@/components/editor/CodeEditor";
 
 import { useServer } from "@/hooks/useServer";
 import { api, type BotSummary, type ControllerConfigSummary, type ControllerInfo } from "@/lib/api";
@@ -435,24 +435,21 @@ function DetailPanel({
             </div>
           )}
 
-          {/* Controller Config */}
+          {/* Controller Config (read-only YAML) */}
           {configEntries.length > 0 && (
-            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-2">
+            <div className="space-y-2">
               <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
                 Controller Config
               </h3>
-              <div className="space-y-1 text-xs">
-                {configEntries.map(([key, val]) => (
-                  <div key={key} className="flex justify-between gap-3 py-0.5">
-                    <span className="text-[var(--color-text-muted)] shrink-0">{key}</span>
-                    <span className="tabular-nums text-right truncate" title={String(val ?? "")}>
-                      {typeof val === "object" && val !== null
-                        ? JSON.stringify(val)
-                        : String(val ?? "")}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <CodeEditor
+                value={yaml.dump(
+                  Object.fromEntries(configEntries.filter(([k]) => !HIDDEN_KEYS.has(k))),
+                  { sortKeys: false, lineWidth: -1 },
+                )}
+                language="yaml"
+                readOnly
+                height="200px"
+              />
             </div>
           )}
         </div>
@@ -515,7 +512,9 @@ function StandaloneConfigEditor({
 }) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
-  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [yamlValue, setYamlValue] = useState("");
+  const [originalYaml, setOriginalYaml] = useState("");
+  const [yamlError, setYamlError] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["config-detail", server, config.id],
@@ -523,40 +522,56 @@ function StandaloneConfigEditor({
     enabled: expanded,
   });
 
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      const parsed: Record<string, unknown> = {};
-      const cfgData = data?.config ?? {};
-      for (const [key, raw] of Object.entries(edits)) {
-        parsed[key] = parseValue(raw, inferInputType(cfgData[key]));
+  // Sync fetched config → YAML string
+  const prevConfigRef = useRef<string>("");
+  useMemo(() => {
+    if (!data?.config) return;
+    const filtered = Object.fromEntries(
+      Object.entries(data.config).filter(([k]) => !HIDDEN_KEYS.has(k)),
+    );
+    const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
+    const sig = JSON.stringify(data.config);
+    if (sig !== prevConfigRef.current) {
+      prevConfigRef.current = sig;
+      setYamlValue(dumped);
+      setOriginalYaml(dumped);
+      setYamlError(null);
+    }
+  }, [data?.config]);
+
+  // Validate YAML on change
+  const handleYamlChange = useCallback((val: string) => {
+    setYamlValue(val);
+    try {
+      const parsed = yaml.load(val);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        setYamlError("YAML must be a mapping (key: value)");
+      } else {
+        setYamlError(null);
       }
-      return api.updateConfig(server, config.id, parsed);
-    },
+    } catch (e) {
+      setYamlError(e instanceof Error ? e.message : "Invalid YAML");
+    }
+  }, []);
+
+  const isDirty = yamlValue !== originalYaml;
+  const canSave = isDirty && !yamlError;
+
+  const saveMutation = useMutation({
+    mutationFn: () => api.updateConfigYaml(server, config.id, yamlValue),
     onSuccess: () => {
-      setEdits({});
+      setOriginalYaml(yamlValue);
       queryClient.invalidateQueries({ queryKey: ["config-detail", server, config.id] });
       queryClient.invalidateQueries({ queryKey: ["available-configs", server] });
     },
   });
 
-  const cfgEntries = useMemo(
-    () => Object.entries(data?.config ?? {}).filter(([k]) => !HIDDEN_KEYS.has(k)),
-    [data?.config],
-  );
+  const handleSave = () => saveMutation.mutate();
 
-  const isDirty = Object.keys(edits).length > 0;
-
-  const handleEdit = useCallback((key: string, value: string) => {
-    setEdits((prev) => ({ ...prev, [key]: value }));
-  }, []);
-
-  const handleReset = useCallback((key: string) => {
-    setEdits((prev) => {
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
-  }, []);
+  const handleReset = () => {
+    setYamlValue(originalYaml);
+    setYamlError(null);
+  };
 
   return (
     <div className={`rounded-lg border overflow-hidden transition-colors ${isDirty ? "border-[var(--color-warning)]/60" : "border-[var(--color-border)]"}`}>
@@ -585,7 +600,6 @@ function StandaloneConfigEditor({
           {isDirty && (
             <span className="flex items-center gap-1 text-xs text-[var(--color-warning)]">
               <Pencil className="h-3 w-3" />
-              {Object.keys(edits).length}
             </span>
           )}
         </div>
@@ -594,127 +608,66 @@ function StandaloneConfigEditor({
       {/* Expanded editor */}
       {expanded && (
         <div className="border-t border-[var(--color-border)]/30">
-          {isLoading ? (
-            <div className="flex items-center gap-2 px-4 py-6 text-sm text-[var(--color-text-muted)]">
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
-              Loading config...
-            </div>
-          ) : cfgEntries.length === 0 ? (
-            <div className="px-4 py-6 text-sm text-[var(--color-text-muted)]">No parameters</div>
-          ) : (
-            <>
-              {/* Action bar */}
-              <div className="flex items-center justify-end gap-2 px-4 pt-3">
-                {isDirty && (
-                  <button
-                    onClick={() => setEdits({})}
-                    className="flex items-center gap-1 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-                  >
-                    <RotateCcw className="h-3 w-3" />
-                    Reset
-                  </button>
-                )}
-                <button
-                  onClick={() => saveMutation.mutate()}
-                  disabled={!isDirty || saveMutation.isPending}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-40"
-                >
-                  {saveMutation.isPending ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : saveMutation.isSuccess && !isDirty ? (
-                    <Check className="h-3 w-3" />
-                  ) : (
-                    <Save className="h-3 w-3" />
-                  )}
-                  {saveMutation.isPending ? "Saving..." : saveMutation.isSuccess && !isDirty ? "Saved" : "Save"}
-                </button>
-              </div>
-
-              {saveMutation.isError && (
-                <div className="mx-4 mt-2 rounded-md border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
-                  {saveMutation.error instanceof Error ? saveMutation.error.message : "Save failed"}
-                </div>
+          {/* Actions bar */}
+          <div className="flex items-center justify-end px-4 pt-3 pb-2 gap-2">
+            {isDirty && (
+              <button
+                onClick={handleReset}
+                className="flex items-center gap-1 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Reset
+              </button>
+            )}
+            <button
+              onClick={handleSave}
+              disabled={!canSave || saveMutation.isPending}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-40"
+            >
+              {saveMutation.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : saveMutation.isSuccess && !isDirty ? (
+                <Check className="h-3 w-3" />
+              ) : (
+                <Save className="h-3 w-3" />
               )}
+              {saveMutation.isPending
+                ? "Saving..."
+                : saveMutation.isSuccess && !isDirty
+                  ? "Saved"
+                  : "Save"}
+            </button>
+          </div>
 
-              {/* Fields */}
-              <div className="grid gap-2 p-4 pt-2">
-                {cfgEntries.map(([key, originalValue]) => {
-                  const inputType = inferInputType(originalValue);
-                  const isEdited = key in edits;
-                  const displayValue = isEdited
-                    ? edits[key]
-                    : inputType === "json"
-                      ? JSON.stringify(originalValue, null, 2)
-                      : String(originalValue ?? "");
-
-                  return (
-                    <div key={key} className="grid grid-cols-[minmax(120px,1fr)_2fr] gap-2 items-start">
-                      <label
-                        className={`text-xs pt-2 truncate ${isEdited ? "text-[var(--color-warning)] font-medium" : "text-[var(--color-text-muted)]"}`}
-                        title={key}
-                      >
-                        {key}
-                      </label>
-                      <div className="flex items-start gap-1">
-                        {inputType === "boolean" ? (
-                          <button
-                            onClick={() => {
-                              const current = isEdited ? edits[key] === "true" : Boolean(originalValue);
-                              handleEdit(key, String(!current));
-                            }}
-                            className={`flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors ${
-                              (isEdited ? edits[key] === "true" : Boolean(originalValue))
-                                ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                                : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
-                            }`}
-                          >
-                            <div className={`h-3 w-3 rounded-sm border flex items-center justify-center ${
-                              (isEdited ? edits[key] === "true" : Boolean(originalValue))
-                                ? "border-[var(--color-primary)] bg-[var(--color-primary)]"
-                                : "border-[var(--color-border)]"
-                            }`}>
-                              {(isEdited ? edits[key] === "true" : Boolean(originalValue)) && (
-                                <Check className="h-2 w-2 text-white" />
-                              )}
-                            </div>
-                            {(isEdited ? edits[key] : String(originalValue))}
-                          </button>
-                        ) : inputType === "json" ? (
-                          <textarea
-                            value={displayValue}
-                            onChange={(e) => handleEdit(key, e.target.value)}
-                            rows={Math.min(6, displayValue.split("\n").length + 1)}
-                            className={`w-full rounded-md border bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)] resize-y ${
-                              isEdited ? "border-[var(--color-warning)]/60" : "border-[var(--color-border)]"
-                            }`}
-                          />
-                        ) : (
-                          <input
-                            type={inputType === "number" ? "number" : "text"}
-                            step={inputType === "number" ? "any" : undefined}
-                            value={displayValue}
-                            onChange={(e) => handleEdit(key, e.target.value)}
-                            className={`w-full rounded-md border bg-[var(--color-bg)] px-2.5 py-1.5 text-xs text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)] ${
-                              inputType === "number" ? "font-mono tabular-nums" : ""
-                            } ${isEdited ? "border-[var(--color-warning)]/60" : "border-[var(--color-border)]"}`}
-                          />
-                        )}
-                        {isEdited && (
-                          <button
-                            onClick={() => handleReset(key)}
-                            className="mt-1 p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-                            title="Reset to original"
-                          >
-                            <RotateCcw className="h-3 w-3" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </>
+          {/* Error banners */}
+          {yamlError && (
+            <div className="mx-4 mb-2 flex items-start gap-2 rounded-md border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+              <span className="break-all">{yamlError}</span>
+            </div>
           )}
+          {saveMutation.isError && (
+            <div className="mx-4 mb-2 rounded-md border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
+              {saveMutation.error instanceof Error ? saveMutation.error.message : "Save failed"}
+            </div>
+          )}
+
+          {/* Editor area */}
+          <div className="px-4 pb-4">
+            {isLoading ? (
+              <div className="flex items-center gap-2 py-6 text-sm text-[var(--color-text-muted)]">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+                Loading config...
+              </div>
+            ) : (
+              <CodeEditor
+                value={yamlValue}
+                onChange={handleYamlChange}
+                language="yaml"
+                height="400px"
+              />
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -792,9 +745,170 @@ function ConfigsTab({ server }: { server: string }) {
   );
 }
 
+// ── Controller Source Viewer ──
+
+function ControllerSourceViewer({
+  server,
+  controllerType,
+  controllerName,
+}: {
+  server: string;
+  controllerType: string;
+  controllerName: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["controller-source", server, controllerType, controllerName],
+    queryFn: () => api.getControllerSource(server, controllerType, controllerName),
+    enabled: expanded,
+  });
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] overflow-hidden">
+      <button
+        className="flex w-full items-center gap-3 px-4 py-2.5 text-left bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] transition-colors"
+        onClick={() => setExpanded(!expanded)}
+      >
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)] shrink-0" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)] shrink-0" />
+        )}
+        <Code2 className="h-3.5 w-3.5 text-[var(--color-text-muted)] shrink-0" />
+        <span className="text-sm font-medium truncate">{controllerName}</span>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-[var(--color-border)]/30 px-4 py-3">
+          {isLoading ? (
+            <div className="flex items-center gap-2 py-6 text-sm text-[var(--color-text-muted)]">
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+              Loading source...
+            </div>
+          ) : isError ? (
+            <div className="rounded-md border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
+              {error instanceof Error ? error.message : "Failed to load source"}
+            </div>
+          ) : (
+            <CodeEditor
+              value={data?.source ?? ""}
+              language="python"
+              readOnly
+              height="500px"
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Controllers Tab ──
+
+function ControllersTab({ server }: { server: string }) {
+  const [search, setSearch] = useState("");
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["available-configs", server],
+    queryFn: () => api.getAvailableConfigs(server),
+  });
+
+  const controllerTypes = data?.controller_types ?? {};
+
+  // Flatten for search and organize by type
+  const allControllers = useMemo(() => {
+    const result: { type: string; name: string }[] = [];
+    for (const [type, names] of Object.entries(controllerTypes)) {
+      for (const name of names) {
+        result.push({ type, name });
+      }
+    }
+    return result;
+  }, [controllerTypes]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return allControllers;
+    const q = search.toLowerCase();
+    return allControllers.filter(
+      (c) => c.name.toLowerCase().includes(q) || c.type.toLowerCase().includes(q),
+    );
+  }, [allControllers, search]);
+
+  // Group filtered results by type
+  const grouped = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const c of filtered) {
+      const list = map.get(c.type) || [];
+      list.push(c.name);
+      map.set(c.type, list);
+    }
+    return map;
+  }, [filtered]);
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-16 text-[var(--color-text-muted)]">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+      </div>
+    );
+  }
+
+  if (allControllers.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-2 py-16 text-[var(--color-text-muted)]">
+        <Code2 className="h-10 w-10" />
+        <p>No controllers found</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Search */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]" />
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter controllers..."
+          className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] pl-10 pr-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
+        />
+      </div>
+
+      {/* Grouped by type */}
+      {Array.from(grouped.entries()).map(([type, names]) => (
+        <div key={type} className="space-y-2">
+          <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)] px-1">
+            {type}
+            <span className="ml-2 text-[var(--color-text-muted)]/60">({names.length})</span>
+          </h3>
+          <div className="space-y-2">
+            {names.map((name) => (
+              <ControllerSourceViewer
+                key={`${type}-${name}`}
+                server={server}
+                controllerType={type}
+                controllerName={name}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {filtered.length === 0 && search && (
+        <p className="text-center text-sm text-[var(--color-text-muted)] py-8">
+          No controllers matching "{search}"
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ──
 
-type Tab = "running" | "configs";
+type Tab = "running" | "configs" | "controllers";
 
 export function Bots() {
   const { server } = useServer();
@@ -887,6 +1001,16 @@ export function Bots() {
           >
             Configs
           </button>
+          <button
+            onClick={() => setTab("controllers")}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+              tab === "controllers"
+                ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
+                : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            Controllers
+          </button>
         </div>
         <button
           onClick={() => setShowDeploy(true)}
@@ -899,6 +1023,8 @@ export function Bots() {
 
       {tab === "configs" ? (
         <ConfigsTab server={server} />
+      ) : tab === "controllers" ? (
+        <ControllersTab server={server} />
       ) : (
         <>
           {/* Summary stat cards */}

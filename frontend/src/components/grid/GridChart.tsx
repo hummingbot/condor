@@ -80,7 +80,7 @@ export function GridChart({
   );
 
   const { data: candles } = useQuery({
-    queryKey: ["candles", server, connector, pair, interval],
+    queryKey: ["candles", server, connector, pair, interval, lookbackSeconds],
     queryFn: () => api.getCandles(server, connector, pair, interval, 5000, startTime),
   });
 
@@ -190,18 +190,9 @@ export function GridChart({
             close: c.close,
           };
         });
-        if (mapped.length > 50) {
-          // Large batch = historical pre-fetch → setData
-          seriesRef.current.setData(mapped);
-          if (!initializedRef.current) {
-            chartRef.current?.timeScale().fitContent();
-            initializedRef.current = true;
-          }
-        } else {
-          // Small batch → update individually
-          for (const bar of mapped) {
-            seriesRef.current.update(bar);
-          }
+        // Always use update() for WS messages to avoid replacing REST data
+        for (const bar of mapped) {
+          seriesRef.current.update(bar);
         }
       }
     });

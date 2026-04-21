@@ -46,7 +46,7 @@ const isActive = (status: string) => {
 
 export function TradeBottomPane({ executors, positions, isLoadingPositions }: TradeBottomPaneProps) {
   const [expanded, setExpanded] = useState(() => {
-    try { return localStorage.getItem(STORAGE_KEY) === "1"; } catch { return false; }
+    try { return localStorage.getItem(STORAGE_KEY) !== "0"; } catch { return true; }
   });
   const [tab, setTab] = useState<"executors" | "positions">("executors");
 
@@ -122,8 +122,8 @@ export function TradeBottomPane({ executors, positions, isLoadingPositions }: Tr
                   ) : (
                     sortedExecutors.map((ex) => {
                       const active = isActive(ex.status);
-                      const side = ex.side?.toLowerCase();
-                      const isBuy = side === "buy" || side === "1";
+                      const side = ex.side?.toUpperCase();
+                      const isBuy = side === "BUY";
                       return (
                         <tr key={ex.id} className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-surface-hover)]">
                           <td className="px-2 py-1 font-mono text-[var(--color-text-muted)]">

@@ -8,7 +8,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { SelectField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
+import { LeverageField, SelectField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
 import type { GridState, GridAction } from "@/pages/CreateGridExecutor";
 
 interface GridConfigPanelProps {
@@ -381,6 +381,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
             ~{validation.levels} levels &middot; ~${perLevel.toFixed(2)} per level
           </p>
         )}
+        <LeverageField value={state.leverage} field="leverage" dispatch={dispatch as unknown as FieldDispatch} isSpot={isSpot} />
       </div>
 
       {/* ── Take Profit ── */}
@@ -421,30 +422,6 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
 
         {state.showAdvanced && (
           <div className="mt-2 space-y-2.5">
-            {isSpot ? (
-              <div>
-                <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Leverage</label>
-                <div className="flex items-center gap-1">
-                  <input
-                    type="text"
-                    value="1"
-                    disabled
-                    className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text-muted)] opacity-60"
-                  />
-                  <span className="text-[10px] text-[var(--color-text-muted)]">x (spot)</span>
-                </div>
-              </div>
-            ) : (
-              <NumberField
-                label="Leverage"
-                value={state.leverage}
-                field="leverage"
-                dispatch={dispatch}
-                step={1}
-                min={1}
-                suffix="x"
-              />
-            )}
             <div className="grid grid-cols-2 gap-2">
               <NumberField
                 label="Max Open Orders"

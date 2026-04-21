@@ -3,6 +3,8 @@ import { Sparkles } from "lucide-react";
 
 import {
   AdvancedSection,
+  AmountField,
+  LeverageField,
   NumberField,
   PriceField,
   SectionHeader,
@@ -216,9 +218,10 @@ interface Props {
   dispatch: React.Dispatch<PositionAction>;
   currentPrice: number | null;
   isSpot?: boolean;
+  pair?: string;
 }
 
-export function PositionConfigPanel({ state, dispatch, currentPrice, isSpot = false }: Props) {
+export function PositionConfigPanel({ state, dispatch, currentPrice, isSpot = false, pair }: Props) {
   const validation = usePositionValidation(state);
 
   // Auto-fill entry price from current price on first load (if zero)
@@ -242,10 +245,12 @@ export function PositionConfigPanel({ state, dispatch, currentPrice, isSpot = fa
           {currentPrice && currentPrice > 0 && (
             <button
               onClick={() => {
-                d({ type: "SET_FIELD", field: "entry_price", value: 0 });
+                const cp = currentPrice!;
+                const entry = state.side === 1 ? cp * 0.999 : cp * 1.001;
+                d({ type: "SET_FIELD", field: "entry_price", value: parseFloat(entry.toPrecision(6)) });
                 d({ type: "SET_FIELD", field: "stop_loss", value: 0.03 });
                 d({ type: "SET_FIELD", field: "take_profit", value: 0.02 });
-                d({ type: "SET_FIELD", field: "open_order_type", value: 1 });
+                d({ type: "SET_FIELD", field: "open_order_type", value: 2 });
               }}
               className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)]"
             >
@@ -263,14 +268,15 @@ export function PositionConfigPanel({ state, dispatch, currentPrice, isSpot = fa
           valid={true}
           hint="Leave at 0 for market entry"
         />
-        <NumberField
-          label="Amount (base currency)"
+        <AmountField
           value={state.amount}
           field="amount"
           dispatch={d}
+          currentPrice={currentPrice}
           step={0.001}
-          min={0}
+          pair={pair}
         />
+        <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
       </div>
 
       {/* Triple Barrier */}
@@ -334,17 +340,6 @@ export function PositionConfigPanel({ state, dispatch, currentPrice, isSpot = fa
         open={state.showAdvanced}
         onToggle={() => d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
       >
-        {isSpot ? (
-          <div>
-            <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Leverage</label>
-            <div className="flex items-center gap-1">
-              <input type="text" value="1" disabled className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-text-muted)] opacity-60" />
-              <span className="text-[10px] text-[var(--color-text-muted)]">x (spot)</span>
-            </div>
-          </div>
-        ) : (
-          <NumberField label="Leverage" value={state.leverage} field="leverage" dispatch={d} step={1} min={1} suffix="x" />
-        )}
         <NumberField label="Activation Bounds (0 = disabled)" value={state.activation_bounds} field="activation_bounds" dispatch={d} step={0.01} isPercent suffix="%" />
         <SelectField label="Open Order Type" value={state.open_order_type} field="open_order_type" dispatch={d} options={ORDER_TYPE_OPTIONS} />
         <SelectField label="Take Profit Order Type" value={state.take_profit_order_type} field="take_profit_order_type" dispatch={d} options={ORDER_TYPE_OPTIONS} />

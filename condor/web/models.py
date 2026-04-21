@@ -229,6 +229,12 @@ class ControllerConfigDetail(BaseModel):
     config: dict[str, Any]
 
 
+class ControllerSourceResponse(BaseModel):
+    controller_name: str
+    controller_type: str
+    source: str
+
+
 class DeployBotRequest(BaseModel):
     bot_name: str
     controllers_config: list[str]

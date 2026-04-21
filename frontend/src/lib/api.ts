@@ -235,6 +235,12 @@ export interface ControllerConfigDetail {
   config: Record<string, unknown>;
 }
 
+export interface ControllerSourceResponse {
+  controller_name: string;
+  controller_type: string;
+  source: string;
+}
+
 export interface DeployBotRequest {
   bot_name: string;
   controllers_config: string[];
@@ -403,6 +409,23 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+
+  updateConfigYaml: (server: string, configId: string, yamlContent: string) =>
+    apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
+      method: "PUT",
+      body: JSON.stringify({ yaml_content: yamlContent }),
+    }),
+
+  getControllerSource: (server: string, controllerType: string, controllerName: string) =>
+    apiFetch<ControllerSourceResponse>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/source`,
+    ),
+
+  updateControllerSource: (server: string, controllerType: string, controllerName: string, source: string) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/source`,
+      { method: "PUT", body: JSON.stringify({ source }) },
+    ),
 
   deployBot: (server: string, data: DeployBotRequest) =>
     apiFetch<Record<string, unknown>>(`/api/v1/servers/${server}/bots/deploy`, {

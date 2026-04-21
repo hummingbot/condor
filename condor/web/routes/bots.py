@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from config_manager import get_config_manager
 from condor.web.auth import get_current_user
+import yaml
+
 from condor.web.models import (
     AvailableControllersResponse,
     BotDetailResponse,
@@ -16,6 +18,7 @@ from condor.web.models import (
     ControllerConfigDetail,
     ControllerConfigSummary,
     ControllerInfo,
+    ControllerSourceResponse,
     DeployBotRequest,
     WebUser,
 )
@@ -362,12 +365,31 @@ async def update_controller_config(
     body: dict[str, Any],
     user: WebUser = Depends(get_current_user),
 ):
-    """Update a saved controller config's parameters."""
+    """Update a saved controller config's parameters.
+
+    Accepts either:
+      - { "yaml_content": "..." } — parse YAML to dict, save
+      - { ... } (raw dict) — existing behavior preserved
+    """
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
+
+    # If yaml_content is provided, parse it as the full config
+    yaml_content = body.pop("yaml_content", None)
+    if yaml_content is not None:
+        try:
+            parsed = yaml.safe_load(yaml_content)
+            if not isinstance(parsed, dict):
+                raise HTTPException(
+                    status_code=400, detail="YAML must parse to a mapping"
+                )
+            body = parsed
+        except yaml.YAMLError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+
     try:
         # Fetch existing config so we preserve controller_name/type/id
         existing = await client.controllers.get_controller_config(config_id)
@@ -387,6 +409,73 @@ async def update_controller_config(
         raise HTTPException(status_code=502, detail=str(e))
 
     return {"updated": True, "config_id": config_id, "result": result}
+
+
+@router.get(
+    "/servers/{name}/controllers/{controller_type}/{controller_name}/source",
+    response_model=ControllerSourceResponse,
+)
+async def get_controller_source(
+    name: str,
+    controller_type: str,
+    controller_name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Fetch the Python source of a controller."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.controllers.get_controller(
+            controller_type, controller_name
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if isinstance(result, str):
+        source = result
+    elif isinstance(result, dict):
+        source = result.get("content") or result.get("source") or result.get("code") or str(result)
+    else:
+        raise HTTPException(status_code=404, detail="Controller not found")
+
+    return ControllerSourceResponse(
+        controller_name=controller_name,
+        controller_type=controller_type,
+        source=source,
+    )
+
+
+@router.put(
+    "/servers/{name}/controllers/{controller_type}/{controller_name}/source",
+)
+async def update_controller_source(
+    name: str,
+    controller_type: str,
+    controller_name: str,
+    body: dict[str, Any],
+    user: WebUser = Depends(get_current_user),
+):
+    """Update the Python source of a controller."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    source = body.get("source")
+    if not source or not isinstance(source, str):
+        raise HTTPException(status_code=400, detail="Missing 'source' string")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.controllers.create_or_update_controller(
+            controller_type, controller_name, source
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"updated": True, "result": result}
 
 
 @router.post("/servers/{name}/bots/deploy")

@@ -70,17 +70,29 @@ const GRID_PERSISTED_FIELDS: (keyof GridState)[] = [
   "activation_bounds", "keep_position", "coerce_tp_to_step",
 ];
 
+const LAST_MARKET_KEY = "condor_last_market";
+
 function loadGridDefaults(): GridState {
   try {
     const raw = localStorage.getItem(GRID_STORAGE_KEY);
-    if (!raw) return GRID_DEFAULTS;
-    const saved = JSON.parse(raw);
-    const merged = { ...GRID_DEFAULTS };
-    for (const key of GRID_PERSISTED_FIELDS) {
-      if (key in saved && saved[key] !== undefined) {
-        (merged as Record<string, unknown>)[key] = saved[key];
+    const merged = raw ? { ...GRID_DEFAULTS } : { ...GRID_DEFAULTS };
+    if (raw) {
+      const saved = JSON.parse(raw);
+      for (const key of GRID_PERSISTED_FIELDS) {
+        if (key in saved && saved[key] !== undefined) {
+          (merged as Record<string, unknown>)[key] = saved[key];
+        }
       }
     }
+    // Override connector/pair from last-used market
+    try {
+      const market = localStorage.getItem(LAST_MARKET_KEY);
+      if (market) {
+        const { connector, pair } = JSON.parse(market);
+        if (connector) merged.connector = connector;
+        if (pair) merged.pair = pair;
+      }
+    } catch { /* ok */ }
     return merged;
   } catch {
     return GRID_DEFAULTS;
@@ -218,6 +230,13 @@ export function CreateExecutor() {
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector);
+
+  // Persist last-used connector/pair to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAST_MARKET_KEY, JSON.stringify({ connector, pair }));
+    } catch { /* ok */ }
+  }, [connector, pair]);
 
   // Sync connector to filtered list
   useEffect(() => {
@@ -538,13 +557,13 @@ export function CreateExecutor() {
               <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
             )}
             {executorType === "position" && (
-              <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+              <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
             )}
             {executorType === "order" && (
-              <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+              <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
             )}
             {executorType === "dca" && (
-              <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+              <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
             )}
           </div>
         </div>

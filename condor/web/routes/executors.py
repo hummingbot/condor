@@ -59,6 +59,13 @@ from handlers.executors._shared import get_executor_pnl, get_executor_volume, ge
 router = APIRouter(tags=["executors"])
 
 
+_SIDE_MAP = {"1": "BUY", "2": "SELL"}
+
+
+def _normalize_side(raw: str) -> str:
+    return _SIDE_MAP.get(raw, raw.upper() if raw else "")
+
+
 def _build_executor_info(ex: dict) -> ExecutorInfo | None:
     """Convert a raw executor dict to an ExecutorInfo model.
 
@@ -89,7 +96,7 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
         type=get_executor_type(ex),
         connector=config.get("connector_name") or ex.get("connector_name") or ex.get("connector") or "",
         trading_pair=config.get("trading_pair") or ex.get("trading_pair") or "",
-        side=str(custom_info.get("side") or config.get("side") or ex.get("side") or ""),
+        side=_normalize_side(str(custom_info.get("side") or config.get("side") or ex.get("side") or "")),
         status=(ex.get("status") or "").lower(),
         close_type=str(ex.get("close_type") or "").lower(),
         pnl=get_executor_pnl(ex),
