@@ -96,6 +96,14 @@ class BotDetailResponse(BaseModel):
     performance: dict[str, Any] = {}
 
 
+class BotLogTailResponse(BaseModel):
+    bot_name: str
+    tail: list[str] = []
+    general_logs: list[str] = []
+    error_logs: list[str] = []
+    updated_at: str
+
+
 class ControllerInfo(BaseModel):
     controller_name: str
     bot_name: str
