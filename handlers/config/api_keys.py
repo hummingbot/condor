@@ -267,7 +267,7 @@ async def show_connectors_by_type(
         if is_perpetual:
             connectors = [c for c in connectors if c.endswith("_perpetual")]
         else:
-            connectors = [c for c in connectors if not c.endswith("_perpetual")]
+            connectors = [c for c in connectors if "_perpetual" not in c]
 
         # Store connector list in context
         context.user_data["api_key_connectors"] = connectors
