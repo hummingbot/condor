@@ -173,3 +173,8 @@ data/
 
 # Node
 node_modules/
+
+.vscode/
+
+
+trading_agents/*
