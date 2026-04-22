@@ -164,6 +164,64 @@ function StatusDot({ status }: { status: string }) {
   return <Circle className={`h-2 w-2 fill-current ${color}`} />;
 }
 
+function BotLogTail({
+  server,
+  botName,
+  open,
+}: {
+  server: string;
+  botName: string;
+  open: boolean;
+}) {
+  const { data, isLoading, isFetching, error } = useQuery({
+    queryKey: ["bot-logs", server, botName],
+    queryFn: () => api.getBotLogs(server, botName, 100),
+    enabled: open,
+    refetchInterval: open ? 5_000 : false,
+    refetchIntervalInBackground: true,
+  });
+
+  if (!open) return null;
+
+  return (
+    <div className="border-t border-[var(--color-border)]/30 bg-[var(--color-bg)] px-4 py-3">
+      <div className="mb-2 flex items-center justify-between gap-3 text-xs text-[var(--color-text-muted)]">
+        <span>
+          Recent log tail
+          {isFetching && !isLoading ? " (updating...)" : ""}
+        </span>
+        <span>Auto-refresh: 5s</span>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Loading logs...
+        </div>
+      ) : error ? (
+        <div className="rounded-md border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
+          {error instanceof Error ? error.message : "Failed to load logs"}
+        </div>
+      ) : (data?.tail.length ?? 0) === 0 ? (
+        <div className="text-xs text-[var(--color-text-muted)]">No logs available</div>
+      ) : (
+        <>
+          <div className="max-h-44 overflow-auto rounded-md border border-[var(--color-border)]/50 bg-[var(--color-surface)] p-2">
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-[var(--color-text)]">
+              {data?.tail.join("\n")}
+            </pre>
+          </div>
+          {data?.updated_at && (
+            <p className="mt-2 text-[11px] text-[var(--color-text-muted)]">
+              Updated {new Date(data.updated_at).toLocaleTimeString()}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Sortable Header ──
 
 function SortHeader({
@@ -460,9 +518,20 @@ function DetailPanel({
 
 // ── Bots Collapsible Section ──
 
-function BotsSection({ bots }: { bots: BotSummary[] }) {
+function BotsSection({
+  bots,
+  server,
+}: {
+  bots: BotSummary[];
+  server: string;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const [openLogs, setOpenLogs] = useState<Record<string, boolean>>({});
   const Chevron = expanded ? ChevronDown : ChevronRight;
+
+  const toggleBotLogs = useCallback((botName: string) => {
+    setOpenLogs((prev) => ({ ...prev, [botName]: !prev[botName] }));
+  }, []);
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -477,22 +546,37 @@ function BotsSection({ bots }: { bots: BotSummary[] }) {
       {expanded && (
         <div className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border)]/30">
           {bots.map((bot) => (
-            <div key={bot.bot_name} className="flex items-center gap-4 px-4 py-2.5 text-sm">
-              <StatusDot status={bot.status} />
-              <span className="font-medium truncate max-w-[250px]" title={bot.bot_name}>
-                {bot.bot_name}
-              </span>
-              <span className="text-[var(--color-text-muted)]">
-                {bot.num_controllers} controller{bot.num_controllers !== 1 ? "s" : ""}
-              </span>
-              {bot.error_count > 0 && (
-                <span className="text-[var(--color-yellow)] text-xs">
-                  {bot.error_count} error{bot.error_count !== 1 ? "s" : ""}
+            <div key={bot.bot_name}>
+              <button
+                className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-[var(--color-surface-hover)]/60 transition-colors"
+                onClick={() => toggleBotLogs(bot.bot_name)}
+              >
+                {openLogs[bot.bot_name] ? (
+                  <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+                )}
+                <StatusDot status={bot.status} />
+                <span className="font-medium truncate max-w-[250px]" title={bot.bot_name}>
+                  {bot.bot_name}
                 </span>
-              )}
-              <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
-                {formatUptime(bot.deployed_at)}
-              </span>
+                <span className="text-[var(--color-text-muted)]">
+                  {bot.num_controllers} controller{bot.num_controllers !== 1 ? "s" : ""}
+                </span>
+                {bot.error_count > 0 && (
+                  <span className="text-[var(--color-yellow)] text-xs">
+                    {bot.error_count} error{bot.error_count !== 1 ? "s" : ""}
+                  </span>
+                )}
+                <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
+                  {formatUptime(bot.deployed_at)}
+                </span>
+              </button>
+              <BotLogTail
+                server={server}
+                botName={bot.bot_name}
+                open={Boolean(openLogs[bot.bot_name])}
+              />
             </div>
           ))}
         </div>
@@ -1124,7 +1208,7 @@ export function Bots() {
               )}
 
               {/* Bots collapsible section */}
-              {bots.length > 0 && <BotsSection bots={bots} />}
+              {bots.length > 0 && <BotsSection bots={bots} server={server} />}
             </>
           )}
 

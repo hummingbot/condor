@@ -101,6 +101,14 @@ export interface BotSummary {
   deployed_at: string | null;
 }
 
+export interface BotLogTailResponse {
+  bot_name: string;
+  tail: string[];
+  general_logs: string[];
+  error_logs: string[];
+  updated_at: string;
+}
+
 export interface BotsPageResponse {
   controllers: ControllerInfo[];
   bots: BotSummary[];
@@ -393,6 +401,11 @@ export const api = {
 
   getBot: (server: string, botId: string) =>
     apiFetch<BotDetail>(`/api/v1/servers/${server}/bots/${botId}`),
+
+  getBotLogs: (server: string, botId: string, limit = 100) =>
+    apiFetch<BotLogTailResponse>(
+      `/api/v1/servers/${server}/bots/${encodeURIComponent(botId)}/logs?log_type=all&limit=${limit}`,
+    ),
 
   getAvailableConfigs: (server: string) =>
     apiFetch<AvailableControllersResponse>(

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -13,6 +14,7 @@ from condor.web.models import (
     AvailableControllersResponse,
     BotDetailResponse,
     BotInfo,
+    BotLogTailResponse,
     BotSummary,
     BotsPageResponse,
     ControllerConfigDetail,
@@ -26,6 +28,29 @@ from condor.web.models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bots"])
+
+
+def _format_log_line(entry: Any) -> str:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        timestamp = (
+            entry.get("timestamp")
+            or entry.get("time")
+            or entry.get("datetime")
+        )
+        message = (
+            entry.get("message")
+            or entry.get("msg")
+            or entry.get("log")
+            or entry.get("error")
+        )
+        if message is None:
+            message = str(entry)
+        if timestamp:
+            return f"[{timestamp}] {message}"
+        return str(message)
+    return str(entry)
 
 
 def _parse_bot(bot: dict) -> BotInfo:
@@ -281,6 +306,77 @@ async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_us
         pass
 
     return BotDetailResponse(bot=bot, config=config, performance=performance)
+
+
+@router.get(
+    "/servers/{name}/bots/{bot_id}/logs",
+    response_model=BotLogTailResponse,
+)
+async def get_bot_logs(
+    name: str,
+    bot_id: str,
+    log_type: Literal["error", "general", "all"] = "all",
+    limit: int = 100,
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    limit = max(1, min(limit, 1000))
+
+    client = await cm.get_client(name)
+    result: dict[str, Any] | None = None
+    try:
+        get_logs_fn = getattr(client.bot_orchestration, "get_bot_logs", None)
+        if callable(get_logs_fn):
+            logs_result = await get_logs_fn(
+                bot_id,
+                log_type=log_type,
+                limit=limit,
+            )
+            if isinstance(logs_result, dict):
+                result = logs_result
+        if result is None:
+            status_result = await client.bot_orchestration.get_bot_status(bot_id)
+            if isinstance(status_result, dict):
+                result = status_result
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=404, detail="Bot not found")
+
+    payload = result.get("data") if isinstance(result.get("data"), dict) else result
+
+    general_logs_raw = payload.get("general_logs", []) if isinstance(payload, dict) else []
+    error_logs_raw = payload.get("error_logs", []) if isinstance(payload, dict) else []
+
+    general_logs = (
+        [_format_log_line(entry) for entry in general_logs_raw]
+        if isinstance(general_logs_raw, list)
+        else []
+    )
+    error_logs = (
+        [_format_log_line(entry) for entry in error_logs_raw]
+        if isinstance(error_logs_raw, list)
+        else []
+    )
+
+    if log_type == "error":
+        tail_logs = error_logs[-limit:]
+    elif log_type == "general":
+        tail_logs = general_logs[-limit:]
+    else:
+        tail_logs = (error_logs + general_logs)[-limit:]
+
+    return BotLogTailResponse(
+        bot_name=bot_id,
+        tail=tail_logs,
+        general_logs=general_logs[-limit:],
+        error_logs=error_logs[-limit:],
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 @router.get(
