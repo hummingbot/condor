@@ -11,6 +11,7 @@ from hummingbot_api_client import HummingbotAPIClient
 
 from mcp_servers.hummingbot_api.exceptions import MaxConnectionsAttemptError
 from mcp_servers.hummingbot_api.settings import settings
+from utils.hummingbot_client_factory import create_initialized_client
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -44,15 +45,16 @@ class HummingbotClient:
         last_error = None
         for attempt in range(settings.max_retries):
             try:
-                self._client = HummingbotAPIClient(
+                self._client = await create_initialized_client(
                     base_url=settings.api_url,
                     username=settings.api_username,
                     password=settings.api_password,
                     timeout=settings.client_timeout,
+                    tls_verify=settings.tls_verify,
+                    ca_bundle_path=settings.ca_bundle_path,
+                    client_cert_path=settings.client_cert_path,
+                    client_key_path=settings.client_key_path,
                 )
-
-                # Initialize and test connection
-                await self._client.init()
                 await self._client.accounts.list_accounts()
 
                 self._initialized = True

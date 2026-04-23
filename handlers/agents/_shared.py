@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 from typing import Any
+from utils.url_builder import build_server_url_from_config
 
 log = logging.getLogger(__name__)
 
@@ -386,7 +387,7 @@ def build_mcp_servers_for_session(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = build_server_url_from_config(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
@@ -396,9 +397,16 @@ def build_mcp_servers_for_session(
             "--url", api_url,
             "--username", server["username"],
             "--password", server["password"],
+            "--tls-verify", str(server.get("tls_verify", True)).lower(),
         ],
         "env": [],
     }
+    if server.get("ca_bundle_path"):
+        mcp_hummingbot["args"] += ["--ca-bundle-path", str(server["ca_bundle_path"])]
+    if server.get("client_cert_path"):
+        mcp_hummingbot["args"] += ["--client-cert-path", str(server["client_cert_path"])]
+    if server.get("client_key_path"):
+        mcp_hummingbot["args"] += ["--client-key-path", str(server["client_key_path"])]
 
     return [mcp_hummingbot, condor]
 
@@ -433,7 +441,7 @@ def build_mcp_servers_for_agent(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = build_server_url_from_config(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
@@ -443,9 +451,16 @@ def build_mcp_servers_for_agent(
             "--url", api_url,
             "--username", server["username"],
             "--password", server["password"],
+            "--tls-verify", str(server.get("tls_verify", True)).lower(),
         ],
         "env": [],
     }
+    if server.get("ca_bundle_path"):
+        mcp_hummingbot["args"] += ["--ca-bundle-path", str(server["ca_bundle_path"])]
+    if server.get("client_cert_path"):
+        mcp_hummingbot["args"] += ["--client-cert-path", str(server["client_cert_path"])]
+    if server.get("client_key_path"):
+        mcp_hummingbot["args"] += ["--client-key-path", str(server["client_key_path"])]
 
     return [mcp_hummingbot, condor]
 

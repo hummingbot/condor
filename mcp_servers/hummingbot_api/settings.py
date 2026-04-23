@@ -22,6 +22,10 @@ class ServerConfig(BaseModel):
     url: str = Field(default="http://localhost:8000")
     username: str = Field(default="admin")
     password: str = Field(default="admin")
+    tls_verify: bool = Field(default=True)
+    ca_bundle_path: str | None = Field(default=None)
+    client_cert_path: str | None = Field(default=None)
+    client_key_path: str | None = Field(default=None)
 
     @field_validator("url", mode="before")
     def validate_url(cls, v):
@@ -45,6 +49,10 @@ def _load_server_config() -> ServerConfig:
         url=os.getenv("HUMMINGBOT_API_URL", "http://localhost:8000"),
         username=os.getenv("HUMMINGBOT_USERNAME", "admin"),
         password=os.getenv("HUMMINGBOT_PASSWORD", "admin"),
+        tls_verify=os.getenv("HUMMINGBOT_TLS_VERIFY", "true").lower() in {"1", "true", "yes", "on"},
+        ca_bundle_path=os.getenv("HUMMINGBOT_CA_BUNDLE_PATH"),
+        client_cert_path=os.getenv("HUMMINGBOT_CLIENT_CERT_PATH"),
+        client_key_path=os.getenv("HUMMINGBOT_CLIENT_KEY_PATH"),
     )
 
 
@@ -62,6 +70,10 @@ class Settings(BaseModel):
     api_url: str = Field(default="http://localhost:8000")
     api_username: str = Field(default="admin")
     api_password: str = Field(default="admin")
+    tls_verify: bool = Field(default=True)
+    ca_bundle_path: str | None = Field(default=None)
+    client_cert_path: str | None = Field(default=None)
+    client_key_path: str | None = Field(default=None)
     server_name: str = Field(default="default")
     default_account: str = Field(default="master_account")
 
@@ -96,6 +108,10 @@ class Settings(BaseModel):
         self.api_url = config.url
         self.api_username = config.username
         self.api_password = config.password
+        self.tls_verify = config.tls_verify
+        self.ca_bundle_path = config.ca_bundle_path
+        self.client_cert_path = config.client_cert_path
+        self.client_key_path = config.client_key_path
         self.server_name = config.name
 
 
@@ -108,6 +124,10 @@ def get_settings() -> Settings:
             api_url=server_config.url,
             api_username=server_config.username,
             api_password=server_config.password,
+            tls_verify=server_config.tls_verify,
+            ca_bundle_path=server_config.ca_bundle_path,
+            client_cert_path=server_config.client_cert_path,
+            client_key_path=server_config.client_key_path,
             server_name=server_config.name,
             connection_timeout=float(os.getenv("HUMMINGBOT_TIMEOUT", "30.0")),
             max_retries=int(os.getenv("HUMMINGBOT_MAX_RETRIES", "3")),

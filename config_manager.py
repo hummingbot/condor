@@ -12,6 +12,8 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 from aiohttp import ClientTimeout
+from utils.hummingbot_client_factory import create_initialized_client
+from utils.url_builder import build_server_url_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,13 @@ class ConfigManager:
 
             # Ensure all sections exist
             self._data.setdefault("servers", {})
+            for server in self._data["servers"].values():
+                server.setdefault("protocol", "auto")
+                server.setdefault("tls_verify", True)
+                server.setdefault("ca_bundle_path", None)
+                server.setdefault("client_cert_path", None)
+                server.setdefault("client_key_path", None)
+
             self._data.setdefault("default_server", None)
             self._data.setdefault("users", {})
             self._data.setdefault("server_access", {})
@@ -233,6 +242,11 @@ class ConfigManager:
         username: str,
         password: str,
         owner_id: int = None,
+        protocol: str = "auto",
+        tls_verify: bool = True,
+        ca_bundle_path: str | None = None,
+        client_cert_path: str | None = None,
+        client_key_path: str | None = None,
     ) -> bool:
         """Add a new server."""
         servers = self._data["servers"]
@@ -245,6 +259,11 @@ class ConfigManager:
             "port": port,
             "username": username,
             "password": password,
+            "protocol": protocol,
+            "tls_verify": tls_verify,
+            "ca_bundle_path": ca_bundle_path,
+            "client_cert_path": client_cert_path,
+            "client_key_path": client_key_path,
         }
 
         # Register ownership
@@ -262,6 +281,11 @@ class ConfigManager:
         port: int = None,
         username: str = None,
         password: str = None,
+        protocol: str = None,
+        tls_verify: bool = None,
+        ca_bundle_path: str = None,
+        client_cert_path: str = None,
+        client_key_path: str = None,
     ) -> bool:
         """Modify an existing server."""
         servers = self._data["servers"]
@@ -281,6 +305,16 @@ class ConfigManager:
             servers[name]["username"] = username
         if password is not None:
             servers[name]["password"] = password
+        if protocol is not None:
+            servers[name]["protocol"] = protocol
+        if tls_verify is not None:
+            servers[name]["tls_verify"] = tls_verify
+        if ca_bundle_path is not None:
+            servers[name]["ca_bundle_path"] = ca_bundle_path
+        if client_cert_path is not None:
+            servers[name]["client_cert_path"] = client_cert_path
+        if client_key_path is not None:
+            servers[name]["client_key_path"] = client_key_path
 
         self._save_config()
         logger.info(f"Modified server '{name}'")
@@ -324,8 +358,6 @@ class ConfigManager:
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
-        from hummingbot_api_client import HummingbotAPIClient
-
         if name is None:
             name = self.get_default_server()
             if not name:
@@ -349,9 +381,9 @@ class ConfigManager:
             self._client_locks[name] = asyncio.Lock()
 
         async with self._client_locks[name]:
-            return await self._get_or_create_client(name, HummingbotAPIClient)
+            return await self._get_or_create_client(name)
 
-    async def _get_or_create_client(self, name: str, HummingbotAPIClient):
+    async def _get_or_create_client(self, name: str):
         """Inner client acquisition — must be called under _client_locks[name]."""
         # Re-check under lock (another coroutine may have just created it)
         if name in self._clients:
@@ -385,16 +417,19 @@ class ConfigManager:
 
         # Create new client
         server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
-        client = HummingbotAPIClient(
+        base_url = build_server_url_from_config(server)
+        client = await create_initialized_client(
             base_url=base_url,
             username=server["username"],
             password=server["password"],
             timeout=ClientTimeout(total=60, connect=10),
+            tls_verify=server.get("tls_verify", True),
+            ca_bundle_path=server.get("ca_bundle_path"),
+            client_cert_path=server.get("client_cert_path"),
+            client_key_path=server.get("client_key_path"),
         )
 
         try:
-            await client.init()
             await client.accounts.list_accounts()
             self._clients[name] = (client, time.time())
             logger.info(f"Connected to server '{name}' at {base_url}")
@@ -442,23 +477,27 @@ class ConfigManager:
 
     async def check_server_status(self, name: str) -> dict:
         """Check if a server is online."""
-        from hummingbot_api_client import HummingbotAPIClient
-
         if name not in self._data["servers"]:
             return {"status": "error", "message": "Server not found"}
 
         server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
+        try:
+            base_url = build_server_url_from_config(server)
+        except ValueError as e:
+            return {"status": "error", "message": f"Invalid server URL config: {e}"}
 
-        client = HummingbotAPIClient(
+        client = await create_initialized_client(
             base_url=base_url,
             username=server["username"],
             password=server["password"],
             timeout=ClientTimeout(total=3, connect=2),
+            tls_verify=server.get("tls_verify", True),
+            ca_bundle_path=server.get("ca_bundle_path"),
+            client_cert_path=server.get("client_cert_path"),
+            client_key_path=server.get("client_key_path"),
         )
 
         try:
-            await client.init()
             await client.accounts.list_accounts()
             return {"status": "online", "message": "Connected and authenticated"}
         except Exception as e:
