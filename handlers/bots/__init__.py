@@ -310,18 +310,16 @@ async def bots_callback_handler(
             await show_type_selector(update, context)
 
         elif main_action == "cfg_type":
-            if len(action_parts) > 1:
-                controller_type = action_parts[1]
-                await show_configs_by_type(update, context, controller_type)
+            if action_payload is not None:
+                await show_configs_by_type(update, context, action_payload)
 
         elif main_action == "cfg_toggle":
-            if len(action_parts) > 1:
-                config_id = action_parts[1]
-                await handle_cfg_toggle(update, context, config_id)
+            if action_payload is not None:
+                await handle_cfg_toggle(update, context, action_payload)
 
         elif main_action == "cfg_page":
-            if len(action_parts) > 1:
-                page = int(action_parts[1])
+            if action_payload is not None:
+                page = int(action_payload)
                 await handle_cfg_page(update, context, page)
 
         elif main_action == "cfg_clear_selection":
