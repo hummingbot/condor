@@ -9,12 +9,36 @@ Routine Types:
 
 import importlib
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RoutineResult:
+    """Rich result from a routine execution.
+
+    Routines can return this instead of a plain string to provide
+    structured data for the web dashboard (tables, charts, sections).
+    Telegram still uses the `text` field.
+    """
+
+    text: str
+    table_data: list[dict] | None = None
+    table_columns: list[str] | None = None
+    chart_image: bytes | None = None
+    sections: list[dict] | None = field(default=None)
+
+
+def normalize_result(result) -> RoutineResult:
+    """Wrap a plain string into RoutineResult for backwards compatibility."""
+    if isinstance(result, RoutineResult):
+        return result
+    return RoutineResult(text=str(result) if result else "Completed")
 
 _routines_cache: dict[str, "RoutineInfo"] | None = None
 
