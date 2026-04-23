@@ -45,6 +45,10 @@ from mcp_servers.hummingbot_api.tools.gateway_clmm import explore_gateway_clmm_p
 from mcp_servers.hummingbot_api.tools.gateway_swap import manage_gateway_swaps as manage_gateway_swaps_impl
 from mcp_servers.hummingbot_api.tools.geckoterminal import explore_geckoterminal as explore_geckoterminal_impl
 from mcp_servers.hummingbot_api.tools import history as history_tools
+from mcp_servers.hummingbot_api.tools.backtesting import (
+    manage_backtest_tasks as manage_backtest_tasks_impl,
+    run_backtest as run_backtest_impl,
+)
 
 # Configure root logger
 logging.basicConfig(
@@ -891,6 +895,84 @@ async def explore_geckoterminal(
         token=token,
         limit=limit,
         trade_volume_filter=trade_volume_filter,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@mcp.tool()
+@handle_errors("run backtest")
+async def run_backtest(
+        config_name: str,
+        start_time: int,
+        end_time: int,
+        backtesting_resolution: str = "1m",
+        trade_cost: float = 0.0002,
+) -> str:
+    """Run a synchronous backtest on a saved controller config.
+
+    Resolves the config name to its full configuration, then runs a backtest
+    over the specified time range. Returns performance metrics immediately.
+
+    Args:
+        config_name: Name of a saved controller config (e.g., 'my_grid_config').
+            Use manage_controllers(action='list') to see available configs.
+        start_time: Start timestamp in seconds (Unix epoch)
+        end_time: End timestamp in seconds (Unix epoch)
+        backtesting_resolution: Candle resolution for the backtest. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
+        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
+    """
+    client = await hummingbot_client.get_client()
+    result = await run_backtest_impl(
+        client=client,
+        config_name=config_name,
+        start_time=start_time,
+        end_time=end_time,
+        backtesting_resolution=backtesting_resolution,
+        trade_cost=trade_cost,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@mcp.tool()
+@handle_errors("manage backtest tasks")
+async def manage_backtest_tasks(
+        action: Literal["submit", "list", "get", "delete"],
+        config_name: str | None = None,
+        task_id: str | None = None,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        backtesting_resolution: str = "1m",
+        trade_cost: float = 0.0002,
+) -> str:
+    """Manage async backtesting tasks: submit background jobs, check status, get results, or delete.
+
+    Use this for long-running backtests that you don't want to wait for synchronously.
+
+    Actions:
+    - submit: Queue a new backtest task (requires config_name, start_time, end_time)
+    - list: List all backtest tasks with their status
+    - get: Get a specific task's status and results (requires task_id)
+    - delete: Cancel/delete a task (requires task_id)
+
+    Args:
+        action: Task action to perform
+        config_name: Controller config name (required for submit). Use manage_controllers(action='list') to see options.
+        task_id: Task ID returned from submit (required for get/delete)
+        start_time: Start timestamp in seconds (required for submit)
+        end_time: End timestamp in seconds (required for submit)
+        backtesting_resolution: Candle resolution. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
+        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
+    """
+    client = await hummingbot_client.get_client()
+    result = await manage_backtest_tasks_impl(
+        client=client,
+        action=action,
+        config_name=config_name,
+        task_id=task_id,
+        start_time=start_time,
+        end_time=end_time,
+        backtesting_resolution=backtesting_resolution,
+        trade_cost=trade_cost,
     )
     return result.get("formatted_output", str(result))
 
