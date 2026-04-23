@@ -12,9 +12,9 @@ import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
 import { Executors } from "@/pages/Executors";
 import { Login } from "@/pages/Login";
-import { Positions } from "@/pages/Positions";
 import { MarketData } from "@/pages/MarketData";
 import { Portfolio } from "@/pages/Portfolio";
+import { Routines } from "@/pages/Routines";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -63,7 +63,9 @@ export default function App() {
                 <Route path="/executors" element={<Executors />} />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
                 <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />
-                <Route path="/positions" element={<Positions />} />
+                <Route path="/backtest" element={<Navigate to="/bots?tab=backtest" replace />} />
+                <Route path="/archived" element={<Navigate to="/bots?tab=archived" replace />} />
+                <Route path="/routines" element={<Routines />} />
                 <Route path="/agents" element={<Agents />} />
                 <Route path="/agents/:slug" element={<AgentDetail />} />
                 <Route path="/market" element={<MarketData />} />

@@ -1,11 +1,11 @@
 import { useState } from "react";
 import {
   Activity,
-  Anchor,
   Bot,
   Brain,
   CandlestickChart,
   Swords,
+  Zap,
   LogOut,
   Moon,
   PanelLeftClose,
@@ -28,8 +28,8 @@ const NAV_ITEMS = [
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
-  { to: "/positions", icon: Anchor, label: "Positions" },
   { to: "/agents", icon: Brain, label: "Agents" },
+  { to: "/routines", icon: Zap, label: "Routines" },
   { to: "/market", icon: CandlestickChart, label: "Market" },
 ] as const;
 
@@ -51,14 +51,29 @@ export function AppShell() {
           collapsed ? "w-14" : "w-56"
         }`}
       >
-        <div className="flex items-center border-b border-[var(--color-border)] p-4">
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] p-4">
           {collapsed ? (
-            <img src="/condor.jpeg" alt="Condor" className="h-7 w-7 rounded-full" />
+            <button
+              onClick={() => setCollapsed(false)}
+              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Expand sidebar"
+            >
+              <PanelLeftOpen className="h-5 w-5" />
+            </button>
           ) : (
-            <h1 className="flex flex-1 items-center gap-2 text-lg font-bold tracking-tight">
-              <img src="/condor.jpeg" alt="Condor" className="h-7 w-7 rounded-full" />
-              Condor
-            </h1>
+            <>
+              <h1 className="flex items-center gap-2 text-lg font-bold tracking-tight">
+                <img src="/condor_old.jpeg" alt="Condor" className="h-7 w-7 rounded-full" />
+                Condor
+              </h1>
+              <button
+                onClick={() => setCollapsed(true)}
+                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                title="Collapse sidebar"
+              >
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
+            </>
           )}
         </div>
 
@@ -108,13 +123,6 @@ export function AppShell() {
               >
                 <LogOut className="h-4 w-4" />
               </button>
-              <button
-                onClick={() => setCollapsed(false)}
-                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                title="Expand sidebar"
-              >
-                <PanelLeftOpen className="h-4 w-4" />
-              </button>
             </div>
           ) : (
             <div className="flex items-center justify-between text-sm">
@@ -128,13 +136,6 @@ export function AppShell() {
                   title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
                 >
                   {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                </button>
-                <button
-                  onClick={() => setCollapsed(true)}
-                  className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                  title="Collapse sidebar"
-                >
-                  <PanelLeftClose className="h-4 w-4" />
                 </button>
                 <button
                   onClick={logout}

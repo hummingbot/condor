@@ -197,29 +197,12 @@ export function CreateExecutor() {
   const isSpot = isSpotConnector(connector);
 
   const [successId, setSuccessId] = useState<string | null>(null);
-  const [onlyConnected, setOnlyConnected] = useState(true);
 
-  const { data: allConnectors } = useQuery({
-    queryKey: ["connectors", server],
-    queryFn: () => api.getConnectors(server!),
-    enabled: !!server,
-  });
-
-  const { data: connectedExchanges } = useQuery({
+  const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],
     queryFn: () => api.getConnectedExchanges(server!),
     enabled: !!server,
   });
-
-  const connectors = useMemo(() => {
-    if (!allConnectors) return [];
-    if (!onlyConnected || !connectedExchanges?.length) return allConnectors;
-    const connectedBases = new Set(connectedExchanges.map((c) => c.replace(/_perpetual$/, "")));
-    return allConnectors.filter((c) => {
-      const base = c.replace(/_perpetual$/, "");
-      return connectedBases.has(base);
-    });
-  }, [allConnectors, connectedExchanges, onlyConnected]);
 
   // WS subscription for executor data
   const execChannels = useMemo(() => server ? [`executors:${server}`] : [], [server]);
@@ -298,15 +281,6 @@ export function CreateExecutor() {
       case "dca": return dcaConfig.validation;
     }
   }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation]);
-
-  const activeSide = useMemo(() => {
-    switch (executorType) {
-      case "grid": return gridState.side;
-      case "position": return positionConfig.state.side;
-      case "order": return orderConfig.state.side;
-      case "dca": return dcaConfig.state.side;
-    }
-  }, [executorType, gridState.side, positionConfig.state.side, orderConfig.state.side, dcaConfig.state.side]);
 
   // Chart props depend on active type
   const chartProps = useMemo(() => {
@@ -406,7 +380,9 @@ export function CreateExecutor() {
         case "dca": dcaConfig.save(); break;
       }
       setSuccessId(data.executor_id);
-      setTimeout(() => navigate("/executors"), 2500);
+      // Auto-dismiss success toast after 2.5s — stay on this page
+      // so the new executor appears in the bottom pane via WS
+      setTimeout(() => setSuccessId(null), 2500);
     },
   });
 
@@ -420,7 +396,7 @@ export function CreateExecutor() {
       <div className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
         {/* Back button */}
         <button
-          onClick={() => navigate("/executors")}
+          onClick={() => navigate(-1)}
           className="flex items-center gap-1 border-r border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
@@ -441,17 +417,6 @@ export function CreateExecutor() {
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
             />
           </div>
-          {connectedExchanges && connectedExchanges.length > 0 && (
-            <label className="flex cursor-pointer items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-[10px] text-[var(--color-text-muted)] select-none hover:bg-[var(--color-surface-hover)]">
-              <input
-                type="checkbox"
-                checked={onlyConnected}
-                onChange={(e) => setOnlyConnected(e.target.checked)}
-                className="h-3 w-3 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
-              />
-              Connected only
-            </label>
-          )}
         </div>
 
         {/* Price ticker */}
@@ -520,6 +485,7 @@ export function CreateExecutor() {
               pricePrecision={pricePrecision}
               extraLines={chartProps.extraLines}
               executorOverlays={mainOverlays}
+              positions={mainPositions}
             />
           </div>
           <TradeBottomPane
@@ -566,59 +532,37 @@ export function CreateExecutor() {
               <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
             )}
           </div>
-        </div>
-      </div>
 
-      {/* Bottom Bar */}
-      <div className="flex items-center justify-between border-t border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
-        <div className="flex items-center gap-3 text-xs">
-          {activeValidation.valid ? (
-            <span className="text-[var(--color-green)]">Ready to launch</span>
-          ) : (
-            <span className="text-[var(--color-red)]">
-              {activeValidation.errors[0]}
-            </span>
-          )}
-          {activeSide === 1 ? (
-            <span className="rounded bg-[var(--color-green)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-green)]">LONG</span>
-          ) : (
-            <span className="rounded bg-[var(--color-red)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-red)]">SHORT</span>
-          )}
-          <span className="text-[var(--color-text-muted)]">
-            {connector} / {pair}
-          </span>
-        </div>
-
-        <button
-          onClick={() => createMutation.mutate()}
-          disabled={!activeValidation.valid || createMutation.isPending}
-          className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {createMutation.isPending ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Rocket className="h-4 w-4" />
-          )}
-          Create {TYPE_LABELS[executorType]}
-        </button>
-      </div>
-
-      {/* Success modal */}
-      {successId && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-8 py-6 shadow-2xl shadow-black/40">
-            <CheckCircle className="h-10 w-10 text-[var(--color-green)]" />
-            <div className="text-center">
-              <p className="text-sm font-semibold text-[var(--color-text)]">{TYPE_LABELS[executorType]} Created</p>
-              <p className="mt-1 font-mono text-xs text-[var(--color-text-muted)]">{successId}</p>
-            </div>
-            <p className="text-[10px] text-[var(--color-text-muted)]">Redirecting to executors...</p>
+          {/* Sticky Create Footer */}
+          <div className="border-t border-[var(--color-border)] p-3">
+            {!activeValidation.valid && (
+              <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                {activeValidation.errors[0]}
+              </p>
+            )}
             <button
-              onClick={() => navigate("/executors")}
-              className="mt-1 rounded-lg bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white hover:brightness-110"
+              onClick={() => createMutation.mutate()}
+              disabled={!activeValidation.valid || createMutation.isPending}
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Go now
+              {createMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Rocket className="h-4 w-4" />
+              )}
+              Create {TYPE_LABELS[executorType]}
             </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Success toast */}
+      {successId && (
+        <div className="absolute bottom-16 left-1/2 z-50 -translate-x-1/2">
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-4 py-2.5 shadow-2xl shadow-black/40">
+            <CheckCircle className="h-4 w-4 text-[var(--color-green)]" />
+            <span className="text-xs font-medium text-[var(--color-text)]">{TYPE_LABELS[executorType]} Created</span>
+            <span className="font-mono text-[10px] text-[var(--color-text-muted)]">{successId.slice(0, 8)}</span>
           </div>
         </div>
       )}

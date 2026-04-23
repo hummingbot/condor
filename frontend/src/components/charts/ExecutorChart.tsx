@@ -82,7 +82,7 @@ export function ExecutorChart({
   const endTime = Math.ceil(timeRange.end + paddingSeconds);
 
   const { data: candles, isLoading, isError } = useQuery({
-    queryKey: ["candles", server, connector, tradingPair, interval, startTime, endTime],
+    queryKey: ["candles", server, connector, tradingPair, interval],
     queryFn: () => api.getCandles(server, connector, tradingPair, interval, 5000, startTime, endTime),
     enabled: !!server && !!connector && !!tradingPair,
     retry: 1,
@@ -408,7 +408,7 @@ export function ExecutorChart({
         return;
       }
 
-      // Position/generic executor → dashed segment line from entry to exit
+      // Position/order/generic executor → segment line from entry to exit
       const seg = overlay.segment;
       if (!seg) return;
 
@@ -416,10 +416,14 @@ export function ExecutorChart({
       const entryT = tsToSeconds(seg.entryTime);
       const exitT = tsToSeconds(seg.exitTime);
 
+      // Order executors: solid line when active (horizontal), dashed otherwise
+      const isOrderActive = overlay.type === "order" && isActive(overlay.status);
+      const lineStyle = isOrderActive ? mod.LineStyle.Solid : mod.LineStyle.Dashed;
+
       const lineSeries = chart.addSeries(mod.LineSeries, {
         color: segColor,
         lineWidth: 2,
-        lineStyle: mod.LineStyle.Dashed,
+        lineStyle,
         priceLineVisible: false,
         lastValueVisible: false,
         crosshairMarkerVisible: false,

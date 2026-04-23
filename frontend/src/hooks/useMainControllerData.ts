@@ -1,20 +1,29 @@
-import { useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 
 import { api, type ExecutorInfo } from "@/lib/api";
 import { computeMultiOverlays } from "@/lib/executor-overlays";
+
+/** Build a fingerprint string for an executor array to detect real changes */
+function executorsFingerprint(exs: ExecutorInfo[]): string {
+  return exs
+    .map((e) => `${e.id}:${e.status}:${e.pnl}:${e.entry_price}:${e.current_price}:${e.close_timestamp}`)
+    .join("|");
+}
 
 export function useMainControllerData(
   server: string | null,
   connector: string,
   pair: string,
 ) {
-  const queryClient = useQueryClient();
+  // Subscribe to executors cache (populated by WS subscription)
+  // enabled:false means no fetch — data comes from WS setQueryData
+  const { data: cachedExecutors } = useQuery<ExecutorInfo[]>({
+    queryKey: ["executors", server, ""],
+    enabled: false,
+  });
 
-  // Read executors from React Query cache (populated by WS subscription)
-  const cachedExecutors = queryClient.getQueryData<ExecutorInfo[]>(["executors", server, ""]);
-
-  const executors = useMemo(() => {
+  const filteredExecutors = useMemo(() => {
     if (!cachedExecutors) return [];
     return cachedExecutors.filter(
       (ex) =>
@@ -24,6 +33,19 @@ export function useMainControllerData(
     );
   }, [cachedExecutors, connector, pair]);
 
+  // Stable reference: only update when executor data actually changes
+  const prevFingerprintRef = useRef("");
+  const stableExecutorsRef = useRef<ExecutorInfo[]>([]);
+
+  const executors = useMemo(() => {
+    const fp = executorsFingerprint(filteredExecutors);
+    if (fp !== prevFingerprintRef.current) {
+      prevFingerprintRef.current = fp;
+      stableExecutorsRef.current = filteredExecutors;
+    }
+    return stableExecutorsRef.current;
+  }, [filteredExecutors]);
+
   const overlays = useMemo(() => computeMultiOverlays(executors), [executors]);
 
   // Fetch consolidated positions
@@ -31,7 +53,8 @@ export function useMainControllerData(
     queryKey: ["consolidated-positions", server],
     queryFn: () => api.getConsolidatedPositions(server!),
     enabled: !!server,
-    refetchInterval: 10_000,
+    refetchInterval: 5_000,
+    staleTime: 0,
   });
 
   const positions = useMemo(() => {

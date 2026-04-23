@@ -53,21 +53,23 @@ export function usePrefetchData() {
       queryFn: () => api.getBots(server),
     });
 
-    // Market data: connectors + trading rules
+    // Prefetch candle connectors list (for market data dropdowns)
     queryClient.prefetchQuery({
-      queryKey: ["connected-exchanges", server],
-      queryFn: () => api.getConnectedExchanges(server),
+      queryKey: ["connectors", server],
+      queryFn: () => api.getConnectors(server),
+      staleTime: 5 * 60 * 1000,
     });
 
+    // Prefetch trading rules only for connected exchanges (with credentials),
+    // not all candle connectors — avoids 404s for unconfigured connectors
     queryClient
       .fetchQuery({
-        queryKey: ["connectors", server],
-        queryFn: () => api.getConnectors(server),
+        queryKey: ["connected-exchanges", server],
+        queryFn: () => api.getConnectedExchanges(server),
         staleTime: 5 * 60 * 1000,
       })
       .then((connectors) => {
         if (!connectors?.length) return;
-        // Prefetch trading rules for each connector
         for (const connector of connectors) {
           queryClient.prefetchQuery({
             queryKey: ["trading-rules", server, connector],

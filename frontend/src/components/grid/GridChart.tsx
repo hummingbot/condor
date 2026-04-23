@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type CandleData } from "@/lib/api";
+import { api, type CandleData, type ConsolidatedPosition } from "@/lib/api";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 
@@ -24,6 +24,7 @@ interface GridChartProps {
   pricePrecision?: number;
   extraLines?: ExtraLine[];
   executorOverlays?: ExecutorOverlay[];
+  positions?: ConsolidatedPosition[];
 }
 
 function getChartColors() {
@@ -53,6 +54,7 @@ export function GridChart({
   pricePrecision,
   extraLines,
   executorOverlays,
+  positions,
 }: GridChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
@@ -68,6 +70,8 @@ export function GridChart({
   const gridLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const extraLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const overlaySeriesRef = useRef<import("lightweight-charts").ISeriesApi<"Line">[]>([]);
+  const overlayPriceLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
+  const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
 
   const channel = `candles:${server}:${connector}:${pair}:${interval}`;
   const channels = useMemo(() => [channel], [channel]);
@@ -80,8 +84,9 @@ export function GridChart({
   );
 
   const { data: candles } = useQuery({
-    queryKey: ["candles", server, connector, pair, interval, lookbackSeconds],
+    queryKey: ["candles", server, connector, pair, interval],
     queryFn: () => api.getCandles(server, connector, pair, interval, 5000, startTime),
+    staleTime: Infinity, // WS handles freshness
   });
 
   // Initialize chart
@@ -150,6 +155,8 @@ export function GridChart({
         limitLineRef.current = null;
         gridLinesRef.current = [];
         extraLinesRef.current = [];
+        overlayPriceLinesRef.current = [];
+        positionLinesRef.current = [];
       }
     };
   }, []);
@@ -347,6 +354,7 @@ export function GridChart({
   // Render executor overlays as line series
   useEffect(() => {
     const chart = chartRef.current;
+    const series = seriesRef.current;
     const mod = chartModuleRef.current;
     if (!chart || !mod) return;
 
@@ -355,6 +363,14 @@ export function GridChart({
       try { chart.removeSeries(s); } catch { /* ok */ }
     }
     overlaySeriesRef.current = [];
+
+    // Clean up old overlay price lines
+    if (series) {
+      for (const pl of overlayPriceLinesRef.current) {
+        try { series.removePriceLine(pl); } catch { /* ok */ }
+      }
+    }
+    overlayPriceLinesRef.current = [];
 
     if (!executorOverlays?.length) return;
 
@@ -446,7 +462,7 @@ export function GridChart({
         return;
       }
 
-      // Position/generic executor → dashed segment line
+      // Position/order/generic executor → segment line
       const seg = overlay.segment;
       if (!seg) return;
 
@@ -454,8 +470,12 @@ export function GridChart({
       const entryT = seg.entryTime > 1e12 ? Math.floor(seg.entryTime / 1000) : seg.entryTime;
       const exitT = seg.exitTime > 1e12 ? Math.floor(seg.exitTime / 1000) : seg.exitTime;
 
+      // Order executors: solid line when active, dashed otherwise
+      const isOrderActive = overlay.type === "order" && (overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active");
+      const lineStyle = isOrderActive ? mod.LineStyle.Solid : mod.LineStyle.Dashed;
+
       const lineSeries = chart.addSeries(mod.LineSeries, {
-        color: segColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
+        color: segColor, lineWidth: 2, lineStyle,
         priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
       });
       lineSeries.setData([
@@ -464,7 +484,78 @@ export function GridChart({
       ]);
       overlaySeriesRef.current.push(lineSeries);
     });
+
+    // Render full-width price lines for active executor overlays (e.g. running limit orders)
+    if (series && executorOverlays?.length) {
+      const styleMap: Record<string, number> = {
+        solid: mod.LineStyle.Solid,
+        dashed: mod.LineStyle.Dashed,
+        dotted: mod.LineStyle.Dotted,
+      };
+      for (const overlay of executorOverlays) {
+        const isRunning = overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active";
+        if (!isRunning) continue;
+        for (const pl of overlay.priceLines) {
+          if (pl.price <= 0) continue;
+          const priceLine = series.createPriceLine({
+            price: pl.price,
+            color: pl.color,
+            lineWidth: (pl.lineWidth ?? 1) as import("lightweight-charts").LineWidth,
+            lineStyle: styleMap[pl.style] ?? mod.LineStyle.Solid,
+            axisLabelVisible: true,
+            title: pl.label,
+          });
+          overlayPriceLinesRef.current.push(priceLine);
+        }
+      }
+    }
   }, [executorOverlays]);
+
+  // Auto-fit when overlays change so they're always visible
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !executorOverlays?.length) return;
+    // Slight delay to let overlay series data settle
+    const timer = setTimeout(() => chart.timeScale().fitContent(), 50);
+    return () => clearTimeout(timer);
+  }, [executorOverlays]);
+
+  // Render position hold lines as horizontal price lines
+  useEffect(() => {
+    const series = seriesRef.current;
+    const mod = chartModuleRef.current;
+    if (!series || !mod) return;
+
+    // Remove old position lines
+    for (const pl of positionLinesRef.current) {
+      try { series.removePriceLine(pl); } catch { /* ok */ }
+    }
+    positionLinesRef.current = [];
+
+    if (!positions?.length) return;
+
+    for (const pos of positions) {
+      if (pos.entry_price <= 0) continue;
+      const isLong = pos.position_side?.toUpperCase() === "LONG";
+      const pnl = pos.unrealized_pnl ?? 0;
+      const pnlSign = pnl >= 0 ? "+" : "";
+      const pnlStr = Math.abs(pnl) >= 1000
+        ? `${pnlSign}$${(pnl / 1000).toFixed(1)}K`
+        : `${pnlSign}$${pnl.toFixed(2)}`;
+      const amt = Math.abs(pos.amount);
+      const color = pnl >= 0 ? "#22c55e" : "#ef4444";
+      const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
+      const pl = series.createPriceLine({
+        price: pos.entry_price,
+        color,
+        lineWidth: 1,
+        lineStyle: mod.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: label,
+      });
+      positionLinesRef.current.push(pl);
+    }
+  }, [positions]);
 
   // Handle click-to-set price
   const handleClick = () => {
@@ -475,11 +566,11 @@ export function GridChart({
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        <p className="text-[10px] text-[var(--color-text-muted)]">
-          {activePickField
-            ? `Click on chart to set ${activePickField} price`
-            : "Grid executor chart"}
-        </p>
+        {activePickField && (
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            Click on chart to set {activePickField} price
+          </p>
+        )}
         {activePickField && (
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
             Pick mode: {activePickField}

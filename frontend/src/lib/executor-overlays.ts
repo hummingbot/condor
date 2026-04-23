@@ -78,6 +78,11 @@ function pnlColor(pnl: number): string {
   return pnl >= 0 ? "#22c55e" : "#ef4444";
 }
 
+function isActiveStatus(status: string): boolean {
+  const s = status?.toLowerCase() ?? "";
+  return s === "running" || s === "active_position" || s === "active";
+}
+
 // ── Position Executor Overlay ──
 
 function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
@@ -266,6 +271,113 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
   };
 }
 
+// ── Order Executor Overlay ──
+
+function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
+  const customInfo = executor.custom_info || {};
+  const config = executor.config || {};
+  const side = normSide(String(customInfo.side || executor.side || config.side));
+  const lines: PriceLine[] = [];
+  const markers: ChartMarker[] = [];
+
+  const isChaser = String(config.execution_strategy ?? "").toUpperCase() === "LIMIT_CHASER";
+
+  const orderPrice =
+    (executor.entry_price > 0 ? executor.entry_price : 0) ||
+    (Number(config.price) > 0 ? Number(config.price) : 0) ||
+    (executor.current_price > 0 ? executor.current_price : 0) ||
+    0;
+  const closePrice =
+    Number(customInfo.close_price) ||
+    executor.current_price ||
+    0;
+
+  // Build descriptive label: "BUY 0.5" or "SELL 1.2 chasing"
+  const amount = Number(config.amount);
+  const sideLabel = side.toUpperCase();
+  const amountStr = amount > 0 ? ` ${amount}` : "";
+  const chaserSuffix = isChaser ? " chasing" : "";
+  const descriptiveLabel = `${sideLabel}${amountStr}${chaserSuffix}`;
+
+  const active = isActiveStatus(executor.status);
+  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
+  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+
+  let segment: ExecutorSegment | undefined;
+
+  if (active && orderPrice > 0) {
+    // Active/running: horizontal line at order price
+    segment = {
+      entryTime: start,
+      entryPrice: orderPrice,
+      exitTime: Math.floor(Date.now() / 1000),
+      exitPrice: orderPrice,
+      color: side === "buy" ? "#22c55e" : "#ef4444",
+    };
+
+    if (orderPrice > 0) {
+      lines.push({
+        price: orderPrice,
+        label: descriptiveLabel,
+        color: side === "buy" ? "#22c55e" : "#ef4444",
+        style: isChaser ? "dotted" : "solid",
+        lineWidth: 2,
+      });
+    }
+  } else if (!active && orderPrice > 0) {
+    // Finished: triangle marker at execution point
+    const fillPrice = closePrice > 0 ? closePrice : orderPrice;
+
+    // Entry marker
+    markers.push({
+      time: start,
+      price: orderPrice,
+      position: side === "buy" ? "belowBar" : "aboveBar",
+      shape: side === "buy" ? "arrowUp" : "arrowDown",
+      color: side === "buy" ? "#22c55e" : "#ef4444",
+      text: side === "buy" ? "BUY" : "SELL",
+    });
+
+    // Close marker (triangle)
+    if (executor.close_timestamp > 0) {
+      markers.push({
+        time: executor.close_timestamp,
+        price: fillPrice,
+        position: side === "buy" ? "aboveBar" : "belowBar",
+        shape: side === "buy" ? "arrowDown" : "arrowUp",
+        color: pnlColor(executor.pnl),
+        text: closeTypeLabel(executor.close_type),
+      });
+    }
+
+    // Short segment from entry to close
+    if (executor.close_timestamp > 0) {
+      segment = {
+        entryTime: start,
+        entryPrice: orderPrice,
+        exitTime: executor.close_timestamp,
+        exitPrice: fillPrice,
+        color: pnlColor(executor.pnl),
+      };
+    }
+  }
+
+  return {
+    executorId: executor.id,
+    type: "order",
+    side,
+    status: executor.status,
+    closeType: executor.close_type,
+    pnl: executor.pnl,
+    pnlPct: executor.net_pnl_pct,
+    volume: executor.volume,
+    priceLines: lines,
+    markers,
+    segment,
+    timeRange: { start, end },
+  };
+}
+
 // ── Generic Executor Overlay (fallback) ──
 
 function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
@@ -353,6 +465,8 @@ export function computeExecutorOverlay(executor: ExecutorInfo): ExecutorOverlay 
       return computePositionOverlay(executor);
     case "grid":
       return computeGridOverlay(executor);
+    case "order":
+      return computeOrderOverlay(executor);
     default:
       return computeGenericOverlay(executor);
   }

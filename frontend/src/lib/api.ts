@@ -78,6 +78,7 @@ export interface BotDetail {
 
 export interface ControllerInfo {
   controller_name: string;
+  controller_id: string;
   bot_name: string;
   status: string;
   connector: string;
@@ -160,6 +161,9 @@ export interface ConsolidatedPosition {
   entry_price: number;
   current_price: number;
   unrealized_pnl: number;
+  realized_pnl: number;
+  cum_fees: number;
+  executor_count: number;
   leverage: number;
   controller_id: string;
   source: "executor" | "bot";
@@ -370,6 +374,97 @@ export interface SnapshotSummary {
   file: string;
 }
 
+// ── Routines ──
+
+export interface RoutineFieldInfo {
+  type: string;
+  default: unknown;
+  description: string;
+}
+
+export interface RoutineInfo {
+  name: string;
+  description: string;
+  is_continuous: boolean;
+  fields: Record<string, RoutineFieldInfo>;
+}
+
+export interface RoutineInstance {
+  instance_id: string;
+  routine_name: string;
+  config: Record<string, unknown>;
+  status: string;
+  source: string;
+  schedule?: Record<string, unknown>;
+  created_at: number;
+  last_run_at: number | null;
+  last_result: string | null;
+  last_duration: number | null;
+  run_count: number;
+  has_result?: boolean;
+  result_text?: string;
+  has_chart?: boolean;
+  table_data?: Record<string, unknown>[] | null;
+  table_columns?: string[] | null;
+  sections?: Record<string, unknown>[] | null;
+}
+
+// ── Archived Bots ──
+
+export interface ArchivedBotSummary {
+  bot_name: string;
+  db_path: string;
+  total_trades: number;
+  total_orders: number;
+  trading_pairs: string[];
+  exchanges: string[];
+  start_time: number | null;
+  end_time: number | null;
+}
+
+export interface PnlPoint {
+  timestamp: number;
+  pnl: number;
+}
+
+export interface ArchivedBotPerformance {
+  bot_name: string;
+  db_path: string;
+  total_pnl: number;
+  total_fees: number;
+  total_volume: number;
+  trade_count: number;
+  buy_count: number;
+  sell_count: number;
+  pnl_by_pair: Record<string, number>;
+  cumulative_pnl: PnlPoint[];
+  trading_pairs: string[];
+  exchanges: string[];
+  executors: ExecutorInfo[];
+  primary_connector: string;
+  primary_trading_pair: string;
+  executor_count: number;
+}
+
+export interface PaginatedExecutors {
+  executors: ExecutorInfo[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ── Backtesting ──
+
+export interface BacktestTask {
+  task_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  config?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: string;
+  created_at?: number;
+  saved?: boolean;
+}
+
 // ── API functions ──
 
 export const api = {
@@ -414,6 +509,22 @@ export const api = {
     apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
       method: "PUT",
       body: JSON.stringify({ yaml_content: yamlContent }),
+    }),
+
+  getControllerConfigTemplate: (server: string, controllerType: string, controllerName: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/template`,
+    ),
+
+  createControllerConfig: (server: string, configId: string, data: Record<string, unknown>) =>
+    apiFetch<{ created: boolean; config_id: string }>(`/api/v1/servers/${server}/controllers/configs`, {
+      method: "POST",
+      body: JSON.stringify({ ...data, id: configId }),
+    }),
+
+  deleteControllerConfig: (server: string, configId: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
+      method: "DELETE",
     }),
 
   getControllerSource: (server: string, controllerType: string, controllerName: string) =>
@@ -634,6 +745,46 @@ export const api = {
       `/api/v1/agents/${slug}/sessions/${sessionNum}/snapshots/${tick}`,
     ),
 
+  // ── Backtesting ──
+
+  submitBacktest: (
+    server: string,
+    data: {
+      config_id: string;
+      start_time: number;
+      end_time: number;
+      backtesting_resolution?: string;
+      trade_cost?: number;
+    },
+  ) =>
+    apiFetch<BacktestTask>(`/api/v1/servers/${server}/backtesting/tasks`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  listBacktestTasks: (server: string) =>
+    apiFetch<BacktestTask[]>(`/api/v1/servers/${server}/backtesting/tasks`),
+
+  getBacktestTask: (server: string, taskId: string) =>
+    apiFetch<BacktestTask>(
+      `/api/v1/servers/${server}/backtesting/tasks/${taskId}`,
+    ),
+
+  deleteBacktestTask: (server: string, taskId: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/backtesting/tasks/${taskId}`,
+      { method: "DELETE" },
+    ),
+
+  getSavedBacktests: (server: string) =>
+    apiFetch<BacktestTask[]>(`/api/v1/servers/${server}/backtesting/saved`),
+
+  deleteSavedBacktest: (server: string, taskId: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/backtesting/saved/${taskId}`,
+      { method: "DELETE" },
+    ),
+
   // ── Experiments ──
 
   getAgentExperiments: (slug: string) =>
@@ -643,4 +794,51 @@ export const api = {
     apiFetch<{ content: string; number: number }>(
       `/api/v1/agents/${slug}/experiments/${expNum}`,
     ),
+
+  // ── Archived Bots ──
+
+  getArchivedBots: (server: string) =>
+    apiFetch<{ bots: ArchivedBotSummary[] }>(`/api/v1/servers/${server}/archived`),
+
+  getArchivedBotPerformance: (server: string, dbPath: string, includeExecutors = false) =>
+    apiFetch<ArchivedBotPerformance>(
+      `/api/v1/servers/${server}/archived/performance?db_path=${encodeURIComponent(dbPath)}&include_executors=${includeExecutors}`,
+    ),
+
+  getArchivedExecutors: (server: string, dbPath: string, offset = 0, limit = 50) =>
+    apiFetch<PaginatedExecutors>(
+      `/api/v1/servers/${server}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
+    ),
+
+  // ── Routines ──
+
+  getRoutines: () => apiFetch<RoutineInfo[]>("/api/v1/routines"),
+
+  getRoutineInstances: () =>
+    apiFetch<RoutineInstance[]>("/api/v1/routines/instances"),
+
+  getRoutineInstance: (id: string) =>
+    apiFetch<RoutineInstance>(`/api/v1/routines/instances/${id}`),
+
+  runRoutine: (server: string, name: string, config: Record<string, unknown> = {}) =>
+    apiFetch<{ instance_id: string }>(
+      `/api/v1/routines/servers/${server}/${name}/run`,
+      { method: "POST", body: JSON.stringify({ config }) },
+    ),
+
+  scheduleRoutine: (
+    server: string,
+    name: string,
+    config: Record<string, unknown> = {},
+    interval_sec: number = 300,
+  ) =>
+    apiFetch<{ instance_id: string }>(
+      `/api/v1/routines/servers/${server}/${name}/schedule`,
+      { method: "POST", body: JSON.stringify({ config, interval_sec }) },
+    ),
+
+  stopRoutineInstance: (id: string) =>
+    apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${id}/stop`, {
+      method: "POST",
+    }),
 };
