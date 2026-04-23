@@ -98,6 +98,7 @@ class BotDetailResponse(BaseModel):
 
 class ControllerInfo(BaseModel):
     controller_name: str
+    controller_id: str = ""
     bot_name: str
     status: str = "unknown"
     connector: str = ""
@@ -242,3 +243,69 @@ class DeployBotRequest(BaseModel):
     image: str = "hummingbot/hummingbot:latest"
     max_global_drawdown_quote: float | None = None
     max_controller_drawdown_quote: float | None = None
+
+
+# ── Archived Bots ──
+
+
+class ArchivedBotSummary(BaseModel):
+    bot_name: str
+    db_path: str
+    total_trades: int = 0
+    total_orders: int = 0
+    trading_pairs: list[str] = []
+    exchanges: list[str] = []
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+
+
+class PnlPoint(BaseModel):
+    timestamp: float
+    pnl: float
+
+
+class NormalizedExecutor(BaseModel):
+    id: str = ""
+    type: str = ""
+    connector: str = ""
+    trading_pair: str = ""
+    side: str = ""
+    status: str = ""
+    close_type: str = ""
+    pnl: float = 0.0
+    volume: float = 0.0
+    timestamp: float = 0.0
+    close_timestamp: float = 0.0
+    entry_price: float = 0.0
+    current_price: float = 0.0
+    cum_fees_quote: float = 0.0
+    net_pnl_pct: float = 0.0
+    controller_id: str = ""
+    custom_info: dict[str, Any] = {}
+    config: dict[str, Any] = {}
+
+
+class ArchivedBotPerformance(BaseModel):
+    bot_name: str
+    db_path: str
+    total_pnl: float = 0.0
+    total_fees: float = 0.0
+    total_volume: float = 0.0
+    trade_count: int = 0
+    buy_count: int = 0
+    sell_count: int = 0
+    pnl_by_pair: dict[str, float] = {}
+    cumulative_pnl: list[PnlPoint] = []
+    trading_pairs: list[str] = []
+    exchanges: list[str] = []
+    executors: list[NormalizedExecutor] = []
+    primary_connector: str = ""
+    primary_trading_pair: str = ""
+    executor_count: int = 0
+
+
+class PaginatedExecutors(BaseModel):
+    executors: list[NormalizedExecutor]
+    total: int
+    offset: int
+    limit: int

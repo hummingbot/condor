@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from condor.web.routes import agents, auth, bots, executors, market, portfolio, positions, servers, ws
+from condor.web.routes import agents, archived, auth, backtesting, bots, executors, market, portfolio, positions, routines, servers, ws
 
 
 def create_app() -> FastAPI:
@@ -31,11 +31,14 @@ def create_app() -> FastAPI:
     app.include_router(servers.router, prefix="/api/v1")
     app.include_router(portfolio.router, prefix="/api/v1")
     app.include_router(bots.router, prefix="/api/v1")
+    app.include_router(archived.router, prefix="/api/v1")
     app.include_router(executors.router, prefix="/api/v1")
     app.include_router(positions.router, prefix="/api/v1")
+    app.include_router(backtesting.router, prefix="/api/v1")
     app.include_router(market.router, prefix="/api/v1")
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
+    app.include_router(routines.router, prefix="/api/v1")
 
     # ── Serve built frontend (production) ──
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"

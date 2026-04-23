@@ -78,18 +78,24 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
     custom_info = ex.get("custom_info") or {}
 
     # Entry price: top-level > config > custom_info (position executors store it there)
-    entry_price = float(
-        config.get("entry_price")
-        or ex.get("entry_price")
-        or custom_info.get("current_position_average_price")
-        or 0
-    )
-    # Current/close price: top-level > custom_info.close_price
-    current_price = float(
-        ex.get("current_price")
-        or custom_info.get("close_price")
-        or 0
-    )
+    # Use explicit > 0 checks so that a valid 0.0 doesn't skip to the next fallback
+    _cfg_entry = float(config.get("entry_price") or 0)
+    _top_entry = float(ex.get("entry_price") or 0)
+    _ci_entry = float(custom_info.get("current_position_average_price") or 0)
+    entry_price = _cfg_entry if _cfg_entry > 0 else (_top_entry if _top_entry > 0 else (_ci_entry if _ci_entry > 0 else 0.0))
+
+    # Current/close price: top-level > custom_info.close_price > held_position_orders fill price
+    _top_cur = float(ex.get("current_price") or 0)
+    _ci_close = float(custom_info.get("close_price") or 0)
+    # Extract fill price from held_position_orders (order executors store fills there)
+    _held_price = 0.0
+    held_orders = custom_info.get("held_position_orders")
+    if isinstance(held_orders, list) and held_orders:
+        try:
+            _held_price = float(held_orders[-1].get("price") or 0)
+        except (TypeError, ValueError, AttributeError):
+            pass
+    current_price = _top_cur if _top_cur > 0 else (_ci_close if _ci_close > 0 else (_held_price if _held_price > 0 else 0.0))
 
     return ExecutorInfo(
         id=str(ex.get("id") or ex.get("executor_id") or ""),

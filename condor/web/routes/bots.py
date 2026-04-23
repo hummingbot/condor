@@ -107,7 +107,7 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
     bots_list = _extract_bots_list(result)
     logger.info("Server '%s': found %d bot(s)", name, len(bots_list))
 
-    # Pre-fetch controller configs keyed by controller id
+    # Pre-fetch controller configs keyed by controller id AND controller_name
     ctrl_configs: dict[str, dict] = {}
     if client is not None:
         for bot_data in bots_list:
@@ -121,6 +121,9 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                         cid = cfg.get("id") or cfg.get("controller_id", "")
                         if cid:
                             ctrl_configs[cid] = cfg
+                        cname = cfg.get("controller_name", "")
+                        if cname and cname != cid:
+                            ctrl_configs[cname] = cfg
             except Exception:
                 pass
 
@@ -210,9 +213,16 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 total_pnl += global_pnl
                 total_volume += volume
 
+                # Use human-readable controller_name from config if available
+                config_cname = ctrl_config.get("controller_name", "")
+                config_id = ctrl_config.get("id") or ctrl_config.get("controller_id", "")
+                display_name = config_cname or ctrl_name
+                display_id = config_id or ctrl_name
+
                 controllers.append(
                     ControllerInfo(
-                        controller_name=ctrl_name,
+                        controller_name=display_name,
+                        controller_id=display_id,
                         bot_name=bot_name,
                         status=ctrl_status,
                         connector=connector,
@@ -476,6 +486,95 @@ async def update_controller_source(
         raise HTTPException(status_code=502, detail=str(e))
 
     return {"updated": True, "result": result}
+
+
+@router.get(
+    "/servers/{name}/controllers/{controller_type}/{controller_name}/template",
+)
+async def get_controller_config_template(
+    name: str,
+    controller_type: str,
+    controller_name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Fetch the config template/schema for a controller."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.controllers.get_controller_config_template(
+            controller_type, controller_name
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Normalize: could be a dict or list of field dicts
+    if isinstance(result, dict):
+        return result
+    return {"fields": result}
+
+
+@router.post("/servers/{name}/controllers/configs")
+async def create_controller_config(
+    name: str,
+    body: dict[str, Any],
+    user: WebUser = Depends(get_current_user),
+):
+    """Create or update a controller config."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    config_id = body.get("id")
+    if not config_id:
+        raise HTTPException(status_code=400, detail="Missing 'id' field")
+
+    # If yaml_content is provided, parse it
+    yaml_content = body.pop("yaml_content", None)
+    if yaml_content is not None:
+        try:
+            parsed = yaml.safe_load(yaml_content)
+            if not isinstance(parsed, dict):
+                raise HTTPException(status_code=400, detail="YAML must parse to a mapping")
+            body = parsed
+            body["id"] = config_id
+        except yaml.YAMLError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.controllers.create_or_update_controller_config(
+            config_id, body
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"created": True, "config_id": config_id, "result": result}
+
+
+@router.delete("/servers/{name}/controllers/configs/{config_id}")
+async def delete_controller_config(
+    name: str,
+    config_id: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Delete a saved controller config."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.controllers.delete_controller_config(config_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"deleted": True, "config_id": config_id, "result": result}
 
 
 @router.post("/servers/{name}/bots/deploy")

@@ -217,6 +217,7 @@ class TickEngine:
 
     async def _tick(self) -> None:
         self._last_tick_at = time.time()
+        mode = self.config.get("execution_mode", "loop")
 
         # 1. Get API client
         client = await self._get_client()
@@ -292,57 +293,8 @@ class TickEngine:
             )
             self._pending_directives.clear()
 
-        # 6. Create agent client (ACP for Claude/Gemini/Copilot, PydanticAI for open-source models)
-        from handlers.agents._shared import (
-            build_mcp_servers_for_agent,
-            build_mcp_servers_for_session,
-            get_project_dir,
-        )
-
-        mode = self.config.get("execution_mode", "loop")
-
-        server_name = self.config.get("server_name")
-        if server_name:
-            mcp_servers = build_mcp_servers_for_agent(
-                server_name, self.user_id, self.chat_id,
-                agent_slug=self.strategy.slug,
-                execution_mode=mode,
-            )
-        else:
-            mcp_servers = build_mcp_servers_for_session(
-                self.user_id, self.chat_id,
-                execution_mode=mode,
-            )
-        permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
-
-        # Session config overrides strategy default for agent_key
-        agent_key = self.config.get("agent_key") or self.strategy.agent_key
-        use_pydantic_ai = is_pydantic_ai_model(agent_key)
-
-        if use_pydantic_ai:
-            import os
-            base_url = self.config.get("model_base_url") or None
-            # Auto-detect filter mode based on model, or use explicit config
-            tool_filter_mode = (
-                self.config.get("tool_filter_mode") or
-                os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
-                None  # None triggers auto-detection
-            )
-            acp_client = PydanticAIClient(
-                model=agent_key,
-                mcp_servers=mcp_servers,
-                permission_callback=permission_cb,
-                base_url=base_url,
-                tool_filter_mode=tool_filter_mode,  # Auto-detects if None
-            )
-        else:
-            agent_cmd = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
-            acp_client = ACPClient(
-                command=agent_cmd,
-                working_dir=get_project_dir(),
-                mcp_servers=mcp_servers,
-                permission_callback=permission_cb,
-            )
+        # 6. Create a fresh agent client per tick (clean context window)
+        acp_client = await self._create_client()
 
         response_chunks: list[str] = []
         tool_calls: list[dict[str, Any]] = []
@@ -407,7 +359,7 @@ class TickEngine:
                 executors_data=executors_summary,
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
-                agent_key=agent_key,
+                agent_key=self.config.get("agent_key") or self.strategy.agent_key,
             )
             log.info(
                 "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
@@ -461,6 +413,62 @@ class TickEngine:
             yield event
             if isinstance(event, PromptDone):
                 break
+
+    # ------------------------------------------------------------------
+    # Client factory
+    # ------------------------------------------------------------------
+
+    async def _create_client(self) -> "ACPClient | PydanticAIClient":
+        """Build an ACP or PydanticAI client (does NOT start it)."""
+        from handlers.agents._shared import (
+            build_mcp_servers_for_agent,
+            build_mcp_servers_for_session,
+            get_project_dir,
+        )
+
+        mode = self.config.get("execution_mode", "loop")
+        risk_state = self.risk.get_state(self.journal or _NullTracker())
+
+        server_name = self.config.get("server_name")
+        if server_name:
+            mcp_servers = build_mcp_servers_for_agent(
+                server_name, self.user_id, self.chat_id,
+                agent_slug=self.strategy.slug,
+                execution_mode=mode,
+            )
+        else:
+            mcp_servers = build_mcp_servers_for_session(
+                self.user_id, self.chat_id,
+                execution_mode=mode,
+            )
+        permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
+
+        agent_key = self.config.get("agent_key") or self.strategy.agent_key
+        use_pydantic_ai = is_pydantic_ai_model(agent_key)
+
+        if use_pydantic_ai:
+            import os
+            base_url = self.config.get("model_base_url") or None
+            tool_filter_mode = (
+                self.config.get("tool_filter_mode") or
+                os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
+                None
+            )
+            return PydanticAIClient(
+                model=agent_key,
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+                base_url=base_url,
+                tool_filter_mode=tool_filter_mode,
+            )
+        else:
+            agent_cmd = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
+            return ACPClient(
+                command=agent_cmd,
+                working_dir=get_project_dir(),
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+            )
 
     # ------------------------------------------------------------------
     # Helpers

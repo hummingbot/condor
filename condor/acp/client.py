@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Awaitable
 
@@ -112,6 +113,7 @@ class ACPClient:
             cwd=self.working_dir,
             env=env,
             limit=10 * 1024 * 1024,
+            start_new_session=True,  # Own process group so we can kill all children
         )
         self._read_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._drain_stderr())
@@ -134,7 +136,7 @@ class ACPClient:
         log.info("ACP session started: %s (cmd=%s)", self._session_id, self.command)
 
     async def stop(self) -> None:
-        """Terminate the subprocess."""
+        """Terminate the subprocess and all its children (MCP servers)."""
         self._peer.cancel_all()
         for task in (self._read_task, self._stderr_task):
             if task:
@@ -144,11 +146,20 @@ class ACPClient:
                 except asyncio.CancelledError:
                     pass
         if self._process and self._process.returncode is None:
-            self._process.terminate()
+            pid = self._process.pid
+            try:
+                # Kill the entire process group (subprocess + MCP server children)
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                self._process.kill()
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    self._process.kill()
+            log.debug("ACP process group %d stopped", pid)
 
     @property
     def alive(self) -> bool:

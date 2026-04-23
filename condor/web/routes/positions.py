@@ -26,6 +26,9 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
         "unrealized_pnl": pos.get("unrealized_pnl_quote") or pos.get("unrealized_pnl") or 0,
         "leverage": pos.get("leverage") or 1,
         "controller_id": pos.get("controller_id") or "",
+        "realized_pnl": pos.get("realized_pnl_quote") or 0,
+        "cum_fees": pos.get("cum_fees_quote") or 0,
+        "executor_count": pos.get("executor_count") or 0,
         "source": source,
         "source_name": source_name,
     }
@@ -103,6 +106,9 @@ async def get_consolidated_positions(
         fetch_executor_positions(),
         fetch_bot_positions(),
     )
+
+    if exec_raw:
+        logger.info("Raw executor positions sample: %s", exec_raw[:2])
 
     executor_positions = [
         _normalize_position(pos, "executor", "Executor")

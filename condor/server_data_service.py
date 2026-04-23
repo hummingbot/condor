@@ -549,24 +549,71 @@ class ServerDataService:
                     logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
 
             # Pre-subscribe trading rules for each discovered connector
-            connectors = self.get(name, ServerDataType.CONNECTORS)
-            if connectors:
-                for connector in connectors:
-                    try:
-                        await self.subscribe(
-                            server=name,
-                            data_type=ServerDataType.TRADING_RULES,
-                            subscriber_id=subscriber_id,
-                            connector_name=connector,
-                        )
-                        count += 1
-                    except Exception as e:
-                        logger.debug(
-                            "SDS auto-subscribe failed for %s/trading_rules/%s: %s",
-                            name, connector, e,
-                        )
+            count += await self._subscribe_trading_rules_for_server(name, subscriber_id)
+
+        # Register on_change callback for CONNECTORS so that when a server
+        # comes online later and CONNECTORS data is fetched for the first time
+        # (or new connectors appear), we auto-subscribe TRADING_RULES.
+        for name in servers:
+            key = CacheKey.make(name, ServerDataType.CONNECTORS)
+            subs = self._subscriptions.get(key, {})
+            if subscriber_id in subs:
+                subs[subscriber_id].callback = self._make_connectors_change_callback(name)
 
         logger.info("SDS auto-subscribe: %d subscriptions for %d servers", count, len(servers))
+
+    async def _subscribe_trading_rules_for_server(
+        self, server_name: str, subscriber_id: str = "_auto"
+    ) -> int:
+        """Subscribe TRADING_RULES for all known connectors on a server. Returns count."""
+        connectors = self.get(server_name, ServerDataType.CONNECTORS)
+        if not connectors:
+            return 0
+        count = 0
+        for connector in connectors:
+            key = CacheKey.make(
+                server_name, ServerDataType.TRADING_RULES,
+                connector_name=connector,
+            )
+            if key in self._subscriptions:
+                continue  # Already subscribed
+            try:
+                await self.subscribe(
+                    server=server_name,
+                    data_type=ServerDataType.TRADING_RULES,
+                    subscriber_id=subscriber_id,
+                    connector_name=connector,
+                )
+                # Check if the initial fetch failed (connector unavailable/404)
+                entry = self._cache.get(key)
+                if entry and entry.value is None and entry.consecutive_errors > 0:
+                    self.unsubscribe(key, subscriber_id)
+                    self._cache.pop(key, None)  # Clean up error-only entry
+                    logger.info(
+                        "SDS: skipping trading rules for %s/%s (connector unavailable)",
+                        server_name, connector,
+                    )
+                    continue
+                count += 1
+            except Exception as e:
+                logger.debug(
+                    "SDS auto-subscribe failed for %s/trading_rules/%s: %s",
+                    server_name, connector, e,
+                )
+        return count
+
+    def _make_connectors_change_callback(self, server_name: str) -> Callable:
+        """Create a callback that auto-subscribes TRADING_RULES when CONNECTORS change."""
+        async def _on_connectors_change(key: CacheKey, old_value, new_value):
+            if not new_value:
+                return
+            added = await self._subscribe_trading_rules_for_server(server_name)
+            if added:
+                logger.info(
+                    "SDS: auto-subscribed %d new TRADING_RULES for %s after CONNECTORS update",
+                    added, server_name,
+                )
+        return _on_connectors_change
 
     def stop(self) -> None:
         self._running = False
