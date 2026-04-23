@@ -141,8 +141,16 @@ async def fetch_cex_balances(
             account_name
         )
 
-        # Filter to CEX only (list_account_credentials returns List[str])
+        # Get connectors actually available in the running instance
+        try:
+            available_connectors = set(await client.connectors.list_connectors())
+        except Exception:
+            available_connectors = None
+
+        # Filter to CEX only, and intersect with available connectors if known
         cex_connectors = [c for c in configured_connectors if is_cex_connector(c)]
+        if available_connectors is not None:
+            cex_connectors = [c for c in cex_connectors if c in available_connectors]
 
         if not cex_connectors:
             logger.warning("No CEX connectors found")
@@ -274,9 +282,17 @@ async def fetch_trading_rules(client, connector_name: str) -> Dict[str, Dict[str
         )
         return result if result else {}
     except Exception as e:
-        logger.error(
-            f"Error fetching trading rules for {connector_name}: {e}", exc_info=True
-        )
+        error_str = str(e)
+        # 404/401 means the connector doesn't exist or isn't configured — log as debug, not error
+        if "404" in error_str or "401" in error_str or "not found" in error_str.lower():
+            logger.debug(
+                "Connector '%s' not available for trading rules: %s",
+                connector_name, e,
+            )
+        else:
+            logger.error(
+                f"Error fetching trading rules for {connector_name}: {e}", exc_info=True
+            )
         return {}
 
 
@@ -441,8 +457,17 @@ async def fetch_available_cex_connectors(
         configured_connectors = await client.accounts.list_account_credentials(
             account_name
         )
-        # Filter to CEX only
-        return [c for c in configured_connectors if is_cex_connector(c)]
+        # Get connectors actually available in the running instance
+        try:
+            available_connectors = set(await client.connectors.list_connectors())
+        except Exception:
+            available_connectors = None
+
+        # Filter to CEX only, and intersect with available connectors if known
+        cex = [c for c in configured_connectors if is_cex_connector(c)]
+        if available_connectors is not None:
+            cex = [c for c in cex if c in available_connectors]
+        return cex
     except Exception as e:
         logger.error(f"Error fetching connectors: {e}", exc_info=True)
         return []

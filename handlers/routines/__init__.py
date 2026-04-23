@@ -19,7 +19,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
 
 from handlers import clear_all_input_states
-from routines.base import discover_routines, get_routine, get_routine_by_state
+from condor.routine_store import get_routine_store
+from routines.base import discover_routines, get_routine, get_routine_by_state, normalize_result
 from utils.auth import restricted
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -204,6 +205,11 @@ def _stop_instance(
             asyncio.create_task(routine.cleanup_fn(context, instance_id, chat_id))
 
         del instances[instance_id]
+        # Sync removal to shared store
+        try:
+            get_routine_store().remove_instance(instance_id)
+        except Exception:
+            pass
         logger.info(f"Stopped instance {instance_id} ({routine_name})")
         return True
     return False
@@ -248,13 +254,24 @@ async def _execute_routine(
 
     try:
         config = routine.config_class(**config_dict)
-        result = await routine.run_fn(config, context)
-        result_text = str(result)[:500] if result else "Completed"
+        raw_result = await routine.run_fn(config, context)
+        rich_result = normalize_result(raw_result)
+        result_text = rich_result.text[:500] if rich_result.text else "Completed"
     except Exception as e:
         result_text = f"Error: {e}"
+        rich_result = None
         logger.error(f"Routine {routine_name}[{instance_id}] failed: {e}")
 
     duration = time.time() - start
+
+    # Bridge to shared store so web dashboard can see Telegram-triggered results
+    if rich_result:
+        try:
+            store = get_routine_store()
+            store.store_result(instance_id, rich_result)
+        except Exception:
+            pass
+
     return result_text, duration
 
 
@@ -463,17 +480,25 @@ def _create_scheduled_instance(
 
     # Store instance
     instances = _get_instances(context)
-    instances[instance_id] = {
+    inst_meta = {
         "routine_name": routine_name,
         "config": config_dict.copy(),
         "schedule": schedule.copy(),
         "status": "running",
+        "source": "telegram",
         "created_at": time.time(),
         "last_run_at": None,
         "last_result": None,
         "last_duration": None,
         "run_count": 0,
     }
+    instances[instance_id] = inst_meta
+
+    # Sync to shared store for web visibility
+    try:
+        get_routine_store().add_instance(instance_id, inst_meta.copy())
+    except Exception:
+        pass
 
     # Capture the active server at creation time so routines in groups
     # connect to the correct server (user_data is keyed by user_id,

@@ -1,7 +1,6 @@
 """Agent chat handler -- /agent command, callback router, message handler."""
 
 import logging
-import random
 import shutil
 
 from telegram import Update
@@ -665,20 +664,16 @@ async def agent_message_handler(
         voice_prefix = f"🎙 {voice_transcription}"
         prefix = f"{prefix}{voice_prefix}" if prefix else voice_prefix
 
-    # Delete placeholder if it exists (we use native streaming drafts now)
+    # Send or reuse placeholder message
     if voice_placeholder:
-        try:
-            await voice_placeholder.delete()
-        except Exception:
-            pass
-
-    # Generate a unique draft ID for streaming (native Telegram feature in v22.7)
-    draft_id = random.randint(1, 2**31 - 1)
+        placeholder = voice_placeholder
+    else:
+        placeholder = await update.message.reply_text("Thinking...")
 
     streamer = TelegramStreamer(
         bot=context.bot,
         chat_id=chat_id,
-        draft_id=draft_id,
+        message_id=placeholder.message_id,
         prefix=prefix,
     )
     edit_task = streamer.start_edit_loop()
@@ -691,8 +686,9 @@ async def agent_message_handler(
     except Exception as e:
         log.exception("Agent prompt error")
         await streamer.finalize()
-        await context.bot.send_message(
+        await context.bot.edit_message_text(
             chat_id=chat_id,
+            message_id=placeholder.message_id,
             text=f"Agent error: {e}",
         )
         await destroy_session(chat_id)
