@@ -302,6 +302,81 @@ class ManageExecutorsRequest(BaseModel):
 
 
 # ==============================================================================
+# Rate Oracle Schemas
+# ==============================================================================
+
+
+class ManageRateOracleRequest(BaseModel):
+    """Request model for managing rate oracle configuration."""
+
+    operation: Literal["list_sources", "get_config", "set_source", "set_global_token"] = Field(
+        description="Rate oracle operation to perform.",
+    )
+
+    source: str | None = Field(
+        default=None,
+        description="Rate oracle source to set, such as 'binance', 'coingecko', or 'hyperliquid'.",
+    )
+
+    global_token_name: str | None = Field(
+        default=None,
+        description="Global token name to set, such as 'USDC', 'USDT', 'USD', or 'BTC'.",
+    )
+
+    global_token_symbol: str | None = Field(
+        default=None,
+        description="Display symbol for the global token, such as '$' or '₿'.",
+    )
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str | None) -> str | None:
+        """Normalize source names to match API source identifiers."""
+        if v is None:
+            return v
+
+        normalized = v.strip().lower().replace(" ", "_").replace("-", "_")
+        if not normalized:
+            raise ValueError("source cannot be empty")
+        if not normalized.replace("_", "").isalnum():
+            raise ValueError(
+                "source should contain only letters, numbers, spaces, hyphens, or underscores"
+            )
+
+        return normalized
+
+    @field_validator("global_token_name")
+    @classmethod
+    def validate_global_token_name(cls, v: str | None) -> str | None:
+        """Normalize token names to uppercase symbols."""
+        if v is None:
+            return v
+
+        normalized = v.strip().upper()
+        if not normalized:
+            raise ValueError("global_token_name cannot be empty")
+        if not normalized.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(
+                "global_token_name should contain only letters, numbers, hyphens, or underscores"
+            )
+
+        return normalized
+
+    @field_validator("global_token_symbol")
+    @classmethod
+    def validate_global_token_symbol(cls, v: str | None) -> str | None:
+        """Validate the display symbol for the global token."""
+        if v is None:
+            return v
+
+        symbol = v.strip()
+        if not symbol:
+            raise ValueError("global_token_symbol cannot be empty")
+
+        return symbol
+
+
+# ==============================================================================
 # Gateway Management Schemas
 # ==============================================================================
 
