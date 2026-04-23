@@ -5,7 +5,7 @@ description = "Telegram bot for Hummingbot trading via Backend API"
 requires-python = ">=3.12"
 dependencies = [
     "python-telegram-bot[job-queue]",
-    "hummingbot-api-client==1.4.0",
+    "hummingbot-api-client==1.4.1",
     "python-dotenv",
     "PyYAML",
     "aiohttp",

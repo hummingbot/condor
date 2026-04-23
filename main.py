@@ -441,6 +441,11 @@ async def post_init(application: Application) -> None:
 
     await restore_scheduled_jobs(application)
 
+    # Inject Telegram bot into routine store so web-triggered routines can send messages
+    from condor.routine_store import get_routine_store
+
+    get_routine_store().set_bot(application.bot)
+
     # Start ServerDataService (unified server-centric cache)
     from condor.server_data_service import get_server_data_service
     from condor.server_data_service import register_default_fetches as sds_register
