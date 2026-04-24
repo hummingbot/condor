@@ -474,6 +474,16 @@ async def post_init(application: Application) -> None:
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
 
+    # Notify admin that Condor has started
+    if ADMIN_USER_ID:
+        try:
+            await application.bot.send_message(
+                chat_id=int(ADMIN_USER_ID),
+                text="Condor is online and ready.",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification to admin: {e}")
+
 
 async def watch_and_reload(application: Application) -> None:
     """Watch for file changes and reload handlers automatically."""

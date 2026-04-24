@@ -1,7 +1,8 @@
-import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 
-import { api, type OrderBookLevel } from "@/lib/api";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import { api, type OrderBookLevel, type OrderBookResponse } from "@/lib/api";
 
 interface OrderBookProps {
   server: string;
@@ -28,12 +29,17 @@ function priceDecimals(levels: OrderBookLevel[]): number {
 }
 
 export function OrderBook({ server, connector, pair }: OrderBookProps) {
-  const { data, isLoading } = useQuery({
+  // REST initial fetch
+  const { data } = useQuery<OrderBookResponse>({
     queryKey: ["order-book", server, connector, pair],
-    queryFn: () => api.getOrderBook(server, connector, pair),
+    queryFn: () => api.getOrderBook(server, connector, pair, LEVELS),
     enabled: !!server && !!connector && !!pair,
-    refetchInterval: 2500,
   });
+
+  // WS live updates — writes to the same ["order-book", ...] query key
+  const channel = `orderbook:${server}:${connector}:${pair}`;
+  const channels = useMemo(() => [channel], [channel]);
+  useCondorWebSocket(channels, server);
 
   const { asks, bids, spread, spreadPct, maxCumulative, pDecimals } =
     useMemo(() => {
@@ -116,7 +122,7 @@ export function OrderBook({ server, connector, pair }: OrderBookProps) {
         <span className="text-right">Total</span>
       </div>
 
-      {isLoading ? (
+      {!data ? (
         <div className="flex flex-1 items-center justify-center text-xs text-[var(--color-text-muted)]">
           Loading...
         </div>

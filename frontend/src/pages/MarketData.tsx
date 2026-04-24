@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
@@ -167,19 +167,33 @@ function FallbackChart({
   const channels = useMemo(() => [channel], [channel]);
   const { wsRef, wsVersion } = useCondorWebSocket(channels, server);
 
+  // Send duration to backend so it sizes its candle buffer appropriately
+  useEffect(() => {
+    const ws = wsRef.current;
+    if (!ws) return;
+    ws.setCandleDuration(channel, lookbackSeconds);
+  }, [lookbackSeconds, channel]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const startTime = useMemo(
     () => Math.floor(Date.now() / 1000) - lookbackSeconds,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [lookbackSeconds, pair, interval],
   );
 
+  const queryClient = useQueryClient();
+
+  // Invalidate candle cache when lookbackSeconds changes so we refetch with new startTime
+  useEffect(() => {
+    queryClient.invalidateQueries({ queryKey: ["candles", server, connector, pair, interval] });
+  }, [lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const { data: candles } = useQuery({
     queryKey: ["candles", server, connector, pair, interval],
     queryFn: () =>
       api.getCandles(server, connector, pair, interval, 5000, startTime),
+    placeholderData: keepPreviousData,
   });
 
-  const queryClient = useQueryClient();
   const candleStatusKey = ["candles-status", server, connector, pair, interval];
 
   const { data: candleStatus } = useQuery<{
@@ -292,7 +306,7 @@ function FallbackChart({
 
   useEffect(() => {
     initializedRef.current = false;
-  }, [pair, interval]);
+  }, [pair, interval, lookbackSeconds]);
 
   return (
     <div className="flex h-full flex-col">
@@ -466,7 +480,7 @@ export function MarketData() {
               />
             ) : tvChecked ? (
               <FallbackChart
-                key={`${connector}:${pair}:${interval}:${lookbackSeconds}`}
+                key={`${connector}:${pair}:${interval}`}
                 server={server}
                 connector={connector}
                 pair={pair}

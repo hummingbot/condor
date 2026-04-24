@@ -56,6 +56,13 @@ export function useCondorWebSocket(
             },
           );
         }
+      } else if (prefix === "orderbook") {
+        // channel format: orderbook:{server}:{connector}:{pair}
+        const parts = channel.split(":");
+        if (parts.length >= 4) {
+          const [, srv, connector, pair] = parts;
+          queryClient.setQueryData(["order-book", srv, connector, pair], data);
+        }
       } else if (prefix === "candles") {
         // channel format: candles:{server}:{connector}:{pair}:{interval}
         const parts = channel.split(":");

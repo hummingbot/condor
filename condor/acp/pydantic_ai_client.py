@@ -140,6 +140,7 @@ class PydanticAIClient:
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
         self._exit_stack: AsyncExitStack | None = None
+        self._mcp_ctx: Any = None
         self._agent: Any = None
 
     def _build_model(self) -> Any:
@@ -255,7 +256,11 @@ class PydanticAIClient:
         return None
 
     async def start(self) -> None:
-        """Initialize MCP servers and create the pydantic-ai agent."""
+        """Initialize MCP servers and create the pydantic-ai agent.
+
+        MCP servers are entered into the exit stack here so they are properly
+        cleaned up when stop() is called, even if prompt_stream() errors out.
+        """
         from pydantic_ai import Agent
         from pydantic_ai.mcp import MCPServerStdio
 
@@ -263,10 +268,6 @@ class PydanticAIClient:
 
         # Build MCP server instances from configs
         # Each config has: name, command, args, env
-        # Don't use deferred loading - it adds unnecessary complexity:
-        # - Cloud models can handle all tools easily
-        # - Local models struggle with the search_tools workflow
-        # Just show all tools upfront for best results
         toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
@@ -284,7 +285,6 @@ class PydanticAIClient:
                 env=env if env else None,
             )
 
-            # Add MCP server directly (no deferred loading)
             toolsets.append(mcp_server)
             self._mcp_servers.append(mcp_server)
 
@@ -295,6 +295,12 @@ class PydanticAIClient:
             toolsets=toolsets,
         )
 
+        # Enter MCP servers into the exit stack so stop() cleans them up.
+        # This uses the agent's run_mcp_servers() context manager which
+        # properly starts and stops all MCP subprocess servers.
+        self._mcp_ctx = self._agent.run_mcp_servers()
+        await self._exit_stack.enter_async_context(self._mcp_ctx)
+
         log.info(
             "PydanticAI client ready: model=%s, mcp_servers=%d",
             self.model_name,
@@ -302,9 +308,12 @@ class PydanticAIClient:
         )
 
     async def stop(self) -> None:
-        """Clean up MCP server connections."""
+        """Clean up MCP server subprocesses."""
         if self._exit_stack:
-            await self._exit_stack.aclose()
+            try:
+                await self._exit_stack.aclose()
+            except Exception:
+                log.exception("Error closing MCP server exit stack")
             self._exit_stack = None
         self._mcp_servers.clear()
         self._agent = None
@@ -326,6 +335,8 @@ class PydanticAIClient:
 
         Uses pydantic-ai's streaming run with MCP tools.
         Tool calls go through the permission callback for risk checking.
+        MCP servers are already running (started in start()), so we
+        call iter() directly without run_mcp_servers().
         """
         assert self._agent is not None, "Client not started"
 
@@ -336,68 +347,67 @@ class PydanticAIClient:
             from pydantic_ai.messages import TextPart, ToolCallPart
             from pydantic_graph import End
 
-            async with self._agent.run_mcp_servers():
-                async with self._agent.iter(text) as run:
-                    async for node in run:
-                        if isinstance(node, End):
-                            # Final result -- extract text from the result
-                            if hasattr(node, "data") and node.data:
-                                result_data = node.data
-                                if hasattr(result_data, "data"):
-                                    yield TextChunk(text=str(result_data.data))
-                            break
+            async with self._agent.iter(text) as run:
+                async for node in run:
+                    if isinstance(node, End):
+                        # Final result -- extract text from the result
+                        if hasattr(node, "data") and node.data:
+                            result_data = node.data
+                            if hasattr(result_data, "data"):
+                                yield TextChunk(text=str(result_data.data))
+                        break
 
-                        if isinstance(node, ModelRequestNode):
-                            elapsed = time.monotonic() - start_time
-                            yield Heartbeat(elapsed_seconds=elapsed)
+                    if isinstance(node, ModelRequestNode):
+                        elapsed = time.monotonic() - start_time
+                        yield Heartbeat(elapsed_seconds=elapsed)
 
-                        elif isinstance(node, CallToolsNode):
-                            # Emit text and tool-call events from model response
-                            for part in node.model_response.parts:
-                                if isinstance(part, TextPart) and part.content:
-                                    yield TextChunk(text=part.content)
+                    elif isinstance(node, CallToolsNode):
+                        # Emit text and tool-call events from model response
+                        for part in node.model_response.parts:
+                            if isinstance(part, TextPart) and part.content:
+                                yield TextChunk(text=part.content)
 
-                                elif isinstance(part, ToolCallPart):
-                                    tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
-                                    tool_name = part.tool_name
+                            elif isinstance(part, ToolCallPart):
+                                tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
+                                tool_name = part.tool_name
 
-                                    # Risk check via permission callback
-                                    if self.permission_callback:
-                                        tool_call_info = {
-                                            "tool": tool_name,
-                                            "title": tool_name,
-                                            "input": part.args if isinstance(part.args, dict) else {},
-                                        }
-                                        options = [
-                                            {"optionId": "allow", "kind": "allow_once"},
-                                            {"optionId": "deny", "kind": "deny"},
-                                        ]
-                                        result = await self.permission_callback(
-                                            tool_call_info, options
+                                # Risk check via permission callback
+                                if self.permission_callback:
+                                    tool_call_info = {
+                                        "tool": tool_name,
+                                        "title": tool_name,
+                                        "input": part.args if isinstance(part.args, dict) else {},
+                                    }
+                                    options = [
+                                        {"optionId": "allow", "kind": "allow_once"},
+                                        {"optionId": "deny", "kind": "deny"},
+                                    ]
+                                    result = await self.permission_callback(
+                                        tool_call_info, options
+                                    )
+                                    outcome = result.get("outcome", {})
+                                    if isinstance(outcome, dict) and outcome.get("outcome") == "cancelled":
+                                        yield ToolCallEvent(
+                                            tool_call_id=tool_id,
+                                            title=tool_name,
+                                            status="blocked",
+                                            kind="mcp",
+                                            input=part.args if isinstance(part.args, dict) else None,
                                         )
-                                        outcome = result.get("outcome", {})
-                                        if isinstance(outcome, dict) and outcome.get("outcome") == "cancelled":
-                                            yield ToolCallEvent(
-                                                tool_call_id=tool_id,
-                                                title=tool_name,
-                                                status="blocked",
-                                                kind="mcp",
-                                                input=part.args if isinstance(part.args, dict) else None,
-                                            )
-                                            continue
+                                        continue
 
-                                    yield ToolCallEvent(
-                                        tool_call_id=tool_id,
-                                        title=tool_name,
-                                        status="in_progress",
-                                        kind="mcp",
-                                        input=part.args if isinstance(part.args, dict) else None,
-                                    )
+                                yield ToolCallEvent(
+                                    tool_call_id=tool_id,
+                                    title=tool_name,
+                                    status="in_progress",
+                                    kind="mcp",
+                                    input=part.args if isinstance(part.args, dict) else None,
+                                )
 
-                                    yield ToolCallUpdate(
-                                        tool_call_id=tool_id,
-                                        status="completed",
-                                    )
+                                yield ToolCallUpdate(
+                                    tool_call_id=tool_id,
+                                    status="completed",
+                                )
 
             yield PromptDone(stop_reason="end_turn")
 

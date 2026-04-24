@@ -544,6 +544,12 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  stopBot: (server: string, botName: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/stop`,
+      { method: "POST" },
+    ),
+
   getExecutors: (
     server: string,
     params?: { executor_type?: string; trading_pair?: string; status?: string; controller_id?: string; limit?: number },

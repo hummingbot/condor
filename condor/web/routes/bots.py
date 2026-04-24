@@ -603,3 +603,27 @@ async def deploy_bot_endpoint(
         raise HTTPException(status_code=502, detail=str(e))
 
     return result
+
+
+@router.post("/servers/{name}/bots/{bot_name}/stop")
+async def stop_bot_endpoint(
+    name: str, bot_name: str, user: WebUser = Depends(get_current_user)
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+
+    from mcp_servers.hummingbot_api.tools.bot_management import manage_bot_execution
+
+    try:
+        result = await manage_bot_execution(
+            client=client,
+            bot_name=bot_name,
+            action="stop_bot",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return result

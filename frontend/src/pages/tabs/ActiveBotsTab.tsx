@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
   ChevronDown,
@@ -7,6 +7,7 @@ import {
   Circle,
   Layers,
   Rocket,
+  Square,
   TrendingUp,
   Volume2,
   X,
@@ -451,9 +452,19 @@ function DetailPanel({
 
 // ── Bots Collapsible Section ──
 
-function BotsSection({ bots }: { bots: BotSummary[] }) {
+function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
   const [expanded, setExpanded] = useState(false);
+  const [confirmStop, setConfirmStop] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const Chevron = expanded ? ChevronDown : ChevronRight;
+
+  const stopMutation = useMutation({
+    mutationFn: (botName: string) => api.stopBot(server, botName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["bots", server] });
+      setConfirmStop(null);
+    },
+  });
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -484,8 +495,41 @@ function BotsSection({ bots }: { bots: BotSummary[] }) {
               <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
                 {formatUptime(bot.deployed_at)}
               </span>
+              {bot.status === "running" && (
+                confirmStop === bot.bot_name ? (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => stopMutation.mutate(bot.bot_name)}
+                      disabled={stopMutation.isPending}
+                      className="rounded px-2 py-1 text-xs font-medium bg-[var(--color-red)] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+                    >
+                      {stopMutation.isPending ? "Stopping..." : "Confirm"}
+                    </button>
+                    <button
+                      onClick={() => setConfirmStop(null)}
+                      className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmStop(bot.bot_name)}
+                    className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--color-red)] hover:bg-[var(--color-red)]/10 transition-colors"
+                    title="Stop bot"
+                  >
+                    <Square className="h-3 w-3" />
+                    Stop
+                  </button>
+                )
+              )}
             </div>
           ))}
+          {stopMutation.isError && (
+            <div className="px-4 py-2 text-xs text-[var(--color-red)]">
+              Failed to stop bot: {stopMutation.error instanceof Error ? stopMutation.error.message : "Unknown error"}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -676,7 +720,7 @@ export function ActiveBotsTab() {
           )}
 
           {/* Bots collapsible section */}
-          {bots.length > 0 && <BotsSection bots={bots} />}
+          {bots.length > 0 && <BotsSection bots={bots} server={server} />}
         </>
       )}
 

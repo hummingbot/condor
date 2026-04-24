@@ -159,7 +159,14 @@ class ACPClient:
                     os.killpg(os.getpgid(pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     self._process.kill()
+                # Always reap after SIGKILL to prevent zombies
+                try:
+                    await asyncio.wait_for(self._process.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    log.warning("ACP process %d could not be reaped", pid)
             log.debug("ACP process group %d stopped", pid)
+        # Clear reference so alive returns False even if reap failed
+        self._process = None
 
     @property
     def alive(self) -> bool:

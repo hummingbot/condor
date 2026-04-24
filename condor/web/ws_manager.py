@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Any, Optional
 
@@ -28,6 +29,77 @@ _SDT_TO_CHANNEL_PREFIX = {
     "CEX_PRICES": "prices",  # Legacy DataManager name
 }
 
+# Interval string -> seconds for buffer sizing
+_INTERVAL_SECONDS: dict[str, int] = {
+    "1s": 1, "5s": 5, "15s": 15, "30s": 30,
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400,
+    "1d": 86400, "1w": 604800,
+}
+
+# Auto-cleanup candle buffers unused for this long
+_CANDLE_BUFFER_IDLE_TTL = 600  # 10 minutes
+
+
+class _CandleBuffer:
+    """Per-channel candle buffer with dynamic sizing based on interval + duration."""
+
+    __slots__ = ("interval", "_data", "_max_size", "last_accessed")
+
+    def __init__(self, interval: str, duration_seconds: int = 3600):
+        self.interval = interval
+        self._data: dict[float, dict] = {}
+        self._max_size: int = 200
+        self.last_accessed: float = time.monotonic()
+        self.set_duration(duration_seconds)
+
+    def set_duration(self, duration_seconds: int) -> int:
+        """Resize buffer for the given duration. Returns the new max size."""
+        interval_sec = _INTERVAL_SECONDS.get(self.interval, 60)
+        needed = math.ceil(duration_seconds / interval_sec)
+        new_max = max(needed, 200)  # minimum 200
+        old_max = self._max_size
+        self._max_size = new_max
+        self.last_accessed = time.monotonic()
+        self._evict()
+        if new_max != old_max:
+            logger.debug(
+                "Candle buffer resized %s: %d -> %d (duration=%ds)",
+                self.interval, old_max, new_max, duration_seconds,
+            )
+        return new_max
+
+    def upsert(self, candle: dict) -> None:
+        self._data[candle["timestamp"]] = candle
+        self._evict()
+
+    def upsert_many(self, candles: list[dict]) -> None:
+        for c in candles:
+            self._data[c["timestamp"]] = c
+        self._evict()
+
+    def get_sorted(self) -> list[dict]:
+        self.last_accessed = time.monotonic()
+        return sorted(self._data.values(), key=lambda c: c["timestamp"])
+
+    def _evict(self) -> None:
+        while len(self._data) > self._max_size:
+            oldest = min(self._data)
+            del self._data[oldest]
+
+    @property
+    def size(self) -> int:
+        return len(self._data)
+
+    @property
+    def max_size(self) -> int:
+        return self._max_size
+
+    @property
+    def needs_backfill(self) -> bool:
+        """True if buffer has room for significantly more candles."""
+        return len(self._data) < self._max_size * 0.5
+
 
 class _Connection:
     __slots__ = ("ws", "user_id", "channels")
@@ -42,8 +114,8 @@ class WebSocketManager:
     """Manages WebSocket connections and channel-based data broadcasting.
 
     Subscribes to ServerDataService for data updates and broadcasts
-    to connected WebSocket clients. Candle streaming remains as dedicated
-    WebSocket connections (not polled data).
+    to connected WebSocket clients. Candle streaming uses dedicated
+    WebSocket connections with dynamic per-channel buffering.
     """
 
     def __init__(self):
@@ -52,9 +124,14 @@ class WebSocketManager:
         self._candle_tasks: dict[str, asyncio.Task] = {}
         self._trade_tasks: dict[str, asyncio.Task] = {}
         self._executor_tasks: dict[str, asyncio.Task] = {}
+        self._order_book_tasks: dict[str, asyncio.Task] = {}
         self._sds_listener_registered = False
         # Track SDS subscriptions: channel -> CacheKey
         self._sds_subscriptions: dict[str, Any] = {}
+        # Candle buffers: channel -> _CandleBuffer (dynamic sizing)
+        self._candle_buffers: dict[str, _CandleBuffer] = {}
+        # Periodic cleanup task
+        self._cleanup_task: asyncio.Task | None = None
 
     # -- Helpers --
 
@@ -94,6 +171,9 @@ class WebSocketManager:
         sds = get_server_data_service()
         sds.add_listener(self._on_data_update)
         self._sds_listener_registered = True
+        # Start periodic candle buffer cleanup
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._candle_buffer_cleanup_loop())
         logger.info("WebSocketManager started (listening to ServerDataService)")
 
     def stop(self) -> None:
@@ -121,6 +201,15 @@ class WebSocketManager:
             if not task.done():
                 task.cancel()
         self._executor_tasks.clear()
+
+        for task in self._order_book_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._order_book_tasks.clear()
+
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            self._cleanup_task = None
 
     def _cleanup_sds_subscriptions(self) -> None:
         """Remove all SDS subscriptions."""
@@ -164,6 +253,8 @@ class WebSocketManager:
                     self._maybe_stop_trade_stream(channel)
                 elif channel.startswith("executors:"):
                     self._maybe_stop_executor_stream(channel)
+                elif channel.startswith("orderbook:"):
+                    self._maybe_stop_order_book_stream(channel)
                 else:
                     self._maybe_unsub_sds(channel)
 
@@ -202,28 +293,153 @@ class WebSocketManager:
 
         if action == "subscribe" and channel:
             conn.channels.add(channel)
-            # Send last known data immediately
-            if channel in self._last_data:
-                await self._send(conn, channel, self._last_data[channel])
+            # Send last known data immediately (candles use buffer instead)
             if channel.startswith("candles:"):
-                self._ensure_candle_stream(channel)
+                duration = msg.get("duration")  # seconds, sent by frontend
+                await self._handle_candle_subscribe(conn, channel, duration)
+            elif channel.startswith("orderbook:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
+                self._ensure_order_book_stream(channel)
             elif channel.startswith("trades:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
                 self._ensure_trade_stream(channel)
             elif channel.startswith("executors:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
                 self._ensure_executor_stream(channel)
             else:
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
                 await self._subscribe_sds(channel)
 
         elif action == "unsubscribe" and channel:
             conn.channels.discard(channel)
             if channel.startswith("candles:"):
                 self._maybe_stop_candle_stream(channel)
+            elif channel.startswith("orderbook:"):
+                self._maybe_stop_order_book_stream(channel)
             elif channel.startswith("trades:"):
                 self._maybe_stop_trade_stream(channel)
             elif channel.startswith("executors:"):
                 self._maybe_stop_executor_stream(channel)
             else:
                 self._maybe_unsub_sds(channel)
+
+        elif action == "set_candle_duration" and channel:
+            # Frontend changed duration without re-subscribing
+            duration = msg.get("duration")
+            if channel.startswith("candles:") and duration:
+                await self._handle_candle_duration_change(conn, channel, int(duration))
+
+    async def _handle_candle_subscribe(
+        self, conn: _Connection, channel: str, duration: int | None
+    ) -> None:
+        """Handle candle channel subscription with optional duration."""
+        parts = channel.split(":")
+        if len(parts) < 5:
+            return
+        interval = parts[4]
+        dur = int(duration) if duration else 3 * 86400  # default 3 days
+
+        buf = self._candle_buffers.get(channel)
+        if buf is None:
+            buf = _CandleBuffer(interval, dur)
+            self._candle_buffers[channel] = buf
+        else:
+            # Expand buffer if this client needs more
+            if dur > 0:
+                old_max = buf.max_size
+                buf.set_duration(dur)
+                if buf.max_size > old_max and buf.needs_backfill:
+                    asyncio.create_task(self._backfill_candles(channel))
+
+        # Send buffered candles as initial snapshot
+        sorted_candles = buf.get_sorted()
+        if sorted_candles:
+            await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
+
+        self._ensure_candle_stream(channel)
+
+    async def _handle_candle_duration_change(
+        self, conn: _Connection, channel: str, duration: int
+    ) -> None:
+        """Handle duration change for an existing candle subscription."""
+        buf = self._candle_buffers.get(channel)
+        if buf is None:
+            return
+        old_max = buf.max_size
+        buf.set_duration(duration)
+        if buf.max_size > old_max and buf.needs_backfill:
+            # Backfill then send full snapshot to requesting client
+            await self._backfill_candles(channel)
+            sorted_candles = buf.get_sorted()
+            if sorted_candles:
+                await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
+        else:
+            # Buffer already has enough data, just send snapshot
+            sorted_candles = buf.get_sorted()
+            if sorted_candles:
+                await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
+
+    async def _backfill_candles(self, channel: str) -> None:
+        """Fetch historical candles to fill the buffer gap."""
+        parts = channel.split(":")
+        if len(parts) < 5:
+            return
+        _, server_name, connector, pair, interval = parts
+        buf = self._candle_buffers.get(channel)
+        if buf is None:
+            return
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        try:
+            client = await cm.get_client(server_name)
+            interval_sec = _INTERVAL_SECONDS.get(interval, 60)
+            end_time = int(time.time())
+            start_time = end_time - (buf.max_size * interval_sec)
+
+            logger.info(
+                "Backfilling candles for %s: need %d, have %d, fetching %ds-%ds",
+                channel, buf.max_size, buf.size, start_time, end_time,
+            )
+
+            result = await client.market_data.get_historical_candles(
+                connector, pair, interval,
+                start_time=start_time, end_time=end_time,
+            )
+
+            candles_raw = (
+                result if isinstance(result, list)
+                else result.get("data", []) if isinstance(result, dict)
+                else []
+            )
+            # Fallback to regular candles if historical returned nothing
+            if not candles_raw:
+                result = await client.market_data.get_candles(
+                    connector, pair, interval, min(buf.max_size, 5000)
+                )
+                candles_raw = (
+                    result if isinstance(result, list)
+                    else result.get("data", []) if isinstance(result, dict)
+                    else []
+                )
+
+            candles = [
+                c for r in candles_raw
+                if (c := self._normalize_candle(r)) is not None
+            ]
+            if candles:
+                buf.upsert_many(candles)
+                logger.info(
+                    "Backfilled %d candles for %s (buffer: %d/%d)",
+                    len(candles), channel, buf.size, buf.max_size,
+                )
+        except Exception as e:
+            logger.warning("Candle backfill failed for %s: %s", channel, e)
 
     async def _subscribe_sds(self, channel: str) -> None:
         """Subscribe to SDS for a channel and prime cache."""
@@ -333,7 +549,7 @@ class WebSocketManager:
     async def _send(self, conn: _Connection, channel: str, data: Any) -> None:
         await conn.ws.send_json({"channel": channel, "data": data, "ts": time.time()})
 
-    # -- Candle streaming (stays as-is) --
+    # -- Candle streaming --
 
     def _ensure_candle_stream(self, channel: str) -> None:
         if channel in self._candle_tasks and not self._candle_tasks[channel].done():
@@ -363,9 +579,6 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
-        # Historical candles are fetched by the frontend via REST endpoint.
-        # WS stream only handles live updates to avoid duplicate slow API calls.
-
         while True:
             try:
                 client = await cm.get_client(server_name)
@@ -387,6 +600,7 @@ class WebSocketManager:
                             raw = msg.get("data")
                             candle = self._normalize_candle(raw) if raw else None
                             if candle:
+                                self._upsert_candle_buffer(channel, candle)
                                 await self.broadcast(
                                     channel,
                                     {"type": "candle_update", "candle": candle},
@@ -398,6 +612,7 @@ class WebSocketManager:
                                 if (c := self._normalize_candle(r)) is not None
                             ]
                             if candles:
+                                self._upsert_candle_buffer_many(channel, candles)
                                 await self.broadcast(
                                     channel,
                                     {"type": "candles", "data": candles},
@@ -510,6 +725,130 @@ class WebSocketManager:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 
+
+    # -- Candle buffer helpers --
+
+    def _get_or_create_candle_buffer(self, channel: str) -> _CandleBuffer:
+        """Get existing buffer or create with default duration."""
+        buf = self._candle_buffers.get(channel)
+        if buf is None:
+            parts = channel.split(":")
+            interval = parts[4] if len(parts) >= 5 else "1m"
+            buf = _CandleBuffer(interval, 3 * 86400)  # default 3 days
+            self._candle_buffers[channel] = buf
+        return buf
+
+    def _upsert_candle_buffer(self, channel: str, candle: dict) -> None:
+        """Upsert a single candle into the per-channel buffer."""
+        buf = self._get_or_create_candle_buffer(channel)
+        buf.upsert(candle)
+
+    def _upsert_candle_buffer_many(self, channel: str, candles: list[dict]) -> None:
+        """Upsert multiple candles into the per-channel buffer."""
+        buf = self._get_or_create_candle_buffer(channel)
+        buf.upsert_many(candles)
+
+    async def _candle_buffer_cleanup_loop(self) -> None:
+        """Periodically remove candle buffers that haven't been accessed."""
+        try:
+            while True:
+                await asyncio.sleep(60)  # check every minute
+                now = time.monotonic()
+                stale = [
+                    ch for ch, buf in self._candle_buffers.items()
+                    if (now - buf.last_accessed) > _CANDLE_BUFFER_IDLE_TTL
+                    and not any(ch in c.channels for c in self._connections)
+                ]
+                for ch in stale:
+                    buf = self._candle_buffers.pop(ch, None)
+                    if buf:
+                        logger.info(
+                            "Cleaned up idle candle buffer: %s (%d candles)",
+                            ch, buf.size,
+                        )
+        except asyncio.CancelledError:
+            return
+
+    # -- Order book streaming --
+
+    def _ensure_order_book_stream(self, channel: str) -> None:
+        if channel in self._order_book_tasks and not self._order_book_tasks[channel].done():
+            return
+        self._order_book_tasks[channel] = asyncio.create_task(
+            self._order_book_stream(channel)
+        )
+        logger.info("Started order book stream for %s", channel)
+
+    def _maybe_stop_order_book_stream(self, channel: str) -> None:
+        for conn in self._connections:
+            if channel in conn.channels:
+                return
+        task = self._order_book_tasks.pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("Stopped order book stream for %s", channel)
+
+    async def _order_book_stream(self, channel: str) -> None:
+        parts = channel.split(":")
+        if len(parts) < 4:
+            return
+        _, server_name, connector, pair = parts[:4]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        while True:
+            try:
+                client = await cm.get_client(server_name)
+                async with client.ws.market_data() as ws:
+                    await ws.subscribe_order_book(
+                        connector, pair, depth=20, update_interval=1.0,
+                    )
+                    logger.info("Order book WS subscribed: %s", channel)
+                    backoff = 5
+                    async for msg in ws:
+                        if not any(channel in c.channels for c in self._connections):
+                            logger.info("No subscribers for %s, closing order book stream", channel)
+                            return
+
+                        msg_type = msg.get("type")
+                        if msg_type == "order_book":
+                            raw_data = msg.get("data", {})
+                            bids = []
+                            asks = []
+                            for b in (raw_data.get("bids") or []):
+                                if isinstance(b, dict):
+                                    bids.append({"price": float(b.get("price", 0)), "amount": float(b.get("amount", b.get("quantity", 0)))})
+                                elif isinstance(b, (list, tuple)) and len(b) >= 2:
+                                    bids.append({"price": float(b[0]), "amount": float(b[1])})
+                            for a in (raw_data.get("asks") or []):
+                                if isinstance(a, dict):
+                                    asks.append({"price": float(a.get("price", 0)), "amount": float(a.get("amount", a.get("quantity", 0)))})
+                                elif isinstance(a, (list, tuple)) and len(a) >= 2:
+                                    asks.append({"price": float(a[0]), "amount": float(a[1])})
+                            ob_data = {"bids": bids, "asks": asks}
+                            await self.broadcast(channel, ob_data)
+                        elif msg_type == "heartbeat":
+                            continue
+                        elif msg_type == "error":
+                            error_msg = msg.get("message", "unknown error")
+                            logger.warning("Order book stream error for %s: %s", channel, error_msg)
+                            break
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                error_str = str(e)
+                is_permanent = any(code in error_str for code in ("401", "403", "404"))
+                if is_permanent:
+                    logger.warning("Order book stream permanent error for %s: %s — giving up", channel, e)
+                    return
+
+                logger.warning("Order book stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
 
     # -- Executor streaming (via Hummingbot WS) --
 

@@ -204,11 +204,17 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
     if close_timestamp is not None and close_timestamp != "N/A" and close_timestamp != 0:
         output += f"Closed: {format_timestamp(close_timestamp, '%Y-%m-%d %H:%M:%S')}\n"
 
-    # Always show custom_info if present
+    # Show custom_info summary (skip large lists/dicts to keep response compact)
     if custom_info:
         output += "\nCustom Info:\n"
         for key, value in custom_info.items():
-            output += f"  {key}: {value}\n"
+            if isinstance(value, (list, dict)):
+                if isinstance(value, list):
+                    output += f"  {key}: [{len(value)} items]\n"
+                else:
+                    output += f"  {key}: {{...}} ({len(value)} keys)\n"
+            else:
+                output += f"  {key}: {value}\n"
 
     return output
 

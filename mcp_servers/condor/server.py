@@ -199,7 +199,16 @@ async def _local_manage_routines_run(name: str, config: dict | None, strategy_id
         result = await asyncio.wait_for(
             routine.run_fn(config_obj, context), timeout=120
         )
-        return {"name": name, "result": result}
+        # Normalize RoutineResult for JSON serialization (strip binary chart_image)
+        from routines.base import normalize_result
+        nr = normalize_result(result)
+        return {"name": name, "result": {
+            "text": nr.text,
+            "table_data": nr.table_data,
+            "table_columns": nr.table_columns,
+            "chart_image": "(PNG bytes, view via dashboard)" if nr.chart_image else None,
+            "sections": nr.sections,
+        }}
     except asyncio.TimeoutError:
         return {"error": f"Routine '{name}' timed out after 120s"}
     except Exception as e:
