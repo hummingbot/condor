@@ -474,15 +474,6 @@ async def post_init(application: Application) -> None:
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
 
-    # Notify admin that Condor has started
-    if ADMIN_USER_ID:
-        try:
-            await application.bot.send_message(
-                chat_id=int(ADMIN_USER_ID),
-                text="Condor is online and ready.",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send startup notification to admin: {e}")
 
 
 async def watch_and_reload(application: Application) -> None:
@@ -641,6 +632,17 @@ async def _run_dual(application: Application) -> None:
 
     # Start WebSocket manager
     get_ws_manager().start()
+
+    # Notify admin that Condor has started
+    from utils.config import ADMIN_USER_ID
+    if ADMIN_USER_ID:
+        try:
+            await application.bot.send_message(
+                chat_id=int(ADMIN_USER_ID),
+                text="Condor is online and ready.",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification to admin: {e}")
 
     logger.info("Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT)
 
