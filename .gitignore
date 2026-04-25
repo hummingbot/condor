@@ -173,6 +173,3 @@ data/
 
 # Node
 node_modules/
-
-# Local trading agent workspaces
-trading_agents/
