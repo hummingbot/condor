@@ -13,6 +13,7 @@ from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_bot_logs_as_table,
     format_connector_result,
+    format_gateway_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_container_result,
@@ -23,6 +24,7 @@ from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
 from mcp_servers.hummingbot_api.schemas import (
     GatewayCLMMRequest,
+    GatewayCLMMManageRequest,
     GatewayConfigRequest,
     GatewayContainerRequest,
     GatewaySwapRequest,
@@ -41,7 +43,10 @@ from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_config as manage_gateway_config_impl,
     manage_gateway_container as manage_gateway_container_impl,
 )
-from mcp_servers.hummingbot_api.tools.gateway_clmm import explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl
+from mcp_servers.hummingbot_api.tools.gateway_clmm import (
+    explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
+    manage_gateway_clmm as manage_gateway_clmm_impl,
+)
 from mcp_servers.hummingbot_api.tools.gateway_swap import manage_gateway_swaps as manage_gateway_swaps_impl
 from mcp_servers.hummingbot_api.tools.geckoterminal import explore_geckoterminal as explore_geckoterminal_impl
 from mcp_servers.hummingbot_api.tools import history as history_tools
@@ -831,6 +836,54 @@ async def explore_dex_pools(
     return format_gateway_clmm_pool_result(action, result)
 
 
+@mcp.tool()
+@handle_errors("manage Gateway CLMM positions", GATEWAY_LOG_HINT)
+async def manage_gateway_clmm(
+    action: Literal["open_position", "close_position", "collect_fees", "get_positions", "search"],
+    connector: str | None = None,
+    network: str | None = None,
+    pool_address: str | None = None,
+    position_address: str | None = None,
+    lower_price: str | None = None,
+    upper_price: str | None = None,
+    base_token_amount: str | None = None,
+    quote_token_amount: str | None = None,
+    slippage_pct: str | None = "1.0",
+    wallet_address: str | None = None,
+    extra_params: dict[str, Any] | None = None,
+    trading_pair: str | None = None,
+    status: Literal["OPEN", "CLOSED"] | None = None,
+    position_addresses: list[str] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    refresh: bool = False,
+) -> str:
+    """Manage Gateway CLMM liquidity positions: open, close, collect fees, get positions, or search."""
+    request = GatewayCLMMManageRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        pool_address=pool_address,
+        position_address=position_address,
+        lower_price=lower_price,
+        upper_price=upper_price,
+        base_token_amount=base_token_amount,
+        quote_token_amount=quote_token_amount,
+        slippage_pct=slippage_pct,
+        wallet_address=wallet_address,
+        extra_params=extra_params,
+        trading_pair=trading_pair,
+        status=status,
+        position_addresses=position_addresses,
+        limit=limit,
+        offset=offset,
+        refresh=refresh,
+    )
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_clmm_impl(client, request)
+    return format_gateway_clmm_result(action, result)
+
+
 # GeckoTerminal Tools
 
 
@@ -932,6 +985,119 @@ async def run_backtest(
     )
     return result.get("formatted_output", str(result))
 
+
+@mcp.tool()
+@handle_errors("manage Gateway container", GATEWAY_LOG_HINT)
+async def manage_gateway_container(
+    action: Literal["get_status", "start", "stop", "restart", "get_logs"],
+    config: dict[str, Any] | None = None,
+    tail: int | None = 100,
+) -> str:
+    """Manage Gateway container lifecycle: get_status, start, stop, restart, get_logs."""
+    request = GatewayContainerRequest(
+        action=action,
+        config=config,
+        tail=tail,
+    )
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_container_impl(client, request)
+    return format_gateway_container_result(result)
+
+
+@mcp.tool()
+@handle_errors("manage Gateway config", GATEWAY_LOG_HINT)
+async def manage_gateway_config(
+    resource_type: Literal["chains", "networks", "tokens", "connectors", "pools", "wallets"],
+    action: Literal["list", "get", "update", "add", "delete"],
+    network_id: str | None = None,
+    connector_name: str | None = None,
+    config_updates: dict[str, Any] | None = None,
+    token_address: str | None = None,
+    token_symbol: str | None = None,
+    token_decimals: int | None = None,
+    token_name: str | None = None,
+    search: str | None = None,
+    pool_type: str | None = None,
+    network: str | None = None,
+    pool_base: str | None = None,
+    pool_quote: str | None = None,
+    pool_address: str | None = None,
+    chain: str | None = None,
+    private_key: str | None = None,
+    wallet_address: str | None = None,
+) -> str:
+    """Manage Gateway chains, networks, tokens, connectors, pools, and wallets."""
+    request = GatewayConfigRequest(
+        resource_type=resource_type,
+        action=action,
+        network_id=network_id,
+        connector_name=connector_name,
+        config_updates=config_updates,
+        token_address=token_address,
+        token_symbol=token_symbol,
+        token_decimals=token_decimals,
+        token_name=token_name,
+        search=search,
+        pool_type=pool_type,
+        network=network,
+        pool_base=pool_base,
+        pool_quote=pool_quote,
+        pool_address=pool_address,
+        chain=chain,
+        private_key=private_key,
+        wallet_address=wallet_address,
+    )
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_config_impl(client, request)
+    return format_gateway_config_result(result)
+
+
+@mcp.tool()
+@handle_errors("manage Gateway swaps", GATEWAY_LOG_HINT)
+async def manage_gateway_swaps(
+    action: Literal["quote", "execute", "search", "get_status"],
+    connector: str | None = None,
+    network: str | None = None,
+    trading_pair: str | None = None,
+    side: Literal["BUY", "SELL"] | None = None,
+    amount: str | None = None,
+    slippage_pct: str | None = "1.0",
+    wallet_address: str | None = None,
+    transaction_hash: str | None = None,
+    search_network: str | None = None,
+    search_connector: str | None = None,
+    search_wallet_address: str | None = None,
+    search_trading_pair: str | None = None,
+    status: str | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    limit: int | None = 50,
+    offset: int | None = 0,
+) -> str:
+    """Manage Gateway swap quote, execute, search, and transaction status."""
+    request = GatewaySwapRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        slippage_pct=slippage_pct,
+        wallet_address=wallet_address,
+        transaction_hash=transaction_hash,
+        search_network=search_network,
+        search_connector=search_connector,
+        search_wallet_address=search_wallet_address,
+        search_trading_pair=search_trading_pair,
+        status=status,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        offset=offset,
+    )
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result(action, result)
 
 @mcp.tool()
 @handle_errors("manage backtest tasks")

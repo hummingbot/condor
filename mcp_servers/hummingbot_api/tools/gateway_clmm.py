@@ -8,13 +8,26 @@ Handles DEX CLMM read-only operations via Hummingbot Gateway:
 For opening/closing LP positions, use `manage_executors` with `lp_executor` type.
 """
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters.base import format_number, get_field
-from mcp_servers.hummingbot_api.schemas import GatewayCLMMRequest
+from mcp_servers.hummingbot_api.schemas import GatewayCLMMManageRequest, GatewayCLMMRequest
 
 logger = logging.getLogger("hummingbot-mcp")
+
+
+def _parse_decimal(value: str | None, field_name: str, required: bool = False) -> Decimal | None:
+    if value is None:
+        if required:
+            raise ToolError(f"{field_name} is required")
+        return None
+
+    try:
+        return Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise ToolError(f"{field_name} must be a valid decimal string") from exc
 
 
 def format_pools_as_table(pools: list[dict[str, Any]]) -> str:
@@ -191,3 +204,143 @@ async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -
         raise ToolError(f"Unknown action: {request.action}")
 
 
+async def manage_gateway_clmm(client: Any, request: GatewayCLMMManageRequest) -> dict[str, Any]:
+    """
+    Manage Gateway CLMM liquidity positions.
+
+    Actions:
+    - open_position: Open a new concentrated liquidity position
+    - close_position: Close a position completely
+    - collect_fees: Collect accumulated fees from a position
+    - get_positions: List positions owned for a pool
+    - search: Search indexed CLMM positions
+    """
+    if request.action == "open_position":
+        if not request.connector:
+            raise ToolError("connector is required for open_position action")
+        if not request.network:
+            raise ToolError("network is required for open_position action")
+        if not request.pool_address:
+            raise ToolError("pool_address is required for open_position action")
+        if not request.base_token_amount and not request.quote_token_amount:
+            raise ToolError("At least one of base_token_amount or quote_token_amount is required for open_position action")
+
+        result = await client.gateway_clmm.open_position(
+            connector=request.connector,
+            network=request.network,
+            pool_address=request.pool_address,
+            lower_price=_parse_decimal(request.lower_price, "lower_price", required=True),
+            upper_price=_parse_decimal(request.upper_price, "upper_price", required=True),
+            base_token_amount=_parse_decimal(request.base_token_amount, "base_token_amount"),
+            quote_token_amount=_parse_decimal(request.quote_token_amount, "quote_token_amount"),
+            slippage_pct=_parse_decimal(request.slippage_pct, "slippage_pct"),
+            wallet_address=request.wallet_address,
+            extra_params=request.extra_params,
+        )
+        return {
+            "action": "open_position",
+            "connector": request.connector,
+            "network": request.network,
+            "pool_address": request.pool_address,
+            "result": result,
+        }
+
+    elif request.action == "close_position":
+        if not request.connector:
+            raise ToolError("connector is required for close_position action")
+        if not request.network:
+            raise ToolError("network is required for close_position action")
+        if not request.position_address:
+            raise ToolError("position_address is required for close_position action")
+
+        result = await client.gateway_clmm.close_position(
+            connector=request.connector,
+            network=request.network,
+            position_address=request.position_address,
+            wallet_address=request.wallet_address,
+        )
+        return {
+            "action": "close_position",
+            "connector": request.connector,
+            "network": request.network,
+            "position_address": request.position_address,
+            "result": result,
+        }
+
+    elif request.action == "collect_fees":
+        if not request.connector:
+            raise ToolError("connector is required for collect_fees action")
+        if not request.network:
+            raise ToolError("network is required for collect_fees action")
+        if not request.position_address:
+            raise ToolError("position_address is required for collect_fees action")
+
+        result = await client.gateway_clmm.collect_fees(
+            connector=request.connector,
+            network=request.network,
+            position_address=request.position_address,
+            wallet_address=request.wallet_address,
+        )
+        return {
+            "action": "collect_fees",
+            "connector": request.connector,
+            "network": request.network,
+            "position_address": request.position_address,
+            "result": result,
+        }
+
+    elif request.action == "get_positions":
+        if not request.connector:
+            raise ToolError("connector is required for get_positions action")
+        if not request.network:
+            raise ToolError("network is required for get_positions action")
+        if not request.pool_address:
+            raise ToolError("pool_address is required for get_positions action")
+
+        result = await client.gateway_clmm.get_positions_owned(
+            connector=request.connector,
+            network=request.network,
+            pool_address=request.pool_address,
+            wallet_address=request.wallet_address,
+        )
+        return {
+            "action": "get_positions",
+            "connector": request.connector,
+            "network": request.network,
+            "pool_address": request.pool_address,
+            "result": result,
+        }
+
+    elif request.action == "search":
+        search_params = {
+            "limit": request.limit,
+            "offset": request.offset,
+            "refresh": request.refresh,
+        }
+        if request.network:
+            search_params["network"] = request.network
+        if request.connector:
+            search_params["connector"] = request.connector
+        if request.wallet_address:
+            search_params["wallet_address"] = request.wallet_address
+        if request.trading_pair:
+            search_params["trading_pair"] = request.trading_pair
+        if request.status:
+            search_params["status"] = request.status
+        if request.position_addresses:
+            search_params["position_addresses"] = request.position_addresses
+
+        result = await client.gateway_clmm.search_positions(**search_params)
+        return {
+            "action": "search",
+            "filters": {k: v for k, v in search_params.items() if k not in ["limit", "offset", "refresh"]},
+            "pagination": {
+                "limit": search_params["limit"],
+                "offset": search_params["offset"],
+                "refresh": search_params["refresh"],
+            },
+            "result": result,
+        }
+
+    else:
+        raise ToolError(f"Unknown action: {request.action}")
