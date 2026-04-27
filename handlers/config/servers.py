@@ -50,6 +50,8 @@ async def handle_servers_callback(
         await handle_modify_field_selection(query, context)
     elif query.data.startswith("add_server_"):
         await handle_add_server_callbacks(query, context)
+    elif query.data.startswith("tlscfg_"):
+        await handle_tls_callback(query, context)
     elif query.data.startswith("api_server_"):
         await handle_api_server_action(query, context)
 
@@ -224,6 +226,9 @@ async def handle_api_server_action(query, context: ContextTypes.DEFAULT_TYPE) ->
         await confirm_delete_server(query, context, server_name)
     elif action_data == "cancel_delete":
         await show_api_servers(query, context)
+    elif action_data.startswith("tls_"):
+        server_name = action_data.replace("tls_", "", 1)
+        await show_tls_settings(query, context, server_name)
     # Server sharing actions
     elif action_data.startswith("share_user_"):
         # Format: share_user_{uid}_{server_name}
@@ -413,6 +418,9 @@ async def _show_server_details(
         )
         keyboard.append(
             [
+                InlineKeyboardButton(
+                    "🔐 TLS", callback_data=f"api_server_tls_{server_name}"
+                ),
                 InlineKeyboardButton(
                     "📤 Share", callback_data=f"api_server_share_{server_name}"
                 ),
@@ -1279,6 +1287,8 @@ async def handle_server_input(
         await handle_add_server_input(update, context)
     elif context.user_data.get("awaiting_modify_input"):
         await handle_modify_value_input(update, context)
+    elif context.user_data.get("awaiting_tls_input"):
+        await handle_tls_input(update, context)
     elif context.user_data.get("awaiting_share_user_id"):
         await handle_share_user_id_input(update, context)
 
@@ -1794,3 +1804,335 @@ async def revoke_access(
         await query.answer("Failed to revoke access", show_alert=True)
 
     await show_server_sharing(query, context, server_name)
+
+
+# ==================== TLS / HTTPS Settings ====================
+
+_TLS_PROTOCOL_CYCLE = ["auto", "http", "https"]
+_TLS_PATH_FIELDS = {
+    "ca": ("ca_bundle_path", "CA bundle"),
+    "cert": ("client_cert_path", "Client cert"),
+    "key": ("client_key_path", "Client key"),
+}
+
+
+def _tls_render(server: dict) -> str:
+    """Render the TLS state for a server config."""
+    proto = server.get("protocol") or "auto"
+    verify = server.get("tls_verify", True)
+    ca = server.get("ca_bundle_path") or "(none)"
+    cert = server.get("client_cert_path") or "(none)"
+    key = server.get("client_key_path") or "(none)"
+    return (
+        f"*Protocol:* `{escape_markdown_v2(proto)}`\n"
+        f"*Verify TLS:* `{escape_markdown_v2('on' if verify else 'off')}`\n"
+        f"*CA bundle:* `{escape_markdown_v2(str(ca))}`\n"
+        f"*Client cert:* `{escape_markdown_v2(str(cert))}`\n"
+        f"*Client key:* `{escape_markdown_v2(str(key))}`"
+    )
+
+
+async def show_tls_settings(
+    query, context: ContextTypes.DEFAULT_TYPE, server_name: str
+) -> None:
+    """Show TLS settings for a server (owner only)."""
+    from config_manager import ServerPermission, get_config_manager
+
+    user_id = query.from_user.id
+    cm = get_config_manager()
+
+    if cm.get_server_permission(user_id, server_name) != ServerPermission.OWNER:
+        await query.answer("Only the owner can edit TLS settings", show_alert=True)
+        return
+
+    server = cm.get_server(server_name)
+    if not server:
+        await query.answer("Server not found", show_alert=True)
+        return
+
+    # Track context so subsequent callbacks (which don't carry server_name) know
+    # which server they're acting on.
+    context.user_data["tls_server"] = server_name
+    context.user_data["tls_message_id"] = query.message.message_id
+    context.user_data["tls_chat_id"] = query.message.chat_id
+    context.user_data.pop("awaiting_tls_input", None)
+    context.user_data.pop("tls_field", None)
+
+    name_escaped = escape_markdown_v2(server_name)
+    message_text = (
+        f"🔐 *TLS Settings: {name_escaped}*\n\n"
+        f"{_tls_render(server)}\n\n"
+        "_Tap a button to change a value\\._"
+    )
+
+    has_ca = bool(server.get("ca_bundle_path"))
+    has_cert = bool(server.get("client_cert_path"))
+    has_key = bool(server.get("client_key_path"))
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🌐 Protocol", callback_data="tlscfg_proto"),
+            InlineKeyboardButton("✅ Verify", callback_data="tlscfg_verify"),
+        ],
+        [
+            InlineKeyboardButton(
+                "🗑 CA" if has_ca else "📄 CA",
+                callback_data="tlscfg_caclr" if has_ca else "tlscfg_ca",
+            ),
+            InlineKeyboardButton(
+                "🗑 Cert" if has_cert else "📄 Cert",
+                callback_data="tlscfg_certclr" if has_cert else "tlscfg_cert",
+            ),
+            InlineKeyboardButton(
+                "🗑 Key" if has_key else "📄 Key",
+                callback_data="tlscfg_keyclr" if has_key else "tlscfg_key",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "« Back", callback_data=f"api_server_view_{server_name}"
+            )
+        ],
+    ]
+
+    await query.message.edit_text(
+        message_text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _refresh_tls_screen(
+    query, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Re-render the TLS settings screen for the active server."""
+    server_name = context.user_data.get("tls_server")
+    if not server_name:
+        await query.answer("Session expired", show_alert=True)
+        await show_api_servers(query, context)
+        return
+    await show_tls_settings(query, context, server_name)
+
+
+async def handle_tls_callback(
+    query, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle tlscfg_* callbacks for TLS settings edits."""
+    from config_manager import ServerPermission, get_config_manager
+
+    server_name = context.user_data.get("tls_server")
+    if not server_name:
+        await query.answer("Session expired", show_alert=True)
+        await show_api_servers(query, context)
+        return
+
+    cm = get_config_manager()
+    user_id = query.from_user.id
+    if cm.get_server_permission(user_id, server_name) != ServerPermission.OWNER:
+        await query.answer("Only the owner can edit TLS settings", show_alert=True)
+        return
+
+    server = cm.get_server(server_name)
+    if not server:
+        await query.answer("Server not found", show_alert=True)
+        return
+
+    action = query.data.replace("tlscfg_", "", 1)
+
+    if action == "proto":
+        current = server.get("protocol") or "auto"
+        try:
+            idx = _TLS_PROTOCOL_CYCLE.index(current)
+        except ValueError:
+            idx = -1
+        new_value = _TLS_PROTOCOL_CYCLE[(idx + 1) % len(_TLS_PROTOCOL_CYCLE)]
+        cm.modify_server(server_name, protocol=new_value)
+        await query.answer(f"Protocol → {new_value}")
+        await _refresh_tls_screen(query, context)
+        return
+
+    if action == "verify":
+        new_value = not bool(server.get("tls_verify", True))
+        cm.modify_server(server_name, tls_verify=new_value)
+        await query.answer(f"Verify TLS → {'on' if new_value else 'off'}")
+        await _refresh_tls_screen(query, context)
+        return
+
+    if action in _TLS_PATH_FIELDS:
+        field, label = _TLS_PATH_FIELDS[action]
+        context.user_data["awaiting_tls_input"] = True
+        context.user_data["tls_field"] = field
+        context.user_data["tls_message_id"] = query.message.message_id
+        context.user_data["tls_chat_id"] = query.message.chat_id
+        name_escaped = escape_markdown_v2(server_name)
+        label_escaped = escape_markdown_v2(label)
+        current_value = server.get(field) or "(none)"
+        current_escaped = escape_markdown_v2(str(current_value))
+        message_text = (
+            f"📄 *Set {label_escaped}*\n\n"
+            f"Server: *{name_escaped}*\n"
+            f"Current: `{current_escaped}`\n\n"
+            f"Send the new path \\(must exist on the bot host\\)\\.\n"
+            f"Send `\\-` to clear\\."
+        )
+        keyboard = [
+            [InlineKeyboardButton("« Back", callback_data="tlscfg_back")]
+        ]
+        await query.message.edit_text(
+            message_text,
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if action in {"caclr", "certclr", "keyclr"}:
+        clr_map = {
+            "caclr": "ca_bundle_path",
+            "certclr": "client_cert_path",
+            "keyclr": "client_key_path",
+        }
+        field = clr_map[action]
+        # modify_server only writes when the value is not None — so set to "" then None.
+        cm._data["servers"][server_name][field] = None
+        cm._save_config()
+        # Drop cached client to force reconnect with new TLS settings
+        if server_name in cm._clients:
+            try:
+                client_obj, _ = cm._clients[server_name]
+                await client_obj.close()
+            except Exception:
+                pass
+            del cm._clients[server_name]
+        await query.answer(f"Cleared {field}")
+        await _refresh_tls_screen(query, context)
+        return
+
+    if action == "back":
+        await _refresh_tls_screen(query, context)
+        return
+
+    await query.answer("Unknown TLS action")
+
+
+async def handle_tls_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle text input for TLS path fields."""
+    from config_manager import get_config_manager
+    from pathlib import Path
+
+    if not context.user_data.get("awaiting_tls_input"):
+        return
+
+    server_name = context.user_data.get("tls_server")
+    field = context.user_data.get("tls_field")
+    message_id = context.user_data.get("tls_message_id")
+    chat_id = context.user_data.get("tls_chat_id")
+
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if not server_name or not field:
+        context.user_data.pop("awaiting_tls_input", None)
+        return
+
+    new_value = update.message.text.strip()
+
+    cm = get_config_manager()
+    server = cm.get_server(server_name)
+    if not server:
+        context.user_data.pop("awaiting_tls_input", None)
+        return
+
+    if new_value == "-" or new_value == "":
+        # Clear the field
+        cm._data["servers"][server_name][field] = None
+        cm._save_config()
+        notice = f"Cleared {field}"
+    else:
+        path_obj = Path(new_value).expanduser()
+        if not path_obj.exists():
+            if message_id and chat_id:
+                name_escaped = escape_markdown_v2(server_name)
+                path_escaped = escape_markdown_v2(new_value)
+                error_text = (
+                    f"❌ *Path not found*\n\n"
+                    f"Server: *{name_escaped}*\n"
+                    f"Path: `{path_escaped}`\n\n"
+                    f"Send a valid path or `\\-` to clear\\."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("« Back", callback_data="tlscfg_back")]
+                ]
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=error_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            return
+        cm.modify_server(server_name, **{field: str(path_obj)})
+        notice = f"Set {field}"
+
+    # Drop cached client so next request reconnects with new TLS settings
+    if server_name in cm._clients:
+        try:
+            client_obj, _ = cm._clients[server_name]
+            await client_obj.close()
+        except Exception:
+            pass
+        del cm._clients[server_name]
+
+    context.user_data.pop("awaiting_tls_input", None)
+    context.user_data.pop("tls_field", None)
+
+    if message_id and chat_id:
+        # Re-render TLS screen
+        server = cm.get_server(server_name)
+        name_escaped = escape_markdown_v2(server_name)
+        message_text = (
+            f"🔐 *TLS Settings: {name_escaped}*\n\n"
+            f"{_tls_render(server)}\n\n"
+            f"_{escape_markdown_v2(notice)}\\._"
+        )
+        has_ca = bool(server.get("ca_bundle_path"))
+        has_cert = bool(server.get("client_cert_path"))
+        has_key = bool(server.get("client_key_path"))
+        keyboard = [
+            [
+                InlineKeyboardButton("🌐 Protocol", callback_data="tlscfg_proto"),
+                InlineKeyboardButton("✅ Verify", callback_data="tlscfg_verify"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🗑 CA" if has_ca else "📄 CA",
+                    callback_data="tlscfg_caclr" if has_ca else "tlscfg_ca",
+                ),
+                InlineKeyboardButton(
+                    "🗑 Cert" if has_cert else "📄 Cert",
+                    callback_data="tlscfg_certclr" if has_cert else "tlscfg_cert",
+                ),
+                InlineKeyboardButton(
+                    "🗑 Key" if has_key else "📄 Key",
+                    callback_data="tlscfg_keyclr" if has_key else "tlscfg_key",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "« Back", callback_data=f"api_server_view_{server_name}"
+                )
+            ],
+        ]
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        except Exception as e:
+            logger.error(f"Error refreshing TLS screen: {e}")

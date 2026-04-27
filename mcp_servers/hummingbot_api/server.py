@@ -173,10 +173,12 @@ async def configure_server(
     parsed = urlparse(current.url)
     current_host = parsed.hostname or "localhost"
     current_port = parsed.port or 8000
+    current_protocol = parsed.scheme or "auto"
 
     final_name = name if name is not None else current.name
     final_host = host if host is not None else current_host
     final_port = port if port is not None else current_port
+    final_protocol = protocol if protocol is not None else current_protocol
     final_username = username if username is not None else current.username
     final_password = password if password is not None else current.password
 
@@ -193,7 +195,7 @@ async def configure_server(
 
     new_config = ServerConfig(
         name=final_name,
-        url=build_server_url(host=final_host, port=final_port, protocol=protocol or "auto"),
+        url=build_server_url(host=final_host, port=final_port, protocol=final_protocol),
         username=final_username,
         password=final_password,
         tls_verify=final_tls_verify,
@@ -1027,7 +1029,12 @@ async def manage_backtest_tasks(
 
 
 def _apply_cli_args():
-    """Parse CLI args and override settings if provided."""
+    """Parse CLI args and override settings if provided.
+
+    When --url is supplied, treat the CLI as the authoritative configuration:
+    reset cert paths so a stale ~/.hummingbot_mcp/server.yml from a prior session
+    cannot leak into this one. CLI args then re-populate any paths that apply.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -1043,6 +1050,9 @@ def _apply_cli_args():
 
     if args.url:
         settings.api_url = args.url
+        settings.ca_bundle_path = None
+        settings.client_cert_path = None
+        settings.client_key_path = None
     if args.username:
         settings.api_username = args.username
     if args.password:

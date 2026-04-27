@@ -177,7 +177,7 @@ async def config_callback_handler(
 
     # Route to appropriate sub-module based on callback data prefix
     if query.data == "config_api_servers" or query.data.startswith(
-        ("api_server_", "modify_field_", "add_server_")
+        ("api_server_", "modify_field_", "add_server_", "tlscfg_")
     ):
         await handle_servers_callback(update, context)
     elif query.data == "config_api_keys" or query.data.startswith("api_key_"):
@@ -195,7 +195,7 @@ def get_config_callback_handler():
     """Get the callback query handler for config menu"""
     return CallbackQueryHandler(
         config_callback_handler,
-        pattern="^config_|^modify_field_|^add_server_|^api_server_|^api_key_|^gateway_|^admin:",
+        pattern="^config_|^modify_field_|^add_server_|^api_server_|^tlscfg_|^api_key_|^gateway_|^admin:",
     )
 
 
@@ -248,8 +248,10 @@ def get_modify_value_handler():
                 return
 
         # 4. Check config flows - server modification
-        if context.user_data.get("awaiting_add_server_input") or context.user_data.get(
-            "awaiting_modify_input"
+        if (
+            context.user_data.get("awaiting_add_server_input")
+            or context.user_data.get("awaiting_modify_input")
+            or context.user_data.get("awaiting_tls_input")
         ):
             await handle_server_input(update, context)
             return
