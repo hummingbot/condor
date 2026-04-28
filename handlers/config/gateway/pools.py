@@ -410,8 +410,7 @@ async def prompt_add_pool(
             "`connector,pool_type,address`\n\n"
             "*Example:*\n"
             "`raydium,clmm,8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj`\n\n"
-            "_Pool info \\(tokens, fees\\) will be fetched automatically\\._\n\n"
-            "⚠️ _Restart Gateway after adding for changes to take effect\\._"
+            "_Pool info \\(tokens, fees\\) will be fetched automatically\\._"
         )
 
         keyboard = [
@@ -553,8 +552,7 @@ async def show_delete_pool_confirmation(
 
         message_text += (
             f"Address: `{addr_escaped}`\n\n"
-            f"⚠️ This will remove the pool from *{network_escaped}*\\.\n"
-            "You will need to restart the Gateway for changes to take effect\\.\n\n"
+            f"⚠️ This will remove the pool from *{network_escaped}*\\.\n\n"
             "Are you sure you want to delete this pool?"
         )
 
@@ -623,8 +621,7 @@ async def remove_pool(
         success_text = (
             f"✅ *Pool Removed*\n\n"
             f"`{addr_escaped}`\n\n"
-            f"Removed from {network_escaped}\n\n"
-            "⚠️ _Restart Gateway for changes to take effect\\._"
+            f"Removed from {network_escaped}"
         )
 
         keyboard = [
@@ -744,8 +741,7 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
                 success_text = (
                     f"✅ *Pool Added Successfully*\n\n"
-                    f"Added to {connector_escaped} on {network_escaped}\n\n"
-                    "⚠️ _Restart Gateway for changes to take effect\\._"
+                    f"Added to {connector_escaped} on {network_escaped}"
                 )
 
                 if message_id and chat_id:
