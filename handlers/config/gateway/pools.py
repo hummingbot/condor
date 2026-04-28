@@ -299,9 +299,18 @@ async def show_connector_pools(
         client = await get_config_manager().get_client_for_chat(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
-        pools = await client.gateway.list_pools(
-            connector_name=connector_name, network=network
+
+        # Get chain from connector data
+        connectors_data = context.user_data.get("pool_connectors_data", {})
+        connector_info = connectors_data.get(connector_name, {})
+        chain = connector_info.get("chain", "solana")  # Default to solana for backward compat
+
+        # Use new network-based endpoint
+        network_id = f"{chain}-{network}"
+        result = await client.gateway.get_network_pools(
+            network_id=network_id, connector=connector_name
         )
+        pools = result.get("pools", []) if isinstance(result, dict) else result
 
         connector_escaped = escape_markdown_v2(connector_name)
         network_escaped = escape_markdown_v2(network)
@@ -460,9 +469,18 @@ async def prompt_remove_pool(
         client = await get_config_manager().get_client_for_chat(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
-        pools = await client.gateway.list_pools(
-            connector_name=connector_name, network=network
+
+        # Get chain from connector data
+        connectors_data = context.user_data.get("pool_connectors_data", {})
+        connector_info = connectors_data.get(connector_name, {})
+        chain = connector_info.get("chain", "solana")
+
+        # Use new network-based endpoint
+        network_id = f"{chain}-{network}"
+        result = await client.gateway.get_network_pools(
+            network_id=network_id, connector=connector_name
         )
+        pools = result.get("pools", []) if isinstance(result, dict) else result
 
         if not pools:
             message_text = (
@@ -604,11 +622,18 @@ async def remove_pool(
         client = await get_config_manager().get_client_for_chat(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
-        await client.gateway.delete_pool(
-            connector=connector_name,
-            network=network,
-            pool_type=pool_type,
+
+        # Get chain from connector data
+        connectors_data = context.user_data.get("pool_connectors_data", {})
+        connector_info = connectors_data.get(connector_name, {})
+        chain = connector_info.get("chain", "solana")
+
+        # Use new network-based endpoint
+        network_id = f"{chain}-{network}"
+        await client.gateway.delete_network_pool(
+            network_id=network_id,
             address=pool_address,
+            pool_type=pool_type,
         )
 
         connector_escaped = escape_markdown_v2(connector_name)
@@ -725,19 +750,26 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     chat_id, preferred_server=get_active_server(context.user_data)
                 )
 
+                # Get chain from connector data
+                connectors_data = context.user_data.get("pool_connectors_data", {})
+                connector_info = connectors_data.get(connector_name, {})
+                chain = connector_info.get("chain", "solana")
+
                 logger.info(
                     f"Adding pool: connector={connector_name}, network={network}, "
                     f"pool_type={pool_type}, base={base}, quote={quote}, address={address}, "
                     f"base_address={base_address}, quote_address={quote_address}"
                 )
 
-                await client.gateway.add_pool(
+                # Use new network-based endpoint
+                network_id = f"{chain}-{network}"
+                await client.gateway.add_network_pool(
+                    network_id=network_id,
                     connector_name=connector_name,
                     pool_type=pool_type,
-                    network=network,
+                    address=address,
                     base=base,
                     quote=quote,
-                    address=address,
                     base_address=base_address,
                     quote_address=quote_address,
                 )

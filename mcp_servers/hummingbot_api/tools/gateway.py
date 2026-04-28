@@ -268,50 +268,52 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
     # ============================================
     elif request.resource_type == "pools":
         if request.action == "list":
-            if not request.connector_name:
-                raise ToolError("connector_name is required for 'list' pools action")
-            if not request.network:
-                raise ToolError("network is required for 'list' pools action")
+            if not request.network_id:
+                raise ToolError(
+                    "network_id is required for 'list' pools action. "
+                    "Format: 'chain-network' (e.g., 'solana-mainnet-beta')"
+                )
 
-            result = await client.gateway.list_pools(
-                request.connector_name,
-                request.network
+            result = await client.gateway.get_network_pools(
+                network_id=request.network_id,
+                connector=request.connector_name,  # Optional filter
+                pool_type=request.pool_type,  # Optional filter
+                search=request.search  # Optional search
             )
             return {
                 "resource_type": "pools",
                 "action": "list",
-                "connector_name": request.connector_name,
-                "network": request.network,
+                "network_id": request.network_id,
+                "connector": request.connector_name,
                 "result": result
             }
 
         elif request.action == "add":
+            if not request.network_id:
+                raise ToolError(
+                    "network_id is required for 'add' pool action. "
+                    "Format: 'chain-network' (e.g., 'solana-mainnet-beta')"
+                )
             if not request.connector_name:
                 raise ToolError("connector_name is required for 'add' pool action")
             if not request.pool_type:
                 raise ToolError("pool_type is required for 'add' pool action")
-            if not request.network:
-                raise ToolError("network is required for 'add' pool action")
-            if not request.pool_base:
-                raise ToolError("pool_base is required for 'add' pool action")
-            if not request.pool_quote:
-                raise ToolError("pool_quote is required for 'add' pool action")
             if not request.pool_address:
                 raise ToolError("pool_address is required for 'add' pool action")
 
-            result = await client.gateway.add_pool(
+            result = await client.gateway.add_network_pool(
+                network_id=request.network_id,
                 connector_name=request.connector_name,
                 pool_type=request.pool_type,
-                network=request.network,
+                address=request.pool_address,
                 base=request.pool_base,
-                quote=request.pool_quote,
-                address=request.pool_address
+                quote=request.pool_quote
             )
             return {
                 "resource_type": "pools",
                 "action": "add",
+                "network_id": request.network_id,
                 "connector_name": request.connector_name,
-                "network": request.network,
                 "pool": {
                     "type": request.pool_type,
                     "base": request.pool_base,
@@ -321,10 +323,32 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 "result": result
             }
 
+        elif request.action == "delete":
+            if not request.network_id:
+                raise ToolError(
+                    "network_id is required for 'delete' pool action. "
+                    "Format: 'chain-network' (e.g., 'solana-mainnet-beta')"
+                )
+            if not request.pool_address:
+                raise ToolError("pool_address is required for 'delete' pool action")
+
+            result = await client.gateway.delete_network_pool(
+                network_id=request.network_id,
+                address=request.pool_address,
+                pool_type=request.pool_type
+            )
+            return {
+                "resource_type": "pools",
+                "action": "delete",
+                "network_id": request.network_id,
+                "pool_address": request.pool_address,
+                "result": result
+            }
+
         else:
             raise ToolError(
                 f"Action '{request.action}' not supported for pools. "
-                f"Supported: list, add"
+                f"Supported: list, add, delete"
             )
 
     # ============================================
