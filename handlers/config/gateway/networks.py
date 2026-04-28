@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..user_preferences import get_active_server
-from ._shared import escape_markdown_v2, extract_network_id, logger
+from ._shared import escape_markdown_v2, extract_network_id, get_default_networks, logger
 
 
 async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -34,6 +34,9 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 [InlineKeyboardButton("« Back", callback_data="config_gateway")]
             ]
         else:
+            # Get default networks to highlight them
+            default_network_ids = await get_default_networks(client)
+
             # Group networks by chain if possible
             network_buttons = []
             network_count = len(networks)
@@ -47,9 +50,14 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 networks[:20]
             ):  # Limit to first 20 to avoid message size issues
                 network_id = extract_network_id(network_item)
+                # Add checkmark if this is a default network
+                if network_id in default_network_ids:
+                    label = f"✓ {network_id}"
+                else:
+                    label = network_id
                 # Use index-based callback to avoid exceeding 64-byte limit
                 button = InlineKeyboardButton(
-                    network_id, callback_data=f"gateway_network_view_{idx}"
+                    label, callback_data=f"gateway_network_view_{idx}"
                 )
                 row.append(button)
 
@@ -63,9 +71,11 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 network_buttons.append(row)
 
             count_escaped = escape_markdown_v2(str(network_count))
+            default_count = len(default_network_ids)
             message_text = (
-                f"🌍 *Networks* \\({count_escaped} available\\)\n\n"
-                "_Click on a network to view and configure settings\\._"
+                f"🌍 *Networks* \\({count_escaped} available, {default_count} default\\)\n\n"
+                "_Click on a network to view and configure settings\\._\n"
+                "_✓ indicates default networks shown in Tokens/Pools\\._"
             )
 
             keyboard = network_buttons + [
