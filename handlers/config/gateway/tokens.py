@@ -7,7 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..user_preferences import get_active_server
-from ._shared import escape_markdown_v2, extract_network_id, logger
+from ._shared import escape_markdown_v2, extract_network_id, get_default_networks, logger
 
 # Gateway network ID -> GeckoTerminal network ID mapping
 NETWORK_TO_GECKO = {
@@ -28,7 +28,9 @@ NETWORK_TO_GECKO = {
 }
 
 
-async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def show_tokens_menu(
+    query, context: ContextTypes.DEFAULT_TYPE, show_all: bool = False
+) -> None:
     """Show tokens menu - select network to view tokens"""
     try:
         from config_manager import get_config_manager
@@ -41,9 +43,9 @@ async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         response = await client.gateway.list_networks()
 
-        networks = response.get("networks", [])
+        all_networks = response.get("networks", [])
 
-        if not networks:
+        if not all_networks:
             message_text = (
                 "🪙 *Token Management*\n\n"
                 "No networks available\\.\n\n"
@@ -57,11 +59,29 @@ async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ]
             ]
         else:
-            # Limit to first 20 networks
-            network_buttons = []
-            context.user_data["token_network_list"] = networks[:20]
+            # Get default networks from config
+            default_network_ids = await get_default_networks(client)
 
-            for idx, network_item in enumerate(networks[:20]):
+            # Decide which networks to show
+            if show_all or not default_network_ids:
+                # Show all networks
+                networks_to_show = all_networks[:20]
+                showing_defaults = False
+            else:
+                # Filter to only default networks
+                networks_to_show = [
+                    n for n in all_networks
+                    if extract_network_id(n) in default_network_ids
+                ][:20]
+                showing_defaults = True
+
+            # Store networks in context
+            context.user_data["token_network_list"] = networks_to_show
+            context.user_data["token_all_networks"] = all_networks[:20]
+
+            # Create network buttons
+            network_buttons = []
+            for idx, network_item in enumerate(networks_to_show):
                 network_id = extract_network_id(network_item)
                 network_buttons.append(
                     [
@@ -71,19 +91,40 @@ async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     ]
                 )
 
-            count_escaped = escape_markdown_v2(str(len(networks)))
-            message_text = (
-                f"🪙 *Token Management* \\({count_escaped} networks\\)\n\n"
-                "_Select a network to view and manage tokens:_"
-            )
-
-            keyboard = network_buttons + [
-                [
-                    InlineKeyboardButton(
-                        "« Back to Gateway", callback_data="config_gateway"
-                    )
+            if showing_defaults:
+                count_escaped = escape_markdown_v2(str(len(networks_to_show)))
+                total_escaped = escape_markdown_v2(str(len(all_networks)))
+                message_text = (
+                    f"🪙 *Token Management* \\({count_escaped} default\\)\n\n"
+                    "_Select a network to view and manage tokens:_"
+                )
+                # Add "All Networks" button
+                keyboard = network_buttons + [
+                    [
+                        InlineKeyboardButton(
+                            f"🌐 All Networks ({len(all_networks)})",
+                            callback_data="gateway_token_all_networks"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "« Back to Gateway", callback_data="config_gateway"
+                        )
+                    ]
                 ]
-            ]
+            else:
+                count_escaped = escape_markdown_v2(str(len(all_networks)))
+                message_text = (
+                    f"🪙 *Token Management* \\({count_escaped} networks\\)\n\n"
+                    "_Select a network to view and manage tokens:_"
+                )
+                keyboard = network_buttons + [
+                    [
+                        InlineKeyboardButton(
+                            "« Back to Gateway", callback_data="config_gateway"
+                        )
+                    ]
+                ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -110,6 +151,11 @@ async def show_tokens_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_token_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle token-specific actions"""
     action_data = query.data.replace("gateway_token_", "")
+
+    if action_data == "all_networks":
+        # Show all networks instead of just defaults
+        await show_tokens_menu(query, context, show_all=True)
+        return
 
     if action_data.startswith("network_"):
         # Show tokens for selected network
