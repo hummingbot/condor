@@ -6,7 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..user_preferences import get_active_server
-from ._shared import escape_markdown_v2, extract_network_id, get_default_networks, logger
+from ._shared import escape_markdown_v2, extract_network_id, logger
 
 
 async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -34,9 +34,6 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 [InlineKeyboardButton("« Back", callback_data="config_gateway")]
             ]
         else:
-            # Get default networks to highlight them
-            default_network_ids = await get_default_networks(client)
-
             # Group networks by chain if possible
             network_buttons = []
             network_count = len(networks)
@@ -50,14 +47,9 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 networks[:20]
             ):  # Limit to first 20 to avoid message size issues
                 network_id = extract_network_id(network_item)
-                # Add checkmark if this is a default network
-                if network_id in default_network_ids:
-                    label = f"✓ {network_id}"
-                else:
-                    label = network_id
                 # Use index-based callback to avoid exceeding 64-byte limit
                 button = InlineKeyboardButton(
-                    label, callback_data=f"gateway_network_view_{idx}"
+                    network_id, callback_data=f"gateway_network_view_{idx}"
                 )
                 row.append(button)
 
@@ -71,11 +63,9 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 network_buttons.append(row)
 
             count_escaped = escape_markdown_v2(str(network_count))
-            default_count = len(default_network_ids)
             message_text = (
-                f"🌍 *Networks* \\({count_escaped} available, {default_count} default\\)\n\n"
-                "_Click on a network to view and configure settings\\._\n"
-                "_✓ indicates default networks shown in Tokens/Pools\\._"
+                f"🌍 *Networks* \\({count_escaped} available\\)\n\n"
+                "_Click on a network to view and configure settings\\._"
             )
 
             keyboard = network_buttons + [
@@ -122,10 +112,6 @@ async def handle_network_action(query, context: ContextTypes.DEFAULT_TYPE) -> No
             # Fallback for old-style callback data
             network_id = network_idx_str
             await show_network_details(query, context, network_id)
-    elif action_data.startswith("toggle_default_"):
-        # Toggle default network setting
-        network_id = action_data.replace("toggle_default_", "")
-        await toggle_default_network(query, context, network_id)
     elif action_data == "config_cancel":
         await handle_network_config_cancel(query, context)
     else:
@@ -160,15 +146,6 @@ async def show_network_details(
 
         network_escaped = escape_markdown_v2(network_id)
 
-        # Parse chain and network from network_id (e.g., "solana-mainnet-beta")
-        parts = network_id.split("-", 1)
-        chain = parts[0] if parts else network_id
-        network_name = parts[1] if len(parts) > 1 else ""
-
-        # Check if this network is in the default_networks list
-        default_networks = config_fields.get("default_networks", [])
-        is_default = network_name in default_networks if network_name else False
-
         if not config_fields:
             message_text = (
                 f"🌍 *Network: {network_escaped}*\n\n" "_No configuration available_"
@@ -177,23 +154,15 @@ async def show_network_details(
                 [InlineKeyboardButton("« Back", callback_data="gateway_networks")]
             ]
         else:
-            # Build copyable config for editing (exclude default_networks for display)
+            # Build copyable config for editing
             config_lines = []
             for key, value in config_fields.items():
-                if key != "default_networks":
-                    config_lines.append(f"{key}={value}")
+                config_lines.append(f"{key}={value}")
 
             config_text = "\n".join(config_lines)
 
-            # Show default status
-            if is_default:
-                default_status = "✅ *Default Network* \\(shown in Tokens/Pools\\)"
-            else:
-                default_status = "⬜ _Not a default network_"
-
             message_text = (
                 f"🌍 *{network_escaped}*\n\n"
-                f"{default_status}\n\n"
                 f"```\n{config_text}\n```\n\n"
                 f"✏️ _Send `key=value` to update_"
             )
@@ -208,19 +177,7 @@ async def show_network_details(
             context.user_data["network_message_id"] = query.message.message_id
             context.user_data["network_chat_id"] = query.message.chat_id
 
-            # Toggle default button
-            if is_default:
-                toggle_text = "⬜ Remove from Defaults"
-            else:
-                toggle_text = "✅ Add to Defaults"
-
             keyboard = [
-                [
-                    InlineKeyboardButton(
-                        toggle_text,
-                        callback_data=f"gateway_network_toggle_default_{network_id}"
-                    )
-                ],
                 [InlineKeyboardButton("« Back", callback_data="gateway_networks")]
             ]
 
@@ -425,63 +382,3 @@ async def handle_network_config_cancel(
     except Exception as e:
         logger.error(f"Error handling cancel: {e}", exc_info=True)
         await query.answer("Error cancelling configuration")
-
-
-async def toggle_default_network(
-    query, context: ContextTypes.DEFAULT_TYPE, network_id: str
-) -> None:
-    """Toggle whether a network is in the default_networks list"""
-    try:
-        from config_manager import get_config_manager
-
-        await query.answer("Updating defaults...")
-
-        chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(
-            chat_id, preferred_server=get_active_server(context.user_data)
-        )
-
-        # Get current config
-        response = await client.gateway.get_network_config(network_id)
-        if isinstance(response, dict):
-            config = (
-                response.get("config", response) if "config" in response else response
-            )
-        else:
-            config = {}
-
-        # Parse network name from network_id (e.g., "solana-mainnet-beta" -> "mainnet-beta")
-        parts = network_id.split("-", 1)
-        network_name = parts[1] if len(parts) > 1 else network_id
-
-        # Get current default_networks list
-        default_networks = config.get("default_networks", [])
-        if not isinstance(default_networks, list):
-            default_networks = []
-
-        # Toggle
-        if network_name in default_networks:
-            # Remove from defaults
-            default_networks = [n for n in default_networks if n != network_name]
-            action = "removed from"
-        else:
-            # Add to defaults
-            default_networks.append(network_name)
-            action = "added to"
-
-        # Update the config
-        await client.gateway.update_network_config(
-            network_id,
-            {"default_networks": default_networks}
-        )
-
-        # Show success and refresh
-        network_escaped = escape_markdown_v2(network_id)
-        await query.answer(f"✅ {network_id} {action} defaults")
-
-        # Refresh the network details view
-        await show_network_details(query, context, network_id)
-
-    except Exception as e:
-        logger.error(f"Error toggling default network: {e}", exc_info=True)
-        await query.answer(f"❌ Error: {str(e)[:100]}")
