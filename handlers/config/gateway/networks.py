@@ -52,7 +52,7 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 network_id = extract_network_id(network_item)
                 # Add checkmark if this is a default network
                 if network_id in default_network_ids:
-                    label = f"✓ {network_id}"
+                    label = f"✅ {network_id}"
                 else:
                     label = network_id
                 # Use index-based callback to avoid exceeding 64-byte limit
@@ -75,7 +75,7 @@ async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             message_text = (
                 f"🌍 *Networks* \\({count_escaped} available, {default_count} default\\)\n\n"
                 "_Click on a network to view and configure settings\\._\n"
-                "_✓ indicates default networks shown in Tokens/Pools\\._"
+                "_✅ indicates default networks shown in Tokens/Pools\\._"
             )
 
             keyboard = network_buttons + [
