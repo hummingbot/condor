@@ -107,51 +107,65 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
     bots_list = _extract_bots_list(result)
     logger.info("Server '%s': found %d bot(s)", name, len(bots_list))
 
-    # Pre-fetch controller configs keyed by controller id AND controller_name
+    # Pre-fetch controller configs AND bot runs concurrently
     ctrl_configs: dict[str, dict] = {}
+    bot_runs: dict[str, str] = {}
+
     if client is not None:
-        for bot_data in bots_list:
-            bn = bot_data.get("bot_name", "")
-            if not bn:
-                continue
+        import asyncio
+
+        # Fetch all bot controller configs concurrently
+        async def _fetch_ctrl_configs() -> dict[str, dict]:
+            configs_map: dict[str, dict] = {}
+            bot_names = [b.get("bot_name", "") for b in bots_list if b.get("bot_name")]
+            if not bot_names:
+                return configs_map
+
+            async def _get_one(bn: str):
+                try:
+                    configs = await client.controllers.get_bot_controller_configs(bn)
+                    if isinstance(configs, list):
+                        for cfg in configs:
+                            cid = cfg.get("id") or cfg.get("controller_id", "")
+                            if cid:
+                                configs_map[cid] = cfg
+                            cname = cfg.get("controller_name", "")
+                            if cname and cname != cid:
+                                configs_map[cname] = cfg
+                except Exception:
+                    pass
+
+            await asyncio.gather(*[_get_one(bn) for bn in bot_names])
+            return configs_map
+
+        async def _fetch_bot_runs() -> dict[str, str]:
+            runs: dict[str, str] = {}
             try:
-                configs = await client.controllers.get_bot_controller_configs(bn)
-                if isinstance(configs, list):
-                    for cfg in configs:
-                        cid = cfg.get("id") or cfg.get("controller_id", "")
-                        if cid:
-                            ctrl_configs[cid] = cfg
-                        cname = cfg.get("controller_name", "")
-                        if cname and cname != cid:
-                            ctrl_configs[cname] = cfg
+                runs_result = await client.bot_orchestration.get_bot_runs()
+                if isinstance(runs_result, dict):
+                    runs_data = runs_result.get("data", runs_result)
+                    if isinstance(runs_data, dict):
+                        for bot_name, run_info in runs_data.items():
+                            if isinstance(run_info, dict):
+                                deployed = run_info.get("deployed_at") or run_info.get("created_at")
+                                if deployed:
+                                    runs[bot_name] = str(deployed)
+                            elif isinstance(run_info, str):
+                                runs[bot_name] = run_info
+                    elif isinstance(runs_data, list):
+                        for run in runs_data:
+                            if isinstance(run, dict):
+                                bn = run.get("bot_name", "")
+                                deployed = run.get("deployed_at") or run.get("created_at")
+                                if bn and deployed:
+                                    runs[bn] = str(deployed)
             except Exception:
                 pass
+            return runs
 
-    # Try to get bot runs for uptime/deployed_at info
-    bot_runs: dict[str, str] = {}
-    try:
-        if client is None:
-            raise ValueError("No client")
-        runs_result = await client.bot_orchestration.get_bot_runs()
-        if isinstance(runs_result, dict):
-            runs_data = runs_result.get("data", runs_result)
-            if isinstance(runs_data, dict):
-                for bot_name, run_info in runs_data.items():
-                    if isinstance(run_info, dict):
-                        deployed = run_info.get("deployed_at") or run_info.get("created_at")
-                        if deployed:
-                            bot_runs[bot_name] = str(deployed)
-                    elif isinstance(run_info, str):
-                        bot_runs[bot_name] = run_info
-            elif isinstance(runs_data, list):
-                for run in runs_data:
-                    if isinstance(run, dict):
-                        bn = run.get("bot_name", "")
-                        deployed = run.get("deployed_at") or run.get("created_at")
-                        if bn and deployed:
-                            bot_runs[bn] = str(deployed)
-    except Exception:
-        pass
+        ctrl_configs, bot_runs = await asyncio.gather(
+            _fetch_ctrl_configs(), _fetch_bot_runs()
+        )
 
     controllers: list[ControllerInfo] = []
     bots: list[BotSummary] = []
@@ -163,6 +177,11 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
         bot_status = bot_data.get("status", "unknown")
         performance = bot_data.get("performance", {})
         error_logs = bot_data.get("error_logs", [])
+        general_logs = bot_data.get("general_logs", [])
+        if not isinstance(error_logs, list):
+            error_logs = []
+        if not isinstance(general_logs, list):
+            general_logs = []
 
         num_controllers = 0
 
@@ -244,8 +263,10 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 bot_name=bot_name,
                 status=bot_status,
                 num_controllers=num_controllers,
-                error_count=len(error_logs) if isinstance(error_logs, list) else 0,
+                error_count=len(error_logs),
                 deployed_at=bot_runs.get(bot_name),
+                error_logs=error_logs[-100:],
+                general_logs=general_logs[-100:],
             )
         )
 
@@ -263,9 +284,32 @@ async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_us
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    import asyncio
+
     client = await cm.get_client(name)
+
+    # Fetch status, config, and performance concurrently
+    async def _get_status():
+        return await client.bot_orchestration.get_bot_status(bot_id)
+
+    async def _get_config():
+        try:
+            r = await client.bot_orchestration.get_bot_config(bot_id)
+            return r if isinstance(r, dict) else {}
+        except Exception:
+            return {}
+
+    async def _get_perf():
+        try:
+            r = await client.bot_orchestration.get_bot_performance(bot_id)
+            return r if isinstance(r, dict) else {}
+        except Exception:
+            return {}
+
     try:
-        result = await client.bot_orchestration.get_bot_status(bot_id)
+        result, config, performance = await asyncio.gather(
+            _get_status(), _get_config(), _get_perf()
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -273,23 +317,6 @@ async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_us
         raise HTTPException(status_code=404, detail="Bot not found")
 
     bot = _parse_bot(result)
-
-    config: dict[str, Any] = {}
-    try:
-        config = await client.bot_orchestration.get_bot_config(bot_id)
-        if not isinstance(config, dict):
-            config = {}
-    except Exception:
-        pass
-
-    performance: dict[str, Any] = {}
-    try:
-        perf = await client.bot_orchestration.get_bot_performance(bot_id)
-        if isinstance(perf, dict):
-            performance = perf
-    except Exception:
-        pass
-
     return BotDetailResponse(bot=bot, config=config, performance=performance)
 
 
@@ -302,37 +329,39 @@ async def list_controller_configs(name: str, user: WebUser = Depends(get_current
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    import asyncio
+
     client = await cm.get_client(name)
 
     # Fetch controller types and saved configs in parallel
-    controller_types: dict[str, list[str]] = {}
-    try:
-        types_result = await client.controllers.list_controllers()
-        if isinstance(types_result, dict):
-            controller_types = {
-                k: v for k, v in types_result.items() if isinstance(v, list)
-            }
-    except Exception as e:
-        logger.warning("Failed to list controller types from '%s': %s", name, e)
+    async def _get_types():
+        try:
+            r = await client.controllers.list_controllers()
+            return {k: v for k, v in r.items() if isinstance(v, list)} if isinstance(r, dict) else {}
+        except Exception as e:
+            logger.warning("Failed to list controller types from '%s': %s", name, e)
+            return {}
 
-    configs: list[ControllerConfigSummary] = []
-    try:
-        configs_result = await client.controllers.list_controller_configs()
-        if isinstance(configs_result, list):
-            for cfg in configs_result:
-                if not isinstance(cfg, dict):
-                    continue
-                configs.append(
-                    ControllerConfigSummary(
-                        id=str(cfg.get("id", "")),
-                        controller_name=cfg.get("controller_name", ""),
-                        controller_type=cfg.get("controller_type", ""),
-                        connector_name=cfg.get("connector_name", ""),
-                        trading_pair=cfg.get("trading_pair", ""),
-                    )
+    async def _get_configs():
+        try:
+            r = await client.controllers.list_controller_configs()
+            if not isinstance(r, list):
+                return []
+            return [
+                ControllerConfigSummary(
+                    id=str(cfg.get("config_base_name") or cfg.get("id", "")),
+                    controller_name=cfg.get("controller_name", ""),
+                    controller_type=cfg.get("controller_type", ""),
+                    connector_name=cfg.get("connector_name", ""),
+                    trading_pair=cfg.get("trading_pair", ""),
                 )
-    except Exception as e:
-        logger.warning("Failed to list controller configs from '%s': %s", name, e)
+                for cfg in r if isinstance(cfg, dict)
+            ]
+        except Exception as e:
+            logger.warning("Failed to list controller configs from '%s': %s", name, e)
+            return []
+
+    controller_types, configs = await asyncio.gather(_get_types(), _get_configs())
 
     return AvailableControllersResponse(
         configs=configs,
@@ -361,7 +390,7 @@ async def get_controller_config(
         raise HTTPException(status_code=404, detail="Config not found")
 
     return ControllerConfigDetail(
-        id=str(result.get("id", config_id)),
+        id=str(result.get("config_base_name") or result.get("id", config_id)),
         controller_name=result.get("controller_name", ""),
         controller_type=result.get("controller_type", ""),
         config=result,

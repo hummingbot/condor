@@ -538,6 +538,102 @@ class WebSocketManager:
                 result.append(info.model_dump())
         return result
 
+    @staticmethod
+    def _transform_bots(raw_data: Any) -> dict:
+        """Transform raw BOTS_STATUS data to BotsPageResponse-compatible dict for WS broadcast."""
+        from condor.web.routes.bots import _extract_bots_list
+
+        bots_list = _extract_bots_list(raw_data)
+        controllers = []
+        bots = []
+        total_pnl = 0.0
+        total_volume = 0.0
+
+        for bot_data in bots_list:
+            bot_name = bot_data.get("bot_name", "")
+            bot_status = bot_data.get("status", "unknown")
+            performance = bot_data.get("performance", {})
+            error_logs = bot_data.get("error_logs", [])
+            general_logs = bot_data.get("general_logs", [])
+            if not isinstance(error_logs, list):
+                error_logs = []
+            if not isinstance(general_logs, list):
+                general_logs = []
+
+            num_controllers = 0
+
+            if isinstance(performance, dict):
+                for ctrl_name, ctrl_info in performance.items():
+                    if not isinstance(ctrl_info, dict):
+                        continue
+                    num_controllers += 1
+                    ctrl_perf = ctrl_info.get("performance", {})
+                    if not isinstance(ctrl_perf, dict):
+                        ctrl_perf = {}
+
+                    realized = float(ctrl_perf.get("realized_pnl_quote", 0) or 0)
+                    unrealized = float(ctrl_perf.get("unrealized_pnl_quote", 0) or 0)
+                    global_pnl = realized + unrealized
+                    global_pnl_pct = float(ctrl_perf.get("global_pnl_pct", 0) or 0)
+                    volume = float(ctrl_perf.get("volume_traded", 0) or 0)
+                    close_types = ctrl_perf.get("close_type_counts", {})
+                    if not isinstance(close_types, dict):
+                        close_types = {}
+                    positions = ctrl_perf.get("positions_summary", [])
+                    if not isinstance(positions, list):
+                        positions = []
+
+                    # Parse connector/pair from controller name
+                    connector = ""
+                    trading_pair = ""
+                    parts = ctrl_name.split("_")
+                    for i, part in enumerate(parts):
+                        if "-" in part and part[0].isupper():
+                            if not trading_pair:
+                                trading_pair = part
+                            if not connector and i > 0:
+                                connector = "_".join(parts[:i])
+                            break
+
+                    total_pnl += global_pnl
+                    total_volume += volume
+
+                    controllers.append({
+                        "controller_name": ctrl_name,
+                        "controller_id": ctrl_name,
+                        "bot_name": bot_name,
+                        "status": ctrl_info.get("status", "running"),
+                        "connector": connector,
+                        "trading_pair": trading_pair,
+                        "realized_pnl_quote": realized,
+                        "unrealized_pnl_quote": unrealized,
+                        "global_pnl_quote": global_pnl,
+                        "global_pnl_pct": global_pnl_pct,
+                        "volume_traded": volume,
+                        "close_type_counts": close_types,
+                        "positions_summary": positions,
+                        "deployed_at": None,
+                        "config": {},
+                    })
+
+            bots.append({
+                "bot_name": bot_name,
+                "status": bot_status,
+                "num_controllers": num_controllers,
+                "error_count": len(error_logs),
+                "deployed_at": None,
+                "error_logs": error_logs[-100:],
+                "general_logs": general_logs[-100:],
+            })
+
+        return {
+            "controllers": controllers,
+            "bots": bots,
+            "total_pnl": total_pnl,
+            "total_volume": total_volume,
+            "server_online": True,
+        }
+
     def _on_data_update(self, server_name: str, cache_key: str, data_type: Any, value: Any) -> None:
         """Called by SDS when cache is updated. Maps to WS channels and broadcasts."""
         dt_name = data_type.name if hasattr(data_type, "name") else str(data_type)
@@ -558,6 +654,14 @@ class WebSocketManager:
         has_subscribers = any(channel in conn.channels for conn in self._connections)
         if not has_subscribers:
             return
+
+        # Transform raw data to match REST endpoint response shapes
+        if dt_name == "BOTS_STATUS":
+            try:
+                value = self._transform_bots(value)
+            except Exception as e:
+                logger.debug("Failed to transform bots data for WS: %s", e)
+                return
 
         asyncio.ensure_future(self._broadcast_update(channel, value))
 
@@ -702,9 +806,11 @@ class WebSocketManager:
                             continue
                         elif msg_type == "error":
                             error_msg = msg.get("message", "unknown error")
-                            logger.warning("Candle stream error for %s: %s", channel, error_msg)
+                            logger.warning("Candle stream error for %s: %s — continuing", channel, error_msg)
                             await self.broadcast(channel, {"type": "error", "message": f"Stream error: {error_msg}"})
-                            break
+                            # Don't break — the WS may still be alive.
+                            # If truly dead, next recv raises and we reconnect.
+                            continue
                         else:
                             logger.info("Candle stream unrecognized msg type for %s: type=%s keys=%s", channel, msg_type, list(msg.keys()) if isinstance(msg, dict) else type(msg).__name__)
 
@@ -782,10 +888,20 @@ class WebSocketManager:
                     ]
                     if candles:
                         buf = self._candle_buffers.get(channel)
-                        # Only broadcast if we got newer data than what's in the buffer
+                        # Broadcast if we have newer candles OR if the latest
+                        # candle's OHLCV changed (same timestamp, updated values)
                         newest_buf_ts = max(buf._data.keys()) if buf and buf._data else 0
                         newest_poll_ts = max(c["timestamp"] for c in candles)
-                        if newest_poll_ts > newest_buf_ts:
+                        changed = newest_poll_ts > newest_buf_ts
+                        if not changed and buf and newest_poll_ts in buf._data:
+                            # Same timestamp — check if OHLCV actually changed
+                            old = buf._data[newest_poll_ts]
+                            new = next(c for c in candles if c["timestamp"] == newest_poll_ts)
+                            changed = any(
+                                old.get(k) != new.get(k)
+                                for k in ("open", "high", "low", "close", "volume")
+                            )
+                        if changed:
                             self._upsert_candle_buffer_many(channel, candles)
                             await self.broadcast(
                                 channel,

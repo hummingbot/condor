@@ -498,6 +498,8 @@ class ServerDataService:
         Called at startup so the cache is warm before any client connects.
         Subscribes to: PORTFOLIO, EXECUTORS, BOTS_STATUS, CONNECTORS,
         and TRADING_RULES (per connector) for every server.
+
+        All initial fetches run concurrently via asyncio.gather.
         """
         from config_manager import get_config_manager
 
@@ -515,21 +517,26 @@ class ServerDataService:
             ServerDataType.CANDLE_CONNECTORS,
         ]
         subscriber_id = "_auto"
-        count = 0
-        for name in servers:
-            for dt in core_types:
-                try:
-                    await self.subscribe(
-                        server=name,
-                        data_type=dt,
-                        subscriber_id=subscriber_id,
-                    )
-                    count += 1
-                except Exception as e:
-                    logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
 
-            # Pre-subscribe trading rules for each discovered connector
-            count += await self._subscribe_trading_rules_for_server(name, subscriber_id)
+        # Launch all core subscriptions concurrently
+        async def _sub(name: str, dt: ServerDataType) -> bool:
+            try:
+                await self.subscribe(server=name, data_type=dt, subscriber_id=subscriber_id)
+                return True
+            except Exception as e:
+                logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
+                return False
+
+        tasks = [_sub(name, dt) for name in servers for dt in core_types]
+        results = await asyncio.gather(*tasks)
+        count = sum(1 for r in results if r)
+
+        # Pre-subscribe trading rules concurrently across servers
+        tr_tasks = [self._subscribe_trading_rules_for_server(name, subscriber_id) for name in servers]
+        tr_results = await asyncio.gather(*tr_tasks, return_exceptions=True)
+        for r in tr_results:
+            if isinstance(r, int):
+                count += r
 
         # Register on_change callback for CONNECTORS so that when a server
         # comes online later and CONNECTORS data is fetched for the first time
@@ -621,8 +628,12 @@ class ServerDataService:
                 await asyncio.sleep(5)
 
     async def _poll_tick(self) -> None:
-        """Single tick: check each subscribed key and refresh if due."""
+        """Single tick: check each subscribed key and refresh if due.
+
+        Collects all due keys first, then fetches them concurrently via gather.
+        """
         now = time.time()
+        due_keys: List[CacheKey] = []
 
         for key, subs in list(self._subscriptions.items()):
             if not subs:
@@ -643,15 +654,22 @@ class ServerDataService:
                     if now - entry.last_error_at < backoff:
                         continue
 
-            # Rate limit per server
+            due_keys.append(key)
+
+        if not due_keys:
+            return
+
+        # Acquire rate limits and fetch concurrently
+        async def _rate_limited_fetch(key: CacheKey):
             limiter = self._get_rate_limiter(key.server)
             if not await limiter.acquire(timeout=0.5):
-                continue
-
+                return
             try:
                 await self._fetch_and_cache(key)
             except Exception:
                 pass  # Error already recorded in _fetch_and_cache
+
+        await asyncio.gather(*[_rate_limited_fetch(k) for k in due_keys])
 
     async def _fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache. Returns the fetched value."""
