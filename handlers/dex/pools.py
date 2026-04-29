@@ -1250,12 +1250,7 @@ async def _show_pool_detail(
 
     # Pool header - compact info
     message += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
-    addr_short = (
-        f"{pool_address[:6]}...{pool_address[-4:]}"
-        if len(pool_address) > 12
-        else pool_address
-    )
-    message += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
+    message += f"📍 *Address:*\n`{escape_markdown_v2(pool_address)}`\n"
     if current_price:
         message += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
     if bin_step:
@@ -4043,12 +4038,7 @@ async def show_add_position_menu(
         # Pool info header - show pair and address
         help_text += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
         if pool_address:
-            addr_short = (
-                f"{pool_address[:6]}...{pool_address[-4:]}"
-                if len(pool_address) > 12
-                else pool_address
-            )
-            help_text += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
+            help_text += f"📍 *Address:*\n`{escape_markdown_v2(pool_address)}`\n"
         if current_price:
             help_text += (
                 f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
