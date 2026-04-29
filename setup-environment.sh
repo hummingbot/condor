@@ -530,6 +530,105 @@ BOTS_PATH=${hb_api_abs_path}
 HBEOF
             msg_ok "Hummingbot API .env configured"
 
+            # ── Optional: HTTPS cert generation ──────────────────
+            echo ""
+            msg_info "You can secure the connection between Condor and Hummingbot API with HTTPS."
+            prompt_visible "Enable HTTPS cert generation for Hummingbot API? [y/N]" "N" "enable_https"
+
+            HB_API_HTTPS_ENABLED=false
+            HB_API_SSL_PORT=8443
+            HB_API_CA_BUNDLE=""
+            HB_API_CLIENT_CERT=""
+            HB_API_CLIENT_KEY=""
+
+            if [[ "${enable_https:-}" =~ ^[Yy]$ ]]; then
+                if ! command_exists openssl; then
+                    msg_warn "openssl not found — skipping HTTPS setup."
+                    msg_info "Install openssl and re-run setup, or run 'make generate-certs' in the hummingbot-api directory."
+                else
+                    prompt_visible "HTTPS port" "8443" "ssl_port"
+                    ssl_port="${ssl_port:-8443}"
+                    prompt_visible "Certificate hostname or IP" "localhost" "ssl_host"
+                    ssl_host="${ssl_host:-localhost}"
+                    prompt_visible "Also generate client certificate for mTLS? [y/N]" "N" "gen_mtls"
+
+                    certs_dir="$hb_api_abs_path/certs"
+                    server_ext="$certs_dir/server-ext.cnf"
+                    msg_info "Generating SSL certificates in $certs_dir ..."
+
+                    mkdir -p "$certs_dir"
+                    openssl genrsa -out "$certs_dir/ca.key" 4096 >/dev/null 2>&1
+                    openssl req -x509 -new -nodes -key "$certs_dir/ca.key" -sha256 -days 3650 \
+                        -out "$certs_dir/ca.pem" -subj "/CN=Hummingbot Local CA" >/dev/null 2>&1
+
+                    # SAN is required — Python 3.12+ ssl rejects CN-only certs at hostname verification
+                    {
+                        echo "subjectAltName = @alt_names"
+                        echo "[alt_names]"
+                        if [[ "$ssl_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                            echo "IP.1 = $ssl_host"
+                            echo "DNS.1 = localhost"
+                            echo "IP.2 = 127.0.0.1"
+                        else
+                            echo "DNS.1 = $ssl_host"
+                            if [[ "$ssl_host" != "localhost" ]]; then echo "DNS.2 = localhost"; fi
+                            echo "IP.1 = 127.0.0.1"
+                        fi
+                    } > "$server_ext"
+
+                    openssl genrsa -out "$certs_dir/server.key" 2048 >/dev/null 2>&1
+                    openssl req -new -key "$certs_dir/server.key" -out "$certs_dir/server.csr" \
+                        -subj "/CN=$ssl_host" >/dev/null 2>&1
+                    openssl x509 -req -in "$certs_dir/server.csr" -CA "$certs_dir/ca.pem" \
+                        -CAkey "$certs_dir/ca.key" -CAcreateserial -out "$certs_dir/server.pem" \
+                        -days 825 -sha256 -extfile "$server_ext" >/dev/null 2>&1
+                    rm -f "$certs_dir/server.csr" "$server_ext"
+
+                    if [[ "${gen_mtls:-}" =~ ^[Yy]$ ]]; then
+                        openssl genrsa -out "$certs_dir/client.key" 2048 >/dev/null 2>&1
+                        openssl req -new -key "$certs_dir/client.key" -out "$certs_dir/client.csr" \
+                            -subj "/CN=condor-client" >/dev/null 2>&1
+                        openssl x509 -req -in "$certs_dir/client.csr" -CA "$certs_dir/ca.pem" \
+                            -CAkey "$certs_dir/ca.key" -CAserial "$certs_dir/ca.srl" \
+                            -out "$certs_dir/client.pem" -days 825 -sha256 >/dev/null 2>&1
+                        rm -f "$certs_dir/client.csr"
+                        HB_API_CLIENT_CERT="$certs_dir/client.pem"
+                        HB_API_CLIENT_KEY="$certs_dir/client.key"
+                    fi
+
+                    msg_ok "Certificates generated"
+
+                    # Update hummingbot-api .env with SSL settings
+                    _upsert_hbenv() {
+                        local file="$1" key="$2" val="$3"
+                        if grep -q "^${key}=" "$file" 2>/dev/null; then
+                            local tmp; tmp="$(mktemp)"
+                            awk -v k="$key" -v v="$val" \
+                                'BEGIN{FS=OFS="="} $1==k{print k "=" v; next} {print}' \
+                                "$file" > "$tmp" && mv "$tmp" "$file"
+                        else
+                            echo "${key}=${val}" >> "$file"
+                        fi
+                    }
+
+                    hb_env="$hb_api_abs_path/.env"
+                    _upsert_hbenv "$hb_env" "SSL_ENABLED"  "true"
+                    _upsert_hbenv "$hb_env" "SSL_PORT"     "$ssl_port"
+                    _upsert_hbenv "$hb_env" "SSL_CERT_PATH" "$certs_dir/server.pem"
+                    _upsert_hbenv "$hb_env" "SSL_KEY_PATH"  "$certs_dir/server.key"
+                    _upsert_hbenv "$hb_env" "SSL_CA_PATH"   "$certs_dir/ca.pem"
+                    if [ -n "$HB_API_CLIENT_CERT" ]; then
+                        _upsert_hbenv "$hb_env" "SSL_CLIENT_CERT_PATH" "$HB_API_CLIENT_CERT"
+                        _upsert_hbenv "$hb_env" "SSL_CLIENT_KEY_PATH"  "$HB_API_CLIENT_KEY"
+                    fi
+                    msg_ok "Hummingbot API .env updated with SSL settings"
+
+                    HB_API_HTTPS_ENABLED=true
+                    HB_API_SSL_PORT="$ssl_port"
+                    HB_API_CA_BUNDLE="$certs_dir/ca.pem"
+                fi
+            fi
+
             # Deploy if Docker is available
             if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
@@ -538,8 +637,16 @@ HBEOF
 
                     # Wait for API to be healthy
                     msg_info "Waiting for API to be ready..."
+                    if [ "${HB_API_HTTPS_ENABLED:-false}" = true ]; then
+                        _health_url="https://localhost:${HB_API_SSL_PORT}/docs"
+                        _curl_opts="--cacert $HB_API_CA_BUNDLE"
+                    else
+                        _health_url="http://localhost:8000/docs"
+                        _curl_opts=""
+                    fi
                     for i in $(seq 1 30); do
-                        if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
+                        # shellcheck disable=SC2086
+                        if curl -sf $_curl_opts "$_health_url" >/dev/null 2>&1; then
                             msg_ok "Hummingbot API is healthy"
                             hb_api_deployed=true
                             break
@@ -549,6 +656,7 @@ HBEOF
                     if [ "$hb_api_deployed" = false ]; then
                         msg_warn "API not responding yet (may still be starting)"
                         msg_info "Check status: cd $HB_API_DIR && docker compose ps"
+                        msg_info "API URL: $_health_url"
                         hb_api_deployed=true  # Config is still valid
                     fi
                 else
@@ -654,6 +762,82 @@ if [ "${hb_api_deployed:-}" = true ]; then
         fi
         
         msg_ok "Synced API credentials to $CONFIG_FILE"
+    fi
+
+    # If HTTPS was configured in this run, update the local server entry in config.yml
+    if [ "${HB_API_HTTPS_ENABLED:-false}" = true ] && [ -f "$CONFIG_FILE" ]; then
+        _apply_https_to_config() {
+            local cfg="$1" port="$2" ca="$3" cert="${4:-}" key="${5:-}"
+
+            # Prefer Python+PyYAML (handles re-runs and arbitrary config structure cleanly)
+            for py in python3 "uv run python"; do
+                if $py -c "import yaml" 2>/dev/null; then
+                    YAML_CFG="$cfg" YAML_PORT="$port" YAML_CA="$ca" \
+                    YAML_CERT="$cert" YAML_KEY="$key" \
+                    $py - << 'PYEOF'
+import os, yaml
+
+cfg = os.environ["YAML_CFG"]
+with open(cfg) as f:
+    data = yaml.safe_load(f) or {}
+
+srv = data.setdefault("servers", {}).setdefault("local", {})
+srv["port"] = int(os.environ["YAML_PORT"])
+srv["protocol"] = "https"
+srv["tls_verify"] = True
+srv["ca_bundle_path"] = os.environ["YAML_CA"]
+cert = os.environ.get("YAML_CERT", "")
+key = os.environ.get("YAML_KEY", "")
+if cert:
+    srv["client_cert_path"] = cert
+    srv["client_key_path"] = key
+else:
+    srv.pop("client_cert_path", None)
+    srv.pop("client_key_path", None)
+
+with open(cfg, "w") as f:
+    yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+PYEOF
+                    return $?
+                fi
+            done
+
+            # Fallback: awk-based update for the known config.yml template structure.
+            # Updates port in-place; appends TLS fields after the password line if not present.
+            local tmp; tmp="$(mktemp)"
+            awk -v port="$port" -v ca="$ca" -v cert="$cert" -v key="$key" '
+                /^  local:/             { in_local=1 }
+                in_local && /^[^ ]/     { in_local=0 }
+                in_local && /^  [^ ]/ && !/^  local:/ { in_local=0 }
+
+                in_local && /^ *port:/ { print "    port: " port; next }
+
+                in_local && /^ *password:/ {
+                    print
+                    # Only add TLS fields if not already present (idempotency guard)
+                    if (!tls_added) {
+                        print "    protocol: https"
+                        print "    tls_verify: true"
+                        print "    ca_bundle_path: " ca
+                        if (cert != "") {
+                            print "    client_cert_path: " cert
+                            print "    client_key_path: " key
+                        }
+                        tls_added=1
+                    }
+                    next
+                }
+
+                # Drop stale TLS fields so re-runs stay clean
+                in_local && /^ *(protocol|tls_verify|ca_bundle_path|client_cert_path|client_key_path):/ { next }
+
+                { print }
+            ' "$cfg" > "$tmp" && mv "$tmp" "$cfg"
+        }
+
+        _apply_https_to_config "$CONFIG_FILE" "$HB_API_SSL_PORT" "$HB_API_CA_BUNDLE" \
+            "$HB_API_CLIENT_CERT" "$HB_API_CLIENT_KEY"
+        msg_ok "Updated $CONFIG_FILE with HTTPS settings (port $HB_API_SSL_PORT)"
     fi
 fi
 
