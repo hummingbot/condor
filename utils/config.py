@@ -27,7 +27,12 @@ _web_port_raw = os.environ.get("WEB_PORT", "").strip()
 if _web_url_raw:
     WEB_URL = _web_url_raw.rstrip("/")
     _parsed = urlparse(WEB_URL)
-    WEB_PORT = _parsed.port or (443 if _parsed.scheme == "https" else 80)
+    # When no port is explicit in WEB_URL, fall back to WEB_PORT env var then 8088.
+    # We avoid binding to privileged ports (80/443) which require root on Linux.
+    WEB_PORT = _parsed.port or (int(_web_port_raw) if _web_port_raw else 8088)
+    # Keep WEB_URL consistent with the port uvicorn will actually bind to.
+    if not _parsed.port:
+        WEB_URL = f"{_parsed.scheme}://{_parsed.hostname}:{WEB_PORT}"
 else:
     WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
     WEB_URL = f"http://localhost:{WEB_PORT}"

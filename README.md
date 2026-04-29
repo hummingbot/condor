@@ -166,6 +166,11 @@ servers:
   main:
     host: localhost
     port: 8000
+    protocol: auto   # optional: auto | http | https
+    tls_verify: true # optional: true | false (HTTPS certificate verification)
+    ca_bundle_path: null # optional: custom CA bundle path for private/self-signed certs
+    client_cert_path: null # optional: client cert path for mTLS
+    client_key_path: null # optional: client key path for mTLS
     username: admin
     password: admin
 default_server: main
@@ -176,6 +181,187 @@ chat_defaults: {}
 audit_log: []
 ```
 
+## HTTPS / SSL Server Configuration
+
+Condor supports both HTTP and HTTPS when connecting to Hummingbot API servers.
+
+### Protocol resolution
+
+For each server in `config.yml`:
+- If `host` includes a scheme (`http://` or `https://`), that scheme is used.
+- Otherwise, `protocol` is used when provided (`http` or `https`).
+- If `protocol` is omitted or set to `auto`:
+  - port `443` => HTTPS
+  - any other port => HTTP
+
+### Recommended patterns
+
+**Local development (HTTP):**
+```yaml
+servers:
+  local:
+    host: localhost
+    port: 8000
+    protocol: auto
+    username: admin
+    password: admin
+```
+
+**Production (HTTPS on 443):**
+```yaml
+servers:
+  production:
+    host: api.example.com
+    port: 443
+    protocol: auto
+    tls_verify: true
+    username: admin
+    password: strong_password
+```
+
+**Explicit HTTPS custom port:**
+```yaml
+servers:
+  production_custom:
+    host: api.example.com
+    port: 8443
+    protocol: https
+    tls_verify: true
+    username: admin
+    password: strong_password
+```
+
+**Host with explicit scheme:**
+```yaml
+servers:
+  explicit:
+    host: https://api.example.com
+    port: 443
+    tls_verify: true
+    username: admin
+    password: strong_password
+```
+
+**HTTPS with private/internal CA:**
+```yaml
+servers:
+  private_ca:
+    host: api.internal.example.com
+    port: 443
+    protocol: auto
+    tls_verify: true
+    ca_bundle_path: /etc/ssl/certs/internal-ca.pem
+    username: admin
+    password: strong_password
+```
+
+**mTLS (client certificate authentication):**
+```yaml
+servers:
+  mtls:
+    host: api.example.com
+    port: 443
+    protocol: auto
+    tls_verify: true
+    ca_bundle_path: /etc/ssl/certs/ca.pem
+    client_cert_path: /etc/ssl/certs/condor-client.pem
+    client_key_path: /etc/ssl/private/condor-client.key
+    username: admin
+    password: strong_password
+```
+
+**Temporary insecure mode (not recommended):**
+```yaml
+servers:
+  lab:
+    host: lab.example.local
+    port: 8443
+    protocol: https
+    tls_verify: false
+    username: admin
+    password: admin
+```
+
+### Validation behavior
+
+Condor validates server URL settings and rejects conflicting configurations, for example:
+- `host: "https://api.example.com:9000"` with `port: 8000`
+- `host: "https://api.example.com"` with `protocol: http`
+
+When `tls_verify` is `true` and `ca_bundle_path` is provided, Condor uses that CA bundle for certificate validation.
+When `tls_verify` is `false`, Condor disables certificate verification for that server.
+If `client_cert_path` or `client_key_path` is provided, both must be provided (mTLS pair).
+
+## End-to-End Certificate Setup (Hummingbot API + Condor)
+
+The easiest secure local setup is to generate a local CA, issue a server cert for Hummingbot API, then configure Condor to trust that CA.
+
+### 1) Generate a local CA and server cert (OpenSSL example)
+
+```bash
+# Create a local CA
+openssl genrsa -out ca.key 4096
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 \
+  -out ca.pem -subj "/CN=Condor Local CA"
+
+# Create server key + CSR
+openssl genrsa -out server.key 2048
+openssl req -new -key server.key -out server.csr -subj "/CN=localhost"
+
+# Sign server cert with local CA
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+  -out server.pem -days 825 -sha256
+```
+
+### Alternative: automated generation from `hummingbot-api`
+
+If you run the sibling `hummingbot-api` repo setup:
+
+```bash
+make generate-certs
+```
+
+It will generate certs in `hummingbot-api/certs` and print exact paths you can copy into Condor (`ca_bundle_path`, and optional mTLS client cert/key paths).
+
+### 2) Run Hummingbot API with HTTPS
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8443 \
+  --ssl-certfile /path/to/server.pem \
+  --ssl-keyfile /path/to/server.key
+```
+
+### 3) Configure Condor to trust that CA
+
+```yaml
+servers:
+  local_https:
+    host: localhost
+    port: 8443
+    protocol: auto
+    tls_verify: true
+    ca_bundle_path: /path/to/ca.pem
+    username: admin
+    password: admin
+```
+
+### 4) Optional mTLS (if server requires client certs)
+
+Generate client cert/key signed by the same CA and add:
+
+```yaml
+    client_cert_path: /path/to/client.pem
+    client_key_path: /path/to/client.key
+```
+
+### Backward compatibility and migration
+
+Existing configurations continue to work without changes:
+- `host: localhost`, `port: 8000` still resolves to `http://localhost:8000`
+- configurations already using `http://...` or `https://...` in `host` remain supported
+
+For migration to HTTPS, update one server at a time and verify status in `/servers` before switching `default_server`.
+
 ## Troubleshooting
 
 | Issue | Solution |
@@ -185,6 +371,8 @@ audit_log: []
 | Commands failing | Verify Hummingbot API is running |
 | Connection refused | Check server host:port in `/config` |
 | Auth error | Verify server credentials |
+| TLS handshake/certificate errors | Verify API certificate validity and hostname; if using custom CA, ensure Condor environment trusts it |
+| Invalid server URL config | Check for conflicts between scheme/host/port/protocol (for example host URL already includes a different port) |
 | DEX features unavailable | Ensure Gateway is configured and running |
 
 ## Docker Deployment

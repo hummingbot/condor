@@ -477,6 +477,26 @@ else
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
         echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
         msg_ok "Skipped Hummingbot API deployment"
+        echo ""
+        msg_info "Enter the Hummingbot API connection details to pre-configure $CONFIG_FILE."
+        prompt_visible "API URL" "http://localhost:8000" "hb_api_url_raw"
+        hb_api_url_raw="${hb_api_url_raw:-http://localhost:8000}"
+        prompt_visible "API admin username" "admin" "hb_username"
+        prompt_secret "API admin password" "admin" "hb_password"
+
+        HB_API_PROTOCOL=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.scheme or 'http')" 2>/dev/null || echo "http")
+        HB_API_HOST=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.hostname or 'localhost')" 2>/dev/null || echo "localhost")
+        _def_port=$([ "$HB_API_PROTOCOL" = "https" ] && echo "8443" || echo "8000")
+        HB_API_PORT=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.port or ${_def_port})" 2>/dev/null || echo "$_def_port")
+        HB_API_TLS_VERIFY="true"
+
+        if [ "$HB_API_PROTOCOL" = "https" ]; then
+            echo ""
+            prompt_visible "Verify TLS certificate? Use 'n' for self-signed certs [Y/n]" "Y" "tls_verify_input"
+            [[ "${tls_verify_input:-Y}" =~ ^[Nn]$ ]] && HB_API_TLS_VERIFY="false"
+        fi
+
+        hb_api_configured=true
     else
         # Check Docker
         if ! command_exists docker; then
@@ -655,6 +675,33 @@ if [ "${hb_api_deployed:-}" = true ]; then
         
         msg_ok "Synced API credentials to $CONFIG_FILE"
     fi
+fi
+
+# If user provided a remote API URL (skipped local deployment), update config.yml
+if [ "${hb_api_configured:-false}" = true ] && [ -f "$CONFIG_FILE" ]; then
+    sed -i.bak "/servers:/,/^[^ ]/ s/host: .*/host: $HB_API_HOST/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    sed -i.bak "/servers:/,/^[^ ]/ s/port: .*/port: $HB_API_PORT/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    if [ -n "${hb_username:-}" ]; then
+        sed -i.bak "/servers:/,/^[^ ]/ s/username: .*/username: $hb_username/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+        sed -i.bak "/servers:/,/^[^ ]/ s/password: .*/password: $hb_password/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    fi
+    if [ "$HB_API_PROTOCOL" = "https" ]; then
+        tmp="$(mktemp)"
+        awk -v verify="$HB_API_TLS_VERIFY" '
+            /^  local:/             { in_local=1 }
+            in_local && /^[^ ]/     { in_local=0 }
+            in_local && /^  [^ ]/ && !/^  local:/ { in_local=0 }
+            in_local && /^ *(protocol|tls_verify):/ { next }
+            in_local && /^ *password:/ {
+                print
+                print "    protocol: https"
+                print "    tls_verify: " verify
+                next
+            }
+            { print }
+        ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+    fi
+    msg_ok "Configured $CONFIG_FILE: ${HB_API_PROTOCOL}://${HB_API_HOST}:${HB_API_PORT}"
 fi
 
 if [ "$config_updated" = false ] && [ -f "$CONFIG_FILE" ]; then
