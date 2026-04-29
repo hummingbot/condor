@@ -306,33 +306,7 @@ async def cached_call(
 # ============================================
 
 
-def is_cex_connector(connector_name: str) -> bool:
-    """Check if a connector is a CEX (not DEX/on-chain)."""
-    connector_lower = connector_name.lower()
-    dex_prefixes = [
-        "solana",
-        "ethereum",
-        "polygon",
-        "arbitrum",
-        "base",
-        "optimism",
-        "avalanche",
-    ]
-    return not any(connector_lower.startswith(prefix) for prefix in dex_prefixes)
-
-
-async def fetch_available_cex_connectors(
-    client, account_name: str = "master_account"
-) -> List[str]:
-    """Fetch list of available CEX connectors with credentials configured."""
-    try:
-        configured_connectors = await client.accounts.list_account_credentials(
-            account_name
-        )
-        return [c for c in configured_connectors if is_cex_connector(c)]
-    except Exception as e:
-        logger.error(f"Error fetching connectors: {e}", exc_info=True)
-        return []
+from condor.fetchers.connectors import is_cex_connector, fetch_available_cex_connectors  # noqa: F811
 
 
 async def get_available_cex_connectors(
@@ -365,48 +339,7 @@ async def get_available_cex_connectors(
 # ============================================
 
 
-async def fetch_current_price(
-    client, connector_name: str, trading_pair: str
-) -> Optional[float]:
-    """Fetch current price for a trading pair."""
-    try:
-        prices = await client.market_data.get_prices(
-            connector_name=connector_name, trading_pairs=trading_pair
-        )
-        return prices.get("prices", {}).get(trading_pair)
-    except Exception as e:
-        logger.error(f"Error fetching price for {trading_pair}: {e}", exc_info=True)
-        return None
-
-
-async def fetch_candles(
-    client,
-    connector_name: str,
-    trading_pair: str,
-    interval: str = "1m",
-    max_records: int = 420,
-) -> Optional[Dict[str, Any]]:
-    """Fetch candles data for a trading pair."""
-    try:
-        candles = await client.market_data.get_candles(
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-            interval=interval,
-            max_records=max_records,
-        )
-        # Validate that candles actually contain data
-        if not candles:
-            return None
-        data = candles if isinstance(candles, list) else candles.get("data", [])
-        if not data:
-            logger.debug(
-                f"No candle data available for {trading_pair} on {connector_name}"
-            )
-            return None
-        return candles
-    except Exception as e:
-        logger.error(f"Error fetching candles for {trading_pair}: {e}", exc_info=True)
-        return None
+from condor.fetchers.market_data import fetch_current_price, fetch_candles  # noqa: F811
 
 
 # ============================================
