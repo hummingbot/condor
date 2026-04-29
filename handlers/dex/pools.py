@@ -164,10 +164,11 @@ def _format_pool_info(pool: dict) -> str:
     lines.append(f"🏊 Pool: {pair}")
     lines.append("")
 
-    # Basic info
+    # Basic info - show full address for copy/paste
     if pool.get("pool_address") or pool.get("address"):
         addr = pool.get("pool_address") or pool.get("address")
-        lines.append(f"📍 Address: {addr[:12]}...{addr[-8:]}")
+        lines.append(f"📍 Address:")
+        lines.append(f"`{addr}`")
 
     if pool.get("bin_step"):
         lines.append(f"📊 Bin Step: {pool.get('bin_step')}")
@@ -2206,6 +2207,7 @@ async def handle_pool_combined_chart(
                 connector=connector,
                 user_data=context.user_data,
                 chat_id=chat_id,
+                context=context,
             )
 
         if not ohlcv_data and not bins:
