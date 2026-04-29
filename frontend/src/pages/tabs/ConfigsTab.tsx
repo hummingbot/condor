@@ -18,7 +18,6 @@ import {
 import { useCallback, useMemo, useRef, useState } from "react";
 import yaml from "js-yaml";
 
-import { HIDDEN_KEYS } from "@/components/bots/DeployBotDialog";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { useServer } from "@/hooks/useServer";
 import { api, type ControllerConfigSummary } from "@/lib/api";
@@ -51,8 +50,9 @@ function StandaloneConfigEditor({
   const prevConfigRef = useRef<string>("");
   useMemo(() => {
     if (!data?.config) return;
+    // Show all parameters including controller_name/type (only hide id, shown in header)
     const filtered = Object.fromEntries(
-      Object.entries(data.config).filter(([k]) => !HIDDEN_KEYS.has(k)),
+      Object.entries(data.config).filter(([k]) => k !== "id"),
     );
     const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
     const sig = JSON.stringify(data.config);
@@ -355,8 +355,9 @@ function CloneConfigDialog({
 
   useMemo(() => {
     if (!data?.config) return;
+    // Show all parameters including controller_name/type (only hide id, managed via input)
     const filtered = Object.fromEntries(
-      Object.entries(data.config).filter(([k]) => !HIDDEN_KEYS.has(k) && k !== "id"),
+      Object.entries(data.config).filter(([k]) => k !== "id"),
     );
     setYamlContent(yaml.dump(filtered, { sortKeys: false, lineWidth: -1 }));
   }, [data?.config]);

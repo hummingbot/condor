@@ -159,6 +159,7 @@ export interface ConsolidatedPosition {
   position_side: string;
   amount: number;
   entry_price: number;
+  notional_value: number;
   current_price: number;
   unrealized_pnl: number;
   realized_pnl: number;

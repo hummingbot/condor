@@ -204,9 +204,13 @@ export function CreateExecutor() {
     enabled: !!server,
   });
 
-  // WS subscription for executor data
-  const execChannels = useMemo(() => server ? [`executors:${server}`] : [], [server]);
-  useCondorWebSocket(execChannels, server);
+  // Single WS for both executor data and candle stream
+  const candleChannel = `candles:${server}:${connector}:${pair}:${gridState.interval}`;
+  const wsChannels = useMemo(
+    () => server ? [`executors:${server}`, candleChannel] : [],
+    [server, candleChannel],
+  );
+  const { wsRef: pageWsRef, wsVersion: pageWsVersion } = useCondorWebSocket(wsChannels, server);
 
   // Main controller data (executors + positions filtered by connector/pair)
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
@@ -469,12 +473,14 @@ export function CreateExecutor() {
         <div className="min-w-0 flex-1 flex flex-col border-r border-[var(--color-border)]">
           <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
             <GridChart
-              key={`${connector}:${pair}:${gridState.interval}:${gridState.lookbackSeconds}`}
+              key={`${connector}:${pair}:${gridState.interval}`}
               server={server}
               connector={connector}
               pair={pair}
               interval={gridState.interval}
               lookbackSeconds={gridState.lookbackSeconds}
+              wsRef={pageWsRef}
+              wsVersion={pageWsVersion}
               startPrice={chartProps.startPrice}
               endPrice={chartProps.endPrice}
               limitPrice={chartProps.limitPrice}

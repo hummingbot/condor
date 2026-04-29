@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
@@ -7,10 +7,12 @@ import { RecentTrades } from "@/components/market/RecentTrades";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { TradingRulesInfo } from "@/components/market/TradingRulesInfo";
+import { useCandleStore } from "@/hooks/useCandleStore";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type CandleData } from "@/lib/api";
+import { api } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 import { createCondorDatafeed } from "@/lib/tradingview-datafeed";
 
 // Map our interval strings to TradingView resolution format
@@ -35,6 +37,13 @@ const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
   { label: "14d", seconds: 14 * 86400 },
   { label: "30d", seconds: 30 * 86400 },
 ];
+
+// Interval durations for progressive backfill chunk sizing
+const INTERVAL_SECONDS: Record<string, number> = {
+  "1s": 1, "5s": 5, "15s": 15, "30s": 30,
+  "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+  "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400, "1w": 604800,
+};
 
 // ─── TradingView Chart ──────────────────────────────────────────
 
@@ -65,16 +74,13 @@ function TradingViewChart({
   const widgetRef = useRef<TradingViewWidget | null>(null);
   const readyRef = useRef(false);
   const { theme } = useTheme();
-
-  const channel = `candles:${server}:${connector}:${pair}:${interval}`;
-  const channels = useMemo(() => [channel], [channel]);
-  const { wsRef } = useCondorWebSocket(channels, server);
+  const { isStale } = useCandleStore(server, connector, pair, interval);
 
   useEffect(() => {
     if (!containerRef.current || !window.TradingView) return;
 
     const colors = getChartColors();
-    const datafeed = createCondorDatafeed(server, connector, wsRef);
+    const datafeed = createCondorDatafeed(server, connector);
     const resolution = INTERVAL_TO_RESOLUTION[interval] || "1";
 
     const widget = new window.TradingView.widget({
@@ -136,7 +142,16 @@ function TradingViewChart({
     widgetRef.current.activeChart().setResolution(resolution);
   }, [interval]);
 
-  return <div ref={containerRef} className="h-full w-full" />;
+  return (
+    <div className="relative h-full w-full">
+      <div ref={containerRef} className="h-full w-full" />
+      {isStale && (
+        <span className="absolute top-2 right-2 z-10 rounded bg-yellow-500/20 px-2 py-0.5 text-xs text-yellow-400">
+          Stale
+        </span>
+      )}
+    </div>
+  );
 }
 
 // ─── Fallback Chart (lightweight-charts) ────────────────────────
@@ -161,41 +176,52 @@ function FallbackChart({
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef =
     useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
-  const initializedRef = useRef(false);
-
-  const channel = `candles:${server}:${connector}:${pair}:${interval}`;
-  const channels = useMemo(() => [channel], [channel]);
-  const { wsRef, wsVersion } = useCondorWebSocket(channels, server);
-
-  // Send duration to backend so it sizes its candle buffer appropriately
-  useEffect(() => {
-    const ws = wsRef.current;
-    if (!ws) return;
-    ws.setCandleDuration(channel, lookbackSeconds);
-  }, [lookbackSeconds, channel]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const startTime = useMemo(
-    () => Math.floor(Date.now() / 1000) - lookbackSeconds,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [lookbackSeconds, pair, interval],
-  );
+  const fitContentOnceRef = useRef(false);
+  const prevCountRef = useRef(0);
+  const [chartReady, setChartReady] = useState(false);
 
   const queryClient = useQueryClient();
 
-  // Invalidate candle cache when lookbackSeconds changes so we refetch with new startTime
-  useEffect(() => {
-    queryClient.invalidateQueries({ queryKey: ["candles", server, connector, pair, interval] });
-  }, [lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Use the candle store for data + duration hints (routes through the same WS)
+  const { candles, isStale, mergeCandles, setDuration } = useCandleStore(server, connector, pair, interval);
 
-  const { data: candles } = useQuery({
-    queryKey: ["candles", server, connector, pair, interval],
-    queryFn: () =>
-      api.getCandles(server, connector, pair, interval, 5000, startTime),
-    placeholderData: keepPreviousData,
-  });
+  // REST backfill on pair/interval/lookback change — fetches progressively in chunks
+  const backfillKeyRef = useRef("");
+  useEffect(() => {
+    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}`;
+    if (backfillKey === backfillKeyRef.current) return;
+    backfillKeyRef.current = backfillKey;
+
+    // Tell backend to expand (never shrink) its buffer for this channel
+    setDuration(lookbackSeconds);
+
+    let cancelled = false;
+    const now = Math.floor(Date.now() / 1000);
+    const rangeStart = now - lookbackSeconds;
+    const ivSec = INTERVAL_SECONDS[interval] || 60;
+    const chunkDuration = ivSec * 2000; // ~2000 candles per chunk
+
+    const fetchProgressively = async () => {
+      let start = rangeStart;
+      while (start < now && !cancelled) {
+        const end = Math.min(start + chunkDuration, now);
+        try {
+          const fetched = await api.getCandles(
+            server, connector, pair, interval, 5000, start, end,
+          );
+          if (!cancelled && fetched?.length) mergeCandles(fetched);
+        } catch {
+          // Skip failed chunk, continue with next
+        }
+        start = end;
+      }
+    };
+    fetchProgressively();
+
+    return () => { cancelled = true; };
+  }, [server, connector, pair, interval, lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const candleStatusKey = ["candles-status", server, connector, pair, interval];
-
   const { data: candleStatus } = useQuery<{
     status: string;
     message?: string;
@@ -204,6 +230,7 @@ function FallbackChart({
     enabled: false,
   });
 
+  // Create chart ONCE on mount
   useEffect(() => {
     let cancelled = false;
     import("lightweight-charts").then((mod) => {
@@ -233,6 +260,7 @@ function FallbackChart({
         borderVisible: false,
       });
       seriesRef.current = series;
+      setChartReady(true);
     });
     return () => {
       cancelled = true;
@@ -240,73 +268,58 @@ function FallbackChart({
         chartRef.current.remove();
         chartRef.current = null;
         seriesRef.current = null;
+        setChartReady(false);
       }
     };
   }, []);
 
+  // Push data to chart whenever candles change
   useEffect(() => {
-    const currentWs = wsRef.current;
-    if (!currentWs) return;
+    if (!seriesRef.current || !candles.length) return;
 
-    const removeHandler = currentWs.onMessage((msgChannel, data) => {
-      if (msgChannel !== channel || !seriesRef.current) return;
+    const prevCount = prevCountRef.current;
+    const diff = candles.length - prevCount;
+    prevCountRef.current = candles.length;
 
-      const payload = data as {
-        type: string;
-        candle?: CandleData;
-        data?: CandleData[];
-      };
-
-      if (payload.type === "candle_update" && payload.candle) {
-        const c = payload.candle;
-        const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-        seriesRef.current.update({
-          time: ts as import("lightweight-charts").UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        });
-      } else if (payload.type === "candles" && payload.data?.length) {
-        const c = payload.data[payload.data.length - 1];
-        const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-        seriesRef.current.update({
-          time: ts as import("lightweight-charts").UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        });
-      }
-    });
-
-    return removeHandler;
-  }, [channel, wsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!seriesRef.current || !candles?.length || !chartModuleRef.current)
+    // WS tick: last bar updated (diff=0) or single new bar appended (diff=1)
+    // series.update() only touches the last bar — no zoom/scroll change
+    if (prevCount > 0 && diff >= 0 && diff <= 1) {
+      const last = candles[candles.length - 1];
+      seriesRef.current.update({
+        time: last.timestamp as import("lightweight-charts").UTCTimestamp,
+        open: last.open,
+        high: last.high,
+        low: last.low,
+        close: last.close,
+      });
       return;
-
-    const mapped = candles.map((c) => {
-      const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-      return {
-        time: ts as import("lightweight-charts").UTCTimestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      };
-    });
-    seriesRef.current.setData(mapped);
-    if (!initializedRef.current) {
-      chartRef.current?.timeScale().fitContent();
-      initializedRef.current = true;
     }
-  }, [candles]);
 
+    // Bulk change (initial load or backfill chunk)
+    // setData() in lightweight-charts v4 preserves time scale position,
+    // so we just call it without manual range save/restore.
+    const mapped = candles.map((c) => ({
+      time: c.timestamp as import("lightweight-charts").UTCTimestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
+    seriesRef.current.setData(mapped);
+
+    // fitContent only on the very first data load (or after pair/interval change)
+    if (!fitContentOnceRef.current) {
+      chartRef.current?.timeScale().fitContent();
+      fitContentOnceRef.current = true;
+    }
+  }, [candles, chartReady]);
+
+  // Reset fit + count on pair/interval change (new data scenario)
+  // NOT on lookbackSeconds — changing range shouldn't reset user's zoom
   useEffect(() => {
-    initializedRef.current = false;
-  }, [pair, interval, lookbackSeconds]);
+    fitContentOnceRef.current = false;
+    prevCountRef.current = 0;
+  }, [pair, interval]);
 
   return (
     <div className="flex h-full flex-col">
@@ -325,9 +338,14 @@ function FallbackChart({
             <span className="ml-1 text-[10px] opacity-60">✕</span>
           </button>
         )}
-        {candleStatus?.status === "connected" && (
+        {candleStatus?.status === "connected" && !isStale && (
           <span className="rounded bg-green-500/20 px-2 py-0.5 text-xs text-green-400">
             Live
+          </span>
+        )}
+        {isStale && candleStatus?.status !== "error" && (
+          <span className="rounded bg-yellow-500/20 px-2 py-0.5 text-xs text-yellow-400">
+            Stale
           </span>
         )}
       </div>
@@ -346,6 +364,14 @@ export function MarketData() {
   const [lookbackSeconds, setLookbackSeconds] = useState(3 * 86400); // 3 days default
   const [tvAvailable, setTvAvailable] = useState(false);
   const [tvChecked, setTvChecked] = useState(false);
+
+  // Page-level WS — wired to candle store for persistent candle data
+  // wsVersion is state (increments on each reconnect), so it triggers re-renders
+  // unlike wsRef.current which is a mutable ref and can't be a reliable dependency.
+  const { wsRef, wsVersion } = useCondorWebSocket([], server);
+  useEffect(() => {
+    candleStore.setWs(wsRef.current);
+  }, [wsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (window.TradingView) {
@@ -480,7 +506,6 @@ export function MarketData() {
               />
             ) : tvChecked ? (
               <FallbackChart
-                key={`${connector}:${pair}:${interval}`}
                 server={server}
                 connector={connector}
                 pair={pair}

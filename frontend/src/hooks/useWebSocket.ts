@@ -26,6 +26,29 @@ export function useCondorWebSocket(
     ws.onMessage((channel, data) => {
       // Update React Query cache based on channel prefix
       const prefix = channel.split(":")[0];
+
+      // Candle data is now managed by candle-store.ts — skip here
+      if (prefix === "candles") {
+        // Still update candle status for error/connected indicators
+        const parts = channel.split(":");
+        if (parts.length >= 5) {
+          const [, srv, conn, pr, iv] = parts;
+          const payload = data as { type: string; message?: string };
+          if (payload.type === "error") {
+            queryClient.setQueryData(
+              ["candles-status", srv, conn, pr, iv],
+              { status: "error", message: payload.message ?? "Unknown error" },
+            );
+          } else if (payload.type === "candle_update" || payload.type === "candles") {
+            queryClient.setQueryData(
+              ["candles-status", srv, conn, pr, iv],
+              { status: "connected" },
+            );
+          }
+        }
+        return;
+      }
+
       if (prefix === "portfolio") {
         queryClient.setQueryData(["portfolio", server], data);
       } else if (prefix === "bots") {
@@ -33,11 +56,6 @@ export function useCondorWebSocket(
       } else if (prefix === "executors") {
         // Set unfiltered cache (matches default queryKey with status="")
         queryClient.setQueryData(["executors", server, ""], data);
-        // NOTE: do NOT invalidate ["executors-infinite", server] here.
-        // The Executors page loads pages progressively; invalidating on every
-        // WS tick (every ~2s) restarts pagination and the page never finishes
-        // loading. The infinite query has its own refetchInterval, and we
-        // prime its first page from WS data below so updates still flow.
         const execs = data as unknown[];
         if (Array.isArray(execs)) {
           queryClient.setQueryData(
@@ -45,8 +63,6 @@ export function useCondorWebSocket(
             (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
               if (!old?.pages?.length) return old;
               const firstPage = old.pages[0];
-              // Replace first page contents with the live WS snapshot (capped
-              // to the same page size) so the top of the list stays fresh.
               const limit = firstPage.executors.length || 50;
               const nextFirst = {
                 ...firstPage,
@@ -57,101 +73,16 @@ export function useCondorWebSocket(
           );
         }
       } else if (prefix === "orderbook") {
-        // channel format: orderbook:{server}:{connector}:{pair}
         const parts = channel.split(":");
         if (parts.length >= 4) {
           const [, srv, connector, pair] = parts;
           queryClient.setQueryData(["order-book", srv, connector, pair], data);
         }
-      } else if (prefix === "candles") {
-        // channel format: candles:{server}:{connector}:{pair}:{interval}
-        const parts = channel.split(":");
-        if (parts.length >= 5) {
-          const [, srv, connector, pair, interval] = parts;
-          const payload = data as {
-            type: string;
-            candle?: Record<string, number>;
-            data?: Record<string, number>[];
-            message?: string;
-          };
-
-          if (payload.type === "error") {
-            queryClient.setQueryData(
-              ["candles-status", srv, connector, pair, interval],
-              { status: "error", message: payload.message ?? "Unknown error" },
-            );
-          } else if (payload.type === "candle_update" && payload.candle) {
-            queryClient.setQueryData(
-              ["candles-status", srv, connector, pair, interval],
-              { status: "connected" },
-            );
-            // Update or append a single candle
-            queryClient.setQueryData(
-              ["candles", srv, connector, pair, interval],
-              (old: Record<string, number>[] | undefined) => {
-                if (!old?.length) return old;
-                const ts = payload.candle!.timestamp;
-                const lastIdx = old.length - 1;
-                if (old[lastIdx].timestamp === ts) {
-                  // Update last candle in place
-                  const updated = [...old];
-                  updated[lastIdx] = payload.candle!;
-                  return updated;
-                } else if (ts > old[lastIdx].timestamp) {
-                  // New candle after the last one
-                  const appended = [...old, payload.candle!];
-                  // Cap at 1000 candles to prevent unbounded growth
-                  return appended.length > 1000 ? appended.slice(-1000) : appended;
-                }
-                // Candle for an older timestamp — ignore
-                return old;
-              },
-            );
-          } else if (payload.type === "candles" && payload.data?.length) {
-            queryClient.setQueryData(
-              ["candles-status", srv, connector, pair, interval],
-              { status: "connected" },
-            );
-            // Merge candles by timestamp — keeps both old REST data and new WS data
-            queryClient.setQueryData(
-              ["candles", srv, connector, pair, interval],
-              (old: Record<string, number>[] | undefined) => {
-                if (!old?.length) return payload.data;
-                // Build a map from existing candles (keyed by timestamp)
-                const map = new Map<number, Record<string, number>>();
-                for (const c of old) map.set(c.timestamp, c);
-                // Merge incoming: newer data wins for same timestamp
-                let changed = false;
-                for (const c of payload.data!) {
-                  if (!map.has(c.timestamp)) {
-                    map.set(c.timestamp, c);
-                    changed = true;
-                  } else {
-                    // Update existing candle (WS may have more recent OHLCV)
-                    const existing = map.get(c.timestamp)!;
-                    if (
-                      existing.close !== c.close ||
-                      existing.high !== c.high ||
-                      existing.low !== c.low ||
-                      existing.volume !== c.volume
-                    ) {
-                      map.set(c.timestamp, c);
-                      changed = true;
-                    }
-                  }
-                }
-                if (!changed) return old;
-                // Sort by timestamp, cap at 1000 to prevent unbounded growth
-                const sorted = Array.from(map.values()).sort(
-                  (a, b) => a.timestamp - b.timestamp,
-                );
-                return sorted.length > 1000 ? sorted.slice(-1000) : sorted;
-              },
-            );
-          }
-        }
       }
     });
+
+    // Notify React immediately when WS connects (not via polling)
+    ws.onConnect(() => setWsVersion((v) => v + 1));
 
     ws.connect();
 
@@ -160,7 +91,7 @@ export function useCondorWebSocket(
       ws.subscribe(ch);
     }
 
-    // Poll for version changes to detect reconnects
+    // Poll as fallback for reconnects (in case onConnect misses edge cases)
     versionPoll = setInterval(() => {
       if (ws.version !== lastVersion) {
         lastVersion = ws.version;
