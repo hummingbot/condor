@@ -361,25 +361,28 @@ def _build_balance_table_compact(gateway_data: dict) -> str:
     return "\n".join(lines)
 
 
-async def handle_pool_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle CLMM pool list"""
+async def handle_pool_list(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector: str = "meteora"
+) -> None:
+    """Handle CLMM pool list for a specific connector"""
     # Get cached gateway balances (cached from /lp menu)
     gateway_data = get_cached(context.user_data, "gateway_balances", ttl=120)
     balance_table = _build_balance_table_compact(gateway_data)
 
+    connector_name = connector.capitalize()
     help_text = (
-        r"📋 *List CLMM Pools*" + "\n\n" + balance_table + r"Reply with:" + "\n\n"
+        rf"📋 *List {connector_name} Pools*" + "\n\n" + balance_table + r"Reply with:" + "\n\n"
         r"`[search_term] [limit]`" + "\n\n"
         r"*Examples:*" + "\n"
         r"`SOL 10`" + "\n"
-        r"`USDC 5`" + "\n\n"
-        r"_\(Uses Meteora connector\)_"
+        r"`USDC 5`" + "\n"
     )
 
     keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:liquidity")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pool_list"
+    context.user_data["pool_list_connector"] = connector
     # Store message for later editing with results
     context.user_data["pool_list_message_id"] = update.callback_query.message.message_id
     context.user_data["pool_list_chat_id"] = update.callback_query.message.chat_id
@@ -387,6 +390,13 @@ async def handle_pool_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.callback_query.message.edit_text(
         help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
+
+
+async def handle_pool_list_orca(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle Orca CLMM pool list"""
+    await handle_pool_list(update, context, connector="orca")
 
 
 def _format_number(value, decimals: int = 2) -> str:
@@ -632,8 +642,8 @@ async def process_pool_list(
         # Otherwise, search for pools
         parts = user_input.split()
 
-        # Always use meteora - only connector that supports pool listing
-        connector = "meteora"
+        # Use connector from context (set by handle_pool_list), default to meteora
+        connector = context.user_data.get("pool_list_connector", "meteora")
         search_term = parts[0] if len(parts) > 0 and parts[0] != "_" else None
         # Parse limit from user input (default 15, max 30 for display)
         requested_limit = int(parts[1]) if len(parts) > 1 else 15
@@ -690,6 +700,10 @@ async def process_pool_list(
 
         pools = result.get("pools", [])
 
+        # Add connector to each pool for later use
+        for pool in pools:
+            pool["connector"] = connector
+
         if not pools:
             message = escape_markdown_v2("📋 No pools found")
             context.user_data["pool_list_cache"] = []
@@ -721,9 +735,10 @@ async def process_pool_list(
             # Use actual pool count (active_pools or pools), not API total which may be inaccurate
             actual_total = len(active_pools) if active_pools else len(pools)
             search_info = f" for '{search_term}'" if search_term else ""
+            connector_name = connector.capitalize()
 
             header = (
-                rf"📋 *CLMM Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {actual_total}\)"
+                rf"📋 *{connector_name} Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {actual_total}\)"
                 + "\n\n"
             )
 

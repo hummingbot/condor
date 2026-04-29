@@ -86,6 +86,7 @@ from .pools import (
     handle_pool_info,
     handle_pool_list,
     handle_pool_list_back,
+    handle_pool_list_orca,
     handle_pool_ohlcv,
     handle_pool_select,
     handle_pos_add_confirm,
@@ -272,6 +273,7 @@ SIMPLE_ACTIONS: dict[str, HandlerFunc] = {
     # Pool
     "pool_info": handle_pool_info,
     "pool_list": handle_pool_list,
+    "pool_list_orca": handle_pool_list_orca,
     "pool_list_back": handle_pool_list_back,
     "pool_detail_refresh": handle_pool_detail_refresh,
     "add_to_gateway": handle_add_to_gateway,
