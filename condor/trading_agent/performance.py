@@ -44,7 +44,7 @@ def _extract_executors_list(result: Any) -> list[dict]:
 
 
 def _executor_row(ex: dict) -> dict[str, Any]:
-    from handlers.executors._shared import (
+    from condor.fetchers.executors import (
         get_executor_fees,
         get_executor_pnl,
         get_executor_volume,

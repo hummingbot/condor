@@ -400,14 +400,24 @@ async def update_controller_config(
         except yaml.YAMLError as e:
             raise HTTPException(status_code=400, detail=f"Invalid YAML: {e}")
 
+    is_full_replace = yaml_content is not None
+
     try:
         # Fetch existing config so we preserve controller_name/type/id
         existing = await client.controllers.get_controller_config(config_id)
         if not isinstance(existing, dict):
             raise HTTPException(status_code=404, detail="Config not found")
 
-        # Merge user edits into existing config
-        merged = {**existing, **body}
+        if is_full_replace:
+            # Full replacement: use parsed YAML as-is, only preserve identity fields
+            merged = {**body}
+            for key in ("id", "controller_name", "controller_type"):
+                if key in existing and key not in merged:
+                    merged[key] = existing[key]
+        else:
+            # Partial update: merge user edits into existing config
+            merged = {**existing, **body}
+
         merged["id"] = config_id  # ensure id stays consistent
 
         result = await client.controllers.create_or_update_controller_config(

@@ -45,3 +45,28 @@ async def token_login(req: TokenLoginRequest):
 @router.get("/auth/me", response_model=WebUser)
 async def me(user: WebUser = Depends(get_current_user)):
     return user
+
+
+# ── User preferences ──
+
+
+@router.get("/auth/preferences")
+async def get_preferences(user: WebUser = Depends(get_current_user)):
+    """Get all preferences for the current user."""
+    cm = get_config_manager()
+    return cm.get_user_preferences(user.id)
+
+
+class PreferencesUpdate(BaseModel):
+    updates: dict
+
+
+@router.patch("/auth/preferences")
+async def update_preferences(
+    body: PreferencesUpdate,
+    user: WebUser = Depends(get_current_user),
+):
+    """Merge preference updates for the current user."""
+    cm = get_config_manager()
+    cm.set_user_preferences(user.id, body.updates)
+    return cm.get_user_preferences(user.id)

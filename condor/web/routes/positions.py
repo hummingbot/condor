@@ -16,12 +16,19 @@ router = APIRouter(tags=["positions"])
 
 def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
     """Normalize a position dict to a common shape with source info."""
+    amount = pos.get("net_amount_base") or pos.get("amount") or 0
+    entry_price = pos.get("buy_breakeven_price") or pos.get("entry_price") or 0
+    try:
+        notional_value = abs(float(amount)) * float(entry_price)
+    except (ValueError, TypeError):
+        notional_value = 0
     return {
         "connector_name": pos.get("connector_name") or pos.get("connector") or "",
         "trading_pair": pos.get("trading_pair") or "",
         "position_side": pos.get("position_side") or pos.get("side") or "",
-        "amount": pos.get("net_amount_base") or pos.get("amount") or 0,
-        "entry_price": pos.get("buy_breakeven_price") or pos.get("entry_price") or 0,
+        "amount": amount,
+        "entry_price": entry_price,
+        "notional_value": notional_value,
         "current_price": pos.get("current_price") or 0,
         "unrealized_pnl": pos.get("unrealized_pnl_quote") or pos.get("unrealized_pnl") or 0,
         "leverage": pos.get("leverage") or 1,

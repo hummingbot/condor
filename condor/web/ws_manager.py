@@ -118,10 +118,13 @@ class WebSocketManager:
     WebSocket connections with dynamic per-channel buffering.
     """
 
+    _CANDLE_KEEP_ALIVE = 300  # 5-minute grace period before tearing down candle streams
+
     def __init__(self):
         self._connections: list[_Connection] = []
         self._last_data: dict[str, Any] = {}  # channel -> last broadcast payload
         self._candle_tasks: dict[str, asyncio.Task] = {}
+        self._candle_poll_tasks: dict[str, asyncio.Task] = {}
         self._trade_tasks: dict[str, asyncio.Task] = {}
         self._executor_tasks: dict[str, asyncio.Task] = {}
         self._order_book_tasks: dict[str, asyncio.Task] = {}
@@ -130,8 +133,14 @@ class WebSocketManager:
         self._sds_subscriptions: dict[str, Any] = {}
         # Candle buffers: channel -> _CandleBuffer (dynamic sizing)
         self._candle_buffers: dict[str, _CandleBuffer] = {}
+        # Deferred teardown timers for candle streams
+        self._candle_teardown_timers: dict[str, asyncio.TimerHandle] = {}
         # Periodic cleanup task
         self._cleanup_task: asyncio.Task | None = None
+        # Track last WS candle update time per channel (monotonic)
+        self._last_candle_ws_update: dict[str, float] = {}
+        # Track whether first message per channel has been logged
+        self._candle_first_msg_logged: set[str] = set()
 
     # -- Helpers --
 
@@ -187,10 +196,21 @@ class WebSocketManager:
         # Unsubscribe all SDS subscriptions
         self._cleanup_sds_subscriptions()
 
+        for handle in self._candle_teardown_timers.values():
+            handle.cancel()
+        self._candle_teardown_timers.clear()
+
         for task in self._candle_tasks.values():
             if not task.done():
                 task.cancel()
         self._candle_tasks.clear()
+
+        for task in self._candle_poll_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._candle_poll_tasks.clear()
+        self._last_candle_ws_update.clear()
+        self._candle_first_msg_logged.clear()
 
         for task in self._trade_tasks.values():
             if not task.done():
@@ -293,6 +313,7 @@ class WebSocketManager:
 
         if action == "subscribe" and channel:
             conn.channels.add(channel)
+            logger.info("WS subscribe: user=%s channel=%s", conn.user_id, channel)
             # Send last known data immediately (candles use buffer instead)
             if channel.startswith("candles:"):
                 duration = msg.get("duration")  # seconds, sent by frontend
@@ -343,6 +364,12 @@ class WebSocketManager:
         interval = parts[4]
         dur = int(duration) if duration else 3 * 86400  # default 3 days
 
+        # Cancel any pending teardown — a subscriber just came back
+        timer = self._candle_teardown_timers.pop(channel, None)
+        if timer is not None:
+            timer.cancel()
+            logger.debug("Cancelled pending candle teardown for %s", channel)
+
         buf = self._candle_buffers.get(channel)
         if buf is None:
             buf = _CandleBuffer(interval, dur)
@@ -360,28 +387,33 @@ class WebSocketManager:
         if sorted_candles:
             await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
 
+        # If the stream task is still running (kept alive during grace period), skip restart
         self._ensure_candle_stream(channel)
 
     async def _handle_candle_duration_change(
         self, conn: _Connection, channel: str, duration: int
     ) -> None:
-        """Handle duration change for an existing candle subscription."""
+        """Handle duration change for an existing candle subscription.
+
+        Only grows the buffer — never shrinks. The frontend manages its own
+        display window; the backend just ensures enough history is buffered.
+        """
         buf = self._candle_buffers.get(channel)
         if buf is None:
             return
         old_max = buf.max_size
+        # Only expand — skip if requested duration would shrink the buffer
+        interval_sec = _INTERVAL_SECONDS.get(buf.interval, 60)
+        needed = max(math.ceil(duration / interval_sec), 200)
+        if needed <= old_max:
+            return
         buf.set_duration(duration)
-        if buf.max_size > old_max and buf.needs_backfill:
-            # Backfill then send full snapshot to requesting client
+        if buf.needs_backfill:
             await self._backfill_candles(channel)
-            sorted_candles = buf.get_sorted()
-            if sorted_candles:
-                await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
-        else:
-            # Buffer already has enough data, just send snapshot
-            sorted_candles = buf.get_sorted()
-            if sorted_candles:
-                await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
+        # Broadcast updated snapshot to ALL subscribers on this channel
+        sorted_candles = buf.get_sorted()
+        if sorted_candles:
+            await self.broadcast(channel, {"type": "candles", "data": sorted_candles})
 
     async def _backfill_candles(self, channel: str) -> None:
         """Fetch historical candles to fill the buffer gap."""
@@ -495,9 +527,10 @@ class WebSocketManager:
     @staticmethod
     def _transform_executors(raw_data: Any) -> list[dict]:
         """Transform raw executor data to ExecutorInfo-compatible dicts for WS broadcast."""
-        from condor.web.routes.executors import _extract_executors_list, _build_executor_info
+        from condor.fetchers.executors import extract_executors_list
+        from condor.web.routes.executors import _build_executor_info
 
-        executors_list = _extract_executors_list(raw_data)
+        executors_list = extract_executors_list(raw_data)
         result = []
         for ex in executors_list:
             info = _build_executor_info(ex)
@@ -507,12 +540,13 @@ class WebSocketManager:
 
     def _on_data_update(self, server_name: str, cache_key: str, data_type: Any, value: Any) -> None:
         """Called by SDS when cache is updated. Maps to WS channels and broadcasts."""
-        prefix = _SDT_TO_CHANNEL_PREFIX.get(data_type.name)
+        dt_name = data_type.name if hasattr(data_type, "name") else str(data_type)
+        prefix = _SDT_TO_CHANNEL_PREFIX.get(dt_name)
         if not prefix:
             return
 
         # Build channel name
-        if data_type.name in ("CEX_PRICES", "PRICES"):
+        if dt_name in ("CEX_PRICES", "PRICES"):
             parts = cache_key.split(":")
             if len(parts) >= 3:
                 channel = f"prices:{server_name}:{parts[1]}:{parts[2]}"
@@ -560,13 +594,49 @@ class WebSocketManager:
         logger.info("Started candle stream for %s", channel)
 
     def _maybe_stop_candle_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        # If subscribers still exist, cancel any pending teardown and return
+        if any(channel in c.channels for c in self._connections):
+            timer = self._candle_teardown_timers.pop(channel, None)
+            if timer is not None:
+                timer.cancel()
+            return
+
+        # Already have a pending teardown scheduled — nothing to do
+        if channel in self._candle_teardown_timers:
+            return
+
+        # Schedule deferred teardown
+        loop = asyncio.get_event_loop()
+        handle = loop.call_later(
+            self._CANDLE_KEEP_ALIVE,
+            self._deferred_stop_candle_stream,
+            channel,
+        )
+        self._candle_teardown_timers[channel] = handle
+        logger.info(
+            "Scheduled candle stream teardown for %s in %ds",
+            channel, self._CANDLE_KEEP_ALIVE,
+        )
+
+    def _deferred_stop_candle_stream(self, channel: str) -> None:
+        """Actually tear down a candle stream after the grace period."""
+        self._candle_teardown_timers.pop(channel, None)
+
+        # Re-check: subscribers may have appeared during the grace period
+        if any(channel in c.channels for c in self._connections):
+            logger.debug("Candle teardown cancelled — subscribers returned for %s", channel)
+            return
+
         task = self._candle_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
-            logger.info("Stopped candle stream for %s", channel)
+            logger.info("Deferred candle stream teardown completed for %s", channel)
+        poll_task = self._candle_poll_tasks.pop(channel, None)
+        if poll_task and not poll_task.done():
+            poll_task.cancel()
+        self._last_candle_ws_update.pop(channel, None)
+        self._candle_first_msg_logged.discard(channel)
+        # NOTE: candle buffer is NOT deleted — the existing idle cleanup loop handles that
 
     async def _candle_stream(self, channel: str) -> None:
         parts = channel.split(":")
@@ -579,27 +649,37 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
+        # Start REST poll fallback alongside the WS stream
+        self._ensure_candle_poll_fallback(channel)
+
         while True:
             try:
                 client = await cm.get_client(server_name)
                 async with client.ws.market_data() as ws:
                     await ws.subscribe_candles(
                         connector, pair, interval=interval,
-                        max_records=500, update_interval=1.0,
+                        max_records=100, update_interval=1.0,
                     )
                     logger.info("Candle WS subscribed: %s", channel)
                     backoff = 5  # Reset on successful connection
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
-                            logger.info("No subscribers for %s, closing stream", channel)
-                            return
+                        # Log first message per channel at INFO for diagnostics
+                        if channel not in self._candle_first_msg_logged:
+                            self._candle_first_msg_logged.add(channel)
+                            logger.info(
+                                "Candle WS first message for %s: %s",
+                                channel,
+                                json.dumps(msg)[:500] if isinstance(msg, dict) else type(msg).__name__,
+                            )
+                        else:
+                            logger.debug("Candle WS raw msg keys for %s: %s", channel, list(msg.keys()) if isinstance(msg, dict) else type(msg).__name__)
 
-                        logger.debug("Candle WS raw msg keys for %s: %s", channel, list(msg.keys()) if isinstance(msg, dict) else type(msg).__name__)
                         msg_type = msg.get("type")
                         if msg_type == "candle_update":
                             raw = msg.get("data")
                             candle = self._normalize_candle(raw) if raw else None
                             if candle:
+                                self._last_candle_ws_update[channel] = time.monotonic()
                                 self._upsert_candle_buffer(channel, candle)
                                 await self.broadcast(
                                     channel,
@@ -612,6 +692,7 @@ class WebSocketManager:
                                 if (c := self._normalize_candle(r)) is not None
                             ]
                             if candles:
+                                self._last_candle_ws_update[channel] = time.monotonic()
                                 self._upsert_candle_buffer_many(channel, candles)
                                 await self.broadcast(
                                     channel,
@@ -642,6 +723,80 @@ class WebSocketManager:
                 await self.broadcast(channel, {"type": "error", "message": f"Connection lost, retrying in {backoff}s"})
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+    # -- Candle REST poll fallback --
+
+    def _ensure_candle_poll_fallback(self, channel: str) -> None:
+        """Start a REST poll fallback task for a candle channel if not already running."""
+        if channel in self._candle_poll_tasks and not self._candle_poll_tasks[channel].done():
+            return
+        self._candle_poll_tasks[channel] = asyncio.create_task(
+            self._candle_poll_fallback(channel)
+        )
+
+    async def _candle_poll_fallback(self, channel: str) -> None:
+        """Periodically poll REST for candles when WS stream goes silent."""
+        parts = channel.split(":")
+        if len(parts) < 5:
+            return
+        _, server_name, connector, pair, interval = parts
+        interval_sec = _INTERVAL_SECONDS.get(interval, 60)
+        stale_threshold = max(interval_sec, 15)
+        was_stale = False
+
+        from config_manager import get_config_manager
+
+        try:
+            while True:
+                await asyncio.sleep(stale_threshold)
+
+                last_update = self._last_candle_ws_update.get(channel)
+                if last_update is not None and (time.monotonic() - last_update) <= stale_threshold:
+                    if was_stale:
+                        logger.info("Candle WS stream resumed for %s, stopping REST fallback polling", channel)
+                        was_stale = False
+                    continue
+
+                # Stream is stale — poll REST
+                if not was_stale:
+                    logger.warning(
+                        "Candle WS stream appears stale for %s (threshold=%ds), polling REST fallback",
+                        channel, stale_threshold,
+                    )
+                    was_stale = True
+
+                try:
+                    cm = get_config_manager()
+                    client = await cm.get_client(server_name)
+                    result = await client.market_data.get_candles(
+                        connector, pair, interval, limit=5,
+                    )
+                    candles_raw = (
+                        result if isinstance(result, list)
+                        else result.get("data", []) if isinstance(result, dict)
+                        else []
+                    )
+                    candles = [
+                        c for r in candles_raw
+                        if (c := self._normalize_candle(r)) is not None
+                    ]
+                    if candles:
+                        buf = self._candle_buffers.get(channel)
+                        # Only broadcast if we got newer data than what's in the buffer
+                        newest_buf_ts = max(buf._data.keys()) if buf and buf._data else 0
+                        newest_poll_ts = max(c["timestamp"] for c in candles)
+                        if newest_poll_ts > newest_buf_ts:
+                            self._upsert_candle_buffer_many(channel, candles)
+                            await self.broadcast(
+                                channel,
+                                {"type": "candles", "data": candles},
+                            )
+                            logger.debug("REST fallback delivered %d candles for %s", len(candles), channel)
+                except Exception as e:
+                    logger.debug("REST candle poll failed for %s: %s", channel, e)
+
+        except asyncio.CancelledError:
+            return
 
 
     # -- Trade streaming --
@@ -898,7 +1053,7 @@ class WebSocketManager:
         # Progressive pre-fetch only if we still have no data
         if channel not in self._last_data:
             try:
-                from condor.web.routes.executors import _extract_executors_list
+                from condor.fetchers.executors import extract_executors_list as _extract_executors_list
 
                 sds = get_server_data_service()
                 client = await cm.get_client(server_name)
