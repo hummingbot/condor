@@ -448,8 +448,16 @@ def _format_pool_table(pools: list) -> str:
 
     for i, pool in enumerate(pools):
         idx = str(i + 1)
-        # Truncate pair to 11 chars
-        pair = pool.get("trading_pair", "N/A")[:11]
+        # Format pair to fit 11 chars - abbreviate base token if needed, keep quote
+        full_pair = pool.get("trading_pair", "N/A")
+        if "-" in full_pair and len(full_pair) > 11:
+            base, quote = full_pair.rsplit("-", 1)
+            max_base_len = 11 - len(quote) - 1  # -1 for the dash
+            if max_base_len > 2:
+                base = base[:max_base_len-1] + "…"
+            pair = f"{base}-{quote}"[:11]
+        else:
+            pair = full_pair[:11]
 
         # Get TVL value
         tvl_val = 0
