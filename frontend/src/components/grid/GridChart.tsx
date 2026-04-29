@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 
-import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type CandleData, type ConsolidatedPosition } from "@/lib/api";
+import { useCandleStore } from "@/hooks/useCandleStore";
+import { api, type ConsolidatedPosition } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
+import type { CondorWebSocket } from "@/lib/websocket";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 
@@ -14,6 +15,8 @@ interface GridChartProps {
   pair: string;
   interval: string;
   lookbackSeconds: number;
+  wsRef: MutableRefObject<CondorWebSocket | null>;
+  wsVersion: number;
   startPrice: number;
   endPrice: number;
   limitPrice: number;
@@ -44,6 +47,8 @@ export function GridChart({
   pair,
   interval,
   lookbackSeconds,
+  wsRef,
+  wsVersion,
   startPrice,
   endPrice,
   limitPrice,
@@ -57,11 +62,14 @@ export function GridChart({
   positions,
 }: GridChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
   const initializedRef = useRef(false);
   const crosshairPriceRef = useRef<number | null>(null);
+  const overlaysRef = useRef<ExecutorOverlay[]>([]);
+  const [chartReady, setChartReady] = useState(false);
 
   // Price line refs
   const startLineRef = useRef<import("lightweight-charts").IPriceLine | null>(null);
@@ -73,23 +81,45 @@ export function GridChart({
   const overlayPriceLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
 
-  const channel = `candles:${server}:${connector}:${pair}:${interval}`;
-  const channels = useMemo(() => [channel], [channel]);
-  const { wsRef, wsVersion } = useCondorWebSocket(channels, server);
+  // ── Wire parent WS to candle store ──
+  useEffect(() => {
+    candleStore.setWs(wsRef.current);
+  }, [wsRef.current, wsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const startTime = useMemo(
-    () => Math.floor(Date.now() / 1000) - lookbackSeconds,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [lookbackSeconds, pair, interval],
-  );
+  // ── Candle data from the singleton store (WS live + cached) ──
+  const { candles, mergeCandles, setDuration } = useCandleStore(server, connector, pair, interval);
 
-  const { data: candles } = useQuery({
-    queryKey: ["candles", server, connector, pair, interval],
-    queryFn: () => api.getCandles(server, connector, pair, interval, 5000, startTime),
-    staleTime: Infinity, // WS handles freshness
-  });
+  // ── REST backfill on pair/interval/lookback change ──
+  const backfillKeyRef = useRef("");
+  useEffect(() => {
+    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}`;
+    if (backfillKey === backfillKeyRef.current) return;
+    backfillKeyRef.current = backfillKey;
 
-  // Initialize chart
+    setDuration(lookbackSeconds);
+
+    let cancelled = false;
+    const startTime = Math.floor(Date.now() / 1000) - lookbackSeconds;
+
+    const fetchWithRetry = (attempt: number) => {
+      if (cancelled) return;
+      api
+        .getCandles(server, connector, pair, interval, 5000, startTime)
+        .then((fetched) => {
+          if (!cancelled && fetched?.length) mergeCandles(fetched);
+        })
+        .catch(() => {
+          if (!cancelled && attempt < 2) {
+            setTimeout(() => fetchWithRetry(attempt + 1), 2000 * (attempt + 1));
+          }
+        });
+    };
+    fetchWithRetry(0);
+
+    return () => { cancelled = true; };
+  }, [server, connector, pair, interval, lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Initialize chart ONCE ──
   useEffect(() => {
     let cancelled = false;
     import("lightweight-charts").then((mod) => {
@@ -107,9 +137,7 @@ export function GridChart({
           vertLines: { color: colors.grid },
           horzLines: { color: colors.grid },
         },
-        crosshair: {
-          mode: mod.CrosshairMode.Normal,
-        },
+        crosshair: { mode: mod.CrosshairMode.Normal },
         timeScale: { timeVisible: true, secondsVisible: false },
       });
       chartRef.current = chart;
@@ -125,27 +153,113 @@ export function GridChart({
         }),
       });
       seriesRef.current = series;
+      setChartReady(true);
 
-      // Track crosshair price
+      // Track crosshair price for click-to-set + executor tooltip
       chart.subscribeCrosshairMove((param) => {
         if (!param.point || !param.seriesData) {
           crosshairPriceRef.current = null;
+          if (tooltipRef.current) tooltipRef.current.style.display = "none";
           return;
         }
         const data = param.seriesData.get(series);
         if (data && "close" in data) {
           crosshairPriceRef.current = (data as { close: number }).close;
         } else if (param.point.y !== undefined) {
-          // Use coordinate-to-price conversion
           const price = series.coordinateToPrice(param.point.y);
           if (price !== null) {
             crosshairPriceRef.current = price as number;
           }
         }
+
+        // Executor tooltip
+        const tooltip = tooltipRef.current;
+        if (!tooltip || !containerRef.current) return;
+
+        const crosshairTime = typeof param.time === "number" ? param.time : 0;
+        if (!crosshairTime || !param.point || param.point.x < 0 || param.point.y < 0) {
+          tooltip.style.display = "none";
+          return;
+        }
+
+        const cursorY = param.point.y;
+        let bestOverlay: ExecutorOverlay | null = null;
+        let bestDist = Infinity;
+
+        for (const overlay of overlaysRef.current) {
+          const box = overlay.gridBox;
+          if (box) {
+            const t1 = box.startTime > 1e12 ? Math.floor(box.startTime / 1000) : box.startTime;
+            const t2 = box.endTime > 1e12 ? Math.floor(box.endTime / 1000) : box.endTime;
+            if (crosshairTime < t1 - 60 || crosshairTime > t2 + 60) continue;
+            const topY = series.priceToCoordinate(Math.max(box.startPrice, box.endPrice));
+            const botY = series.priceToCoordinate(Math.min(box.startPrice, box.endPrice));
+            if (topY === null || botY === null) continue;
+            const minY = Math.min(topY, botY);
+            const maxY = Math.max(topY, botY);
+            const dist = cursorY >= minY && cursorY <= maxY ? 0 : Math.min(Math.abs(cursorY - minY), Math.abs(cursorY - maxY));
+            if (dist < bestDist && dist < 30) {
+              bestDist = dist;
+              bestOverlay = overlay;
+            }
+            continue;
+          }
+
+          const seg = overlay.segment;
+          if (!seg) continue;
+          const entryT = seg.entryTime > 1e12 ? Math.floor(seg.entryTime / 1000) : seg.entryTime;
+          const exitT = seg.exitTime > 1e12 ? Math.floor(seg.exitTime / 1000) : seg.exitTime;
+          if (crosshairTime < entryT - 60 || crosshairTime > exitT + 60) continue;
+          const tFrac = exitT === entryT ? 0.5 : (crosshairTime - entryT) / (exitT - entryT);
+          const expectedPrice = seg.entryPrice + tFrac * (seg.exitPrice - seg.entryPrice);
+          const priceY = series.priceToCoordinate(expectedPrice);
+          if (priceY === null) continue;
+          const dist = Math.abs(cursorY - priceY);
+          if (dist < bestDist && dist < 30) {
+            bestDist = dist;
+            bestOverlay = overlay;
+          }
+        }
+
+        if (!bestOverlay) {
+          tooltip.style.display = "none";
+          return;
+        }
+
+        const o = bestOverlay;
+        const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
+        const pnlSign = o.pnl >= 0 ? "+" : "";
+        const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
+        const pctStr = o.pnlPct !== 0 ? ` (${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%)` : "";
+
+        let detailLine = "";
+        if (o.segment) {
+          detailLine = `<div style="color:#9ca3af;font-size:10px">Entry: ${o.segment.entryPrice.toPrecision(6)} → Exit: ${o.segment.exitPrice.toPrecision(6)}</div>`;
+        } else if (o.gridBox) {
+          detailLine = `<div style="color:#9ca3af;font-size:10px">Range: ${o.gridBox.startPrice.toPrecision(6)} – ${o.gridBox.endPrice.toPrecision(6)}</div>`;
+        }
+
+        tooltip.innerHTML = `
+          <div style="font-weight:600;margin-bottom:2px">${o.executorId.slice(0, 8)}… · ${o.type.toUpperCase()} ${o.side.toUpperCase()}</div>
+          <div style="color:${pnlClr}">${pnlStr}${pctStr}</div>
+          ${detailLine}
+          <div style="color:#9ca3af;font-size:10px">${o.status} · ${o.closeType || "—"}</div>
+        `;
+        tooltip.style.display = "block";
+
+        const containerRect = containerRef.current.getBoundingClientRect();
+        let left = param.point.x + 16;
+        if (left + 200 > containerRect.width) left = param.point.x - 210;
+        let top = param.point.y - 10;
+        if (top < 0) top = 4;
+
+        tooltip.style.left = `${left}px`;
+        tooltip.style.top = `${top}px`;
       });
     });
     return () => {
       cancelled = true;
+      setChartReady(false);
       if (chartRef.current) {
         chartRef.current.remove();
         chartRef.current = null;
@@ -161,79 +275,51 @@ export function GridChart({
     };
   }, []);
 
-  // Handle WebSocket candle data (both bulk history and live updates)
+  // ── Push candle data to chart ──
   useEffect(() => {
-    const currentWs = wsRef.current;
-    if (!currentWs) return;
+    if (!chartReady || !seriesRef.current || !candles.length) return;
 
-    const removeHandler = currentWs.onMessage((msgChannel: string, data: unknown) => {
-      if (msgChannel !== channel || !seriesRef.current) return;
-
-      const payload = data as {
-        type: string;
-        candle?: CandleData;
-        data?: CandleData[];
-      };
-
-      if (payload.type === "candle_update" && payload.candle) {
-        const c = payload.candle;
-        const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-        seriesRef.current.update({
-          time: ts as import("lightweight-charts").UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        });
-      } else if (payload.type === "candles" && payload.data?.length) {
-        // Bulk candle data (pre-fetch broadcast or batch update)
-        const mapped = payload.data.map((c) => {
-          const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-          return {
-            time: ts as import("lightweight-charts").UTCTimestamp,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-          };
-        });
-        // Always use update() for WS messages to avoid replacing REST data
-        for (const bar of mapped) {
-          seriesRef.current.update(bar);
-        }
-      }
-    });
-
-    return removeHandler;
-  }, [channel, wsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Set initial candle data from REST query
-  useEffect(() => {
-    if (!seriesRef.current || !candles?.length || !chartModuleRef.current) return;
-
-    const mapped = candles.map((c) => {
-      const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-      return {
-        time: ts as import("lightweight-charts").UTCTimestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      };
-    });
+    const mapped = candles.map((c) => ({
+      time: c.timestamp as import("lightweight-charts").UTCTimestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
     seriesRef.current.setData(mapped);
+
     if (!initializedRef.current) {
       chartRef.current?.timeScale().fitContent();
       initializedRef.current = true;
     }
-  }, [candles]);
+  }, [candles, chartReady]);
 
-  // Reset on pair/interval change
+  // ── Real-time last candle update via candle store listener ──
+  useEffect(() => {
+    if (!chartReady || !seriesRef.current) return;
+    const key = `candles:${server}:${connector}:${pair}:${interval}`;
+
+    const removeListener = candleStore.onUpdate(key, (updated) => {
+      if (!seriesRef.current || !updated.length) return;
+      const last = updated[updated.length - 1];
+      seriesRef.current.update({
+        time: last.timestamp as import("lightweight-charts").UTCTimestamp,
+        open: last.open,
+        high: last.high,
+        low: last.low,
+        close: last.close,
+      });
+    });
+
+    return removeListener;
+  }, [chartReady, server, connector, pair, interval]);
+
+  // ── Reset auto-fit on pair/interval/range change ──
   useEffect(() => {
     initializedRef.current = false;
-  }, [pair, interval]);
+  }, [pair, interval, lookbackSeconds]);
 
-  // Update price precision when it changes
+  // ── Update price precision ──
   useEffect(() => {
     if (!seriesRef.current || pricePrecision == null) return;
     seriesRef.current.applyOptions({
@@ -241,7 +327,7 @@ export function GridChart({
     });
   }, [pricePrecision]);
 
-  // Update price lines
+  // ── Price lines (start/end/limit/grid levels/extras) ──
   useEffect(() => {
     const series = seriesRef.current;
     const mod = chartModuleRef.current;
@@ -256,7 +342,6 @@ export function GridChart({
     }
     gridLinesRef.current = [];
 
-    // Start price line
     if (startPrice > 0) {
       startLineRef.current = series.createPriceLine({
         price: startPrice,
@@ -268,7 +353,6 @@ export function GridChart({
       });
     }
 
-    // End price line
     if (endPrice > 0) {
       endLineRef.current = series.createPriceLine({
         price: endPrice,
@@ -280,7 +364,6 @@ export function GridChart({
       });
     }
 
-    // Limit price line
     if (limitPrice > 0) {
       const limitColor = side === 1 ? "#ef4444" : "#f97316";
       limitLineRef.current = series.createPriceLine({
@@ -305,11 +388,8 @@ export function GridChart({
       const stepSize = startPrice * minSpread;
       if (stepSize > 0) {
         const numLevels = Math.floor(range / stepSize);
-        // Only draw grid lines if there's a reasonable number (2-200)
-        // Skip if too many (would clutter) or too few
         if (numLevels >= 2 && numLevels <= 200) {
           const maxDraw = Math.min(numLevels, 50);
-          // If more levels than we can draw, sample evenly
           const drawStep = numLevels > maxDraw ? numLevels / maxDraw : 1;
           for (let idx = 0; idx < maxDraw; idx++) {
             const i = Math.round((idx + 1) * drawStep);
@@ -351,20 +431,18 @@ export function GridChart({
     }
   }, [startPrice, endPrice, limitPrice, side, minSpread, activePickField, extraLines]);
 
-  // Render executor overlays as line series
+  // ── Executor overlays ──
   useEffect(() => {
     const chart = chartRef.current;
     const series = seriesRef.current;
     const mod = chartModuleRef.current;
     if (!chart || !mod) return;
 
-    // Clean up old overlay series
     for (const s of overlaySeriesRef.current) {
       try { chart.removeSeries(s); } catch { /* ok */ }
     }
     overlaySeriesRef.current = [];
 
-    // Clean up old overlay price lines
     if (series) {
       for (const pl of overlayPriceLinesRef.current) {
         try { series.removePriceLine(pl); } catch { /* ok */ }
@@ -379,7 +457,6 @@ export function GridChart({
     executorOverlays.forEach((overlay, idx) => {
       const color = isMulti ? getExecutorColor(idx, overlay.pnl) : undefined;
 
-      // Grid executor → draw a box
       const box = overlay.gridBox;
       if (box) {
         const boxColor = color ?? box.color;
@@ -402,7 +479,6 @@ export function GridChart({
         }
 
         try {
-          // Top edge
           const top = chart.addSeries(mod.LineSeries, {
             color: boxColor, lineWidth: 2,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -413,7 +489,6 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(top);
 
-          // Bottom edge — dashed
           const bottom = chart.addSeries(mod.LineSeries, {
             color: boxColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -424,7 +499,6 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(bottom);
 
-          // Left edge
           const left = chart.addSeries(mod.LineSeries, {
             color: boxColor, lineWidth: 1,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -435,7 +509,6 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(left);
 
-          // Right edge
           const right = chart.addSeries(mod.LineSeries, {
             color: boxColor, lineWidth: 1,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -446,7 +519,6 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(right);
 
-          // Limit price line
           if (box.limitPrice) {
             const limit = chart.addSeries(mod.LineSeries, {
               color: "#ef4444", lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
@@ -462,7 +534,6 @@ export function GridChart({
         return;
       }
 
-      // Position/order/generic executor → segment line
       const seg = overlay.segment;
       if (!seg) return;
 
@@ -470,7 +541,6 @@ export function GridChart({
       const entryT = seg.entryTime > 1e12 ? Math.floor(seg.entryTime / 1000) : seg.entryTime;
       const exitT = seg.exitTime > 1e12 ? Math.floor(seg.exitTime / 1000) : seg.exitTime;
 
-      // Order executors: solid line when active, dashed otherwise
       const isOrderActive = overlay.type === "order" && (overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active");
       const lineStyle = isOrderActive ? mod.LineStyle.Solid : mod.LineStyle.Dashed;
 
@@ -485,7 +555,7 @@ export function GridChart({
       overlaySeriesRef.current.push(lineSeries);
     });
 
-    // Render full-width price lines for active executor overlays (e.g. running limit orders)
+    // Full-width price lines for active executors
     if (series && executorOverlays?.length) {
       const styleMap: Record<string, number> = {
         solid: mod.LineStyle.Solid,
@@ -511,22 +581,17 @@ export function GridChart({
     }
   }, [executorOverlays]);
 
-  // Auto-fit when overlays change so they're always visible
+  // Keep overlaysRef in sync for tooltip
   useEffect(() => {
-    const chart = chartRef.current;
-    if (!chart || !executorOverlays?.length) return;
-    // Slight delay to let overlay series data settle
-    const timer = setTimeout(() => chart.timeScale().fitContent(), 50);
-    return () => clearTimeout(timer);
+    overlaysRef.current = executorOverlays ?? [];
   }, [executorOverlays]);
 
-  // Render position hold lines as horizontal price lines
+  // ── Position hold lines ──
   useEffect(() => {
     const series = seriesRef.current;
     const mod = chartModuleRef.current;
     if (!series || !mod) return;
 
-    // Remove old position lines
     for (const pl of positionLinesRef.current) {
       try { series.removePriceLine(pl); } catch { /* ok */ }
     }
@@ -557,7 +622,7 @@ export function GridChart({
     }
   }, [positions]);
 
-  // Handle click-to-set price
+  // ── Click-to-set price ──
   const handleClick = () => {
     if (!activePickField || crosshairPriceRef.current === null) return;
     onPriceSet(activePickField, crosshairPriceRef.current);
@@ -577,12 +642,36 @@ export function GridChart({
           </span>
         )}
       </div>
-      <div
-        ref={containerRef}
-        className="flex-1"
-        style={{ cursor: activePickField ? "crosshair" : "default" }}
-        onClick={handleClick}
-      />
+      <div className="relative flex-1">
+        <div
+          ref={containerRef}
+          className="absolute inset-0"
+          style={{ cursor: activePickField ? "crosshair" : "default" }}
+          onClick={handleClick}
+        />
+        {/* Executor tooltip overlay */}
+        <div
+          ref={tooltipRef}
+          style={{
+            display: "none",
+            position: "absolute",
+            top: 0,
+            left: 0,
+            zIndex: 10,
+            pointerEvents: "none",
+            background: "rgba(15, 21, 37, 0.95)",
+            border: "1px solid rgba(107, 121, 148, 0.3)",
+            borderRadius: 6,
+            padding: "6px 10px",
+            fontSize: 11,
+            color: "#e2e8f0",
+            maxWidth: 220,
+            whiteSpace: "nowrap",
+            lineHeight: 1.4,
+            backdropFilter: "blur(8px)",
+          }}
+        />
+      </div>
     </div>
   );
 }

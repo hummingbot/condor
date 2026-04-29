@@ -265,7 +265,6 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
       dispatch({ type: "SET_FIELD", field: "end_price", value: parseFloat(end.toPrecision(6)) });
       dispatch({ type: "SET_FIELD", field: "limit_price", value: parseFloat(limit.toPrecision(6)) });
     }
-    dispatch({ type: "SET_FIELD", field: "open_order_type", value: 1 });
   };
 
   const perLevel = validation.levels > 0 ? state.total_amount_quote / validation.levels : 0;
