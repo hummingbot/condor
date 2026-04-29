@@ -20,7 +20,8 @@ import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 
 import { useServer } from "@/hooks/useServer";
-import { api, type BotSummary, type ControllerInfo } from "@/lib/api";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import { api, type BotLogEntry, type BotSummary, type ControllerInfo } from "@/lib/api";
 
 // ── Formatters ──
 
@@ -273,11 +274,83 @@ function PositionCard({ pos }: { pos: Record<string, unknown> }) {
   );
 }
 
+function formatLogTime(ts?: number): string {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function LogsSection({ logs }: { logs: BotLogEntry[] }) {
+  const [filter, setFilter] = useState<"all" | "error" | "general">("all");
+  const filtered = filter === "all" ? logs : logs.filter((l) => l.log_category === filter);
+
+  if (logs.length === 0) {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)] py-2">No logs available</p>
+    );
+  }
+
+  const errorCount = logs.filter((l) => l.log_category === "error").length;
+  const generalCount = logs.filter((l) => l.log_category === "general").length;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1.5">
+        {(["all", "general", "error"] as const).map((f) => {
+          const count = f === "all" ? logs.length : f === "error" ? errorCount : generalCount;
+          return (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+                filter === f
+                  ? f === "error"
+                    ? "bg-[var(--color-red)]/15 text-[var(--color-red)]"
+                    : "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              {f} ({count})
+            </button>
+          );
+        })}
+      </div>
+      <div className="max-h-[300px] overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] font-mono text-[11px] leading-relaxed">
+        {filtered.map((log, i) => (
+          <div
+            key={i}
+            className={`flex gap-2 px-2.5 py-1 border-b border-[var(--color-border)]/20 last:border-b-0 ${
+              log.log_category === "error" ? "bg-[var(--color-red)]/5" : ""
+            }`}
+          >
+            <span className="text-[var(--color-text-muted)] shrink-0 tabular-nums">
+              {formatLogTime(log.timestamp)}
+            </span>
+            <span
+              className={`break-all ${
+                log.log_category === "error" ? "text-[var(--color-red)]" : "text-[var(--color-text)]"
+              }`}
+            >
+              {log.msg || JSON.stringify(log)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DetailPanel({
   ctrl,
+  bots,
   onClose,
 }: {
   ctrl: ControllerInfo;
+  bots: BotSummary[];
   onClose: () => void;
 }) {
   const [panelWidth, setPanelWidth] = useState(480);
@@ -444,6 +517,24 @@ function DetailPanel({
               />
             </div>
           )}
+
+          {/* Bot Logs */}
+          {(() => {
+            const bot = bots.find((b) => b.bot_name === ctrl.bot_name);
+            if (!bot) return null;
+            const allLogs: BotLogEntry[] = [
+              ...(bot.error_logs || []).map((l) => ({ ...l, log_category: "error" as const })),
+              ...(bot.general_logs || []).map((l) => ({ ...l, log_category: "general" as const })),
+            ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+            return (
+              <div className="space-y-2">
+                <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                  Bot Logs ({ctrl.bot_name})
+                </h3>
+                <LogsSection logs={allLogs} />
+              </div>
+            );
+          })()}
         </div>
       </div>
     </>
@@ -538,18 +629,23 @@ function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
 
 // ── Main Page ──
 
+const BOTS_WS_CHANNELS = ["bots"];
+
 export function ActiveBotsTab() {
   const { server } = useServer();
   const [sortKey, setSortKey] = useState<SortKey>("global_pnl_quote");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [selectedController, setSelectedController] = useState<ControllerInfo | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showDeploy, setShowDeploy] = useState(false);
+
+  // Subscribe to real-time bots updates via WS
+  useCondorWebSocket(BOTS_WS_CHANNELS, server);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["bots", server],
     queryFn: () => api.getBots(server!),
     enabled: !!server,
-    refetchInterval: 10000,
+    refetchInterval: 30000, // Slower polling since WS handles real-time updates
   });
 
   const handleSort = (key: SortKey) => {
@@ -563,6 +659,11 @@ export function ActiveBotsTab() {
 
   const controllers = data?.controllers ?? [];
   const bots = data?.bots ?? [];
+
+  // Derive live controller from latest data instead of stale snapshot
+  const selectedController = selectedKey
+    ? controllers.find((c) => `${c.bot_name}-${c.controller_name}` === selectedKey) ?? null
+    : null;
 
   const sortedControllers = useMemo(
     () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
@@ -656,14 +757,13 @@ export function ActiveBotsTab() {
                   </thead>
                   <tbody>
                     {sortedControllers.map((ctrl) => {
-                      const isSelected =
-                        selectedController?.controller_name === ctrl.controller_name &&
-                        selectedController?.bot_name === ctrl.bot_name;
+                      const ctrlKey = `${ctrl.bot_name}-${ctrl.controller_name}`;
+                      const isSelected = selectedKey === ctrlKey;
                       return (
                         <tr
-                          key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                          key={ctrlKey}
                           className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
-                          onClick={() => setSelectedController(ctrl)}
+                          onClick={() => setSelectedKey(ctrlKey)}
                         >
                           <td className="px-4 py-2.5">
                             <div className="flex flex-col">
@@ -726,7 +826,7 @@ export function ActiveBotsTab() {
 
       {/* Side panel */}
       {selectedController && (
-        <DetailPanel ctrl={selectedController} onClose={() => setSelectedController(null)} />
+        <DetailPanel ctrl={selectedController} bots={bots} onClose={() => setSelectedKey(null)} />
       )}
 
       {/* Deploy dialog */}

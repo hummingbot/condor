@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/lib/auth";
+import type { BotsPageResponse, ControllerInfo } from "@/lib/api";
 import { CondorWebSocket } from "@/lib/websocket";
 
 export function useCondorWebSocket(
@@ -52,7 +53,41 @@ export function useCondorWebSocket(
       if (prefix === "portfolio") {
         queryClient.setQueryData(["portfolio", server], data);
       } else if (prefix === "bots") {
-        queryClient.setQueryData(["bots", server], data);
+        // Merge WS update with existing cache to preserve config/deployed_at from REST
+        queryClient.setQueryData(["bots", server], (old: BotsPageResponse | undefined) => {
+          const incoming = data as BotsPageResponse;
+          if (!incoming?.controllers) return old ?? data;
+          if (!old?.controllers?.length) return incoming;
+
+          // Build lookup of existing controllers by key for config/deployed_at
+          const oldMap = new Map<string, ControllerInfo>();
+          for (const c of old.controllers) {
+            oldMap.set(`${c.bot_name}-${c.controller_name}`, c);
+          }
+          const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
+
+          return {
+            ...incoming,
+            controllers: incoming.controllers.map((c) => {
+              const prev = oldMap.get(`${c.bot_name}-${c.controller_name}`);
+              if (!prev) return c;
+              return {
+                ...c,
+                // Preserve rich data from REST fetch
+                config: Object.keys(c.config || {}).length ? c.config : prev.config,
+                deployed_at: c.deployed_at ?? prev.deployed_at,
+                connector: c.connector || prev.connector,
+                trading_pair: c.trading_pair || prev.trading_pair,
+                controller_name: prev.controller_name || c.controller_name,
+                controller_id: prev.controller_id || c.controller_id,
+              };
+            }),
+            bots: incoming.bots.map((b) => {
+              const prev = oldBotMap.get(b.bot_name);
+              return { ...b, deployed_at: b.deployed_at ?? prev?.deployed_at ?? null };
+            }),
+          };
+        });
       } else if (prefix === "executors") {
         // Set unfiltered cache (matches default queryKey with status="")
         queryClient.setQueryData(["executors", server, ""], data);

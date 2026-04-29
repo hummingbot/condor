@@ -12,7 +12,6 @@ import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
 import { Executors } from "@/pages/Executors";
 import { Login } from "@/pages/Login";
-import { MarketData } from "@/pages/MarketData";
 import { Portfolio } from "@/pages/Portfolio";
 import { Routines } from "@/pages/Routines";
 
@@ -68,7 +67,7 @@ export default function App() {
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/agents" element={<Agents />} />
                 <Route path="/agents/:slug" element={<AgentDetail />} />
-                <Route path="/market" element={<MarketData />} />
+                <Route path="/market" element={<Navigate to="/trade" replace />} />
               </Route>
             </Routes>
           </BrowserRouter>

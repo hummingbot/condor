@@ -94,12 +94,21 @@ export interface ControllerInfo {
   config: Record<string, unknown>;
 }
 
+export interface BotLogEntry {
+  timestamp?: number;
+  msg?: string;
+  log_category?: string;
+  [key: string]: unknown;
+}
+
 export interface BotSummary {
   bot_name: string;
   status: string;
   num_controllers: number;
   error_count: number;
   deployed_at: string | null;
+  error_logs: BotLogEntry[];
+  general_logs: BotLogEntry[];
 }
 
 export interface BotsPageResponse {

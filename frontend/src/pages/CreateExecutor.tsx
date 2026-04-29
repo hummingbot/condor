@@ -4,17 +4,21 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowUpDown,
+  BarChart3,
   CheckCircle,
   Grid3X3,
   Layers,
   Loader2,
   Rocket,
+  Settings2,
   TrendingUp,
 } from "lucide-react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
+import { TradingRulesInfo } from "@/components/market/TradingRulesInfo";
+import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { GridChart } from "@/components/grid/GridChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
@@ -197,6 +201,7 @@ export function CreateExecutor() {
   const isSpot = isSpotConnector(connector);
 
   const [successId, setSuccessId] = useState<string | null>(null);
+  const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
 
   const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],
@@ -275,6 +280,11 @@ export function CreateExecutor() {
     if (inc >= 1) return 0;
     return Math.max(0, Math.ceil(-Math.log10(inc)));
   }, [rulesData, pair]);
+
+  const selectedRule = useMemo(
+    () => rulesData?.rules?.find((r) => r.trading_pair === pair),
+    [rulesData, pair],
+  );
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
@@ -494,6 +504,7 @@ export function CreateExecutor() {
               positions={mainPositions}
             />
           </div>
+          <TradingRulesInfo rule={selectedRule} />
           <TradeBottomPane
             executors={mainExecutors}
             positions={mainPositions}
@@ -503,62 +514,94 @@ export function CreateExecutor() {
 
         {/* Right Panel */}
         <div className="flex w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
-          {/* Type Tabs */}
-          <div className="border-b border-[var(--color-border)]">
-            <div className="flex">
-              {TYPE_TABS.map((tab) => (
-                <button
-                  key={tab.value}
-                  onClick={() => handleTypeChange(tab.value)}
-                  className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
-                    executorType === tab.value
-                      ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                  }`}
-                >
-                  {tab.icon}
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Config Panel */}
-          <div className="flex-1 overflow-y-auto">
-            {executorType === "grid" && (
-              <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
-            )}
-            {executorType === "position" && (
-              <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-            )}
-            {executorType === "order" && (
-              <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-            )}
-            {executorType === "dca" && (
-              <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-            )}
-          </div>
-
-          {/* Sticky Create Footer */}
-          <div className="border-t border-[var(--color-border)] p-3">
-            {!activeValidation.valid && (
-              <p className="mb-2 text-[11px] text-[var(--color-red)]">
-                {activeValidation.errors[0]}
-              </p>
-            )}
+          {/* Panel Mode Toggle */}
+          <div className="flex border-b border-[var(--color-border)]">
             <button
-              onClick={() => createMutation.mutate()}
-              disabled={!activeValidation.valid || createMutation.isPending}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => setRightPanel("config")}
+              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
+                rightPanel === "config"
+                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
             >
-              {createMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Rocket className="h-4 w-4" />
-              )}
-              Create {TYPE_LABELS[executorType]}
+              <Settings2 className="h-3.5 w-3.5" />
+              Config
+            </button>
+            <button
+              onClick={() => setRightPanel("depth")}
+              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
+                rightPanel === "depth"
+                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              <BarChart3 className="h-3.5 w-3.5" />
+              Depth
             </button>
           </div>
+
+          {rightPanel === "config" ? (
+            <>
+              {/* Type Tabs */}
+              <div className="border-b border-[var(--color-border)]">
+                <div className="flex">
+                  {TYPE_TABS.map((tab) => (
+                    <button
+                      key={tab.value}
+                      onClick={() => handleTypeChange(tab.value)}
+                      className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
+                        executorType === tab.value
+                          ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                      }`}
+                    >
+                      {tab.icon}
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Config Panel */}
+              <div className="flex-1 overflow-y-auto">
+                {executorType === "grid" && (
+                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
+                )}
+                {executorType === "position" && (
+                  <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+                {executorType === "order" && (
+                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+                {executorType === "dca" && (
+                  <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+              </div>
+
+              {/* Sticky Create Footer */}
+              <div className="border-t border-[var(--color-border)] p-3">
+                {!activeValidation.valid && (
+                  <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                    {activeValidation.errors[0]}
+                  </p>
+                )}
+                <button
+                  onClick={() => createMutation.mutate()}
+                  disabled={!activeValidation.valid || createMutation.isPending}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {createMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Rocket className="h-4 w-4" />
+                  )}
+                  Create {TYPE_LABELS[executorType]}
+                </button>
+              </div>
+            </>
+          ) : (
+            <MarketDepthPanel server={server} connector={connector} pair={pair} />
+          )}
         </div>
       </div>
 
