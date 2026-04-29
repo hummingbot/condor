@@ -15,6 +15,16 @@ services:
       - ./config.yml:/app/config.yml
       # Mount routines for auto-discovery
       - ./routines:/app/routines
+      - ./handlers/bots/__init__.py:/app/handlers/bots/__init__.py
+      - ./handlers/bots/controller_handlers.py:/app/handlers/bots/controller_handlers.py
+      - ./handlers/bots/controllers/__init__.py:/app/handlers/bots/controllers/__init__.py
+      - ./handlers/bots/controllers/multi_grid_strike:/app/handlers/bots/controllers/multi_grid_strike
+      - ./handlers/bots/controllers/dman_v3:/app/handlers/bots/controllers/dman_v3
+      - ./handlers/bots/controllers/arbitrage_controller:/app/handlers/bots/controllers/arbitrage_controller
+      - ./handlers/bots/controllers/xemm_multiple_levels:/app/handlers/bots/controllers/xemm_multiple_levels
+      - ./handlers/bots/controllers/macd_bb_v1:/app/handlers/bots/controllers/macd_bb_v1
+      - ./handlers/bots/controllers/supertrend_v1:/app/handlers/bots/controllers/supertrend_v1
+      - ./handlers/bots/controllers/anti_folla_v1:/app/handlers/bots/controllers/anti_folla_v1
     network_mode: host
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
