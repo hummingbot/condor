@@ -512,7 +512,7 @@ export function BacktestingTab() {
   });
 
   // Selected task detail
-  const { data: selectedTask } = useQuery({
+  const { data: selectedTask, isLoading: selectedTaskLoading } = useQuery({
     queryKey: ["backtest-task", server, selectedTaskId],
     queryFn: () => api.getBacktestTask(server!, selectedTaskId!),
     enabled: !!server && !!selectedTaskId,
@@ -1043,6 +1043,11 @@ export function BacktestingTab() {
                 <p className="text-sm">Backtest completed but no results data returned</p>
               </div>
             )
+          ) : selectedTaskLoading ? (
+            <div className="flex flex-col items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-16">
+              <Circle className="h-6 w-6 animate-spin text-[var(--color-primary)] mb-3" />
+              <p className="text-sm text-[var(--color-text-muted)]">Loading backtest...</p>
+            </div>
           ) : (
             /* Empty state with guided steps */
             <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50 py-20 text-[var(--color-text-muted)]">
