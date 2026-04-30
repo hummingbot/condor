@@ -537,6 +537,12 @@ export const api = {
       method: "DELETE",
     }),
 
+  deleteController: (server: string, controllerType: string, controllerName: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}`,
+      { method: "DELETE" },
+    ),
+
   getControllerSource: (server: string, controllerType: string, controllerName: string) =>
     apiFetch<ControllerSourceResponse>(
       `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/source`,
