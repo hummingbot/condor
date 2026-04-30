@@ -114,9 +114,6 @@ async def get_consolidated_positions(
         fetch_bot_positions(),
     )
 
-    if exec_raw:
-        logger.info("Raw executor positions sample: %s", exec_raw[:2])
-
     executor_positions = [
         _normalize_position(pos, "executor", "Executor")
         for pos in exec_raw

@@ -497,6 +497,7 @@ class ServerDataService:
 
         Called at startup so the cache is warm before any client connects.
         Subscribes to: PORTFOLIO, EXECUTORS, BOTS_STATUS, CONNECTORS,
+        CANDLE_CONNECTORS, POSITIONS, ACTIVE_ORDERS, SERVER_STATUS,
         and TRADING_RULES (per connector) for every server.
 
         All initial fetches run concurrently via asyncio.gather.
@@ -515,6 +516,9 @@ class ServerDataService:
             ServerDataType.BOTS_STATUS,
             ServerDataType.CONNECTORS,
             ServerDataType.CANDLE_CONNECTORS,
+            ServerDataType.POSITIONS,
+            ServerDataType.ACTIVE_ORDERS,
+            ServerDataType.SERVER_STATUS,
         ]
         subscriber_id = "_auto"
 

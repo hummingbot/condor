@@ -616,6 +616,27 @@ async def delete_controller_config(
     return {"deleted": True, "config_id": config_id, "result": result}
 
 
+@router.delete("/servers/{name}/controllers/{controller_type}/{controller_name}")
+async def delete_controller(
+    name: str,
+    controller_type: str,
+    controller_name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Delete a controller."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.controllers.delete_controller(controller_type, controller_name)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"deleted": True, "controller_type": controller_type, "controller_name": controller_name, "result": result}
+
+
 @router.post("/servers/{name}/bots/deploy")
 async def deploy_bot_endpoint(
     name: str, body: DeployBotRequest, user: WebUser = Depends(get_current_user)
