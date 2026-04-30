@@ -118,20 +118,32 @@ class WebSocketManager:
     WebSocket connections with dynamic per-channel buffering.
     """
 
+    _CANDLE_KEEP_ALIVE = 300  # 5-minute grace period before tearing down candle streams
+
     def __init__(self):
         self._connections: list[_Connection] = []
         self._last_data: dict[str, Any] = {}  # channel -> last broadcast payload
         self._candle_tasks: dict[str, asyncio.Task] = {}
+        self._candle_poll_tasks: dict[str, asyncio.Task] = {}
         self._trade_tasks: dict[str, asyncio.Task] = {}
         self._executor_tasks: dict[str, asyncio.Task] = {}
         self._order_book_tasks: dict[str, asyncio.Task] = {}
+        self._bots_ws_tasks: dict[str, asyncio.Task] = {}
+        self._positions_ws_tasks: dict[str, asyncio.Task] = {}
+        self._performance_ws_tasks: dict[str, asyncio.Task] = {}
         self._sds_listener_registered = False
         # Track SDS subscriptions: channel -> CacheKey
         self._sds_subscriptions: dict[str, Any] = {}
         # Candle buffers: channel -> _CandleBuffer (dynamic sizing)
         self._candle_buffers: dict[str, _CandleBuffer] = {}
+        # Deferred teardown timers for candle streams
+        self._candle_teardown_timers: dict[str, asyncio.TimerHandle] = {}
         # Periodic cleanup task
         self._cleanup_task: asyncio.Task | None = None
+        # Track last WS candle update time per channel (monotonic)
+        self._last_candle_ws_update: dict[str, float] = {}
+        # Track whether first message per channel has been logged
+        self._candle_first_msg_logged: set[str] = set()
 
     # -- Helpers --
 
@@ -187,10 +199,21 @@ class WebSocketManager:
         # Unsubscribe all SDS subscriptions
         self._cleanup_sds_subscriptions()
 
+        for handle in self._candle_teardown_timers.values():
+            handle.cancel()
+        self._candle_teardown_timers.clear()
+
         for task in self._candle_tasks.values():
             if not task.done():
                 task.cancel()
         self._candle_tasks.clear()
+
+        for task in self._candle_poll_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._candle_poll_tasks.clear()
+        self._last_candle_ws_update.clear()
+        self._candle_first_msg_logged.clear()
 
         for task in self._trade_tasks.values():
             if not task.done():
@@ -206,6 +229,21 @@ class WebSocketManager:
             if not task.done():
                 task.cancel()
         self._order_book_tasks.clear()
+
+        for task in self._bots_ws_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._bots_ws_tasks.clear()
+
+        for task in self._positions_ws_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._positions_ws_tasks.clear()
+
+        for task in self._performance_ws_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._performance_ws_tasks.clear()
 
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
@@ -255,6 +293,12 @@ class WebSocketManager:
                     self._maybe_stop_executor_stream(channel)
                 elif channel.startswith("orderbook:"):
                     self._maybe_stop_order_book_stream(channel)
+                elif channel.startswith("bots_ws:"):
+                    self._maybe_stop_bots_ws_stream(channel)
+                elif channel.startswith("positions_ws:"):
+                    self._maybe_stop_positions_ws_stream(channel)
+                elif channel.startswith("performance_ws:"):
+                    self._maybe_stop_performance_ws_stream(channel)
                 else:
                     self._maybe_unsub_sds(channel)
 
@@ -293,6 +337,7 @@ class WebSocketManager:
 
         if action == "subscribe" and channel:
             conn.channels.add(channel)
+            logger.info("WS subscribe: user=%s channel=%s", conn.user_id, channel)
             # Send last known data immediately (candles use buffer instead)
             if channel.startswith("candles:"):
                 duration = msg.get("duration")  # seconds, sent by frontend
@@ -309,6 +354,18 @@ class WebSocketManager:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
                 self._ensure_executor_stream(channel)
+            elif channel.startswith("bots_ws:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
+                self._ensure_bots_ws_stream(channel)
+            elif channel.startswith("positions_ws:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
+                self._ensure_positions_ws_stream(channel)
+            elif channel.startswith("performance_ws:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
+                self._ensure_performance_ws_stream(channel)
             else:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
@@ -324,6 +381,12 @@ class WebSocketManager:
                 self._maybe_stop_trade_stream(channel)
             elif channel.startswith("executors:"):
                 self._maybe_stop_executor_stream(channel)
+            elif channel.startswith("bots_ws:"):
+                self._maybe_stop_bots_ws_stream(channel)
+            elif channel.startswith("positions_ws:"):
+                self._maybe_stop_positions_ws_stream(channel)
+            elif channel.startswith("performance_ws:"):
+                self._maybe_stop_performance_ws_stream(channel)
             else:
                 self._maybe_unsub_sds(channel)
 
@@ -343,6 +406,12 @@ class WebSocketManager:
         interval = parts[4]
         dur = int(duration) if duration else 3 * 86400  # default 3 days
 
+        # Cancel any pending teardown — a subscriber just came back
+        timer = self._candle_teardown_timers.pop(channel, None)
+        if timer is not None:
+            timer.cancel()
+            logger.debug("Cancelled pending candle teardown for %s", channel)
+
         buf = self._candle_buffers.get(channel)
         if buf is None:
             buf = _CandleBuffer(interval, dur)
@@ -360,28 +429,33 @@ class WebSocketManager:
         if sorted_candles:
             await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
 
+        # If the stream task is still running (kept alive during grace period), skip restart
         self._ensure_candle_stream(channel)
 
     async def _handle_candle_duration_change(
         self, conn: _Connection, channel: str, duration: int
     ) -> None:
-        """Handle duration change for an existing candle subscription."""
+        """Handle duration change for an existing candle subscription.
+
+        Only grows the buffer — never shrinks. The frontend manages its own
+        display window; the backend just ensures enough history is buffered.
+        """
         buf = self._candle_buffers.get(channel)
         if buf is None:
             return
         old_max = buf.max_size
+        # Only expand — skip if requested duration would shrink the buffer
+        interval_sec = _INTERVAL_SECONDS.get(buf.interval, 60)
+        needed = max(math.ceil(duration / interval_sec), 200)
+        if needed <= old_max:
+            return
         buf.set_duration(duration)
-        if buf.max_size > old_max and buf.needs_backfill:
-            # Backfill then send full snapshot to requesting client
+        if buf.needs_backfill:
             await self._backfill_candles(channel)
-            sorted_candles = buf.get_sorted()
-            if sorted_candles:
-                await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
-        else:
-            # Buffer already has enough data, just send snapshot
-            sorted_candles = buf.get_sorted()
-            if sorted_candles:
-                await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
+        # Broadcast updated snapshot to ALL subscribers on this channel
+        sorted_candles = buf.get_sorted()
+        if sorted_candles:
+            await self.broadcast(channel, {"type": "candles", "data": sorted_candles})
 
     async def _backfill_candles(self, channel: str) -> None:
         """Fetch historical candles to fill the buffer gap."""
@@ -495,9 +569,10 @@ class WebSocketManager:
     @staticmethod
     def _transform_executors(raw_data: Any) -> list[dict]:
         """Transform raw executor data to ExecutorInfo-compatible dicts for WS broadcast."""
-        from condor.web.routes.executors import _extract_executors_list, _build_executor_info
+        from condor.fetchers.executors import extract_executors_list
+        from condor.web.routes.executors import _build_executor_info
 
-        executors_list = _extract_executors_list(raw_data)
+        executors_list = extract_executors_list(raw_data)
         result = []
         for ex in executors_list:
             info = _build_executor_info(ex)
@@ -505,14 +580,111 @@ class WebSocketManager:
                 result.append(info.model_dump())
         return result
 
+    @staticmethod
+    def _transform_bots(raw_data: Any) -> dict:
+        """Transform raw BOTS_STATUS data to BotsPageResponse-compatible dict for WS broadcast."""
+        from condor.web.routes.bots import _extract_bots_list
+
+        bots_list = _extract_bots_list(raw_data)
+        controllers = []
+        bots = []
+        total_pnl = 0.0
+        total_volume = 0.0
+
+        for bot_data in bots_list:
+            bot_name = bot_data.get("bot_name", "")
+            bot_status = bot_data.get("status", "unknown")
+            performance = bot_data.get("performance", {})
+            error_logs = bot_data.get("error_logs", [])
+            general_logs = bot_data.get("general_logs", [])
+            if not isinstance(error_logs, list):
+                error_logs = []
+            if not isinstance(general_logs, list):
+                general_logs = []
+
+            num_controllers = 0
+
+            if isinstance(performance, dict):
+                for ctrl_name, ctrl_info in performance.items():
+                    if not isinstance(ctrl_info, dict):
+                        continue
+                    num_controllers += 1
+                    ctrl_perf = ctrl_info.get("performance", {})
+                    if not isinstance(ctrl_perf, dict):
+                        ctrl_perf = {}
+
+                    realized = float(ctrl_perf.get("realized_pnl_quote", 0) or 0)
+                    unrealized = float(ctrl_perf.get("unrealized_pnl_quote", 0) or 0)
+                    global_pnl = realized + unrealized
+                    global_pnl_pct = float(ctrl_perf.get("global_pnl_pct", 0) or 0)
+                    volume = float(ctrl_perf.get("volume_traded", 0) or 0)
+                    close_types = ctrl_perf.get("close_type_counts", {})
+                    if not isinstance(close_types, dict):
+                        close_types = {}
+                    positions = ctrl_perf.get("positions_summary", [])
+                    if not isinstance(positions, list):
+                        positions = []
+
+                    # Parse connector/pair from controller name
+                    connector = ""
+                    trading_pair = ""
+                    parts = ctrl_name.split("_")
+                    for i, part in enumerate(parts):
+                        if "-" in part and part[0].isupper():
+                            if not trading_pair:
+                                trading_pair = part
+                            if not connector and i > 0:
+                                connector = "_".join(parts[:i])
+                            break
+
+                    total_pnl += global_pnl
+                    total_volume += volume
+
+                    controllers.append({
+                        "controller_name": ctrl_name,
+                        "controller_id": ctrl_name,
+                        "bot_name": bot_name,
+                        "status": ctrl_info.get("status", "running"),
+                        "connector": connector,
+                        "trading_pair": trading_pair,
+                        "realized_pnl_quote": realized,
+                        "unrealized_pnl_quote": unrealized,
+                        "global_pnl_quote": global_pnl,
+                        "global_pnl_pct": global_pnl_pct,
+                        "volume_traded": volume,
+                        "close_type_counts": close_types,
+                        "positions_summary": positions,
+                        "deployed_at": None,
+                        "config": {},
+                    })
+
+            bots.append({
+                "bot_name": bot_name,
+                "status": bot_status,
+                "num_controllers": num_controllers,
+                "error_count": len(error_logs),
+                "deployed_at": None,
+                "error_logs": error_logs[-100:],
+                "general_logs": general_logs[-100:],
+            })
+
+        return {
+            "controllers": controllers,
+            "bots": bots,
+            "total_pnl": total_pnl,
+            "total_volume": total_volume,
+            "server_online": True,
+        }
+
     def _on_data_update(self, server_name: str, cache_key: str, data_type: Any, value: Any) -> None:
         """Called by SDS when cache is updated. Maps to WS channels and broadcasts."""
-        prefix = _SDT_TO_CHANNEL_PREFIX.get(data_type.name)
+        dt_name = data_type.name if hasattr(data_type, "name") else str(data_type)
+        prefix = _SDT_TO_CHANNEL_PREFIX.get(dt_name)
         if not prefix:
             return
 
         # Build channel name
-        if data_type.name in ("CEX_PRICES", "PRICES"):
+        if dt_name in ("CEX_PRICES", "PRICES"):
             parts = cache_key.split(":")
             if len(parts) >= 3:
                 channel = f"prices:{server_name}:{parts[1]}:{parts[2]}"
@@ -524,6 +696,14 @@ class WebSocketManager:
         has_subscribers = any(channel in conn.channels for conn in self._connections)
         if not has_subscribers:
             return
+
+        # Transform raw data to match REST endpoint response shapes
+        if dt_name == "BOTS_STATUS":
+            try:
+                value = self._transform_bots(value)
+            except Exception as e:
+                logger.debug("Failed to transform bots data for WS: %s", e)
+                return
 
         asyncio.ensure_future(self._broadcast_update(channel, value))
 
@@ -560,13 +740,49 @@ class WebSocketManager:
         logger.info("Started candle stream for %s", channel)
 
     def _maybe_stop_candle_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        # If subscribers still exist, cancel any pending teardown and return
+        if any(channel in c.channels for c in self._connections):
+            timer = self._candle_teardown_timers.pop(channel, None)
+            if timer is not None:
+                timer.cancel()
+            return
+
+        # Already have a pending teardown scheduled — nothing to do
+        if channel in self._candle_teardown_timers:
+            return
+
+        # Schedule deferred teardown
+        loop = asyncio.get_event_loop()
+        handle = loop.call_later(
+            self._CANDLE_KEEP_ALIVE,
+            self._deferred_stop_candle_stream,
+            channel,
+        )
+        self._candle_teardown_timers[channel] = handle
+        logger.info(
+            "Scheduled candle stream teardown for %s in %ds",
+            channel, self._CANDLE_KEEP_ALIVE,
+        )
+
+    def _deferred_stop_candle_stream(self, channel: str) -> None:
+        """Actually tear down a candle stream after the grace period."""
+        self._candle_teardown_timers.pop(channel, None)
+
+        # Re-check: subscribers may have appeared during the grace period
+        if any(channel in c.channels for c in self._connections):
+            logger.debug("Candle teardown cancelled — subscribers returned for %s", channel)
+            return
+
         task = self._candle_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
-            logger.info("Stopped candle stream for %s", channel)
+            logger.info("Deferred candle stream teardown completed for %s", channel)
+        poll_task = self._candle_poll_tasks.pop(channel, None)
+        if poll_task and not poll_task.done():
+            poll_task.cancel()
+        self._last_candle_ws_update.pop(channel, None)
+        self._candle_first_msg_logged.discard(channel)
+        # NOTE: candle buffer is NOT deleted — the existing idle cleanup loop handles that
 
     async def _candle_stream(self, channel: str) -> None:
         parts = channel.split(":")
@@ -579,27 +795,37 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
+        # Start REST poll fallback alongside the WS stream
+        self._ensure_candle_poll_fallback(channel)
+
         while True:
             try:
                 client = await cm.get_client(server_name)
                 async with client.ws.market_data() as ws:
                     await ws.subscribe_candles(
                         connector, pair, interval=interval,
-                        max_records=500, update_interval=1.0,
+                        max_records=100, update_interval=1.0,
                     )
                     logger.info("Candle WS subscribed: %s", channel)
                     backoff = 5  # Reset on successful connection
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
-                            logger.info("No subscribers for %s, closing stream", channel)
-                            return
+                        # Log first message per channel at INFO for diagnostics
+                        if channel not in self._candle_first_msg_logged:
+                            self._candle_first_msg_logged.add(channel)
+                            logger.info(
+                                "Candle WS first message for %s: %s",
+                                channel,
+                                json.dumps(msg)[:500] if isinstance(msg, dict) else type(msg).__name__,
+                            )
+                        else:
+                            logger.debug("Candle WS raw msg keys for %s: %s", channel, list(msg.keys()) if isinstance(msg, dict) else type(msg).__name__)
 
-                        logger.debug("Candle WS raw msg keys for %s: %s", channel, list(msg.keys()) if isinstance(msg, dict) else type(msg).__name__)
                         msg_type = msg.get("type")
                         if msg_type == "candle_update":
                             raw = msg.get("data")
                             candle = self._normalize_candle(raw) if raw else None
                             if candle:
+                                self._last_candle_ws_update[channel] = time.monotonic()
                                 self._upsert_candle_buffer(channel, candle)
                                 await self.broadcast(
                                     channel,
@@ -612,18 +838,21 @@ class WebSocketManager:
                                 if (c := self._normalize_candle(r)) is not None
                             ]
                             if candles:
+                                self._last_candle_ws_update[channel] = time.monotonic()
                                 self._upsert_candle_buffer_many(channel, candles)
                                 await self.broadcast(
                                     channel,
                                     {"type": "candles", "data": candles},
                                 )
-                        elif msg_type == "heartbeat":
+                        elif msg_type in ("heartbeat", "subscribed"):
                             continue
                         elif msg_type == "error":
                             error_msg = msg.get("message", "unknown error")
-                            logger.warning("Candle stream error for %s: %s", channel, error_msg)
+                            logger.warning("Candle stream error for %s: %s — continuing", channel, error_msg)
                             await self.broadcast(channel, {"type": "error", "message": f"Stream error: {error_msg}"})
-                            break
+                            # Don't break — the WS may still be alive.
+                            # If truly dead, next recv raises and we reconnect.
+                            continue
                         else:
                             logger.info("Candle stream unrecognized msg type for %s: type=%s keys=%s", channel, msg_type, list(msg.keys()) if isinstance(msg, dict) else type(msg).__name__)
 
@@ -642,6 +871,96 @@ class WebSocketManager:
                 await self.broadcast(channel, {"type": "error", "message": f"Connection lost, retrying in {backoff}s"})
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+    # -- Candle REST poll fallback --
+
+    def _ensure_candle_poll_fallback(self, channel: str) -> None:
+        """Start a REST poll fallback task for a candle channel if not already running."""
+        if channel in self._candle_poll_tasks and not self._candle_poll_tasks[channel].done():
+            return
+        self._candle_poll_tasks[channel] = asyncio.create_task(
+            self._candle_poll_fallback(channel)
+        )
+
+    async def _candle_poll_fallback(self, channel: str) -> None:
+        """Periodically poll REST for candles when WS stream goes silent."""
+        parts = channel.split(":")
+        if len(parts) < 5:
+            return
+        _, server_name, connector, pair, interval = parts
+        interval_sec = _INTERVAL_SECONDS.get(interval, 60)
+        # How long without a WS update before we consider it stale
+        stale_threshold = max(interval_sec, 15)
+        # How often to poll REST once stale (keep the last candle fresh)
+        poll_interval = min(interval_sec, 10)
+        was_stale = False
+
+        from config_manager import get_config_manager
+
+        try:
+            while True:
+                await asyncio.sleep(poll_interval if was_stale else stale_threshold)
+
+                last_update = self._last_candle_ws_update.get(channel)
+                if last_update is not None and (time.monotonic() - last_update) <= stale_threshold:
+                    if was_stale:
+                        logger.info("Candle WS stream resumed for %s, stopping REST fallback polling", channel)
+                        was_stale = False
+                    continue
+
+                # Stream is stale — poll REST
+                if not was_stale:
+                    logger.warning(
+                        "Candle WS stream appears stale for %s (threshold=%ds), polling REST fallback",
+                        channel, stale_threshold,
+                    )
+                    was_stale = True
+
+                try:
+                    cm = get_config_manager()
+                    client = await cm.get_client(server_name)
+                    now = int(time.time())
+                    result = await client.market_data.get_historical_candles(
+                        connector, pair, interval,
+                        start_time=now - interval_sec * 5,
+                        end_time=now,
+                    )
+                    candles_raw = (
+                        result if isinstance(result, list)
+                        else result.get("data", []) if isinstance(result, dict)
+                        else []
+                    )
+                    candles = [
+                        c for r in candles_raw
+                        if (c := self._normalize_candle(r)) is not None
+                    ]
+                    if candles:
+                        buf = self._candle_buffers.get(channel)
+                        # Broadcast if we have newer candles OR if the latest
+                        # candle's OHLCV changed (same timestamp, updated values)
+                        newest_buf_ts = max(buf._data.keys()) if buf and buf._data else 0
+                        newest_poll_ts = max(c["timestamp"] for c in candles)
+                        changed = newest_poll_ts > newest_buf_ts
+                        if not changed and buf and newest_poll_ts in buf._data:
+                            # Same timestamp — check if OHLCV actually changed
+                            old = buf._data[newest_poll_ts]
+                            new = next(c for c in candles if c["timestamp"] == newest_poll_ts)
+                            changed = any(
+                                old.get(k) != new.get(k)
+                                for k in ("open", "high", "low", "close", "volume")
+                            )
+                        if changed:
+                            self._upsert_candle_buffer_many(channel, candles)
+                            await self.broadcast(
+                                channel,
+                                {"type": "candles", "data": candles},
+                            )
+                            logger.debug("REST fallback delivered %d candles for %s", len(candles), channel)
+                except Exception as e:
+                    logger.debug("REST candle poll failed for %s: %s", channel, e)
+
+        except asyncio.CancelledError:
+            return
 
 
     # -- Trade streaming --
@@ -898,7 +1217,7 @@ class WebSocketManager:
         # Progressive pre-fetch only if we still have no data
         if channel not in self._last_data:
             try:
-                from condor.web.routes.executors import _extract_executors_list
+                from condor.fetchers.executors import extract_executors_list as _extract_executors_list
 
                 sds = get_server_data_service()
                 client = await cm.get_client(server_name)
@@ -981,6 +1300,233 @@ class WebSocketManager:
                     return
 
                 logger.warning("Executor stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    # -- Bots WS streaming (via Hummingbot /ws/executors all_bots_status) --
+
+    def _ensure_bots_ws_stream(self, channel: str) -> None:
+        if channel in self._bots_ws_tasks and not self._bots_ws_tasks[channel].done():
+            return
+        self._bots_ws_tasks[channel] = asyncio.create_task(
+            self._bots_ws_stream(channel)
+        )
+        logger.info("Started bots WS stream for %s", channel)
+
+    def _maybe_stop_bots_ws_stream(self, channel: str) -> None:
+        for conn in self._connections:
+            if channel in conn.channels:
+                return
+        task = self._bots_ws_tasks.pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("Stopped bots WS stream for %s", channel)
+
+    async def _bots_ws_stream(self, channel: str) -> None:
+        """Stream all_bots_status from Hummingbot /ws/executors and update SDS cache."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        # Send SDS-cached bots data as initial snapshot
+        if channel not in self._last_data:
+            from condor.server_data_service import ServerDataType, get_server_data_service
+
+            sds = get_server_data_service()
+            cached = sds.get(server_name, ServerDataType.BOTS_STATUS)
+            if cached is not None:
+                try:
+                    data = self._transform_bots(cached)
+                    await self.broadcast(channel, data)
+                except Exception:
+                    pass
+
+        while True:
+            try:
+                client = await cm.get_client(server_name)
+                async with client.ws.executors() as ws:
+                    # all_bots_status is not in the client library, send raw
+                    await ws._send({
+                        "action": "subscribe",
+                        "type": "all_bots_status",
+                        "update_interval": 5.0,
+                    })
+                    resp = await ws._receive()
+                    if resp.get("type") == "error":
+                        raise RuntimeError(f"Subscribe failed: {resp.get('message')}")
+
+                    logger.info("Bots WS subscribed: %s", channel)
+                    backoff = 5
+                    async for msg in ws:
+                        if not any(channel in c.channels for c in self._connections):
+                            logger.info("No subscribers for %s, closing bots WS stream", channel)
+                            return
+
+                        msg_type = msg.get("type")
+                        if msg_type == "all_bots_status":
+                            raw_data = msg.get("data", {})
+                            # Update SDS cache so REST and Telegram benefit
+                            from condor.server_data_service import ServerDataType, get_server_data_service
+                            get_server_data_service().put(server_name, ServerDataType.BOTS_STATUS, raw_data)
+                            try:
+                                data = self._transform_bots(raw_data)
+                                await self._broadcast_update(channel, data)
+                            except Exception as e:
+                                logger.debug("Failed to transform bots WS data: %s", e)
+                        elif msg_type == "heartbeat":
+                            continue
+                        elif msg_type == "error":
+                            logger.warning("Bots WS stream error for %s: %s", channel, msg.get("message"))
+                            break
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                error_str = str(e)
+                is_permanent = any(code in error_str for code in ("401", "403", "404"))
+                if is_permanent:
+                    logger.warning("Bots WS stream permanent error for %s: %s — giving up", channel, e)
+                    return
+                logger.warning("Bots WS stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    # -- Positions WS streaming (via Hummingbot /ws/executors positions) --
+
+    def _ensure_positions_ws_stream(self, channel: str) -> None:
+        if channel in self._positions_ws_tasks and not self._positions_ws_tasks[channel].done():
+            return
+        self._positions_ws_tasks[channel] = asyncio.create_task(
+            self._positions_ws_stream(channel)
+        )
+        logger.info("Started positions WS stream for %s", channel)
+
+    def _maybe_stop_positions_ws_stream(self, channel: str) -> None:
+        for conn in self._connections:
+            if channel in conn.channels:
+                return
+        task = self._positions_ws_tasks.pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("Stopped positions WS stream for %s", channel)
+
+    async def _positions_ws_stream(self, channel: str) -> None:
+        """Stream positions from Hummingbot /ws/executors and update SDS cache."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        while True:
+            try:
+                client = await cm.get_client(server_name)
+                async with client.ws.executors() as ws:
+                    await ws.subscribe_positions(update_interval=5.0)
+                    logger.info("Positions WS subscribed: %s", channel)
+                    backoff = 5
+                    async for msg in ws:
+                        if not any(channel in c.channels for c in self._connections):
+                            logger.info("No subscribers for %s, closing positions WS stream", channel)
+                            return
+
+                        msg_type = msg.get("type")
+                        if msg_type == "positions":
+                            raw_data = msg.get("data", [])
+                            # Update SDS cache
+                            from condor.server_data_service import ServerDataType, get_server_data_service
+                            get_server_data_service().put(server_name, ServerDataType.POSITIONS, raw_data)
+                            await self._broadcast_update(channel, raw_data)
+                        elif msg_type == "heartbeat":
+                            continue
+                        elif msg_type == "error":
+                            logger.warning("Positions WS stream error for %s: %s", channel, msg.get("message"))
+                            break
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                error_str = str(e)
+                is_permanent = any(code in error_str for code in ("401", "403", "404"))
+                if is_permanent:
+                    logger.warning("Positions WS stream permanent error for %s: %s — giving up", channel, e)
+                    return
+                logger.warning("Positions WS stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    # -- Performance WS streaming (via Hummingbot /ws/executors performance) --
+
+    def _ensure_performance_ws_stream(self, channel: str) -> None:
+        if channel in self._performance_ws_tasks and not self._performance_ws_tasks[channel].done():
+            return
+        self._performance_ws_tasks[channel] = asyncio.create_task(
+            self._performance_ws_stream(channel)
+        )
+        logger.info("Started performance WS stream for %s", channel)
+
+    def _maybe_stop_performance_ws_stream(self, channel: str) -> None:
+        for conn in self._connections:
+            if channel in conn.channels:
+                return
+        task = self._performance_ws_tasks.pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("Stopped performance WS stream for %s", channel)
+
+    async def _performance_ws_stream(self, channel: str) -> None:
+        """Stream performance from Hummingbot /ws/executors and update SDS cache."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        while True:
+            try:
+                client = await cm.get_client(server_name)
+                async with client.ws.executors() as ws:
+                    await ws.subscribe_performance(update_interval=5.0)
+                    logger.info("Performance WS subscribed: %s", channel)
+                    backoff = 5
+                    async for msg in ws:
+                        if not any(channel in c.channels for c in self._connections):
+                            logger.info("No subscribers for %s, closing performance WS stream", channel)
+                            return
+
+                        msg_type = msg.get("type")
+                        if msg_type == "performance":
+                            raw_data = msg.get("data", {})
+                            await self._broadcast_update(channel, raw_data)
+                        elif msg_type == "heartbeat":
+                            continue
+                        elif msg_type == "error":
+                            logger.warning("Performance WS stream error for %s: %s", channel, msg.get("message"))
+                            break
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                error_str = str(e)
+                is_permanent = any(code in error_str for code in ("401", "403", "404"))
+                if is_permanent:
+                    logger.warning("Performance WS stream permanent error for %s: %s — giving up", channel, e)
+                    return
+                logger.warning("Performance WS stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
 

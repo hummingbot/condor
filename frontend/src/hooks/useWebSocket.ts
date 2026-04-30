@@ -2,7 +2,16 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/lib/auth";
+import type { BotsPageResponse, ControllerInfo } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 import { CondorWebSocket } from "@/lib/websocket";
+
+/**
+ * Filter out candle channels — those are managed exclusively by candleStore.
+ */
+function nonCandleChannels(channels: string[]): string[] {
+  return channels.filter((ch) => !ch.startsWith("candles:"));
+}
 
 export function useCondorWebSocket(
   channels: string[],
@@ -12,32 +21,81 @@ export function useCondorWebSocket(
   const queryClient = useQueryClient();
   const wsRef = useRef<CondorWebSocket | null>(null);
   const [wsVersion, setWsVersion] = useState(0);
+  const prevChannelsRef = useRef<Set<string>>(new Set());
 
+  // ── Effect 1: Create / destroy WS (stable — only depends on token + server) ──
   useEffect(() => {
     if (!token || !server) return;
 
     const ws = new CondorWebSocket(token);
     wsRef.current = ws;
 
-    // Track reconnects by polling version
-    let versionPoll: ReturnType<typeof setInterval> | null = null;
+    // Wire candle store singleton to this WS instance
+    candleStore.setWs(ws);
+
     let lastVersion = ws.version;
 
     ws.onMessage((channel, data) => {
-      // Update React Query cache based on channel prefix
       const prefix = channel.split(":")[0];
+
+      // Candle data is managed by candle-store.ts — only update status here
+      if (prefix === "candles") {
+        const parts = channel.split(":");
+        if (parts.length >= 5) {
+          const [, srv, conn, pr, iv] = parts;
+          const payload = data as { type: string; message?: string };
+          if (payload.type === "error") {
+            queryClient.setQueryData(
+              ["candles-status", srv, conn, pr, iv],
+              { status: "error", message: payload.message ?? "Unknown error" },
+            );
+          } else if (payload.type === "candle_update" || payload.type === "candles") {
+            queryClient.setQueryData(
+              ["candles-status", srv, conn, pr, iv],
+              { status: "connected" },
+            );
+          }
+        }
+        return;
+      }
+
       if (prefix === "portfolio") {
         queryClient.setQueryData(["portfolio", server], data);
       } else if (prefix === "bots") {
-        queryClient.setQueryData(["bots", server], data);
+        queryClient.setQueryData(["bots", server], (old: BotsPageResponse | undefined) => {
+          const incoming = data as BotsPageResponse;
+          if (!incoming?.controllers) return old ?? data;
+          if (!old?.controllers?.length) return incoming;
+
+          const oldMap = new Map<string, ControllerInfo>();
+          for (const c of old.controllers) {
+            oldMap.set(`${c.bot_name}-${c.controller_name}`, c);
+          }
+          const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
+
+          return {
+            ...incoming,
+            controllers: incoming.controllers.map((c) => {
+              const prev = oldMap.get(`${c.bot_name}-${c.controller_name}`);
+              if (!prev) return c;
+              return {
+                ...c,
+                config: Object.keys(c.config || {}).length ? c.config : prev.config,
+                deployed_at: c.deployed_at ?? prev.deployed_at,
+                connector: c.connector || prev.connector,
+                trading_pair: c.trading_pair || prev.trading_pair,
+                controller_name: prev.controller_name || c.controller_name,
+                controller_id: prev.controller_id || c.controller_id,
+              };
+            }),
+            bots: incoming.bots.map((b) => {
+              const prev = oldBotMap.get(b.bot_name);
+              return { ...b, deployed_at: b.deployed_at ?? prev?.deployed_at ?? null };
+            }),
+          };
+        });
       } else if (prefix === "executors") {
-        // Set unfiltered cache (matches default queryKey with status="")
         queryClient.setQueryData(["executors", server, ""], data);
-        // NOTE: do NOT invalidate ["executors-infinite", server] here.
-        // The Executors page loads pages progressively; invalidating on every
-        // WS tick (every ~2s) restarts pagination and the page never finishes
-        // loading. The infinite query has its own refetchInterval, and we
-        // prime its first page from WS data below so updates still flow.
         const execs = data as unknown[];
         if (Array.isArray(execs)) {
           queryClient.setQueryData(
@@ -45,8 +103,6 @@ export function useCondorWebSocket(
             (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
               if (!old?.pages?.length) return old;
               const firstPage = old.pages[0];
-              // Replace first page contents with the live WS snapshot (capped
-              // to the same page size) so the top of the list stays fresh.
               const limit = firstPage.executors.length || 50;
               const nextFirst = {
                 ...firstPage,
@@ -57,111 +113,21 @@ export function useCondorWebSocket(
           );
         }
       } else if (prefix === "orderbook") {
-        // channel format: orderbook:{server}:{connector}:{pair}
         const parts = channel.split(":");
         if (parts.length >= 4) {
           const [, srv, connector, pair] = parts;
           queryClient.setQueryData(["order-book", srv, connector, pair], data);
         }
-      } else if (prefix === "candles") {
-        // channel format: candles:{server}:{connector}:{pair}:{interval}
-        const parts = channel.split(":");
-        if (parts.length >= 5) {
-          const [, srv, connector, pair, interval] = parts;
-          const payload = data as {
-            type: string;
-            candle?: Record<string, number>;
-            data?: Record<string, number>[];
-            message?: string;
-          };
-
-          if (payload.type === "error") {
-            queryClient.setQueryData(
-              ["candles-status", srv, connector, pair, interval],
-              { status: "error", message: payload.message ?? "Unknown error" },
-            );
-          } else if (payload.type === "candle_update" && payload.candle) {
-            queryClient.setQueryData(
-              ["candles-status", srv, connector, pair, interval],
-              { status: "connected" },
-            );
-            // Update or append a single candle
-            queryClient.setQueryData(
-              ["candles", srv, connector, pair, interval],
-              (old: Record<string, number>[] | undefined) => {
-                if (!old?.length) return old;
-                const ts = payload.candle!.timestamp;
-                const lastIdx = old.length - 1;
-                if (old[lastIdx].timestamp === ts) {
-                  // Update last candle in place
-                  const updated = [...old];
-                  updated[lastIdx] = payload.candle!;
-                  return updated;
-                } else if (ts > old[lastIdx].timestamp) {
-                  // New candle after the last one
-                  const appended = [...old, payload.candle!];
-                  // Cap at 1000 candles to prevent unbounded growth
-                  return appended.length > 1000 ? appended.slice(-1000) : appended;
-                }
-                // Candle for an older timestamp — ignore
-                return old;
-              },
-            );
-          } else if (payload.type === "candles" && payload.data?.length) {
-            queryClient.setQueryData(
-              ["candles-status", srv, connector, pair, interval],
-              { status: "connected" },
-            );
-            // Merge candles by timestamp — keeps both old REST data and new WS data
-            queryClient.setQueryData(
-              ["candles", srv, connector, pair, interval],
-              (old: Record<string, number>[] | undefined) => {
-                if (!old?.length) return payload.data;
-                // Build a map from existing candles (keyed by timestamp)
-                const map = new Map<number, Record<string, number>>();
-                for (const c of old) map.set(c.timestamp, c);
-                // Merge incoming: newer data wins for same timestamp
-                let changed = false;
-                for (const c of payload.data!) {
-                  if (!map.has(c.timestamp)) {
-                    map.set(c.timestamp, c);
-                    changed = true;
-                  } else {
-                    // Update existing candle (WS may have more recent OHLCV)
-                    const existing = map.get(c.timestamp)!;
-                    if (
-                      existing.close !== c.close ||
-                      existing.high !== c.high ||
-                      existing.low !== c.low ||
-                      existing.volume !== c.volume
-                    ) {
-                      map.set(c.timestamp, c);
-                      changed = true;
-                    }
-                  }
-                }
-                if (!changed) return old;
-                // Sort by timestamp, cap at 1000 to prevent unbounded growth
-                const sorted = Array.from(map.values()).sort(
-                  (a, b) => a.timestamp - b.timestamp,
-                );
-                return sorted.length > 1000 ? sorted.slice(-1000) : sorted;
-              },
-            );
-          }
-        }
       }
     });
 
+    // Notify React immediately when WS connects
+    ws.onConnect(() => setWsVersion((v) => v + 1));
+
     ws.connect();
 
-    // Subscribe to requested channels
-    for (const ch of channels) {
-      ws.subscribe(ch);
-    }
-
-    // Poll for version changes to detect reconnects
-    versionPoll = setInterval(() => {
+    // Poll as fallback for reconnects
+    const versionPoll = setInterval(() => {
       if (ws.version !== lastVersion) {
         lastVersion = ws.version;
         setWsVersion(ws.version);
@@ -169,11 +135,33 @@ export function useCondorWebSocket(
     }, 500);
 
     return () => {
-      if (versionPoll) clearInterval(versionPoll);
+      clearInterval(versionPoll);
+      candleStore.setWs(null);
       ws.disconnect();
       wsRef.current = null;
+      prevChannelsRef.current = new Set();
     };
-  }, [token, server, channels.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token, server]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Effect 2: Diff channels — subscribe/unsubscribe without reconnecting ──
+  useEffect(() => {
+    const ws = wsRef.current;
+    if (!ws) return;
+
+    const newSet = new Set(nonCandleChannels(channels));
+    const oldSet = prevChannelsRef.current;
+
+    // Subscribe new channels
+    for (const ch of newSet) {
+      if (!oldSet.has(ch)) ws.subscribe(ch);
+    }
+    // Unsubscribe removed channels
+    for (const ch of oldSet) {
+      if (!newSet.has(ch)) ws.unsubscribe(ch);
+    }
+
+    prevChannelsRef.current = newSet;
+  }, [channels.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { wsRef, wsVersion };
 }

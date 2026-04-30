@@ -94,12 +94,21 @@ export interface ControllerInfo {
   config: Record<string, unknown>;
 }
 
+export interface BotLogEntry {
+  timestamp?: number;
+  msg?: string;
+  log_category?: string;
+  [key: string]: unknown;
+}
+
 export interface BotSummary {
   bot_name: string;
   status: string;
   num_controllers: number;
   error_count: number;
   deployed_at: string | null;
+  error_logs: BotLogEntry[];
+  general_logs: BotLogEntry[];
 }
 
 export interface BotsPageResponse {
@@ -159,6 +168,7 @@ export interface ConsolidatedPosition {
   position_side: string;
   amount: number;
   entry_price: number;
+  notional_value: number;
   current_price: number;
   unrealized_pnl: number;
   realized_pnl: number;
@@ -526,6 +536,12 @@ export const api = {
     apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
       method: "DELETE",
     }),
+
+  deleteController: (server: string, controllerType: string, controllerName: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}`,
+      { method: "DELETE" },
+    ),
 
   getControllerSource: (server: string, controllerType: string, controllerName: string) =>
     apiFetch<ControllerSourceResponse>(

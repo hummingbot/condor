@@ -10,10 +10,7 @@
  */
 
 import { api, type CandleData } from "./api";
-import type { CondorWebSocket } from "./websocket";
-
-/** Accepts either a WS instance or a ref-like object for lazy access */
-type WsSource = CondorWebSocket | { current: CondorWebSocket | null } | null | undefined;
+import { candleStore } from "./candle-store";
 
 // -- TradingView type stubs (from charting_library/charting_library.d.ts) --
 // These keep us type-safe without importing the library at build time.
@@ -113,16 +110,9 @@ interface SubscriptionRecord {
   cleanup: () => void;
 }
 
-function resolveWs(source: WsSource): CondorWebSocket | null {
-  if (!source) return null;
-  if ("current" in source) return source.current;
-  return source;
-}
-
 export function createCondorDatafeed(
   server: string,
   connector: string,
-  wsSource?: WsSource,
 ) {
   const subscriptions = new Map<string, SubscriptionRecord>();
   let lastPrice = 0;
@@ -243,60 +233,20 @@ export function createCondorDatafeed(
       const interval = RESOLUTION_MAP[resolution] || "1m";
       const channel = `candles:${server}:${connector}:${symbolInfo.name}:${interval}`;
 
-      // Resolve WS lazily — subscribeBars is called after chart init, so WS should be ready
-      const ws = resolveWs(wsSource);
+      // Use candle store for subscription + updates
+      candleStore.subscribe(channel);
 
-      // If we have a WebSocket instance, use real-time streaming
-      if (ws) {
-        ws.subscribe(channel);
-
-        const removeHandler = ws.onMessage((msgChannel, data) => {
-          if (msgChannel !== channel) return;
-
-          const payload = data as {
-            type: string;
-            candle?: CandleData;
-            data?: CandleData[];
-          };
-
-          if (payload.type === "candle_update" && payload.candle) {
-            onTick(candleToBar(payload.candle));
-          } else if (payload.type === "candles" && payload.data?.length) {
-            // Full candle batch — send the latest as a tick
-            const latest = payload.data[payload.data.length - 1];
-            onTick(candleToBar(latest));
-          }
-        });
-
-        subscriptions.set(listenerGuid, {
-          listenerGuid,
-          resolution,
-          symbolInfo,
-          onTick,
-          channel,
-          cleanup: removeHandler,
-        });
-        return;
-      }
-
-      // Fallback: poll REST every 5 seconds if no WebSocket available
-      const timer = setInterval(async () => {
-        try {
-          const candles = await api.getCandles(
-            server,
-            connector,
-            symbolInfo.name,
-            interval,
-            2,
-          );
-          if (candles?.length) {
-            const latest = candles[candles.length - 1];
-            onTick(candleToBar(latest));
-          }
-        } catch {
-          // Silently retry next interval
+      let lastBarTime = 0;
+      const removeListener = candleStore.onUpdate(channel, (candles) => {
+        if (!candles.length) return;
+        const latest = candles[candles.length - 1];
+        const bar = candleToBar(latest);
+        // Only tick if bar time is >= last sent (avoid stale ticks)
+        if (bar.time >= lastBarTime) {
+          lastBarTime = bar.time;
+          onTick(bar);
         }
-      }, 5000);
+      });
 
       subscriptions.set(listenerGuid, {
         listenerGuid,
@@ -304,7 +254,7 @@ export function createCondorDatafeed(
         symbolInfo,
         onTick,
         channel,
-        cleanup: () => clearInterval(timer),
+        cleanup: removeListener,
       });
     },
 
@@ -312,16 +262,7 @@ export function createCondorDatafeed(
       const sub = subscriptions.get(listenerGuid);
       if (sub) {
         sub.cleanup();
-        const ws = resolveWs(wsSource);
-        if (ws) {
-          // Only unsubscribe from WS if no other subscription uses this channel
-          const otherUsesChannel = Array.from(subscriptions.values()).some(
-            (s) => s.listenerGuid !== listenerGuid && s.channel === sub.channel,
-          );
-          if (!otherUsesChannel) {
-            ws.unsubscribe(sub.channel);
-          }
-        }
+        candleStore.unsubscribe(sub.channel);
         subscriptions.delete(listenerGuid);
       }
     },
