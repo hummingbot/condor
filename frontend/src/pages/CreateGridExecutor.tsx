@@ -162,13 +162,9 @@ export function CreateGridExecutor() {
   const validation = useGridValidation(state);
   const isSpot = isSpotConnector(state.connector);
 
-  // Single WS for candle stream
-  const candleChannel = `candles:${server}:${state.connector}:${state.pair}:${state.interval}`;
-  const wsChannels = useMemo(
-    () => server ? [candleChannel] : [],
-    [server, candleChannel],
-  );
-  const { wsRef: pageWsRef, wsVersion: pageWsVersion } = useCondorWebSocket(wsChannels, server);
+  // WS connection (candle streams are managed by candleStore)
+  const wsChannels = useMemo(() => [] as string[], []);
+  useCondorWebSocket(wsChannels, server);
 
   const [successId, setSuccessId] = useState<string | null>(null);
   const [onlyConnected, setOnlyConnected] = useState(true);
@@ -383,8 +379,7 @@ export function CreateGridExecutor() {
               pair={state.pair}
               interval={state.interval}
               lookbackSeconds={state.lookbackSeconds}
-              wsRef={pageWsRef}
-              wsVersion={pageWsVersion}
+
               startPrice={state.start_price}
               endPrice={state.end_price}
               limitPrice={state.limit_price}

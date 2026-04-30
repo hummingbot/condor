@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
-import type { CondorWebSocket } from "@/lib/websocket";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 
@@ -15,8 +14,6 @@ interface GridChartProps {
   pair: string;
   interval: string;
   lookbackSeconds: number;
-  wsRef: MutableRefObject<CondorWebSocket | null>;
-  wsVersion: number;
   startPrice: number;
   endPrice: number;
   limitPrice: number;
@@ -47,8 +44,6 @@ export function GridChart({
   pair,
   interval,
   lookbackSeconds,
-  wsRef,
-  wsVersion,
   startPrice,
   endPrice,
   limitPrice,
@@ -80,11 +75,6 @@ export function GridChart({
   const overlaySeriesRef = useRef<import("lightweight-charts").ISeriesApi<"Line">[]>([]);
   const overlayPriceLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
-
-  // ── Wire parent WS to candle store ──
-  useEffect(() => {
-    candleStore.setWs(wsRef.current);
-  }, [wsRef.current, wsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Candle data from the singleton store (WS live + cached) ──
   const { candles, mergeCandles, setDuration } = useCandleStore(server, connector, pair, interval);

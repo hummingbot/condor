@@ -209,13 +209,12 @@ export function CreateExecutor() {
     enabled: !!server,
   });
 
-  // Single WS for both executor data and candle stream
-  const candleChannel = `candles:${server}:${connector}:${pair}:${gridState.interval}`;
+  // WS for executor data (candle streams are managed by candleStore)
   const wsChannels = useMemo(
-    () => server ? [`executors:${server}`, candleChannel] : [],
-    [server, candleChannel],
+    () => server ? [`executors:${server}`] : [],
+    [server],
   );
-  const { wsRef: pageWsRef, wsVersion: pageWsVersion } = useCondorWebSocket(wsChannels, server);
+  useCondorWebSocket(wsChannels, server);
 
   // Main controller data (executors + positions filtered by connector/pair)
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
@@ -489,8 +488,7 @@ export function CreateExecutor() {
               pair={pair}
               interval={gridState.interval}
               lookbackSeconds={gridState.lookbackSeconds}
-              wsRef={pageWsRef}
-              wsVersion={pageWsVersion}
+
               startPrice={chartProps.startPrice}
               endPrice={chartProps.endPrice}
               limitPrice={chartProps.limitPrice}

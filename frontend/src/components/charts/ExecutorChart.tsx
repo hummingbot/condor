@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type CandleData, type ExecutorInfo } from "@/lib/api";
+import { api, type ExecutorInfo } from "@/lib/api";
 import {
   computeMultiOverlays,
   getExecutorColor,
@@ -71,10 +71,9 @@ export function ExecutorChart({
   // Determine if any executor is active (for WS subscription)
   const hasActive = executors.some((ex) => isActive(ex.status));
 
-  // Candle channel for live updates
-  const channel = `candles:${server}:${connector}:${tradingPair}:${interval}`;
-  const channels = useMemo(() => (hasActive ? [channel] : []), [channel, hasActive]);
-  const { wsRef, wsVersion } = useCondorWebSocket(channels, server);
+  // WS for non-candle updates (candle streams managed by candleStore)
+  const channels = useMemo(() => [] as string[], []);
+  useCondorWebSocket(channels, server);
 
   // Pad time range for candle fetch
   const paddingSeconds = 1800;
@@ -238,46 +237,6 @@ export function ExecutorChart({
       setChartReady(false);
     };
   }, []);
-
-  // Handle WebSocket candle updates
-  useEffect(() => {
-    const currentWs = wsRef.current;
-    if (!currentWs || !hasActive) return;
-
-    const removeHandler = currentWs.onMessage((msgChannel: string, data: unknown) => {
-      if (msgChannel !== channel || !seriesRef.current) return;
-
-      const payload = data as {
-        type: string;
-        candle?: CandleData;
-        data?: CandleData[];
-      };
-
-      if (payload.type === "candle_update" && payload.candle) {
-        const c = payload.candle;
-        const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-        seriesRef.current.update({
-          time: ts as import("lightweight-charts").UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        });
-      } else if (payload.type === "candles" && payload.data?.length) {
-        const c = payload.data[payload.data.length - 1];
-        const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-        seriesRef.current.update({
-          time: ts as import("lightweight-charts").UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        });
-      }
-    });
-
-    return removeHandler;
-  }, [channel, wsVersion, hasActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Set initial candle data
   useEffect(() => {

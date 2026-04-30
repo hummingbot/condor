@@ -3,7 +3,15 @@ import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/lib/auth";
 import type { BotsPageResponse, ControllerInfo } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 import { CondorWebSocket } from "@/lib/websocket";
+
+/**
+ * Filter out candle channels — those are managed exclusively by candleStore.
+ */
+function nonCandleChannels(channels: string[]): string[] {
+  return channels.filter((ch) => !ch.startsWith("candles:"));
+}
 
 export function useCondorWebSocket(
   channels: string[],
@@ -13,24 +21,25 @@ export function useCondorWebSocket(
   const queryClient = useQueryClient();
   const wsRef = useRef<CondorWebSocket | null>(null);
   const [wsVersion, setWsVersion] = useState(0);
+  const prevChannelsRef = useRef<Set<string>>(new Set());
 
+  // ── Effect 1: Create / destroy WS (stable — only depends on token + server) ──
   useEffect(() => {
     if (!token || !server) return;
 
     const ws = new CondorWebSocket(token);
     wsRef.current = ws;
 
-    // Track reconnects by polling version
-    let versionPoll: ReturnType<typeof setInterval> | null = null;
+    // Wire candle store singleton to this WS instance
+    candleStore.setWs(ws);
+
     let lastVersion = ws.version;
 
     ws.onMessage((channel, data) => {
-      // Update React Query cache based on channel prefix
       const prefix = channel.split(":")[0];
 
-      // Candle data is now managed by candle-store.ts — skip here
+      // Candle data is managed by candle-store.ts — only update status here
       if (prefix === "candles") {
-        // Still update candle status for error/connected indicators
         const parts = channel.split(":");
         if (parts.length >= 5) {
           const [, srv, conn, pr, iv] = parts;
@@ -53,13 +62,11 @@ export function useCondorWebSocket(
       if (prefix === "portfolio") {
         queryClient.setQueryData(["portfolio", server], data);
       } else if (prefix === "bots") {
-        // Merge WS update with existing cache to preserve config/deployed_at from REST
         queryClient.setQueryData(["bots", server], (old: BotsPageResponse | undefined) => {
           const incoming = data as BotsPageResponse;
           if (!incoming?.controllers) return old ?? data;
           if (!old?.controllers?.length) return incoming;
 
-          // Build lookup of existing controllers by key for config/deployed_at
           const oldMap = new Map<string, ControllerInfo>();
           for (const c of old.controllers) {
             oldMap.set(`${c.bot_name}-${c.controller_name}`, c);
@@ -73,7 +80,6 @@ export function useCondorWebSocket(
               if (!prev) return c;
               return {
                 ...c,
-                // Preserve rich data from REST fetch
                 config: Object.keys(c.config || {}).length ? c.config : prev.config,
                 deployed_at: c.deployed_at ?? prev.deployed_at,
                 connector: c.connector || prev.connector,
@@ -89,7 +95,6 @@ export function useCondorWebSocket(
           };
         });
       } else if (prefix === "executors") {
-        // Set unfiltered cache (matches default queryKey with status="")
         queryClient.setQueryData(["executors", server, ""], data);
         const execs = data as unknown[];
         if (Array.isArray(execs)) {
@@ -116,18 +121,13 @@ export function useCondorWebSocket(
       }
     });
 
-    // Notify React immediately when WS connects (not via polling)
+    // Notify React immediately when WS connects
     ws.onConnect(() => setWsVersion((v) => v + 1));
 
     ws.connect();
 
-    // Subscribe to requested channels
-    for (const ch of channels) {
-      ws.subscribe(ch);
-    }
-
-    // Poll as fallback for reconnects (in case onConnect misses edge cases)
-    versionPoll = setInterval(() => {
+    // Poll as fallback for reconnects
+    const versionPoll = setInterval(() => {
       if (ws.version !== lastVersion) {
         lastVersion = ws.version;
         setWsVersion(ws.version);
@@ -135,11 +135,33 @@ export function useCondorWebSocket(
     }, 500);
 
     return () => {
-      if (versionPoll) clearInterval(versionPoll);
+      clearInterval(versionPoll);
+      candleStore.setWs(null);
       ws.disconnect();
       wsRef.current = null;
+      prevChannelsRef.current = new Set();
     };
-  }, [token, server, channels.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token, server]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Effect 2: Diff channels — subscribe/unsubscribe without reconnecting ──
+  useEffect(() => {
+    const ws = wsRef.current;
+    if (!ws) return;
+
+    const newSet = new Set(nonCandleChannels(channels));
+    const oldSet = prevChannelsRef.current;
+
+    // Subscribe new channels
+    for (const ch of newSet) {
+      if (!oldSet.has(ch)) ws.subscribe(ch);
+    }
+    // Unsubscribe removed channels
+    for (const ch of oldSet) {
+      if (!newSet.has(ch)) ws.unsubscribe(ch);
+    }
+
+    prevChannelsRef.current = newSet;
+  }, [channels.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { wsRef, wsVersion };
 }
