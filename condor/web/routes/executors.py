@@ -6,55 +6,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 logger = logging.getLogger(__name__)
 
-# Safety cap to avoid runaway pagination loops
-MAX_EXECUTORS_FETCH = 5000
-EXECUTORS_PAGE_SIZE = 500
-
-
-async def fetch_all_executors(client, max_items: int = MAX_EXECUTORS_FETCH, **filters) -> list[dict]:
-    """Fetch all executors via cursor-based pagination.
-
-    The underlying hummingbot-api-client defaults to limit=50, so without
-    pagination we'd only ever see the 50 most recent executors across the
-    whole server. This walks the cursor until exhausted or a safety cap.
-    """
-    all_items: list[dict] = []
-    cursor: str | None = None
-    while True:
-        remaining = max_items - len(all_items)
-        if remaining <= 0:
-            break
-        page_size = min(EXECUTORS_PAGE_SIZE, remaining)
-        kwargs = {**filters, "limit": page_size}
-        if cursor:
-            kwargs["cursor"] = cursor
-        result = await client.executors.search_executors(**kwargs)
-        page = _extract_executors_list(result)
-        all_items.extend(page)
-
-        # Detect next cursor from common shapes; stop if none or page short.
-        next_cursor = None
-        if isinstance(result, dict):
-            next_cursor = result.get("next_cursor") or result.get("cursor")
-            pagination = result.get("pagination")
-            if not next_cursor and isinstance(pagination, dict):
-                next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
-        # Continue while the backend advertises a next cursor, even if the page
-        # is short (some backends silently cap page size below what we requested).
-        if not next_cursor:
-            if len(page) < page_size:
-                break
-            # No cursor but a full page: nothing more to fetch safely.
-            break
-        if len(all_items) >= max_items:
-            break
-        cursor = next_cursor
-    return all_items
 
 from config_manager import get_config_manager
 from condor.web.auth import get_current_user
 from condor.web.models import CreateExecutorRequest, ExecutorInfo, WebUser
-from handlers.executors._shared import get_executor_pnl, get_executor_volume, get_executor_type, get_executor_fees
+from condor.fetchers.executors import (
+    fetch_all_executors,
+    extract_executors_list as _extract_executors_list,
+    get_executor_pnl,
+    get_executor_volume,
+    get_executor_type,
+    get_executor_fees,
+    MAX_EXECUTORS_FETCH,
+)
 
 router = APIRouter(tags=["executors"])
 
@@ -118,16 +82,6 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
         config=ex.get("config", {}),
     )
 
-
-def _extract_executors_list(result) -> list[dict]:
-    """Extract executor list from various API response shapes."""
-    if isinstance(result, list):
-        return result
-    if isinstance(result, dict):
-        for key in ("executors", "data", "results", "items"):
-            if key in result and isinstance(result[key], list):
-                return result[key]
-    return []
 
 
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
@@ -305,7 +259,7 @@ async def create_executor_endpoint(
     # Inject executor type into config
     config = {**body.config, "type": body.executor_type}
 
-    from handlers.executors._shared import create_executor
+    from condor.fetchers.executors import create_executor
 
     result = await create_executor(client, config, account_name=body.account_name)
     if isinstance(result, dict) and result.get("status") == "error":
@@ -329,7 +283,7 @@ async def stop_executor_endpoint(
 
     client = await cm.get_client(name)
 
-    from handlers.executors._shared import stop_executor
+    from condor.fetchers.executors import stop_executor
 
     result = await stop_executor(client, executor_id, keep_position=keep_position)
     if isinstance(result, dict) and result.get("status") == "error":

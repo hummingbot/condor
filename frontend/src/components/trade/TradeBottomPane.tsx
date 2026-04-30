@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronUp, ChevronDown, Loader2, Square } from "lucide-react";
+import { ChevronUp, ChevronDown, Loader2, Square, Trash2 } from "lucide-react";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -69,6 +69,8 @@ export function TradeBottomPane({ executors, positions, isLoadingPositions }: Tr
   const [tab, setTab] = useState<"executors" | "positions">("executors");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
+  const [confirmClearPos, setConfirmClearPos] = useState<ConsolidatedPosition | null>(null);
+  const [clearingPositions, setClearingPositions] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
@@ -87,6 +89,30 @@ export function TradeBottomPane({ executors, positions, isLoadingPositions }: Tr
       });
       setConfirmStopId(null);
       queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
+    },
+  });
+
+  const clearPositionMutation = useMutation({
+    mutationFn: (pos: ConsolidatedPosition) => {
+      const key = `${pos.connector_name}:${pos.trading_pair}:${pos.position_side}`;
+      setClearingPositions((prev) => new Set([...prev, key]));
+      return api.clearPositionHeld(
+        server!,
+        pos.connector_name,
+        pos.trading_pair,
+        pos.controller_id || undefined,
+      );
+    },
+    onSettled: (_data, _error, pos) => {
+      const key = `${pos.connector_name}:${pos.trading_pair}:${pos.position_side}`;
+      setClearingPositions((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      setConfirmClearPos(null);
+      queryClient.invalidateQueries({ queryKey: ["positions", server] });
+      queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
     },
   });
 
@@ -237,6 +263,8 @@ export function TradeBottomPane({ executors, positions, isLoadingPositions }: Tr
                     const side = pos.position_side?.toLowerCase();
                     const isBuy = side === "long" || side === "buy";
                     const isFlat = side === "flat";
+                    const posKey = `${pos.connector_name}:${pos.trading_pair}:${pos.position_side}`;
+                    const isClearing = clearingPositions.has(posKey);
                     return (
                       <div
                         key={`${pos.connector_name}-${pos.trading_pair}-${pos.position_side}-${i}`}
@@ -255,6 +283,9 @@ export function TradeBottomPane({ executors, positions, isLoadingPositions }: Tr
                             </span>
                             <div className="text-[11px]">
                               <span className="text-[var(--color-text)]">{Math.abs(pos.amount).toFixed(4)}</span>
+                              <span className="ml-1 text-[var(--color-text-muted)]">
+                                (${(pos.notional_value ?? Math.abs(pos.amount) * pos.entry_price).toFixed(2)})
+                              </span>
                               <span className="ml-1.5 text-[var(--color-text-muted)]">@ {formatPrice(pos.entry_price)}</span>
                             </div>
                           </div>
@@ -270,6 +301,18 @@ export function TradeBottomPane({ executors, positions, isLoadingPositions }: Tr
                             <span className={`font-mono font-medium ${pos.unrealized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
                               {formatPnl(pos.unrealized_pnl)}
                             </span>
+                            <button
+                              onClick={() => setConfirmClearPos(pos)}
+                              disabled={isClearing}
+                              className="rounded p-0.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-red)]/20 hover:text-[var(--color-red)] disabled:opacity-50"
+                              title="Clear position"
+                            >
+                              {isClearing ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3 w-3" />
+                              )}
+                            </button>
                           </div>
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">
@@ -313,6 +356,35 @@ export function TradeBottomPane({ executors, positions, isLoadingPositions }: Tr
                 className="rounded bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
               >
                 Stop
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Clear position confirmation */}
+      {confirmClearPos && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-xl">
+            <p className="text-sm text-[var(--color-text)]">
+              Clear <span className="font-medium">{confirmClearPos.position_side?.toUpperCase()}</span> position on{" "}
+              <span className="font-mono text-[var(--color-text-muted)]">{confirmClearPos.trading_pair}</span>?
+            </p>
+            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+              This resets the tracked position state. It does not close the position on the exchange.
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmClearPos(null)}
+                className="rounded px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => clearPositionMutation.mutate(confirmClearPos)}
+                className="rounded bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:brightness-110"
+              >
+                Clear
               </button>
             </div>
           </div>

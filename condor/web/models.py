@@ -120,6 +120,8 @@ class BotSummary(BaseModel):
     num_controllers: int = 0
     error_count: int = 0
     deployed_at: Optional[str] = None
+    error_logs: list[dict[str, Any]] = []
+    general_logs: list[dict[str, Any]] = []
 
 
 class BotsPageResponse(BaseModel):

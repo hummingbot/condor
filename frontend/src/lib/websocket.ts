@@ -1,9 +1,11 @@
 type MessageHandler = (channel: string, data: unknown, ts: number) => void;
+type ConnectHandler = () => void;
 
 export class CondorWebSocket {
   private ws: WebSocket | null = null;
   private url: string;
   private handlers: Set<MessageHandler> = new Set();
+  private connectHandlers: Set<ConnectHandler> = new Set();
   private channels: Set<string> = new Set();
   private _channelExtras: Map<string, Record<string, unknown> | undefined> = new Map();
   private reconnectDelay = 1000;
@@ -52,6 +54,14 @@ export class CondorWebSocket {
     };
   }
 
+  /** Register a callback fired immediately on each (re)connect. */
+  onConnect(handler: ConnectHandler) {
+    this.connectHandlers.add(handler);
+    return () => {
+      this.connectHandlers.delete(handler);
+    };
+  }
+
   private _connect() {
     if (!this.shouldConnect) return;
 
@@ -64,6 +74,10 @@ export class CondorWebSocket {
       for (const ch of this.channels) {
         const extras = this._channelExtras.get(ch);
         this._send({ action: "subscribe", channel: ch, ...extras });
+      }
+      // Notify connect listeners (triggers React state update for dependents)
+      for (const handler of this.connectHandlers) {
+        handler();
       }
     };
 
