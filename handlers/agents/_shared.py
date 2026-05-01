@@ -13,6 +13,9 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "codex": {"label": "ChatGPT Codex"},
     "ollama:": {"label": "Ollama — Default Model"},
     "lmstudio:": {"label": "LM Studio — Default Model"},
+    # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
+    # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
+    "openrouter:": {"label": "OpenRouter — Pick Model"},
 }
 
 DEFAULT_AGENT = "claude-code"
@@ -124,9 +127,13 @@ Available models:
 - Pydantic AI (local): "ollama:llama3.1", "ollama:qwen3:32b", \
 "ollama:qwen2.5:72b", "ollama:deepseek-r1:32b", "lmstudio:<model-name>"
 - Pydantic AI (cloud): "openai:gpt-4o", "groq:llama-3.3-70b-versatile"
+- OpenRouter (cloud, unified gateway): "openrouter:openai/gpt-4o", \
+"openrouter:anthropic/claude-sonnet-4-5", "openrouter:meta-llama/llama-3.3-70b-instruct". \
+Requires OPENROUTER_API_KEY in .env. Honors model_base_url for self-hosted proxies.
 - Custom endpoint: use "openai:<model-name>" + model_base_url in config
 
-Default URLs (no config needed): Ollama=localhost:11434, LM Studio=localhost:1234. \
+Default URLs (no config needed): Ollama=localhost:11434, LM Studio=localhost:1234, \
+OpenRouter=https://openrouter.ai/api/v1. \
 Override with model_base_url in config if running on a different host/port.
 
 GENERIC vs SPECIFIC STRATEGIES:

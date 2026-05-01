@@ -3,7 +3,7 @@
 import logging
 import shutil
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from handlers import clear_all_input_states
@@ -123,7 +123,25 @@ async def agent_callback_handler(
         await _handle_settings(update, context)
     elif action.startswith("set_llm:"):
         llm_key = action.split(":", 1)[1]
-        await _handle_set_llm(update, context, llm_key)
+        # OpenRouter sentinel -> open the model picker instead of setting directly
+        if llm_key == "openrouter:":
+            await _handle_openrouter_picker(update, context, page=0)
+        else:
+            await _handle_set_llm(update, context, llm_key)
+    elif action.startswith("or_page:"):
+        page = int(action.split(":", 1)[1])
+        await _handle_openrouter_picker(update, context, page=page)
+    elif action.startswith("or_pick:"):
+        idx = int(action.split(":", 1)[1])
+        await _handle_openrouter_pick(update, context, idx)
+    elif action == "or_type":
+        await _handle_openrouter_type_prompt(update, context)
+    elif action == "or_type_confirm":
+        await _handle_openrouter_type_confirm(update, context)
+    elif action == "or_type_cancel":
+        await _handle_openrouter_type_cancel(update, context)
+    elif action == "or_noop":
+        pass  # page indicator button — do nothing
 
     # Session management
     elif action == "stop":
@@ -266,6 +284,190 @@ async def _handle_set_llm(
         f"LLM set to {label}. New sessions will use this model.\n\n"
         "Use /agent to continue."
     )
+
+
+async def _handle_openrouter_picker(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int
+) -> None:
+    """Show paginated OpenRouter model picker.
+
+    Fetches the model list (cached for 1h), filters to tool-calling models, and
+    stores the resolved list in user_data so or_pick:N can resolve the index.
+    """
+    import os
+
+    from .menu import _openrouter_picker_keyboard
+    from .openrouter_models import fetch_models
+
+    query = update.callback_query
+
+    # Surface a hint instead of silently presenting an unusable picker
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        await query.message.edit_text(
+            "OPENROUTER_API_KEY is not set. Add it to your .env to use OpenRouter models, "
+            "then restart the bot.\n\nGet a key at https://openrouter.ai/keys"
+        )
+        return
+
+    if page == 0:
+        await query.message.edit_text("Loading OpenRouter models...")
+
+    try:
+        models = await fetch_models()
+    except Exception as e:
+        log.exception("Failed to fetch OpenRouter models")
+        await query.message.edit_text(f"Failed to fetch OpenRouter models: {e}")
+        return
+
+    if not models:
+        await query.message.edit_text(
+            "No OpenRouter models available. Check your network or try again later."
+        )
+        return
+
+    # Cache for or_pick:N to resolve. Models list is sorted deterministically and
+    # cached for an hour, so the index is stable across paging within a session.
+    context.user_data["_openrouter_models"] = models
+
+    current = context.user_data.get("agent_llm", "")
+    current_slug = (
+        current.split(":", 1)[1]
+        if current.startswith("openrouter:") and current != "openrouter:"
+        else None
+    )
+
+    keyboard = _openrouter_picker_keyboard(models, page=page, current_slug=current_slug)
+    await query.message.edit_text(
+        f"Select an OpenRouter model ({len(models)} with tool-calling support):",
+        reply_markup=keyboard,
+    )
+
+
+async def _handle_openrouter_pick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+) -> None:
+    """Resolve picker index → set agent_llm to 'openrouter:<slug>'."""
+    query = update.callback_query
+    models = context.user_data.get("_openrouter_models") or []
+    if not models or idx < 0 or idx >= len(models):
+        await query.message.edit_text(
+            "Selection expired. Reopen the picker via Change LLM."
+        )
+        return
+
+    model = models[idx]
+    agent_key = f"openrouter:{model.slug}"
+    context.user_data["agent_llm"] = agent_key
+
+    pricing = ""
+    if model.prompt_price or model.completion_price:
+        pricing = (
+            f"\nPricing: ${model.prompt_price:.2f}/M input, "
+            f"${model.completion_price:.2f}/M output"
+        )
+
+    await query.message.edit_text(
+        f"LLM set to OpenRouter — {model.name}.\n"
+        f"Slug: {model.slug}{pricing}\n\n"
+        "New sessions will use this model. Use /agent to continue."
+    )
+
+
+async def _handle_openrouter_type_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Arm slug-input mode: next text message is parsed as an OpenRouter slug."""
+    query = update.callback_query
+    context.user_data["_openrouter_typing_slug"] = True
+    await query.message.edit_text(
+        "Send the OpenRouter model slug as a message.\n"
+        "Example: anthropic/claude-sonnet-4.5\n\n"
+        "Send /cancel to abort."
+    )
+
+
+async def _resolve_openrouter_typed_slug(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
+    """Validate a typed slug; on match, prompt confirmation."""
+    from .openrouter_models import fetch_models, find_model_by_slug
+
+    slug = text.strip()
+    if slug.lower() in ("/cancel", "cancel"):
+        await update.message.reply_text("Cancelled. Use /agent to continue.")
+        return
+
+    try:
+        models = await fetch_models()
+    except Exception as e:
+        log.exception("Failed to fetch OpenRouter models")
+        await update.message.reply_text(f"Failed to fetch OpenRouter models: {e}")
+        return
+
+    model = find_model_by_slug(models, slug)
+    if not model:
+        # Re-arm so the user can retype without hunting for the button again
+        context.user_data["_openrouter_typing_slug"] = True
+        await update.message.reply_text(
+            f"No tool-calling OpenRouter model matches '{slug}'.\n"
+            "The slug must be exact (e.g. anthropic/claude-sonnet-4.5).\n"
+            "Try again, or send /cancel."
+        )
+        return
+
+    context.user_data["_openrouter_typed_slug"] = model.slug
+
+    pricing = ""
+    if model.prompt_price or model.completion_price:
+        pricing = (
+            f"\nPricing: ${model.prompt_price:.2f}/M input, "
+            f"${model.completion_price:.2f}/M output"
+        )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Use this model", callback_data="agent:or_type_confirm"
+                ),
+                InlineKeyboardButton(
+                    "Cancel", callback_data="agent:or_type_cancel"
+                ),
+            ]
+        ]
+    )
+    await update.message.reply_text(
+        f"Use OpenRouter — {model.name}?\nSlug: {model.slug}{pricing}",
+        reply_markup=keyboard,
+    )
+
+
+async def _handle_openrouter_type_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Apply the typed slug as the active agent_llm."""
+    query = update.callback_query
+    slug = context.user_data.pop("_openrouter_typed_slug", None)
+    if not slug:
+        await query.message.edit_text(
+            "Selection expired. Reopen the picker via Change LLM."
+        )
+        return
+
+    context.user_data["agent_llm"] = f"openrouter:{slug}"
+    await query.message.edit_text(
+        f"LLM set to OpenRouter — {slug}.\n\n"
+        "New sessions will use this model. Use /agent to continue."
+    )
+
+
+async def _handle_openrouter_type_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Discard the typed slug without changing the active LLM."""
+    query = update.callback_query
+    context.user_data.pop("_openrouter_typed_slug", None)
+    await query.message.edit_text("Cancelled. Use /agent to continue.")
 
 
 async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -584,6 +786,11 @@ async def agent_message_handler(
     # Handle custom compact input
     if context.user_data.pop("agent_compact_custom", None):
         await _do_compact_from_message(update, context, text)
+        return
+
+    # Handle typed OpenRouter slug input
+    if context.user_data.pop("_openrouter_typing_slug", None):
+        await _resolve_openrouter_typed_slug(update, context, text)
         return
 
     # Backward compat
