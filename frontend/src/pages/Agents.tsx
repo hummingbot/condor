@@ -7,10 +7,10 @@ import {
   Plus,
   Zap,
 } from "lucide-react";
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
-import { type AgentSummary, api } from "@/lib/api";
+import { type AgentSummary, type RunningInstance, api } from "@/lib/api";
 
 const STATUS_STYLES: Record<string, { dot: string; bg: string; label: string }> = {
   running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", bg: "border-emerald-500/30 bg-emerald-500/5", label: "LIVE" },
@@ -197,6 +197,82 @@ function CreateAgentDialog({
   );
 }
 
+interface ActiveSession extends RunningInstance {
+  agentName: string;
+  agentSlug: string;
+}
+
+function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
+  return (
+    <div className="mb-6 rounded-lg border border-emerald-500/20 bg-[var(--color-surface)] p-4">
+      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-emerald-400">
+        <Zap className="h-3.5 w-3.5" /> Active Trading Sessions ({sessions.length})
+      </h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+              <th className="px-2 py-1.5">Agent</th>
+              <th className="px-2 py-1.5">Session</th>
+              <th className="px-2 py-1.5">Trading Context</th>
+              <th className="px-2 py-1.5 text-right">Realized PnL</th>
+              <th className="px-2 py-1.5 text-right">Unrealized PnL</th>
+              <th className="px-2 py-1.5 text-right">Volume</th>
+              <th className="px-2 py-1.5 text-right">Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map((s) => {
+              const realizedColor = s.realized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+              const unrealizedColor = s.unrealized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+              const modeBadge = s.execution_mode === "dry_run"
+                ? { label: "DRY RUN", cls: "border-blue-500/30 bg-blue-500/10 text-blue-400" }
+                : s.execution_mode === "run_once"
+                  ? { label: "RUN ONCE", cls: "border-amber-500/30 bg-amber-500/10 text-amber-400" }
+                  : null;
+              return (
+                <tr key={s.agent_id} className="border-t border-[var(--color-border)]/40 font-mono">
+                  <td className="px-2 py-2">
+                    <Link
+                      to={`/agents/${s.agentSlug}`}
+                      className="font-medium text-[var(--color-primary)] hover:underline"
+                    >
+                      {s.agentName}
+                    </Link>
+                  </td>
+                  <td className="px-2 py-2 text-[var(--color-text)]">
+                    <span className="flex items-center gap-1.5">
+                      #{s.session_num}
+                      {modeBadge && (
+                        <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase ${modeBadge.cls}`}>
+                          {modeBadge.label}
+                        </span>
+                      )}
+                    </span>
+                  </td>
+                  <td className="max-w-[200px] px-2 py-2 text-[var(--color-text-muted)]">
+                    <span className="line-clamp-1">{s.trading_context || "—"}</span>
+                  </td>
+                  <td className={`px-2 py-2 text-right ${realizedColor}`}>
+                    ${s.realized_pnl >= 0 ? "+" : ""}{s.realized_pnl.toFixed(2)}
+                  </td>
+                  <td className={`px-2 py-2 text-right ${unrealizedColor}`}>
+                    ${s.unrealized_pnl >= 0 ? "+" : ""}{s.unrealized_pnl.toFixed(2)}
+                  </td>
+                  <td className="px-2 py-2 text-right text-[var(--color-text)]">
+                    ${s.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </td>
+                  <td className="px-2 py-2 text-right text-[var(--color-text)]">{s.open_count}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 export function Agents() {
   const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
@@ -209,6 +285,18 @@ export function Agents() {
 
   const running = agents.filter((a) => a.status === "running");
   const others = agents.filter((a) => a.status !== "running");
+
+  const activeSessions = useMemo<ActiveSession[]>(
+    () =>
+      agents.flatMap((a) =>
+        (a.instances || []).map((inst) => ({
+          ...inst,
+          agentName: a.name,
+          agentSlug: a.slug,
+        })),
+      ),
+    [agents],
+  );
 
   const aggTotalPnl = agents.reduce((sum, a) => sum + (a.total_pnl ?? 0), 0);
   const aggVolume = agents.reduce((sum, a) => sum + (a.total_volume ?? 0), 0);
@@ -264,6 +352,11 @@ export function Agents() {
             <span className="text-lg font-mono text-emerald-400">{running.length} / {agents.length}</span>
           </div>
         </div>
+      )}
+
+      {/* Active Sessions Table */}
+      {!isLoading && activeSessions.length > 0 && (
+        <ActiveSessionsTable sessions={activeSessions} />
       )}
 
       {isLoading ? (
