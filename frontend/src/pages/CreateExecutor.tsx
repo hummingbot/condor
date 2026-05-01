@@ -523,7 +523,7 @@ export function CreateExecutor() {
               }`}
             >
               <Settings2 className="h-3.5 w-3.5" />
-              Config
+              Execute
             </button>
             <button
               onClick={() => setRightPanel("depth")}
@@ -534,7 +534,7 @@ export function CreateExecutor() {
               }`}
             >
               <BarChart3 className="h-3.5 w-3.5" />
-              Depth
+              Data
             </button>
           </div>
 
