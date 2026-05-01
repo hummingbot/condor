@@ -298,8 +298,13 @@ class PydanticAIClient:
         # Enter MCP servers into the exit stack so stop() cleans them up.
         # This uses the agent's run_mcp_servers() context manager which
         # properly starts and stops all MCP subprocess servers.
-        self._mcp_ctx = self._agent.run_mcp_servers()
-        await self._exit_stack.enter_async_context(self._mcp_ctx)
+        try:
+            self._mcp_ctx = self._agent.run_mcp_servers()
+            await self._exit_stack.enter_async_context(self._mcp_ctx)
+        except Exception:
+            # MCP server startup failed -- clean up to prevent orphan subprocesses
+            await self.stop()
+            raise
 
         log.info(
             "PydanticAI client ready: model=%s, mcp_servers=%d",
@@ -344,7 +349,7 @@ class PydanticAIClient:
 
         try:
             from pydantic_ai.agent import CallToolsNode, ModelRequestNode
-            from pydantic_ai.messages import TextPart, ToolCallPart
+            from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
             from pydantic_graph import End
 
             async with self._agent.iter(text) as run:
@@ -360,6 +365,17 @@ class PydanticAIClient:
                     if isinstance(node, ModelRequestNode):
                         elapsed = time.monotonic() - start_time
                         yield Heartbeat(elapsed_seconds=elapsed)
+                        # Extract tool return results from request parts
+                        if hasattr(node, 'request') and node.request:
+                            for part in node.request.parts:
+                                if isinstance(part, ToolReturnPart):
+                                    content = part.content
+                                    output_str = content if isinstance(content, str) else str(content)
+                                    yield ToolCallUpdate(
+                                        tool_call_id=part.tool_call_id or "",
+                                        status="completed",
+                                        output=output_str,
+                                    )
 
                     elif isinstance(node, CallToolsNode):
                         # Emit text and tool-call events from model response
