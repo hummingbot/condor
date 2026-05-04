@@ -252,12 +252,7 @@ def reload_handlers():
     except Exception as e:
         logger.warning(f"Failed to re-register SDS fetches: {e}")
 
-    try:
-        from condor.data_manager import register_default_fetches
-
-        register_default_fetches()
-    except Exception as e:
-        logger.warning(f"Failed to re-register DataManager fetches: {e}")
+    # DataManager register_default_fetches is now a no-op (SDS handles registrations)
 
 
 def register_handlers(application: Application) -> None:
@@ -455,10 +450,9 @@ async def post_init(application: Application) -> None:
     sds.start()
     await sds.auto_subscribe_servers()
 
-    # Start DataManager (legacy, delegates to SDS)
-    from condor.data_manager import get_data_manager, register_default_fetches
+    # DataManager legacy wrapper — kept for any unmigrated code
+    from condor.data_manager import get_data_manager
 
-    register_default_fetches()
     get_data_manager().start()
 
     # Start agent session health monitor

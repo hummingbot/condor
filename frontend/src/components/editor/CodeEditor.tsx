@@ -13,6 +13,7 @@ interface CodeEditorProps {
   language: "yaml" | "python";
   readOnly?: boolean;
   height?: string;
+  className?: string;
 }
 
 export function CodeEditor({
@@ -21,6 +22,7 @@ export function CodeEditor({
   language,
   readOnly = false,
   height = "400px",
+  className,
 }: CodeEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -91,7 +93,7 @@ export function CodeEditor({
   return (
     <div
       ref={containerRef}
-      className="rounded-md border border-[var(--color-border)] overflow-hidden"
+      className={`rounded-md border border-[var(--color-border)] overflow-hidden ${className ?? ""}`}
     />
   );
 }

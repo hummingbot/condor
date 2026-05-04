@@ -369,4 +369,29 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     classified = classify_markets(analyses, config.mature_count, config.degen_count)
 
     # Step 5: Format
-    return format_results(classified, config.lookback_hours)
+    text = format_results(classified, config.lookback_hours)
+
+    try:
+        from condor.reports import ReportBuilder
+
+        def _to_table(items):
+            return [
+                {"Pair": m["trading_pair"], "Volume 24h": format_volume(m["volume_24h_usd"]),
+                 "24h Chg": f"{m['price_change_24h']:+.1f}%", "NATR": f"{m['natr_mean']:.3f}%",
+                 "NATR-CV": f"{m['natr_cv']:.2f}", "Vol-CV": f"{m['bucket_cv']:.2f}",
+                 "Range": f"{m['price_range_pct']:.1f}%"}
+                for m in items
+            ]
+
+        builder = ReportBuilder(f"Market Scanner ({config.lookback_hours}h)")
+        builder.source("routine", "market_scanner").tags(["scanner", "volatility"])
+        builder.markdown(f"Analyzed {classified['total_analyzed']} pairs · {config.lookback_hours}h lookback · 1m candles")
+        builder.markdown("### Mature Markets\nHigh volume, stable volatility")
+        builder.table(_to_table(classified["mature"]))
+        builder.markdown("### Degen Markets\nHigh volatility, spiky activity")
+        builder.table(_to_table(classified["degen"]))
+        builder.save()
+    except Exception as e:
+        logger.warning(f"Report generation failed: {e}")
+
+    return text

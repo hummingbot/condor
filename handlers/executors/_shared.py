@@ -83,26 +83,7 @@ POSITION_EXECUTOR_DEFAULTS = {
 }
 
 
-def get_executor_type(executor: Dict[str, Any]) -> str:
-    """Determine executor type from its data.
-
-    Returns the executor type label (e.g. 'grid', 'position', 'order', 'dca', 'lp').
-    """
-    config = executor.get("config", executor)
-    for source in (config, executor):
-        # Check both "type" (REST) and "executor_type" (WS) field names
-        ex_type = source.get("type", "") or source.get("executor_type", "")
-        if isinstance(ex_type, str) and ex_type:
-            # Strip common suffixes for a clean label
-            label = ex_type.lower().replace("_executor", "").replace("executor", "").strip("_")
-            if label:
-                return label
-    # Heuristic fallback based on config fields
-    if "start_price" in config and "end_price" in config:
-        return "grid"
-    if "stop_loss" in config or "trailing_stop" in config:
-        return "position"
-    return "unknown"
+from condor.fetchers.executors import get_executor_type  # noqa: F811 — canonical source
 
 
 # ============================================
@@ -210,144 +191,24 @@ async def get_executors_client(
     return await get_bots_client(chat_id, user_data)
 
 
+from condor.fetchers.executors import (  # noqa: F811
+    create_executor,
+    stop_executor,
+    get_executor_detail,
+    extract_executors_list,
+)
+
+
 async def search_running_executors(
     client, status: Optional[str] = "RUNNING", limit: int = 50
 ) -> List[Dict[str, Any]]:
-    """Search for executors with a specific status
-
-    Args:
-        client: API client
-        status: Status to filter by (default: running), None for all
-        limit: Maximum number of results
-
-    Returns:
-        List of executor dicts
-    """
+    """Search for executors with a specific status."""
     try:
         result = await client.executors.search_executors(status=status, limit=limit)
-        logger.info(
-            f"search_executors response type={type(result).__name__}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}, len={len(result) if isinstance(result, (list, dict)) else 'N/A'}"
-        )
-        if isinstance(result, dict):
-            # Try known keys in order of likelihood
-            for key in ("executors", "data", "results", "items"):
-                if key in result and isinstance(result[key], list):
-                    logger.info(
-                        f"search_executors found {len(result[key])} executors under key '{key}'"
-                    )
-                    executors = result[key]
-                    for ex in executors:
-                        if isinstance(ex, dict):
-                            ex_t = get_executor_type(ex)
-                            numeric = {
-                                k: v
-                                for k, v in ex.items()
-                                if isinstance(v, (int, float))
-                            }
-                            logger.info(
-                                f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}"
-                            )
-                    return executors
-            # If dict has no recognized list key, log and return empty
-            logger.warning(
-                f"search_executors: no recognized list key in response: {list(result.keys())}"
-            )
-            return []
-        executors = result if isinstance(result, list) else []
-        for ex in executors:
-            if isinstance(ex, dict):
-                ex_t = get_executor_type(ex)
-                numeric = {k: v for k, v in ex.items() if isinstance(v, (int, float))}
-                logger.info(
-                    f"search_executors [{ex_t}] keys={list(ex.keys())} numeric={numeric}"
-                )
-        return executors
+        return extract_executors_list(result)
     except Exception as e:
         logger.error(f"Error searching executors: {e}", exc_info=True)
         return []
-
-
-async def create_executor(
-    client, config: Dict[str, Any], account_name: str = "master_account"
-) -> Dict[str, Any]:
-    """Create a new executor
-
-    Args:
-        client: API client
-        config: Executor configuration
-        account_name: Account to use
-
-    Returns:
-        API response dict
-    """
-    try:
-        result = await client.executors.create_executor(
-            executor_config=config, account_name=account_name
-        )
-        return result
-    except Exception as e:
-        logger.error(f"Error creating executor: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
-
-
-async def stop_executor(
-    client, executor_id: str, keep_position: bool = False
-) -> Dict[str, Any]:
-    """Stop a running executor
-
-    Args:
-        client: API client
-        executor_id: ID of executor to stop
-        keep_position: Whether to keep the position open
-
-    Returns:
-        API response dict
-    """
-    try:
-        result = await client.executors.stop_executor(
-            executor_id=executor_id, keep_position=keep_position
-        )
-        return result
-    except Exception as e:
-        logger.error(f"Error stopping executor: {e}", exc_info=True)
-
-        # Handle specific error cases
-        error_str = str(e)
-        if "404" in error_str and "not found" in error_str.lower():
-            return {
-                "status": "error",
-                "message": "Executor not found (may have already stopped or expired)",
-            }
-        elif "403" in error_str:
-            return {
-                "status": "error",
-                "message": "Permission denied - cannot stop this executor",
-            }
-        elif "400" in error_str:
-            return {
-                "status": "error",
-                "message": "Bad request - executor may be in invalid state",
-            }
-        else:
-            return {"status": "error", "message": str(e)}
-
-
-async def get_executor_detail(client, executor_id: str) -> Optional[Dict[str, Any]]:
-    """Get details for a specific executor
-
-    Args:
-        client: API client
-        executor_id: ID of executor
-
-    Returns:
-        Executor details dict or None
-    """
-    try:
-        result = await client.executors.get_executor(executor_id=executor_id)
-        return result
-    except Exception as e:
-        logger.error(f"Error getting executor detail: {e}", exc_info=True)
-        return None
 
 
 # ============================================
@@ -355,54 +216,9 @@ async def get_executor_detail(client, executor_id: str) -> Optional[Dict[str, An
 # ============================================
 
 
-def get_executor_pnl(executor: Dict[str, Any]) -> float:
-    """Extract PnL from an executor response.
-
-    Checks multiple field names since the API response structure varies.
-    """
-    pnl_keys = (
-        "net_pnl_quote",
-        "pnl_quote",
-        "unrealized_pnl_quote",
-        "realized_pnl_quote",
-        "net_pnl",
-        "pnl",
-        "close_pnl",
-    )
-    for key in pnl_keys:
-        val = executor.get(key)
-        if val is not None and val != 0:
-            return float(val)
-
-    # Log available keys when PnL is 0 to help debug
-    ex_type = get_executor_type(executor)
-    if ex_type == "position":
-        available = {
-            k: v
-            for k, v in executor.items()
-            if isinstance(v, (int, float)) and k != "timestamp"
-        }
-        logger.debug(f"Position executor PnL=0, numeric fields: {available}")
-
-    return 0.0
-
-
-def get_executor_volume(executor: Dict[str, Any]) -> float:
-    """Extract filled/traded volume from an executor response."""
-    for key in ("filled_amount_quote", "volume_traded", "total_volume"):
-        val = executor.get(key)
-        if val is not None and val != 0:
-            return float(val)
-    return 0.0
-
-
-def get_executor_fees(executor: Dict[str, Any]) -> float:
-    """Extract cumulative fees from an executor response."""
-    for key in ("cum_fees_quote", "fees_quote", "total_fees"):
-        val = executor.get(key)
-        if val is not None and val != 0:
-            return float(val)
-    return 0.0
+from condor.fetchers.executors import get_executor_pnl  # noqa: F811
+from condor.fetchers.executors import get_executor_volume  # noqa: F811
+from condor.fetchers.executors import get_executor_fees  # noqa: F811
 
 
 def format_executor_status_line(executor: Dict[str, Any]) -> str:
@@ -532,45 +348,5 @@ async def cached_call(
 # ============================================
 
 
-async def fetch_current_price(
-    client, connector_name: str, trading_pair: str
-) -> Optional[float]:
-    """Fetch current price for a trading pair."""
-    try:
-        prices = await client.market_data.get_prices(
-            connector_name=connector_name, trading_pairs=trading_pair
-        )
-        return prices.get("prices", {}).get(trading_pair)
-    except Exception as e:
-        logger.error(f"Error fetching price for {trading_pair}: {e}", exc_info=True)
-        return None
-
-
-async def fetch_candles(
-    client,
-    connector_name: str,
-    trading_pair: str,
-    interval: str = "1m",
-    max_records: int = 420,
-) -> Optional[Dict[str, Any]]:
-    """Fetch candles data for a trading pair."""
-    try:
-        candles = await client.market_data.get_candles(
-            connector_name=connector_name,
-            trading_pair=trading_pair,
-            interval=interval,
-            max_records=max_records,
-        )
-        # Validate that candles actually contain data
-        if not candles:
-            return None
-        data = candles if isinstance(candles, list) else candles.get("data", [])
-        if not data:
-            logger.debug(
-                f"No candle data available for {trading_pair} on {connector_name}"
-            )
-            return None
-        return candles
-    except Exception as e:
-        logger.error(f"Error fetching candles for {trading_pair}: {e}", exc_info=True)
-        return None
+from condor.fetchers.market_data import fetch_current_price  # noqa: F811
+from condor.fetchers.market_data import fetch_candles  # noqa: F811

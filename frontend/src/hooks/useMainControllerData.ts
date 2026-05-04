@@ -1,5 +1,5 @@
 import { useMemo, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 
 import { api, type ExecutorInfo } from "@/lib/api";
 import { computeMultiOverlays } from "@/lib/executor-overlays";
@@ -16,11 +16,13 @@ export function useMainControllerData(
   connector: string,
   pair: string,
 ) {
-  // Subscribe to executors cache (populated by WS subscription)
-  // enabled:false means no fetch — data comes from WS setQueryData
+  // Fetch executors via REST on mount (survives refresh), WS updates keep it fresh
   const { data: cachedExecutors } = useQuery<ExecutorInfo[]>({
     queryKey: ["executors", server, ""],
-    enabled: false,
+    queryFn: () => api.getExecutors(server!),
+    enabled: !!server,
+    staleTime: 30_000, // REST fetch valid for 30s, WS pushes override instantly
+    refetchOnWindowFocus: false,
   });
 
   const filteredExecutors = useMemo(() => {
@@ -55,6 +57,7 @@ export function useMainControllerData(
     enabled: !!server,
     refetchInterval: 5_000,
     staleTime: 0,
+    placeholderData: keepPreviousData, // keep showing old data during refetch/refresh
   });
 
   const positions = useMemo(() => {

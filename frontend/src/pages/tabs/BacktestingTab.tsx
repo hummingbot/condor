@@ -1,10 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Calendar,
+  CheckCircle2,
   ChevronDown,
   Circle,
   FlaskConical,
   HardDrive,
+  Info,
+  Maximize2,
+  Minimize2,
+  Pin,
+  PinOff,
   Play,
   Trash2,
   X,
@@ -16,9 +22,8 @@ import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
 import { api } from "@/lib/api";
 
-// ── Helpers ──
+// -- Helpers --
 
-/** Normalize a timestamp to seconds (lightweight-charts expects epoch seconds) */
 function tsToSeconds(ts: number): number {
   return ts > 1e12 ? Math.floor(ts / 1000) : ts;
 }
@@ -51,6 +56,13 @@ function tsToDateTime(ts: number): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+  });
+}
+
+function tsToShortDate(ts: number): string {
+  return new Date(ts * 1000).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
   });
 }
 
@@ -87,7 +99,7 @@ const CLOSE_TYPE_LABELS: Record<string, { label: string; color: string }> = {
   POSITION_HOLD: { label: "PH", color: "#42a5f5" },
 };
 
-// ── Chart: Lightweight Charts base config ──
+// -- Chart config --
 
 function chartOptions(isDark: boolean) {
   return {
@@ -109,8 +121,6 @@ function chartOptions(isDark: boolean) {
   };
 }
 
-// ── Executor line style by close type (matches Python _add_executor_markers convention) ──
-
 function executorLineStyle(
   ex: ExecutorData,
   LineStyle: { Solid: number; Dashed: number; Dotted: number },
@@ -118,7 +128,6 @@ function executorLineStyle(
   const ct = ex.closeType?.toUpperCase() ?? "";
 
   if (ct.includes("POSITION_HOLD")) {
-    // Hold: dotted, blue for buy / purple for sell
     return {
       color: ex.side === "BUY" ? "#42a5f5" : "#ab47bc",
       lineWidth: 1,
@@ -126,19 +135,16 @@ function executorLineStyle(
     };
   }
   if (ct.includes("EARLY_STOP")) {
-    // Early stop: dashed, gray
     return { color: "#e0e0e0", lineWidth: 1, lineStyle: LineStyle.Dashed };
   }
   if (ct.includes("STOP_LOSS")) {
-    // Stop loss: solid, orange
     return { color: "#ff6d00", lineWidth: 2, lineStyle: LineStyle.Solid };
   }
-  // TP / Time Limit / Other: solid, green if profit / red if loss
   const color = ex.netPnlQuote >= 0 ? "#26a69a" : "#ef5350";
   return { color, lineWidth: 2, lineStyle: LineStyle.Solid };
 }
 
-// ── Unified Backtest Chart (synced subplots) ──
+// -- Backtest Chart --
 
 function BacktestChart({ data }: { data: BacktestData }) {
   const priceRef = useRef<HTMLDivElement>(null);
@@ -150,18 +156,24 @@ function BacktestChart({ data }: { data: BacktestData }) {
   const hasPositionHeld = data.positionHeldTimeseries.length > 0;
   const hasPnl = data.pnlTimeseries.length > 0 || data.executors.length > 0;
 
+  // Compute final values for badges
+  const finalPnl = data.pnlTimeseries.length > 0
+    ? data.pnlTimeseries[data.pnlTimeseries.length - 1].totalPnl
+    : null;
+  const finalPosition = data.positionHeldTimeseries.length > 0
+    ? data.positionHeldTimeseries[data.positionHeldTimeseries.length - 1].netAmount
+    : null;
+
   useEffect(() => {
     if (!priceRef.current || data.candles.length === 0) return;
     const isDark = theme === "dark";
     let ro: ResizeObserver | undefined;
-    // Track if syncing to prevent infinite loops
     let isSyncing = false;
 
     (async () => {
       const mod = await import("lightweight-charts");
       if (!priceRef.current) return;
 
-      // Cleanup previous charts
       for (const c of chartsRef.current) {
         try { c.remove(); } catch { /* ok */ }
       }
@@ -173,7 +185,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
       const containerWidth = priceRef.current.clientWidth;
 
-      // ── Row 1: Price + Executors ──
+      // Row 1: Price + Executors
       const priceChart = mod.createChart(priceRef.current, {
         ...chartOptions(isDark),
         width: containerWidth,
@@ -218,7 +230,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
             { time: exitT, value: exitP },
           ]);
         } else if (ex.entryPrice > 0) {
-          // Unfilled: dashed white horizontal
           const seg = priceChart.addSeries(mod.LineSeries, {
             color: "rgba(255,255,255,0.4)",
             lineWidth: 1,
@@ -236,7 +247,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
       priceChart.timeScale().fitContent();
 
-      // ── Row 2: Cumulative PnL ──
+      // Row 2: Cumulative PnL
       let pnlChart: IChartApi | undefined;
       if (hasPnl && pnlRef.current) {
         pnlChart = mod.createChart(pnlRef.current, {
@@ -247,7 +258,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
         chartsRef.current.push(pnlChart);
 
         if (data.pnlTimeseries.length > 0) {
-          // Full tick-level PnL timeseries
           const totalSeries = pnlChart.addSeries(mod.AreaSeries, {
             lineColor: "#ffd54f",
             topColor: "rgba(255,213,79,0.25)",
@@ -278,7 +288,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
             s.setData(data.pnlTimeseries.map((p) => ({ time: ts(p.time), value: p.positionUnrealizedPnl })));
           }
         } else {
-          // Fallback: cumulative from executor closures
           const closed = data.executors
             .filter((e) => e.closeTimestamp && e.filledAmountQuote > 0 && !e.closeType?.toUpperCase().includes("POSITION_HOLD"))
             .sort((a, b) => a.closeTimestamp - b.closeTimestamp);
@@ -299,7 +308,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
         pnlChart.timeScale().fitContent();
       }
 
-      // ── Row 3: Position Held (only if data exists) ──
+      // Row 3: Position Held
       let posChart: IChartApi | undefined;
       if (hasPositionHeld && posRef.current) {
         posChart = mod.createChart(posRef.current, {
@@ -311,7 +320,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
         const pts = data.positionHeldTimeseries;
 
-        // Long held (green area)
         const longSeries = posChart.addSeries(mod.AreaSeries, {
           lineColor: "#26a69a",
           topColor: "rgba(38,166,154,0.3)",
@@ -320,7 +328,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
         });
         longSeries.setData(pts.map((p) => ({ time: ts(p.time), value: p.longAmount })));
 
-        // Short held (red area, negative)
         if (pts.some((p) => p.shortAmount > 0)) {
           const shortSeries = posChart.addSeries(mod.AreaSeries, {
             lineColor: "#ef5350",
@@ -332,7 +339,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
           shortSeries.setData(pts.map((p) => ({ time: ts(p.time), value: -p.shortAmount })));
         }
 
-        // Net position line
         const netSeries = posChart.addSeries(mod.LineSeries, {
           color: "#e0e0e0", lineWidth: 1,
           priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -342,7 +348,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
         posChart.timeScale().fitContent();
       }
 
-      // ── Sync time scales across all charts ──
+      // Sync time scales
       const allCharts = chartsRef.current;
       for (let i = 0; i < allCharts.length; i++) {
         allCharts[i].timeScale().subscribeVisibleLogicalRangeChange((range) => {
@@ -357,7 +363,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
         });
       }
 
-      // Crosshair sync — clearCrosshairPosition when mouse leaves a chart
       for (let i = 0; i < allCharts.length; i++) {
         allCharts[i].subscribeCrosshairMove((param) => {
           if (isSyncing) return;
@@ -373,7 +378,6 @@ function BacktestChart({ data }: { data: BacktestData }) {
         });
       }
 
-      // Resize observer
       ro = new ResizeObserver((entries) => {
         const w = entries[0]?.contentRect?.width;
         if (w) {
@@ -396,10 +400,14 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-0">
+      {/* Price chart header */}
       <div className="flex items-center justify-between mb-3">
-        <h4 className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
-          Price &amp; Executors
-        </h4>
+        <div className="flex items-center gap-2">
+          <h4 className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
+            Price &amp; Executors
+          </h4>
+          <span className="text-[10px] text-[var(--color-text-muted)] opacity-60">USD</span>
+        </div>
         {data.pnlTimeseries.length > 0 && (
           <div className="flex gap-3 text-[10px]">
             <span className="flex items-center gap-1"><span className="inline-block w-3 h-0.5 bg-[#ffd54f]" /> Total PnL</span>
@@ -410,18 +418,50 @@ function BacktestChart({ data }: { data: BacktestData }) {
         )}
       </div>
       <div ref={priceRef} />
+
+      {/* PnL chart */}
       {hasPnl && (
         <>
-          <div className="pt-1">
-            <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wide">Cumulative PnL</span>
+          <div className="pt-2 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wide">Cumulative PnL</span>
+              <span className="text-[10px] text-[var(--color-text-muted)] opacity-60">USD</span>
+            </div>
+            {finalPnl !== null && (
+              <span
+                className="text-[11px] font-semibold tabular-nums px-1.5 py-0.5 rounded"
+                style={{
+                  color: finalPnl >= 0 ? "var(--color-green)" : "var(--color-red)",
+                  backgroundColor: finalPnl >= 0 ? "rgba(38,166,154,0.1)" : "rgba(239,83,80,0.1)",
+                }}
+              >
+                {formatPnl(finalPnl)}
+              </span>
+            )}
           </div>
           <div ref={pnlRef} />
         </>
       )}
+
+      {/* Position chart */}
       {hasPositionHeld && (
         <>
-          <div className="pt-1">
-            <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wide">Position Held</span>
+          <div className="pt-2 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wide">Position Held</span>
+              <span className="text-[10px] text-[var(--color-text-muted)] opacity-60">QTY</span>
+            </div>
+            {finalPosition !== null && (
+              <span
+                className="text-[11px] font-semibold tabular-nums px-1.5 py-0.5 rounded"
+                style={{
+                  color: finalPosition >= 0 ? "var(--color-green)" : "var(--color-red)",
+                  backgroundColor: finalPosition >= 0 ? "rgba(38,166,154,0.1)" : "rgba(239,83,80,0.1)",
+                }}
+              >
+                {finalPosition >= 0 ? "+" : ""}{finalPosition.toFixed(4)}
+              </span>
+            )}
           </div>
           <div ref={posRef} />
         </>
@@ -430,7 +470,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
   );
 }
 
-// ── Main Component ──
+// -- Main Component --
 
 export function BacktestingTab() {
   const { server } = useServer();
@@ -448,6 +488,10 @@ export function BacktestingTab() {
   );
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [configDropdownOpen, setConfigDropdownOpen] = useState(false);
+  const [configSearch, setConfigSearch] = useState("");
+  const [activePreset, setActivePreset] = useState<string | null>("1W");
+  const [pinnedTaskId, setPinnedTaskId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   // Available configs
   const { data: configsData } = useQuery({
@@ -467,8 +511,8 @@ export function BacktestingTab() {
     refetchInterval: 5000,
   });
 
-  // Selected task detail (poll while pending/running)
-  const { data: selectedTask } = useQuery({
+  // Selected task detail
+  const { data: selectedTask, isLoading: selectedTaskLoading } = useQuery({
     queryKey: ["backtest-task", server, selectedTaskId],
     queryFn: () => api.getBacktestTask(server!, selectedTaskId!),
     enabled: !!server && !!selectedTaskId,
@@ -479,13 +523,28 @@ export function BacktestingTab() {
     },
   });
 
-  // Auto-select first completed task if none selected
+  // Pinned task detail (for comparison)
+  const { data: pinnedTask } = useQuery({
+    queryKey: ["backtest-task", server, pinnedTaskId],
+    queryFn: () => api.getBacktestTask(server!, pinnedTaskId!),
+    enabled: !!server && !!pinnedTaskId && pinnedTaskId !== selectedTaskId,
+  });
+
+  // Auto-select first completed task
   useEffect(() => {
     if (!selectedTaskId && tasks && tasks.length > 0) {
       const completed = tasks.find((t) => t.status === "completed");
       setSelectedTaskId(completed?.task_id ?? tasks[0].task_id);
     }
   }, [tasks, selectedTaskId]);
+
+  // Toast auto-dismiss
+  useEffect(() => {
+    if (toast) {
+      const t = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [toast]);
 
   // Submit mutation
   const submitMutation = useMutation({
@@ -500,6 +559,7 @@ export function BacktestingTab() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["backtest-tasks", server] });
       if (data.task_id) setSelectedTaskId(data.task_id);
+      setToast("Backtest submitted successfully");
     },
   });
 
@@ -508,33 +568,96 @@ export function BacktestingTab() {
     mutationFn: (taskId: string) => api.deleteBacktestTask(server!, taskId),
     onSuccess: (_, taskId) => {
       if (selectedTaskId === taskId) setSelectedTaskId(null);
+      if (pinnedTaskId === taskId) setPinnedTaskId(null);
       queryClient.invalidateQueries({ queryKey: ["backtest-tasks", server] });
     },
   });
 
-  const applyPreset = useCallback((days: number) => {
+  const applyPreset = useCallback((label: string, days: number) => {
     const now = Math.floor(Date.now() / 1000);
     setEndDate(toDateInputValue(now));
     setStartDate(toDateInputValue(now - days * 86400));
+    setActivePreset(label);
   }, []);
 
-  // The backend-api uses "result" (singular) for the backtesting data
-  // which contains: { executors, results (metrics), processed_data, pnl_timeseries, ... }
+  // Clear active preset when dates are manually changed
+  const handleStartDateChange = useCallback((val: string) => {
+    setStartDate(val);
+    setActivePreset(null);
+  }, []);
+  const handleEndDateChange = useCallback((val: string) => {
+    setEndDate(val);
+    setActivePreset(null);
+  }, []);
+
   const rawTaskResults = selectedTask?.result as Record<string, unknown> | undefined;
   const processed = rawTaskResults ? extractResults(rawTaskResults) : null;
+
+  // Pinned task processed data for comparison
+  const pinnedRawResults = pinnedTask?.result as Record<string, unknown> | undefined;
+  const pinnedProcessed = pinnedRawResults ? extractResults(pinnedRawResults) : null;
+
+  // Extract config info from a task for display
+  const getTaskConfigInfo = useCallback((task: Record<string, unknown>) => {
+    const config = (task.config ?? {}) as Record<string, unknown>;
+    const innerConfig = (config.config ?? {}) as Record<string, unknown>;
+    return {
+      controllerName: String(innerConfig.controller_name ?? config.controller_name ?? ""),
+      configId: String(innerConfig.id ?? config.config_id ?? ""),
+      tradingPair: String(innerConfig.trading_pair ?? config.trading_pair ?? ""),
+      connector: String(innerConfig.connector_name ?? config.connector_name ?? ""),
+      resolution: String(config.backtesting_resolution ?? ""),
+      startTime: (config.start_time as number) ?? 0,
+      endTime: (config.end_time as number) ?? 0,
+    };
+  }, []);
 
   if (!server)
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
 
   const selectedConfig = configsData?.configs.find((c) => c.id === configId);
 
+  // Group configs by controller_name
+  const groupedConfigs = configsData?.configs
+    .filter((c) => {
+      if (!configSearch) return true;
+      const q = configSearch.toLowerCase();
+      return (
+        c.id.toLowerCase().includes(q) ||
+        (c.controller_name ?? "").toLowerCase().includes(q) ||
+        (c.connector_name ?? "").toLowerCase().includes(q) ||
+        (c.trading_pair ?? "").toLowerCase().includes(q)
+      );
+    })
+    .reduce<Record<string, typeof configsData.configs>>((acc, c) => {
+      const group = c.controller_name ?? "Other";
+      if (!acc[group]) acc[group] = [];
+      acc[group].push(c);
+      return acc;
+    }, {});
+
+  // Reason why button is disabled
+  const disabledReason = !configId
+    ? "Select a controller config first"
+    : submitMutation.isPending
+      ? "Backtest is being submitted..."
+      : null;
+
   return (
-    <div className="space-y-6">
-      {/* ── Config Panel ── */}
+    <div className="space-y-5">
+      {/* Toast notification */}
+      {toast && (
+        <div className="fixed top-4 right-4 z-50 flex items-center gap-2 rounded-lg border border-[var(--color-green)]/30 bg-[var(--color-green)]/10 px-4 py-2.5 text-sm text-[var(--color-green)] shadow-lg backdrop-blur-sm animate-in fade-in slide-in-from-top-2">
+          <CheckCircle2 className="h-4 w-4 shrink-0" />
+          {toast}
+        </div>
+      )}
+
+      {/* Config Panel */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {/* Config selector */}
-          <div>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end">
+          {/* Left: Config selector (wider) */}
+          <div className="lg:w-[340px] lg:shrink-0">
             <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
               Controller Config
             </label>
@@ -543,143 +666,188 @@ export function BacktestingTab() {
                 onClick={() => setConfigDropdownOpen((o) => !o)}
                 className="flex w-full items-center justify-between rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
               >
-                <span className={`truncate ${configId ? "" : "text-[var(--color-text-muted)]"}`}>
-                  {selectedConfig
-                    ? `${selectedConfig.id}`
-                    : "Select a config..."}
-                </span>
-                <ChevronDown className={`h-4 w-4 shrink-0 text-[var(--color-text-muted)] transition-transform ${configDropdownOpen ? "rotate-180" : ""}`} />
+                <div className="min-w-0 flex-1 text-left">
+                  {selectedConfig ? (
+                    <div>
+                      <div className="font-medium truncate">{selectedConfig.id}</div>
+                      <div className="text-[10px] text-[var(--color-text-muted)] truncate">
+                        {selectedConfig.controller_name} &middot; {selectedConfig.connector_name} &middot; {selectedConfig.trading_pair}
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-[var(--color-text-muted)]">Select a config...</span>
+                  )}
+                </div>
+                <ChevronDown className={`h-4 w-4 shrink-0 ml-2 text-[var(--color-text-muted)] transition-transform ${configDropdownOpen ? "rotate-180" : ""}`} />
               </button>
               {configDropdownOpen && configsData && (
                 <>
-                  <div className="fixed inset-0 z-10" onClick={() => setConfigDropdownOpen(false)} />
-                  <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-60 overflow-auto rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
-                    {configsData.configs.length === 0 && (
-                      <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">
-                        No configs available
-                      </div>
-                    )}
-                    {configsData.configs.map((c) => (
-                      <button
-                        key={c.id}
-                        onClick={() => {
-                          setConfigId(c.id);
-                          setConfigDropdownOpen(false);
-                        }}
-                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--color-surface-hover)] ${
-                          c.id === configId ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]" : ""
-                        }`}
-                      >
-                        <span className="font-medium">{c.id}</span>
-                        <span className="text-xs text-[var(--color-text-muted)]">
-                          {c.controller_name} &middot; {c.connector_name} &middot; {c.trading_pair}
-                        </span>
-                      </button>
-                    ))}
+                  <div className="fixed inset-0 z-10" onClick={() => { setConfigDropdownOpen(false); setConfigSearch(""); }} />
+                  <div className="absolute left-0 top-full z-20 mt-1 w-[420px] max-w-[90vw] rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl">
+                    <div className="p-2 border-b border-[var(--color-border)]">
+                      <input
+                        type="text"
+                        value={configSearch}
+                        onChange={(e) => setConfigSearch(e.target.value)}
+                        placeholder="Search configs..."
+                        autoFocus
+                        className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+                      />
+                    </div>
+                    <div className="max-h-72 overflow-auto">
+                      {configsData.configs.length === 0 && (
+                        <div className="px-3 py-4 text-xs text-center text-[var(--color-text-muted)]">
+                          No configs available
+                        </div>
+                      )}
+                      {groupedConfigs && Object.entries(groupedConfigs).map(([group, configs]) => (
+                        <div key={group}>
+                          <div className="sticky top-0 bg-[var(--color-bg)] px-3 py-1.5 text-[10px] font-semibold text-[var(--color-text-muted)] uppercase tracking-wider border-b border-[var(--color-border)]">
+                            {group}
+                          </div>
+                          {configs.map((c) => (
+                            <button
+                              key={c.id}
+                              onClick={() => {
+                                setConfigId(c.id);
+                                setConfigDropdownOpen(false);
+                                setConfigSearch("");
+                              }}
+                              className={`flex w-full flex-col gap-0.5 px-3 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+                                c.id === configId ? "bg-[var(--color-primary)]/10" : ""
+                              }`}
+                            >
+                              <span className={`text-sm font-medium truncate ${c.id === configId ? "text-[var(--color-primary)]" : ""}`}>
+                                {c.id}
+                              </span>
+                              <span className="text-[11px] text-[var(--color-text-muted)] truncate">
+                                {c.connector_name} &middot; {c.trading_pair}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </>
               )}
             </div>
           </div>
 
-          {/* Time range */}
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
-              Time Range
-            </label>
-            <div className="space-y-1.5">
-              <div className="flex items-center gap-1.5">
-                <Calendar className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
-                />
-                <span className="text-xs text-[var(--color-text-muted)]">to</span>
-                <input
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                  className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
-                />
+          {/* Middle: Parameters group */}
+          <div className="flex flex-1 flex-wrap items-end gap-4">
+            {/* Time range */}
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
+                Time Range
+              </label>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-1.5">
+                  <Calendar className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => handleStartDateChange(e.target.value)}
+                    className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+                  />
+                  <span className="text-xs text-[var(--color-text-muted)]">to</span>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => handleEndDateChange(e.target.value)}
+                    className="min-w-0 flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"
+                  />
+                </div>
+                <div className="flex rounded-md border border-[var(--color-border)] overflow-hidden w-fit">
+                  {RANGE_PRESETS.map(({ label, days }) => (
+                    <button
+                      key={label}
+                      onClick={() => applyPreset(label, days)}
+                      className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                        activePreset === label
+                          ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
+            </div>
+
+            {/* Resolution */}
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
+                Resolution
+              </label>
               <div className="flex rounded-md border border-[var(--color-border)] overflow-hidden w-fit">
-                {RANGE_PRESETS.map(({ label, days }) => (
+                {RESOLUTIONS.map((r) => (
                   <button
-                    key={label}
-                    onClick={() => applyPreset(days)}
-                    className="px-2.5 py-1 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                    key={r}
+                    onClick={() => setResolution(r)}
+                    className={`px-3 py-2 text-xs font-medium transition-colors ${
+                      resolution === r
+                        ? "bg-[var(--color-primary)] text-white"
+                        : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                    }`}
                   >
-                    {label}
+                    {r}
                   </button>
                 ))}
               </div>
             </div>
-          </div>
 
-          {/* Resolution */}
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
-              Resolution
-            </label>
-            <div className="flex rounded-md border border-[var(--color-border)] overflow-hidden w-fit">
-              {RESOLUTIONS.map((r) => (
-                <button
-                  key={r}
-                  onClick={() => setResolution(r)}
-                  className={`px-3 py-2 text-xs font-medium transition-colors ${
-                    resolution === r
-                      ? "bg-[var(--color-primary)] text-white"
-                      : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                >
-                  {r}
-                </button>
-              ))}
+            {/* Trade Cost */}
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
+                Trade Cost
+              </label>
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  value={tradeCost}
+                  onChange={(e) => setTradeCost(e.target.value)}
+                  className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-sm tabular-nums focus:border-[var(--color-primary)] focus:outline-none"
+                />
+                <span className="text-xs text-[var(--color-text-muted)]">
+                  ({(parseFloat(tradeCost || "0") * 100).toFixed(2)}%)
+                </span>
+              </div>
             </div>
           </div>
 
-          {/* Trade Cost */}
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
-              Trade Cost
-            </label>
-            <div className="flex items-center gap-1">
-              <input
-                type="number"
-                step="0.0001"
-                min="0"
-                value={tradeCost}
-                onChange={(e) => setTradeCost(e.target.value)}
-                className="w-24 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-2 text-sm tabular-nums focus:border-[var(--color-primary)] focus:outline-none"
-              />
-              <span className="text-xs text-[var(--color-text-muted)]">
-                ({(parseFloat(tradeCost || "0") * 100).toFixed(2)}%)
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Submit button */}
-        <div className="mt-4 flex items-center gap-3">
-          <button
-            onClick={() => submitMutation.mutate()}
-            disabled={!configId || submitMutation.isPending}
-            className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {submitMutation.isPending ? (
-              <Circle className="h-4 w-4 animate-spin" />
-            ) : (
-              <Play className="h-4 w-4" />
+          {/* Right: Run button */}
+          <div className="relative group lg:shrink-0">
+            <button
+              onClick={() => submitMutation.mutate()}
+              disabled={!!disabledReason}
+              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shadow-[var(--color-primary)]/20"
+            >
+              {submitMutation.isPending ? (
+                <Circle className="h-4 w-4 animate-spin" />
+              ) : (
+                <Play className="h-4 w-4" />
+              )}
+              Run Backtest
+            </button>
+            {/* Tooltip on disabled */}
+            {disabledReason && (
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block">
+                <div className="whitespace-nowrap rounded-md bg-[var(--color-bg)] border border-[var(--color-border)] px-2.5 py-1.5 text-xs text-[var(--color-text-muted)] shadow-lg">
+                  <div className="flex items-center gap-1.5">
+                    <Info className="h-3 w-3 shrink-0" />
+                    {disabledReason}
+                  </div>
+                  <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-px">
+                    <div className="border-4 border-transparent border-t-[var(--color-border)]" />
+                  </div>
+                </div>
+              </div>
             )}
-            Run Backtest
-          </button>
-          {selectedConfig && (
-            <span className="text-xs text-[var(--color-text-muted)]">
-              {selectedConfig.controller_name} &middot; {selectedConfig.connector_name} &middot; {selectedConfig.trading_pair}
-            </span>
-          )}
+          </div>
         </div>
       </div>
 
@@ -689,12 +857,12 @@ export function BacktestingTab() {
         </div>
       )}
 
-      {/* ── Tasks + Results ── */}
-      <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
+      {/* Tasks + Results */}
+      <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
         {/* Task list sidebar */}
         <div className="space-y-2">
           <h3 className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
-            Tasks
+            Tasks {tasks && tasks.length > 0 && `(${tasks.length})`}
           </h3>
 
           {tasksLoading && (
@@ -712,43 +880,117 @@ export function BacktestingTab() {
           {tasks?.map((task) => {
             const style = STATUS_STYLES[task.status] ?? STATUS_STYLES.pending;
             const isSelected = task.task_id === selectedTaskId;
+            const isPinned = task.task_id === pinnedTaskId;
+
+            // Extract config info from task if available
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const taskInfo = getTaskConfigInfo(task as any);
+
+            // Try to get quick PnL from task result for completed tasks
+            let quickPnl: number | null = null;
+            if (task.status === "completed") {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const r = (task as any).result;
+              if (r) {
+                const metrics = (r.results && typeof r.results === "object") ? r.results : r;
+                quickPnl = metrics?.net_pnl_quote ?? metrics?.net_pnl ?? null;
+              }
+            }
 
             return (
               <button
                 key={task.task_id}
                 onClick={() => setSelectedTaskId(task.task_id)}
-                className={`group flex w-full items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
+                className={`group flex w-full items-start gap-2 rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
                   isSelected
                     ? "border-[var(--color-primary)]/50 bg-[var(--color-primary)]/5"
                     : "border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-primary)]/30"
                 }`}
               >
                 <div className="min-w-0 flex-1">
+                  {/* Row 1: Status + config name */}
                   <div className="flex items-center gap-2">
                     <span
-                      className="inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-none"
+                      className="inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-none shrink-0"
                       style={{ backgroundColor: style.bg, color: style.text }}
                     >
                       {task.status}
                     </span>
-                    <code className="truncate text-xs text-[var(--color-text-muted)]">
-                      {task.task_id.slice(0, 8)}
-                    </code>
+                    {taskInfo.configId ? (
+                      <span className="text-xs font-medium truncate">{taskInfo.configId}</span>
+                    ) : (
+                      <code className="truncate text-xs text-[var(--color-text-muted)]">
+                        {task.task_id.slice(0, 8)}
+                      </code>
+                    )}
                     {task.saved && (
                       <HardDrive className="h-3 w-3 text-[var(--color-primary)] shrink-0" />
                     )}
                   </div>
+
+                  {/* Row 2: Details line */}
+                  {(taskInfo.tradingPair || taskInfo.resolution || taskInfo.startTime > 0) && (
+                    <div className="mt-1 flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                      {taskInfo.tradingPair && (
+                        <span className="font-medium">{taskInfo.tradingPair}</span>
+                      )}
+                      {taskInfo.resolution && (
+                        <>
+                          <span>&middot;</span>
+                          <span>{taskInfo.resolution}</span>
+                        </>
+                      )}
+                      {taskInfo.startTime > 0 && taskInfo.endTime > 0 && (
+                        <>
+                          <span>&middot;</span>
+                          <span>{tsToShortDate(taskInfo.startTime)}-{tsToShortDate(taskInfo.endTime)}</span>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Row 3: Quick PnL for completed */}
+                  {quickPnl !== null && (
+                    <div className="mt-1">
+                      <span
+                        className="text-xs font-semibold tabular-nums"
+                        style={{ color: pnlColor(quickPnl) }}
+                      >
+                        {formatPnl(quickPnl)}
+                      </span>
+                    </div>
+                  )}
                 </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    deleteMutation.mutate(task.task_id);
-                  }}
-                  className="rounded p-0.5 text-[var(--color-text-muted)] opacity-0 transition-all hover:text-[var(--color-red)] group-hover:opacity-100"
-                  title="Delete task"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+
+                {/* Action buttons */}
+                <div className="flex flex-col gap-1 shrink-0">
+                  {task.status === "completed" && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPinnedTaskId(isPinned ? null : task.task_id);
+                      }}
+                      className={`rounded p-0.5 transition-all ${
+                        isPinned
+                          ? "text-[var(--color-primary)]"
+                          : "text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 hover:text-[var(--color-primary)]"
+                      }`}
+                      title={isPinned ? "Unpin (remove from comparison)" : "Pin for comparison"}
+                    >
+                      {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                    </button>
+                  )}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteMutation.mutate(task.task_id);
+                    }}
+                    className="rounded p-0.5 text-[var(--color-text-muted)] opacity-0 transition-all hover:text-[var(--color-red)] group-hover:opacity-100"
+                    title="Delete task"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </button>
             );
           })}
@@ -775,7 +1017,12 @@ export function BacktestingTab() {
             </div>
           ) : selectedTask?.status === "completed" ? (
             processed ? (
-              <BacktestResults data={processed} taskConfig={selectedTask?.config as Record<string, unknown> | undefined} />
+              <BacktestResults
+                data={processed}
+                taskConfig={selectedTask?.config as Record<string, unknown> | undefined}
+                pinnedData={pinnedProcessed}
+                pinnedConfig={pinnedTask?.config as Record<string, unknown> | undefined}
+              />
             ) : rawTaskResults ? (
               <div className="space-y-4">
                 <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
@@ -796,10 +1043,30 @@ export function BacktestingTab() {
                 <p className="text-sm">Backtest completed but no results data returned</p>
               </div>
             )
+          ) : selectedTaskLoading ? (
+            <div className="flex flex-col items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-16">
+              <Circle className="h-6 w-6 animate-spin text-[var(--color-primary)] mb-3" />
+              <p className="text-sm text-[var(--color-text-muted)]">Loading backtest...</p>
+            </div>
           ) : (
-            <div className="flex flex-col items-center justify-center rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-16 text-[var(--color-text-muted)]">
-              <FlaskConical className="h-8 w-8 mb-3 opacity-30" />
-              <p className="text-sm">Select a config and run a backtest</p>
+            /* Empty state with guided steps */
+            <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50 py-20 text-[var(--color-text-muted)]">
+              <FlaskConical className="h-10 w-10 mb-4 opacity-20" />
+              <p className="text-base font-medium mb-6 text-[var(--color-text)]">Run your first backtest</p>
+              <div className="flex flex-col gap-3 text-sm">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary)]/10 text-xs font-semibold text-[var(--color-primary)]">1</span>
+                  <span>Select a controller config from the dropdown above</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary)]/10 text-xs font-semibold text-[var(--color-primary)]">2</span>
+                  <span>Choose a time range and resolution</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--color-primary)]/10 text-xs font-semibold text-[var(--color-primary)]">3</span>
+                  <span>Click <strong>Run Backtest</strong> to see results</span>
+                </div>
+              </div>
             </div>
           )}
         </div>
@@ -808,7 +1075,7 @@ export function BacktestingTab() {
   );
 }
 
-// ── Data Types ──
+// -- Data Types --
 
 interface CandleData {
   time: number;
@@ -847,7 +1114,6 @@ interface PositionHeldPoint {
 }
 
 interface BacktestData {
-  // Summary metrics
   netPnlQuote: number;
   netPnlPct: number;
   maxDrawdownUsd: number;
@@ -860,26 +1126,19 @@ interface BacktestData {
   accuracyShort: number;
   totalFees: number;
   closeTypes: Record<string, number>;
-  // Chart data
   candles: CandleData[];
   pnlTimeseries: PnlTimeseriesPoint[];
   positionHeldTimeseries: PositionHeldPoint[];
   executors: ExecutorData[];
-  // Raw for debug
   raw: Record<string, unknown>;
 }
 
-// ── Results Extraction ──
+// -- Results Extraction --
 
 function extractResults(taskResults: Record<string, unknown>): BacktestData | null {
-  // The hummingbot API returns nested structure:
-  //   { processed_data: { features: [...] }, results: { net_pnl_quote, ... }, executors: [...], pnl_timeseries: [...] }
-  // But it could also be flat if the backend wraps it differently.
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw = taskResults as any;
 
-  // Find the metrics dict - could be at results.results (nested) or results directly (flat)
   const metrics: Record<string, unknown> =
     (raw.results && typeof raw.results === "object" && !Array.isArray(raw.results))
       ? raw.results
@@ -905,21 +1164,17 @@ function extractResults(taskResults: Record<string, unknown>): BacktestData | nu
   const accuracyShort = num(metrics, "accuracy_short");
   const totalFees = num(metrics, "total_fees_quote", "total_fees");
 
-  // Close types
   let closeTypes: Record<string, number> = {};
   const rawCT = metrics.close_types;
   if (rawCT && typeof rawCT === "object") {
     closeTypes = rawCT as Record<string, number>;
   }
 
-  // Extract candle data from processed_data
-  // Backend returns df.to_dict() which gives { column: { "0": val, "1": val, ... } }
   let candles: CandleData[] = [];
   const processedData = raw.processed_data;
   if (processedData) {
     const features = processedData.features ?? processedData;
     if (Array.isArray(features)) {
-      // Records format
       candles = features.map((f: Record<string, unknown>) => ({
         time: f.timestamp as number,
         open: f.open as number,
@@ -929,7 +1184,6 @@ function extractResults(taskResults: Record<string, unknown>): BacktestData | nu
       }));
     } else if (features && typeof features === "object" && features.timestamp) {
       const tsObj = features.timestamp as Record<string, number>;
-      // Check if it's columnar array format or dict-of-dicts (df.to_dict() default)
       if (Array.isArray(tsObj)) {
         const timestamps = tsObj as unknown as number[];
         const opens = features.open as unknown as number[];
@@ -944,7 +1198,6 @@ function extractResults(taskResults: Record<string, unknown>): BacktestData | nu
           close: closes[i],
         }));
       } else {
-        // df.to_dict() format: { column: { "0": val, "1": val, ... } }
         const keys = Object.keys(tsObj).sort((a, b) => Number(a) - Number(b));
         const opensObj = (features.open ?? {}) as Record<string, number>;
         const highsObj = (features.high ?? {}) as Record<string, number>;
@@ -961,7 +1214,6 @@ function extractResults(taskResults: Record<string, unknown>): BacktestData | nu
     }
   }
 
-  // Extract PnL timeseries
   let pnlTimeseries: PnlTimeseriesPoint[] = [];
   const rawPnlTs = raw.pnl_timeseries;
   if (Array.isArray(rawPnlTs) && rawPnlTs.length > 0) {
@@ -974,14 +1226,12 @@ function extractResults(taskResults: Record<string, unknown>): BacktestData | nu
     }));
   }
 
-  // Extract executors
   let executors: ExecutorData[] = [];
   const rawExecutors = raw.executors;
   if (Array.isArray(rawExecutors)) {
     executors = rawExecutors
       .filter((e: Record<string, unknown>) => e.timestamp != null)
       .map((e: Record<string, unknown>) => {
-        // Handle both serialized ExecutorInfo dicts and simpler formats
         const config = (e.config ?? {}) as Record<string, unknown>;
         const customInfo = (e.custom_info ?? {}) as Record<string, unknown>;
         return {
@@ -998,7 +1248,6 @@ function extractResults(taskResults: Record<string, unknown>): BacktestData | nu
       });
   }
 
-  // Extract position held timeseries
   let positionHeldTimeseries: PositionHeldPoint[] = [];
   const rawPosTs = raw.position_held_timeseries;
   if (Array.isArray(rawPosTs) && rawPosTs.length > 0) {
@@ -1011,9 +1260,7 @@ function extractResults(taskResults: Record<string, unknown>): BacktestData | nu
     }));
   }
 
-  // If we found no metrics and no data at all, return null
   if (netPnlQuote === 0 && totalExecutors === 0 && candles.length === 0 && executors.length === 0 && pnlTimeseries.length === 0) {
-    // Check if there's really nothing useful
     const hasAnything = Object.keys(metrics).length > 0 || Object.keys(raw).length > 1;
     if (!hasAnything) return null;
   }
@@ -1049,18 +1296,30 @@ function normalizeSide(side: unknown): string {
   return String(side ?? "");
 }
 
-// ── Results Display ──
+// -- Results Display --
 
-function BacktestResults({ data, taskConfig }: { data: BacktestData; taskConfig?: Record<string, unknown> }) {
+function BacktestResults({
+  data,
+  taskConfig,
+  pinnedData,
+  pinnedConfig,
+}: {
+  data: BacktestData;
+  taskConfig?: Record<string, unknown>;
+  pinnedData?: BacktestData | null;
+  pinnedConfig?: Record<string, unknown>;
+}) {
   const [showRaw, setShowRaw] = useState(false);
   const [showExecutors, setShowExecutors] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
+  const [chartExpanded, setChartExpanded] = useState(false);
 
-  // Extract controller info from task config
-  // Task config shape: { start_time, end_time, backtesting_resolution, trade_cost, config: { controller_name, id, ... } }
   const controllerConfig = (taskConfig?.config ?? {}) as Record<string, unknown>;
   const controllerName = String(controllerConfig.controller_name ?? "");
   const configId = String(controllerConfig.id ?? "");
+
+  // Close types total for stacked bar
+  const closeTypesTotal = Object.values(data.closeTypes).reduce((s, v) => s + v, 0);
 
   return (
     <div className="space-y-4">
@@ -1101,17 +1360,25 @@ function BacktestResults({ data, taskConfig }: { data: BacktestData; taskConfig?
         </div>
       )}
 
-      {/* Stat cards - row 1: core metrics */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
-        <StatCard label="Net PnL" value={formatPnl(data.netPnlQuote)} color={pnlColor(data.netPnlQuote)} />
-        <StatCard
+      {/* Hero stat cards: Net PnL & Return (larger) */}
+      <div className="grid grid-cols-2 gap-3">
+        <HeroStatCard
+          label="Net PnL"
+          value={formatPnl(data.netPnlQuote)}
+          pnl={data.netPnlQuote}
+        />
+        <HeroStatCard
           label="Return"
           value={data.netPnlPct ? formatPct(data.netPnlPct) : "\u2014"}
-          color={pnlColor(data.netPnlPct)}
+          pnl={data.netPnlPct}
         />
+      </div>
+
+      {/* Secondary stat cards */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard label="Executors" value={String(data.totalExecutors)} />
         <StatCard
-          label="Sharpe"
+          label="Sharpe Ratio"
           value={data.sharpeRatio ? data.sharpeRatio.toFixed(2) : "\u2014"}
           color={data.sharpeRatio > 0 ? "var(--color-green)" : "var(--color-red)"}
         />
@@ -1127,7 +1394,7 @@ function BacktestResults({ data, taskConfig }: { data: BacktestData; taskConfig?
         />
       </div>
 
-      {/* Row 2: accuracy & fees */}
+      {/* Accuracy & fees row */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatCard
           label="Accuracy Long"
@@ -1150,30 +1417,90 @@ function BacktestResults({ data, taskConfig }: { data: BacktestData; taskConfig?
         />
       </div>
 
-      {/* Close types breakdown */}
-      {Object.keys(data.closeTypes).length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {Object.entries(data.closeTypes).map(([type, count]) => {
-            const ct = CLOSE_TYPE_LABELS[type];
-            return (
-              <div
-                key={type}
-                className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5"
-              >
-                <span
-                  className="inline-block h-2 w-2 rounded-full"
-                  style={{ backgroundColor: ct?.color ?? "#78909c" }}
+      {/* Close types - stacked bar */}
+      {closeTypesTotal > 0 && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+          <div className="text-[10px] font-medium text-[var(--color-text-muted)] uppercase tracking-wide mb-2">
+            Close Type Distribution
+          </div>
+          {/* Stacked bar */}
+          <div className="flex h-3 rounded-full overflow-hidden mb-2">
+            {Object.entries(data.closeTypes).map(([type, count]) => {
+              const ct = CLOSE_TYPE_LABELS[type];
+              const pct = (count / closeTypesTotal) * 100;
+              if (pct < 0.5) return null;
+              return (
+                <div
+                  key={type}
+                  className="h-full transition-all"
+                  style={{
+                    width: `${pct}%`,
+                    backgroundColor: ct?.color ?? "#78909c",
+                  }}
+                  title={`${ct?.label ?? type}: ${count} (${pct.toFixed(1)}%)`}
                 />
-                <span className="text-xs font-medium">{ct?.label ?? type}</span>
-                <span className="text-xs text-[var(--color-text-muted)]">{count}</span>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+          {/* Legend */}
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {Object.entries(data.closeTypes).map(([type, count]) => {
+              const ct = CLOSE_TYPE_LABELS[type];
+              const pct = (count / closeTypesTotal) * 100;
+              return (
+                <div key={type} className="flex items-center gap-1.5 text-xs">
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ backgroundColor: ct?.color ?? "#78909c" }}
+                  />
+                  <span className="font-medium">{ct?.label ?? type}</span>
+                  <span className="text-[var(--color-text-muted)]">{count}</span>
+                  <span className="text-[var(--color-text-muted)]">({pct.toFixed(0)}%)</span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
-      {/* Unified chart: Price+Executors / PnL / Position Held */}
-      {data.candles.length > 0 && <BacktestChart data={data} />}
+      {/* Comparison table */}
+      {pinnedData && (
+        <ComparisonTable current={data} pinned={pinnedData} pinnedConfig={pinnedConfig} currentConfig={taskConfig} />
+      )}
+
+      {/* Chart */}
+      {data.candles.length > 0 && (
+        <>
+          <div className="relative">
+            <button
+              onClick={() => setChartExpanded(true)}
+              className="absolute top-2 right-2 z-10 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:border-[var(--color-primary)]/50 transition-colors"
+              title="Expand chart"
+            >
+              <Maximize2 className="h-4 w-4" />
+            </button>
+            <BacktestChart data={data} />
+          </div>
+
+          {chartExpanded && (
+            <div className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg)]">
+              <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
+                <span className="text-sm font-medium">Backtest Report</span>
+                <button
+                  onClick={() => setChartExpanded(false)}
+                  className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-1.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+                  title="Close"
+                >
+                  <Minimize2 className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-auto p-4">
+                <BacktestChart data={data} />
+              </div>
+            </div>
+          )}
+        </>
+      )}
 
       {/* Executors table */}
       {data.executors.length > 0 && (
@@ -1266,6 +1593,150 @@ function BacktestResults({ data, taskConfig }: { data: BacktestData; taskConfig?
             {JSON.stringify(data.raw, null, 2)}
           </pre>
         )}
+      </div>
+    </div>
+  );
+}
+
+// -- Comparison Table --
+
+function ComparisonTable({
+  current,
+  pinned,
+  currentConfig,
+  pinnedConfig,
+}: {
+  current: BacktestData;
+  pinned: BacktestData;
+  currentConfig?: Record<string, unknown>;
+  pinnedConfig?: Record<string, unknown>;
+}) {
+  const currentName = String((currentConfig?.config as Record<string, unknown>)?.id ?? "Current");
+  const pinnedName = String((pinnedConfig?.config as Record<string, unknown>)?.id ?? "Pinned");
+
+  const rows: { label: string; currentVal: string; pinnedVal: string; currentColor?: string; pinnedColor?: string }[] = [
+    {
+      label: "Net PnL",
+      currentVal: formatPnl(current.netPnlQuote),
+      pinnedVal: formatPnl(pinned.netPnlQuote),
+      currentColor: pnlColor(current.netPnlQuote),
+      pinnedColor: pnlColor(pinned.netPnlQuote),
+    },
+    {
+      label: "Return",
+      currentVal: current.netPnlPct ? formatPct(current.netPnlPct) : "\u2014",
+      pinnedVal: pinned.netPnlPct ? formatPct(pinned.netPnlPct) : "\u2014",
+      currentColor: pnlColor(current.netPnlPct),
+      pinnedColor: pnlColor(pinned.netPnlPct),
+    },
+    {
+      label: "Sharpe",
+      currentVal: current.sharpeRatio ? current.sharpeRatio.toFixed(2) : "\u2014",
+      pinnedVal: pinned.sharpeRatio ? pinned.sharpeRatio.toFixed(2) : "\u2014",
+    },
+    {
+      label: "Profit Factor",
+      currentVal: current.profitFactor ? current.profitFactor.toFixed(2) : "\u2014",
+      pinnedVal: pinned.profitFactor ? pinned.profitFactor.toFixed(2) : "\u2014",
+    },
+    {
+      label: "Max Drawdown",
+      currentVal: current.maxDrawdownUsd ? formatUsd(-Math.abs(current.maxDrawdownUsd)) : "\u2014",
+      pinnedVal: pinned.maxDrawdownUsd ? formatUsd(-Math.abs(pinned.maxDrawdownUsd)) : "\u2014",
+      currentColor: "var(--color-red)",
+      pinnedColor: "var(--color-red)",
+    },
+    {
+      label: "Executors",
+      currentVal: String(current.totalExecutors),
+      pinnedVal: String(pinned.totalExecutors),
+    },
+    {
+      label: "Volume",
+      currentVal: current.totalVolume ? formatUsd(current.totalVolume) : "\u2014",
+      pinnedVal: pinned.totalVolume ? formatUsd(pinned.totalVolume) : "\u2014",
+    },
+    {
+      label: "Fees",
+      currentVal: current.totalFees ? formatUsd(current.totalFees) : "\u2014",
+      pinnedVal: pinned.totalFees ? formatUsd(pinned.totalFees) : "\u2014",
+    },
+  ];
+
+  return (
+    <div className="rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--color-primary)]/20">
+        <Pin className="h-3.5 w-3.5 text-[var(--color-primary)]" />
+        <span className="text-xs font-medium text-[var(--color-primary)] uppercase tracking-wide">Comparison</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-[var(--color-border)]">
+              <th className="px-4 py-2 text-left text-xs font-medium text-[var(--color-text-muted)]">Metric</th>
+              <th className="px-4 py-2 text-right text-xs font-medium text-[var(--color-text)]">
+                {currentName}
+                <span className="ml-1 text-[10px] text-[var(--color-text-muted)]">(selected)</span>
+              </th>
+              <th className="px-4 py-2 text-right text-xs font-medium text-[var(--color-text-muted)]">
+                {pinnedName}
+                <span className="ml-1 text-[10px]">(pinned)</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.label} className="border-b border-[var(--color-border)] last:border-b-0">
+                <td className="px-4 py-1.5 text-xs text-[var(--color-text-muted)]">{row.label}</td>
+                <td
+                  className="px-4 py-1.5 text-right text-xs font-semibold tabular-nums"
+                  style={row.currentColor ? { color: row.currentColor } : undefined}
+                >
+                  {row.currentVal}
+                </td>
+                <td
+                  className="px-4 py-1.5 text-right text-xs font-semibold tabular-nums"
+                  style={row.pinnedColor ? { color: row.pinnedColor } : undefined}
+                >
+                  {row.pinnedVal}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// -- Stat Cards --
+
+function HeroStatCard({
+  label,
+  value,
+  pnl,
+}: {
+  label: string;
+  value: string;
+  pnl: number;
+}) {
+  const isPositive = pnl >= 0;
+  return (
+    <div
+      className="rounded-lg border px-4 py-4"
+      style={{
+        borderColor: isPositive ? "rgba(38,166,154,0.3)" : "rgba(239,83,80,0.3)",
+        backgroundColor: isPositive ? "rgba(38,166,154,0.05)" : "rgba(239,83,80,0.05)",
+      }}
+    >
+      <div className="text-[11px] font-medium text-[var(--color-text-muted)] uppercase tracking-wide">
+        {label}
+      </div>
+      <div
+        className="mt-1 text-2xl font-bold tabular-nums"
+        style={{ color: pnlColor(pnl) }}
+      >
+        {value}
       </div>
     </div>
   );

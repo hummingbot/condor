@@ -94,12 +94,21 @@ export interface ControllerInfo {
   config: Record<string, unknown>;
 }
 
+export interface BotLogEntry {
+  timestamp?: number;
+  msg?: string;
+  log_category?: string;
+  [key: string]: unknown;
+}
+
 export interface BotSummary {
   bot_name: string;
   status: string;
   num_controllers: number;
   error_count: number;
   deployed_at: string | null;
+  error_logs: BotLogEntry[];
+  general_logs: BotLogEntry[];
 }
 
 export interface BotsPageResponse {
@@ -159,6 +168,7 @@ export interface ConsolidatedPosition {
   position_side: string;
   amount: number;
   entry_price: number;
+  notional_value: number;
   current_price: number;
   unrealized_pnl: number;
   realized_pnl: number;
@@ -453,6 +463,23 @@ export interface PaginatedExecutors {
   limit: number;
 }
 
+// ── Reports ──
+
+export interface ReportSummary {
+  id: string;
+  title: string;
+  filename: string;
+  created_at: string;
+  source_type: string;
+  source_name: string;
+  tags: string[];
+}
+
+export interface ReportsListResponse {
+  reports: ReportSummary[];
+  total: number;
+}
+
 // ── Backtesting ──
 
 export interface BacktestTask {
@@ -526,6 +553,12 @@ export const api = {
     apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
       method: "DELETE",
     }),
+
+  deleteController: (server: string, controllerType: string, controllerName: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}`,
+      { method: "DELETE" },
+    ),
 
   getControllerSource: (server: string, controllerType: string, controllerName: string) =>
     apiFetch<ControllerSourceResponse>(
@@ -815,6 +848,22 @@ export const api = {
     apiFetch<PaginatedExecutors>(
       `/api/v1/servers/${server}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
     ),
+
+  // ── Reports ──
+
+  getReports: (params?: { source_type?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.source_type) qs.set("source_type", params.source_type);
+    if (params?.tag) qs.set("tag", params.tag);
+    if (params?.search) qs.set("search", params.search);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.offset) qs.set("offset", String(params.offset));
+    const q = qs.toString();
+    return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
+  },
+
+  deleteReport: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/reports/${id}`, { method: "DELETE" }),
 
   // ── Routines ──
 

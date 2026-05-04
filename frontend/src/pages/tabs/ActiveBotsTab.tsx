@@ -20,7 +20,8 @@ import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 
 import { useServer } from "@/hooks/useServer";
-import { api, type BotSummary, type ControllerInfo } from "@/lib/api";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import { api, type BotLogEntry, type BotSummary, type ControllerInfo } from "@/lib/api";
 
 // ── Formatters ──
 
@@ -273,6 +274,76 @@ function PositionCard({ pos }: { pos: Record<string, unknown> }) {
   );
 }
 
+function formatLogTime(ts?: number): string {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function LogsSection({ logs }: { logs: BotLogEntry[] }) {
+  const [filter, setFilter] = useState<"all" | "error" | "general">("all");
+  const filtered = filter === "all" ? logs : logs.filter((l) => l.log_category === filter);
+
+  if (logs.length === 0) {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)] py-2">No logs available</p>
+    );
+  }
+
+  const errorCount = logs.filter((l) => l.log_category === "error").length;
+  const generalCount = logs.filter((l) => l.log_category === "general").length;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1.5">
+        {(["all", "general", "error"] as const).map((f) => {
+          const count = f === "all" ? logs.length : f === "error" ? errorCount : generalCount;
+          return (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+                filter === f
+                  ? f === "error"
+                    ? "bg-[var(--color-red)]/15 text-[var(--color-red)]"
+                    : "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              {f} ({count})
+            </button>
+          );
+        })}
+      </div>
+      <div className="max-h-[300px] overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] font-mono text-[11px] leading-relaxed">
+        {filtered.map((log, i) => (
+          <div
+            key={i}
+            className={`flex gap-2 px-2.5 py-1 border-b border-[var(--color-border)]/20 last:border-b-0 ${
+              log.log_category === "error" ? "bg-[var(--color-red)]/5" : ""
+            }`}
+          >
+            <span className="text-[var(--color-text-muted)] shrink-0 tabular-nums">
+              {formatLogTime(log.timestamp)}
+            </span>
+            <span
+              className={`break-all ${
+                log.log_category === "error" ? "text-[var(--color-red)]" : "text-[var(--color-text)]"
+              }`}
+            >
+              {log.msg || JSON.stringify(log)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DetailPanel({
   ctrl,
   onClose,
@@ -444,6 +515,7 @@ function DetailPanel({
               />
             </div>
           )}
+
         </div>
       </div>
     </>
@@ -452,19 +524,103 @@ function DetailPanel({
 
 // ── Bots Collapsible Section ──
 
-function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const [confirmStop, setConfirmStop] = useState<string | null>(null);
+function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
+  const [showLogs, setShowLogs] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
   const queryClient = useQueryClient();
-  const Chevron = expanded ? ChevronDown : ChevronRight;
 
   const stopMutation = useMutation({
-    mutationFn: (botName: string) => api.stopBot(server, botName),
+    mutationFn: () => api.stopBot(server, bot.bot_name),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
-      setConfirmStop(null);
+      setConfirmStop(false);
     },
   });
+
+  const allLogs: BotLogEntry[] = useMemo(() => {
+    return [
+      ...(bot.error_logs || []).map((l) => ({ ...l, log_category: "error" as const })),
+      ...(bot.general_logs || []).map((l) => ({ ...l, log_category: "general" as const })),
+    ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  }, [bot.error_logs, bot.general_logs]);
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-4 px-4 py-2.5 text-sm cursor-pointer hover:bg-[var(--color-surface-hover)]/50 transition-colors"
+        onClick={() => setShowLogs(!showLogs)}
+      >
+        <div className="p-0.5">
+          {showLogs ? (
+            <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          )}
+        </div>
+        <StatusDot status={bot.status} />
+        <span
+          className="font-medium truncate max-w-[250px]"
+          title={bot.bot_name}
+        >
+          {bot.bot_name}
+        </span>
+        <span className="text-[var(--color-text-muted)]">
+          {bot.num_controllers} controller{bot.num_controllers !== 1 ? "s" : ""}
+        </span>
+        {bot.error_count > 0 && (
+          <span className="text-[var(--color-yellow)] text-xs">
+            {bot.error_count} error{bot.error_count !== 1 ? "s" : ""}
+          </span>
+        )}
+        <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
+          {formatUptime(bot.deployed_at)}
+        </span>
+        {bot.status === "running" && (
+          confirmStop ? (
+            <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => stopMutation.mutate()}
+                disabled={stopMutation.isPending}
+                className="rounded px-2 py-1 text-xs font-medium bg-[var(--color-red)] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {stopMutation.isPending ? "Stopping..." : "Confirm"}
+              </button>
+              <button
+                onClick={() => setConfirmStop(false)}
+                className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={(e) => { e.stopPropagation(); setConfirmStop(true); }}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--color-red)] hover:bg-[var(--color-red)]/10 transition-colors"
+              title="Stop bot"
+            >
+              <Square className="h-3 w-3" />
+              Stop
+            </button>
+          )
+        )}
+      </div>
+      {showLogs && (
+        <div className="px-4 pb-3 pt-1">
+          <LogsSection logs={allLogs} />
+        </div>
+      )}
+      {stopMutation.isError && (
+        <div className="px-4 py-2 text-xs text-[var(--color-red)]">
+          Failed to stop bot: {stopMutation.error instanceof Error ? stopMutation.error.message : "Unknown error"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
+  const [expanded, setExpanded] = useState(true);
+  const Chevron = expanded ? ChevronDown : ChevronRight;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -479,57 +635,8 @@ function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
       {expanded && (
         <div className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border)]/30">
           {bots.map((bot) => (
-            <div key={bot.bot_name} className="flex items-center gap-4 px-4 py-2.5 text-sm">
-              <StatusDot status={bot.status} />
-              <span className="font-medium truncate max-w-[250px]" title={bot.bot_name}>
-                {bot.bot_name}
-              </span>
-              <span className="text-[var(--color-text-muted)]">
-                {bot.num_controllers} controller{bot.num_controllers !== 1 ? "s" : ""}
-              </span>
-              {bot.error_count > 0 && (
-                <span className="text-[var(--color-yellow)] text-xs">
-                  {bot.error_count} error{bot.error_count !== 1 ? "s" : ""}
-                </span>
-              )}
-              <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
-                {formatUptime(bot.deployed_at)}
-              </span>
-              {bot.status === "running" && (
-                confirmStop === bot.bot_name ? (
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => stopMutation.mutate(bot.bot_name)}
-                      disabled={stopMutation.isPending}
-                      className="rounded px-2 py-1 text-xs font-medium bg-[var(--color-red)] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
-                    >
-                      {stopMutation.isPending ? "Stopping..." : "Confirm"}
-                    </button>
-                    <button
-                      onClick={() => setConfirmStop(null)}
-                      className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                ) : (
-                  <button
-                    onClick={() => setConfirmStop(bot.bot_name)}
-                    className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--color-red)] hover:bg-[var(--color-red)]/10 transition-colors"
-                    title="Stop bot"
-                  >
-                    <Square className="h-3 w-3" />
-                    Stop
-                  </button>
-                )
-              )}
-            </div>
+            <BotRow key={bot.bot_name} bot={bot} server={server} />
           ))}
-          {stopMutation.isError && (
-            <div className="px-4 py-2 text-xs text-[var(--color-red)]">
-              Failed to stop bot: {stopMutation.error instanceof Error ? stopMutation.error.message : "Unknown error"}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -538,18 +645,23 @@ function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
 
 // ── Main Page ──
 
+const BOTS_WS_CHANNELS = ["bots"];
+
 export function ActiveBotsTab() {
   const { server } = useServer();
   const [sortKey, setSortKey] = useState<SortKey>("global_pnl_quote");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const [selectedController, setSelectedController] = useState<ControllerInfo | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showDeploy, setShowDeploy] = useState(false);
+
+  // Subscribe to real-time bots updates via WS
+  useCondorWebSocket(BOTS_WS_CHANNELS, server);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["bots", server],
     queryFn: () => api.getBots(server!),
     enabled: !!server,
-    refetchInterval: 10000,
+    refetchInterval: 30000, // Slower polling since WS handles real-time updates
   });
 
   const handleSort = (key: SortKey) => {
@@ -563,6 +675,11 @@ export function ActiveBotsTab() {
 
   const controllers = data?.controllers ?? [];
   const bots = data?.bots ?? [];
+
+  // Derive live controller from latest data instead of stale snapshot
+  const selectedController = selectedKey
+    ? controllers.find((c) => `${c.bot_name}-${c.controller_name}` === selectedKey) ?? null
+    : null;
 
   const sortedControllers = useMemo(
     () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
@@ -656,14 +773,13 @@ export function ActiveBotsTab() {
                   </thead>
                   <tbody>
                     {sortedControllers.map((ctrl) => {
-                      const isSelected =
-                        selectedController?.controller_name === ctrl.controller_name &&
-                        selectedController?.bot_name === ctrl.bot_name;
+                      const ctrlKey = `${ctrl.bot_name}-${ctrl.controller_name}`;
+                      const isSelected = selectedKey === ctrlKey;
                       return (
                         <tr
-                          key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                          key={ctrlKey}
                           className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
-                          onClick={() => setSelectedController(ctrl)}
+                          onClick={() => setSelectedKey(ctrlKey)}
                         >
                           <td className="px-4 py-2.5">
                             <div className="flex flex-col">
@@ -726,7 +842,7 @@ export function ActiveBotsTab() {
 
       {/* Side panel */}
       {selectedController && (
-        <DetailPanel ctrl={selectedController} onClose={() => setSelectedController(null)} />
+        <DetailPanel ctrl={selectedController} onClose={() => setSelectedKey(null)} />
       )}
 
       {/* Deploy dialog */}

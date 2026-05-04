@@ -591,7 +591,8 @@ def _local_journal_write(params: dict) -> dict:
         return {"error": "text is required"}
 
     if entry_type == "learning":
-        jm.append_learning(text)
+        category = params.get("category", "market")
+        jm.append_learning(text, category=category)
     elif entry_type == "state":
         jm.write_state(text)
     else:
@@ -638,6 +639,7 @@ async def trading_agent_journal_write(
     reasoning: str = "",
     risk_note: str = "",
     tick: int = 0,
+    category: str = "",
 ) -> dict:
     """Write to the trading agent's journal. Keep entries SHORT (one line).
 
@@ -652,6 +654,9 @@ async def trading_agent_journal_write(
         reasoning: One-sentence reasoning (for actions only).
         risk_note: Optional risk note (for actions only).
         tick: Current tick number (for actions only).
+        category: Learning category: "market" (observations, patterns, volatility)
+            or "execution" (errors, fills, timing). Only used when entry_type="learning".
+            Defaults to "market".
 
     Returns:
         {"written": true}
@@ -663,6 +668,7 @@ async def trading_agent_journal_write(
         "reasoning": reasoning,
         "risk_note": risk_note,
         "tick": tick,
+        "category": category,
     })
 
 
@@ -965,39 +971,75 @@ def _local_manage_strategy(
     return {"error": f"Unknown strategy action: {action}"}
 
 
+async def _call_main_api(method: str, path: str, body: dict | None = None) -> dict | list:
+    """Call the Condor web API in the main process.
+
+    The MCP server runs as a subprocess -- TickEngines must be created in the
+    main process so they survive beyond the MCP subprocess lifecycle.
+    """
+    import aiohttp
+    from condor.web.auth import create_jwt
+
+    from utils.config import WEB_PORT
+
+    url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
+    token = create_jwt(USER_ID, role="user")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.request(method, url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                if resp.status >= 400:
+                    detail = data.get("detail", str(data)) if isinstance(data, dict) else str(data)
+                    return {"error": f"API error ({resp.status}): {detail}"}
+                return data
+    except Exception as e:
+        return {"error": f"Failed to reach main process API: {e}"}
+
+
 async def _local_agent_lifecycle(
     action: str, strategy_id: str | None, agent_id: str | None, config: dict | None,
 ) -> dict:
-    from condor.trading_agent.engine import TickEngine, get_engine, get_all_engines
+    # All lifecycle actions delegate to the main process via the web API.
+    # This ensures TickEngines live in the main process and survive beyond
+    # the MCP subprocess that created them.
 
     if action == "list_agents":
-        engines = get_all_engines()
-        if not engines:
+        result = await _call_main_api("GET", "/agents")
+        if isinstance(result, dict) and "error" in result:
+            return result
+        # The web API returns a list of AgentSummary objects.
+        # Extract running instances for a flat list like the old format.
+        agents = []
+        if isinstance(result, list):
+            for agent_summary in result:
+                for inst in agent_summary.get("instances", []):
+                    agents.append(inst)
+        if not agents:
             return {"agents": [], "message": "No agents running"}
-        return {
-            "agents": [e.get_info() for e in engines.values()],
-        }
+        return {"agents": agents}
 
     if action == "start_agent":
         if not strategy_id:
             return {"error": "strategy_id is required"}
+
+        # Resolve the strategy slug from strategy_id
         from condor.trading_agent.strategy import StrategyStore
-        from condor.trading_agent.config import load_agent_config
-        from config_manager import get_config_manager, get_effective_server
         store = StrategyStore()
         strategy = store.get(strategy_id)
         if not strategy:
             return {"error": f"Strategy '{strategy_id}' not found"}
+
+        # Build config with server resolution and overrides
+        from condor.trading_agent.config import load_agent_config
+        from config_manager import get_config_manager, get_effective_server
         agent_config = load_agent_config(strategy.agent_dir, strategy.default_config)
         config_dict = agent_config.model_dump()
         if config:
-            # Translate dry_run shorthand → execution_mode
             if config.get("dry_run") and "execution_mode" not in config:
                 config["execution_mode"] = "dry_run"
             config_dict.update(config)
-        # Enforce the active server if not explicitly overridden.
-        # ACTIVE_SERVER is passed via --server-name from the session that spawned
-        # this MCP subprocess, so it reflects the user's actual server selection.
         if not config or "server_name" not in config:
             effective = ACTIVE_SERVER or get_effective_server(CHAT_ID)
             if not effective:
@@ -1006,43 +1048,53 @@ async def _local_agent_lifecycle(
                 effective = accessible[0] if accessible else None
             if effective:
                 config_dict["server_name"] = effective
-        engine = TickEngine(
-            strategy=strategy,
-            config=config_dict,
-            chat_id=CHAT_ID,
-            user_id=USER_ID,
-        )
-        await engine.start()
-        return {"started": True, "agent_id": engine.agent_id, "session_num": engine.session_num}
+
+        # Extract trading_context from config (web API expects it separately)
+        trading_context = config_dict.pop("trading_context", "")
+
+        result = await _call_main_api("POST", f"/agents/{strategy.slug}/start", {
+            "config": config_dict,
+            "trading_context": trading_context,
+            "chat_id": CHAT_ID,
+            "user_id": USER_ID,
+        })
+        return result
 
     if action == "stop_agent":
         if not agent_id:
             return {"error": "agent_id is required"}
-        engine = get_engine(agent_id)
-        if not engine:
-            return {"error": f"Agent '{agent_id}' not found"}
-        await engine.stop()
-        return {"stopped": True, "agent_id": agent_id}
+        # Extract slug from agent_id (format: {slug}_{session_num} or {slug}_e{num})
+        slug = _slug_from_agent_id(agent_id)
+        result = await _call_main_api("POST", f"/agents/{slug}/stop?agent_id={agent_id}")
+        return result
 
     if action == "pause_agent":
         if not agent_id:
             return {"error": "agent_id is required"}
-        engine = get_engine(agent_id)
-        if not engine or not engine.is_running:
-            return {"error": f"Agent '{agent_id}' not found or not running"}
-        engine.pause()
-        return {"paused": True, "agent_id": agent_id}
+        slug = _slug_from_agent_id(agent_id)
+        result = await _call_main_api("POST", f"/agents/{slug}/pause?agent_id={agent_id}")
+        return result
 
     if action == "resume_agent":
         if not agent_id:
             return {"error": "agent_id is required"}
-        engine = get_engine(agent_id)
-        if not engine:
-            return {"error": f"Agent '{agent_id}' not found"}
-        engine.resume()
-        return {"resumed": True, "agent_id": agent_id}
+        slug = _slug_from_agent_id(agent_id)
+        result = await _call_main_api("POST", f"/agents/{slug}/resume?agent_id={agent_id}")
+        return result
 
     return {"error": f"Unknown lifecycle action: {action}"}
+
+
+def _slug_from_agent_id(agent_id: str) -> str:
+    """Extract strategy slug from agent_id.
+
+    agent_id formats: '{slug}_{session_num}' or '{slug}_e{num}'
+    The slug itself may contain underscores, so split from the right.
+    """
+    import re
+    # Match trailing _N or _eN
+    m = re.match(r'^(.+?)_(?:e?\d+)$', agent_id)
+    return m.group(1) if m else agent_id
 
 
 def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
