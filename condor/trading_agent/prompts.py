@@ -165,7 +165,7 @@ def build_tick_prompt(
             "Make your best move now — there will be no follow-up ticks."
         )
 
-    # Server credentials are injected via env vars into the MCP process,
+    # Server credentials are injected via CLI args into the MCP process,
     # so no need to include them in the prompt or call configure_server.
 
     # Strategy instructions

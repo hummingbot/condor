@@ -173,3 +173,6 @@ data/
 
 # Node
 node_modules/
+
+# Repo Reference for Onboarding
+REPO_REFERENCE.md

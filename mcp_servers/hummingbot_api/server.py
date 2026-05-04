@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sys
 from typing import Any, Literal
+from utils.url_builder import build_server_url
 
 from mcp.server.fastmcp import FastMCP
 
@@ -110,8 +111,13 @@ async def configure_server(
         name: str | None = None,
         host: str | None = None,
         port: int | None = None,
+        protocol: Literal["auto", "http", "https"] | None = None,
         username: str | None = None,
         password: str | None = None,
+        tls_verify: bool | None = None,
+        ca_bundle_path: str | None = None,
+        client_cert_path: str | None = None,
+        client_key_path: str | None = None,
 ) -> str:
     """Configure the active Hummingbot API server connection.
 
@@ -125,19 +131,39 @@ async def configure_server(
         name: Server label (e.g., 'macmini', 'production')
         host: API host (e.g., 'localhost', 'host.docker.internal', '72.212.424.42')
         port: API port (e.g., 8000)
+        protocol: URL protocol override ('auto', 'http', 'https'). Default: auto.
         username: API username
         password: API password
+        tls_verify: Enable TLS certificate verification when using HTTPS (default: True)
+        ca_bundle_path: Optional custom CA bundle path for private/self-signed CAs
+        client_cert_path: Optional client certificate path for mTLS
+        client_key_path: Optional client private key path for mTLS
     """
     from mcp_servers.hummingbot_api.settings import ServerConfig, _load_server_config, save_server_config
 
     # No params → show active server
-    if name is None and host is None and port is None and username is None and password is None:
+    if (
+        name is None
+        and host is None
+        and port is None
+        and protocol is None
+        and username is None
+        and password is None
+        and tls_verify is None
+        and ca_bundle_path is None
+        and client_cert_path is None
+        and client_key_path is None
+    ):
         current = _load_server_config()
         return (
             f"Active Server:\n\n"
             f"  Name: {current.name}\n"
             f"  URL: {current.url}\n"
             f"  Username: {current.username}\n"
+            f"  TLS Verify: {current.tls_verify}\n"
+            f"  CA Bundle: {current.ca_bundle_path or '(system default)'}\n"
+            f"  Client Cert: {current.client_cert_path or '(none)'}\n"
+            f"  Client Key: {current.client_key_path or '(none)'}\n"
         )
 
     # Build new config with partial updates
@@ -147,18 +173,35 @@ async def configure_server(
     parsed = urlparse(current.url)
     current_host = parsed.hostname or "localhost"
     current_port = parsed.port or 8000
+    current_protocol = parsed.scheme or "auto"
 
     final_name = name if name is not None else current.name
     final_host = host if host is not None else current_host
     final_port = port if port is not None else current_port
+    final_protocol = protocol if protocol is not None else current_protocol
     final_username = username if username is not None else current.username
     final_password = password if password is not None else current.password
 
+    final_tls_verify = tls_verify if tls_verify is not None else current.tls_verify
+    final_ca_bundle = (
+        ca_bundle_path if ca_bundle_path is not None else current.ca_bundle_path
+    )
+    final_client_cert = (
+        client_cert_path if client_cert_path is not None else current.client_cert_path
+    )
+    final_client_key = (
+        client_key_path if client_key_path is not None else current.client_key_path
+    )
+
     new_config = ServerConfig(
         name=final_name,
-        url=f"http://{final_host}:{final_port}",
+        url=build_server_url(host=final_host, port=final_port, protocol=final_protocol),
         username=final_username,
         password=final_password,
+        tls_verify=final_tls_verify,
+        ca_bundle_path=final_ca_bundle,
+        client_cert_path=final_client_cert,
+        client_key_path=final_client_key,
     )
 
     # Persist and apply
@@ -172,12 +215,20 @@ async def configure_server(
             f"Server '{new_config.name}' configured and connected successfully.\n\n"
             f"  URL: {new_config.url}\n"
             f"  Username: {new_config.username}\n"
+            f"  TLS Verify: {new_config.tls_verify}\n"
+            f"  CA Bundle: {new_config.ca_bundle_path or '(system default)'}\n"
+            f"  Client Cert: {new_config.client_cert_path or '(none)'}\n"
+            f"  Client Key: {new_config.client_key_path or '(none)'}\n"
         )
     except Exception as e:
         return (
             f"Server '{new_config.name}' configured but could not connect.\n\n"
             f"  URL: {new_config.url}\n"
             f"  Username: {new_config.username}\n\n"
+            f"  TLS Verify: {new_config.tls_verify}\n"
+            f"  CA Bundle: {new_config.ca_bundle_path or '(system default)'}\n\n"
+            f"  Client Cert: {new_config.client_cert_path or '(none)'}\n"
+            f"  Client Key: {new_config.client_key_path or '(none)'}\n\n"
             f"Error: {str(e)}\n"
         )
 
@@ -978,7 +1029,12 @@ async def manage_backtest_tasks(
 
 
 def _apply_cli_args():
-    """Parse CLI args and override settings if provided."""
+    """Parse CLI args and override settings if provided.
+
+    When --url is supplied, treat the CLI as the authoritative configuration:
+    reset cert paths so a stale ~/.hummingbot_mcp/server.yml from a prior session
+    cannot leak into this one. CLI args then re-populate any paths that apply.
+    """
     import argparse
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -986,16 +1042,36 @@ def _apply_cli_args():
     parser.add_argument("--username")
     parser.add_argument("--password")
     parser.add_argument("--server-name")
+    parser.add_argument("--tls-verify")
+    parser.add_argument("--ca-bundle-path")
+    parser.add_argument("--client-cert-path")
+    parser.add_argument("--client-key-path")
     args, _ = parser.parse_known_args()
 
     if args.url:
         settings.api_url = args.url
+        settings.ca_bundle_path = None
+        settings.client_cert_path = None
+        settings.client_key_path = None
     if args.username:
         settings.api_username = args.username
     if args.password:
         settings.api_password = args.password
     if args.server_name:
         settings.server_name = args.server_name
+    if args.tls_verify is not None:
+        settings.tls_verify = str(args.tls_verify).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if args.ca_bundle_path:
+        settings.ca_bundle_path = args.ca_bundle_path
+    if args.client_cert_path:
+        settings.client_cert_path = args.client_cert_path
+    if args.client_key_path:
+        settings.client_key_path = args.client_key_path
 
 
 async def _run():

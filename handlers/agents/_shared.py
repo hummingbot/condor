@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 from typing import Any
+from utils.url_builder import build_server_url_from_config
 
 log = logging.getLogger(__name__)
 
@@ -386,7 +387,7 @@ def build_mcp_servers_for_session(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = build_server_url_from_config(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
@@ -396,9 +397,16 @@ def build_mcp_servers_for_session(
             "--url", api_url,
             "--username", server["username"],
             "--password", server["password"],
+            "--tls-verify", str(server.get("tls_verify", True)).lower(),
         ],
         "env": [],
     }
+    if server.get("ca_bundle_path"):
+        mcp_hummingbot["args"] += ["--ca-bundle-path", str(server["ca_bundle_path"])]
+    if server.get("client_cert_path"):
+        mcp_hummingbot["args"] += ["--client-cert-path", str(server["client_cert_path"])]
+    if server.get("client_key_path"):
+        mcp_hummingbot["args"] += ["--client-key-path", str(server["client_key_path"])]
 
     return [mcp_hummingbot, condor]
 
@@ -433,7 +441,7 @@ def build_mcp_servers_for_agent(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
+    api_url = build_server_url_from_config(server)
 
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
@@ -443,9 +451,16 @@ def build_mcp_servers_for_agent(
             "--url", api_url,
             "--username", server["username"],
             "--password", server["password"],
+            "--tls-verify", str(server.get("tls_verify", True)).lower(),
         ],
         "env": [],
     }
+    if server.get("ca_bundle_path"):
+        mcp_hummingbot["args"] += ["--ca-bundle-path", str(server["ca_bundle_path"])]
+    if server.get("client_cert_path"):
+        mcp_hummingbot["args"] += ["--client-cert-path", str(server["client_cert_path"])]
+    if server.get("client_key_path"):
+        mcp_hummingbot["args"] += ["--client-key-path", str(server["client_key_path"])]
 
     return [mcp_hummingbot, condor]
 
@@ -482,13 +497,32 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
                 f"user={server['username']}, pass={server['password']}"
             )
 
-        # Build configure_server call for the active server
+        # Build configure_server call for the active server.
+        # Include all TLS-relevant args so partial updates can't downgrade the
+        # session's protocol/cert config when the agent calls configure_server.
         active_server = cm.get_server(active_name)
         if active_server:
+            def _py_repr(value: Any) -> str:
+                if value is None:
+                    return "None"
+                if isinstance(value, bool):
+                    return "True" if value else "False"
+                return repr(str(value))
+
+            args = [
+                f'host="{active_server["host"]}"',
+                f'port={active_server["port"]}',
+                f'protocol="{active_server.get("protocol") or "auto"}"',
+                f'username="{active_server["username"]}"',
+                f'password="{active_server["password"]}"',
+                f'tls_verify={_py_repr(active_server.get("tls_verify", True))}',
+                f'ca_bundle_path={_py_repr(active_server.get("ca_bundle_path"))}',
+                f'client_cert_path={_py_repr(active_server.get("client_cert_path"))}',
+                f'client_key_path={_py_repr(active_server.get("client_key_path"))}',
+            ]
             configure_hint = (
                 f'IMPORTANT: Before making ANY tool calls to mcp-hummingbot, you MUST first call '
-                f'configure_server(host="{active_server["host"]}", port={active_server["port"]}, '
-                f'username="{active_server["username"]}", password="{active_server["password"]}") '
+                f'configure_server({", ".join(args)}) '
                 f'to ensure the MCP is connected to the correct server. '
                 f'Do this silently without telling the user.'
             )
