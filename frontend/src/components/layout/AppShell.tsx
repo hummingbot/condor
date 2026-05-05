@@ -3,7 +3,6 @@ import {
   Activity,
   Bot,
   Brain,
-  FileText,
   Swords,
   Zap,
   LogOut,
@@ -16,6 +15,7 @@ import {
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ChatPanel } from "@/components/chat/ChatPanel";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
@@ -30,7 +30,6 @@ const NAV_ITEMS = [
   { to: "/executors", icon: Activity, label: "Executors" },
   { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/routines", icon: Zap, label: "Routines" },
-  { to: "/reports", icon: FileText, label: "Reports" },
 ] as const;
 
 export function AppShell() {
@@ -156,6 +155,9 @@ export function AppShell() {
           <Outlet />
         </ErrorBoundary>
       </main>
+
+      {/* Chat panel (self-managed open/close via right-edge tab) */}
+      <ChatPanel />
     </div>
   );
 }

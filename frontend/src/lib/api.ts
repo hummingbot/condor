@@ -396,7 +396,10 @@ export interface RoutineInfo {
   name: string;
   description: string;
   is_continuous: boolean;
+  category: string;
+  source: string;
   fields: Record<string, RoutineFieldInfo>;
+  report_count: number;
 }
 
 export interface RoutineInstance {
@@ -877,8 +880,8 @@ export const api = {
 
   runRoutine: (server: string, name: string, config: Record<string, unknown> = {}) =>
     apiFetch<{ instance_id: string }>(
-      `/api/v1/routines/servers/${server}/${name}/run`,
-      { method: "POST", body: JSON.stringify({ config }) },
+      `/api/v1/routines/run`,
+      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config }) },
     ),
 
   scheduleRoutine: (
@@ -888,12 +891,17 @@ export const api = {
     interval_sec: number = 300,
   ) =>
     apiFetch<{ instance_id: string }>(
-      `/api/v1/routines/servers/${server}/${name}/schedule`,
-      { method: "POST", body: JSON.stringify({ config, interval_sec }) },
+      `/api/v1/routines/schedule`,
+      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config, interval_sec }) },
     ),
 
   stopRoutineInstance: (id: string) =>
     apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${id}/stop`, {
       method: "POST",
     }),
+
+  getRoutineReports: (name: string) =>
+    apiFetch<ReportsListResponse>(
+      `/api/v1/routines/${encodeURIComponent(name)}/reports`,
+    ),
 };

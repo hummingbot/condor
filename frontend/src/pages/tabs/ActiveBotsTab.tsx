@@ -722,19 +722,8 @@ export function ActiveBotsTab() {
 
   return (
     <div className="space-y-6">
-      {/* Header: deploy button */}
-      <div className="flex items-center justify-end">
-        <button
-          onClick={() => setShowDeploy(true)}
-          className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
-        >
-          <Rocket className="h-4 w-4" />
-          Deploy Bot
-        </button>
-      </div>
-
-      {/* Summary stat cards */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      {/* Summary stat cards + deploy button */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]">
         <StatCard
           label="Total PnL"
           value={formatPnl(totalPnl)}
@@ -744,6 +733,13 @@ export function ActiveBotsTab() {
         <StatCard label="Volume" value={formatVolume(totalVolume)} icon={Volume2} />
         <StatCard label="Active Bots" value={String(activeBots)} icon={Bot} />
         <StatCard label="Controllers" value={String(controllers.length)} icon={Layers} />
+        <button
+          onClick={() => setShowDeploy(true)}
+          className="flex items-center gap-2 justify-center rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20 h-full col-span-2 lg:col-span-1"
+        >
+          <Rocket className="h-4 w-4" />
+          Deploy Bot
+        </button>
       </div>
 
       {isEmpty ? (
