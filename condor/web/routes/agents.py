@@ -626,9 +626,9 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     agent_md = agent_md_path.read_text() if agent_md_path.exists() else ""
 
     # Read config
-    from condor.trading_agent.config import load_agent_config
+    from condor.trading_agent.config import load_full_config
 
-    config = load_agent_config(agent_dir, strategy.default_config)
+    config_dict = load_full_config(agent_dir, strategy.default_config)
 
     # Read learnings
     learnings_path = agent_dir / "learnings.md"
@@ -697,7 +697,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         name=strategy.name,
         description=strategy.description,
         agent_md=agent_md,
-        config=config.model_dump(),
+        config=config_dict,
         default_trading_context=strategy.default_trading_context,
         learnings=learnings,
         status=status,
@@ -763,11 +763,12 @@ async def update_agent_config(
 ):
     """Update agent config."""
     strategy = _get_strategy_by_slug(slug)
-    from condor.trading_agent.config import AgentConfig, save_agent_config
+    from condor.trading_agent.config import load_full_config, save_full_config
 
-    config = AgentConfig.from_dict(req.config)
-    save_agent_config(strategy.agent_dir, config)
-    return {"updated": True, "config": config.model_dump()}
+    config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
+    config_dict.update(req.config)
+    save_full_config(strategy.agent_dir, config_dict)
+    return {"updated": True, "config": config_dict}
 
 
 @router.delete("/{slug}")
@@ -852,14 +853,13 @@ async def start_agent(
     slug: str, req: StartAgentRequest, user: WebUser = Depends(get_current_user)
 ):
     """Start an agent (creates new session)."""
-    from condor.trading_agent.config import load_agent_config
+    from condor.trading_agent.config import load_full_config
     from condor.trading_agent.engine import TickEngine
 
     strategy = _get_strategy_by_slug(slug)
 
     # Load config (merge request overrides)
-    config = load_agent_config(strategy.agent_dir, strategy.default_config)
-    config_dict = config.model_dump()
+    config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
 

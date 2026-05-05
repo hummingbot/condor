@@ -40,9 +40,23 @@ _HTML_TEMPLATE = """\
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
     font-size: 14px; line-height: 1.6; padding: 24px; max-width: 1400px; margin: 0 auto;
   }}
-  h1 {{ font-size: 20px; margin-bottom: 8px; }}
-  .meta {{ color: var(--text-muted); font-size: 12px; margin-bottom: 24px; }}
-  .meta span {{ margin-right: 16px; }}
+  .report-header {{
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px;
+  }}
+  .report-header h1 {{ font-size: 20px; }}
+  .report-header .meta {{ color: var(--text-muted); font-size: 12px; }}
+  .report-header .meta span {{ margin-left: 16px; }}
+  .kpi-bar {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }}
+  .kpi-card {{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 150px; flex: 1;
+  }}
+  .kpi-card .label {{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }}
+  .kpi-card .value {{ font-size: 24px; font-weight: 700; margin: 4px 0; }}
+  .kpi-card .delta {{ font-size: 12px; }}
+  .kpi-card .delta.up {{ color: var(--green); }}
+  .kpi-card .delta.down {{ color: var(--red); }}
   .section {{ margin-bottom: 32px; }}
   .section-md {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; }}
   .section-md h1, .section-md h2, .section-md h3 {{ color: var(--text); margin: 12px 0 6px; }}
@@ -66,14 +80,16 @@ _HTML_TEMPLATE = """\
   .section-table td {{ padding: 8px 12px; border-bottom: 1px solid var(--border); }}
   .section-table tr:nth-child(even) td {{ background: rgba(255,255,255,0.02); }}
   .section-table tr:last-child td {{ border-bottom: none; }}
-  .plotly-chart {{ margin: 8px 0; }}
+  .plotly-chart {{ min-height: 400px; margin-bottom: 24px; }}
 </style>
 </head>
 <body>
-<h1>{title}</h1>
-<div class="meta">
-  <span>{created_at}</span>
-  {meta_badges}
+<div class="report-header">
+  <h1>{title}</h1>
+  <div class="meta">
+    <span>{created_at}</span>
+    {meta_badges}
+  </div>
 </div>
 {sections_html}
 </body>
@@ -195,6 +211,9 @@ def _cleanup(max_reports: int = MAX_REPORTS) -> None:
 # ── ReportBuilder ──
 
 
+_SECTION_PRIORITY = {"kpi": 0, "plotly": 1, "table": 2, "markdown": 3}
+
+
 class ReportBuilder:
     def __init__(self, title: str = "Report"):
         self._title = title
@@ -202,6 +221,7 @@ class ReportBuilder:
         self._source_name: str = ""
         self._tags: list[str] = []
         self._sections: list[dict] = []
+        self._manual_order = False
 
     def source(self, source_type: str, source_name: str) -> ReportBuilder:
         self._source_type = source_type
@@ -210,6 +230,14 @@ class ReportBuilder:
 
     def tags(self, tags: list[str]) -> ReportBuilder:
         self._tags = tags
+        return self
+
+    def manual_order(self) -> ReportBuilder:
+        self._manual_order = True
+        return self
+
+    def kpi(self, label: str, value: str, delta: str | None = None, trend: str = "neutral") -> ReportBuilder:
+        self._sections.append({"type": "kpi", "label": label, "value": value, "delta": delta, "trend": trend})
         return self
 
     def markdown(self, text: str) -> ReportBuilder:
@@ -270,14 +298,45 @@ class ReportBuilder:
         return report_id
 
     def _render_sections(self) -> str:
+        sections = list(self._sections)
+        if not self._manual_order:
+            # Stable sort: kpi first, then plotly, table, markdown
+            sections = sorted(sections, key=lambda s: _SECTION_PRIORITY.get(s["type"], 99))
+
         parts = []
-        for sec in self._sections:
-            if sec["type"] == "markdown":
+        i = 0
+        while i < len(sections):
+            sec = sections[i]
+            if sec["type"] == "kpi":
+                # Group consecutive KPIs into a single kpi-bar
+                kpis = []
+                while i < len(sections) and sections[i]["type"] == "kpi":
+                    kpis.append(sections[i])
+                    i += 1
+                cards = []
+                for k in kpis:
+                    delta_html = ""
+                    if k["delta"]:
+                        cls = f' {k["trend"]}' if k["trend"] in ("up", "down") else ""
+                        delta_html = f'<div class="delta{cls}">{k["delta"]}</div>'
+                    cards.append(
+                        f'<div class="kpi-card">'
+                        f'<div class="label">{k["label"]}</div>'
+                        f'<div class="value">{k["value"]}</div>'
+                        f'{delta_html}</div>'
+                    )
+                parts.append(f'<div class="kpi-bar">{"".join(cards)}</div>')
+            elif sec["type"] == "markdown":
                 parts.append(f'<div class="section section-md">{_md_to_html(sec["content"])}</div>')
+                i += 1
             elif sec["type"] == "plotly":
                 parts.append(f'<div class="section plotly-chart">{sec["content"]}</div>')
+                i += 1
             elif sec["type"] == "table":
                 parts.append(self._render_table(sec["columns"], sec["rows"]))
+                i += 1
+            else:
+                i += 1
         return "\n".join(parts)
 
     @staticmethod

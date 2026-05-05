@@ -64,3 +64,35 @@ def save_agent_config(agent_dir: Path, config: AgentConfig) -> None:
     config_path = agent_dir / "config.yml"
     agent_dir.mkdir(parents=True, exist_ok=True)
     config_path.write_text(yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False))
+
+
+def load_full_config(agent_dir: Path, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Load config preserving both AgentConfig fields and strategy-specific keys.
+
+    Starts from strategy defaults, overlays saved config.yml, then validates
+    core fields via AgentConfig and merges defaults for any missing core fields.
+    """
+    result = dict(defaults or {})
+
+    config_path = agent_dir / "config.yml"
+    if config_path.exists():
+        try:
+            saved = yaml.safe_load(config_path.read_text()) or {}
+            result.update(saved)
+        except Exception:
+            pass
+
+    # Validate core fields and fill in any missing AgentConfig defaults
+    core = AgentConfig.from_dict(result)
+    core_defaults = core.model_dump()
+    for k, v in core_defaults.items():
+        result.setdefault(k, v)
+
+    return result
+
+
+def save_full_config(agent_dir: Path, config: dict[str, Any]) -> None:
+    """Save a raw config dict as YAML (no filtering through AgentConfig)."""
+    config_path = agent_dir / "config.yml"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from condor.web.routes import agents, archived, auth, backtesting, bots, executors, market, portfolio, positions, reports, routines, servers, ws
+from condor.web.routes import agents, archived, auth, backtesting, bots, chat_ws, executors, market, portfolio, positions, reports, routines, servers, ws
 
 
 def create_app() -> FastAPI:
@@ -40,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
+    app.include_router(chat_ws.router, prefix="/api/v1")
 
     # ── Serve interactive charts ──
     charts_dir = Path(__file__).resolve().parent.parent.parent / "charts"
