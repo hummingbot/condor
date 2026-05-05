@@ -56,6 +56,8 @@ class RoutineInfo:
         message_handler: Callable | None = None,
         message_states: list[str] | None = None,
         cleanup_fn: Callable | None = None,
+        category: str = "Uncategorized",
+        source: str = "global",
     ):
         self.name = name
         self.config_class = config_class
@@ -65,6 +67,8 @@ class RoutineInfo:
         self.message_handler = message_handler
         self.message_states = message_states or []
         self.cleanup_fn = cleanup_fn
+        self.category = category
+        self.source = source
 
         # Extract description from Config docstring
         doc = config_class.__doc__ or name
@@ -136,6 +140,7 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
 
             # Check for CONTINUOUS flag
             is_continuous = getattr(module, "CONTINUOUS", False)
+            category = getattr(module, "CATEGORY", "Uncategorized")
 
             # Detect optional handlers
             callback_handler = getattr(module, "handle_callback", None)
@@ -152,6 +157,8 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 message_handler=message_handler,
                 message_states=message_states,
                 cleanup_fn=cleanup_fn,
+                category=category,
+                source="global",
             )
             logger.debug(
                 f"Discovered routine: {file_path.stem} (continuous={is_continuous})"
@@ -164,7 +171,9 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     return routines
 
 
-def discover_routines_from_path(routines_dir: Path) -> dict[str, RoutineInfo]:
+def discover_routines_from_path(
+    routines_dir: Path, agent_slug: str | None = None
+) -> dict[str, RoutineInfo]:
     """Discover routines from an arbitrary directory path.
 
     Uses importlib.util for dynamic loading since agent-local routines
@@ -172,6 +181,7 @@ def discover_routines_from_path(routines_dir: Path) -> dict[str, RoutineInfo]:
 
     Args:
         routines_dir: Directory containing routine .py files.
+        agent_slug: If provided, sets source to "agent:{slug}" and default category to agent name.
 
     Returns:
         Dict mapping routine name to RoutineInfo.
@@ -183,12 +193,15 @@ def discover_routines_from_path(routines_dir: Path) -> dict[str, RoutineInfo]:
     if not routines_dir.exists():
         return routines
 
+    source = f"agent:{agent_slug}" if agent_slug else "global"
+    default_category = agent_slug.replace("_", " ").replace("-", " ").title() if agent_slug else "Uncategorized"
+
     for file_path in routines_dir.glob("*.py"):
         if file_path.stem.startswith("_"):
             continue
 
         try:
-            module_name = f"agent_routine_{file_path.stem}"
+            module_name = f"agent_routine_{agent_slug}_{file_path.stem}" if agent_slug else f"agent_routine_{file_path.stem}"
             spec = importlib.util.spec_from_file_location(module_name, file_path)
             if not spec or not spec.loader:
                 continue
@@ -200,6 +213,7 @@ def discover_routines_from_path(routines_dir: Path) -> dict[str, RoutineInfo]:
                 continue
 
             is_continuous = getattr(module, "CONTINUOUS", False)
+            category = getattr(module, "CATEGORY", default_category)
             callback_handler = getattr(module, "handle_callback", None)
             message_handler = getattr(module, "handle_message", None)
             message_states = getattr(module, "MESSAGE_STATES", None)
@@ -214,6 +228,8 @@ def discover_routines_from_path(routines_dir: Path) -> dict[str, RoutineInfo]:
                 message_handler=message_handler,
                 message_states=message_states,
                 cleanup_fn=cleanup_fn,
+                category=category,
+                source=source,
             )
             logger.debug(f"Discovered agent routine: {file_path.stem}")
 
