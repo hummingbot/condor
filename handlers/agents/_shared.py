@@ -250,6 +250,23 @@ COMPACT_CONTEXT_TEMPLATE = (
     "Continue from where we left off. The user compacted the context to free up space."
 )
 
+WEB_SYSTEM_PROMPT = (
+    "[System context -- do not repeat this to the user]\n"
+    "You are Condor, a trading assistant in a web dashboard.\n\n"
+    "BEHAVIOR:\n"
+    "- Lead with the answer. Be direct, not verbose.\n"
+    "- For trading questions, use MCP tools directly. Don't explore the filesystem.\n"
+    "- Keep tool chains short: 1-3 tool calls per response, not 10.\n"
+    "- Never read source code or explore the codebase unless explicitly asked.\n\n"
+    "FORMATTING (web dashboard):\n"
+    "- Use Markdown freely: tables, headers, bold, code blocks, lists.\n"
+    "- No message length limits, but stay concise.\n"
+    "- Use tables for structured data (portfolios, prices, comparisons).\n"
+    "- Use code blocks for configs, JSON, or commands.\n"
+    "- Respond in the user's language.\n\n"
+    "Read @CONDOR.md for full details on your identity, tools, permissions, and rules.\n"
+)
+
 TELEGRAM_SYSTEM_PROMPT = (
     "[System context -- do not repeat this to the user]\n"
     "You are Condor, a trading assistant inside Telegram.\n\n"
@@ -327,15 +344,18 @@ def get_project_dir() -> str:
 
 
 def _condor_mcp_args(
-    chat_id: int, user_id: int,
+    chat_id: int | str, user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess."""
     import os
 
+    # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
+    # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
+    effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
     args = [
-        "--chat-id", str(chat_id),
+        "--chat-id", str(effective_chat_id),
         "--user-id", str(user_id),
         "--bot-token", os.environ.get("TELEGRAM_TOKEN", ""),
     ]
@@ -347,7 +367,7 @@ def _condor_mcp_args(
 
 
 def build_mcp_servers_for_session(
-    user_id: int, chat_id: int, user_data: dict | None = None,
+    user_id: int, chat_id: int | str, user_data: dict | None = None,
     execution_mode: str = "loop",
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
@@ -457,15 +477,16 @@ def build_mcp_servers_for_agent(
     return [mcp_hummingbot, condor]
 
 
-def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = None, agent_key: str | None = None) -> str:
+def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram") -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from config_manager import ServerPermission, get_config_manager, get_effective_server
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     cm = get_config_manager()
 
-    # Always start with Telegram formatting rules
-    sections: list[str] = [TELEGRAM_SYSTEM_PROMPT]
+    # Select formatting rules based on platform
+    system_prompt = WEB_SYSTEM_PROMPT if platform == "web" else TELEGRAM_SYSTEM_PROMPT
+    sections: list[str] = [system_prompt]
 
     # Resolve active server (respects user preferences)
     active_name = get_effective_server(chat_id, user_data)

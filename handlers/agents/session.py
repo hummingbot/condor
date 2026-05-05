@@ -25,7 +25,7 @@ PROMPT_LOCK_TIMEOUT = 30
 PROMPT_OVERALL_TIMEOUT = 1800  # 30 minutes
 
 # Module-level session storage (not persisted -- subprocesses can't survive restarts)
-_sessions: dict[int, "AgentSession"] = {}
+_sessions: dict[int | str, "AgentSession"] = {}
 
 # Health monitor state
 _health_task: asyncio.Task | None = None
@@ -34,7 +34,7 @@ _health_bot: Bot | None = None
 
 @dataclass
 class AgentSession:
-    chat_id: int
+    chat_id: int | str
     agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
     client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
@@ -52,7 +52,7 @@ class AgentSession:
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=PROMPT_LOCK_TIMEOUT)
         except asyncio.TimeoutError:
-            log.warning("Lock acquisition timed out for chat %d", self.chat_id)
+            log.warning("Lock acquisition timed out for chat %s", self.chat_id)
             # Force-clear busy flag if subprocess is dead (stuck state recovery)
             if not self.client.alive:
                 self.is_busy = False
@@ -68,7 +68,7 @@ class AgentSession:
                     break
                 if loop.time() > deadline:
                     log.warning(
-                        "Prompt overall timeout (%ds) for chat %d",
+                        "Prompt overall timeout (%ds) for chat %s",
                         PROMPT_OVERALL_TIMEOUT,
                         self.chat_id,
                     )
@@ -80,12 +80,13 @@ class AgentSession:
 
 
 async def get_or_create_session(
-    chat_id: int,
+    chat_id: int | str,
     agent_key: str,
     permission_callback: PermissionCallback | None = None,
     user_id: int | None = None,
     user_data: dict | None = None,
     mode: str = "condor",
+    platform: str = "telegram",
 ) -> AgentSession:
     """Get existing session or create a new one.
 
@@ -102,8 +103,10 @@ async def get_or_create_session(
     if session:
         await _destroy_session_internal(chat_id)
 
+    # MCP subprocess env expects numeric chat_id; for web sessions use user_id
+    effective_chat_id = chat_id if isinstance(chat_id, int) else (user_id or 0)
     extra_env = {
-        "CONDOR_CHAT_ID": str(chat_id),
+        "CONDOR_CHAT_ID": str(effective_chat_id),
     }
 
     # Build dynamic MCP servers from user's Condor permissions
@@ -150,12 +153,12 @@ async def get_or_create_session(
     try:
         # Send initial context about server and permissions
         if user_id:
-            initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key)
+            initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key, platform=platform)
             if initial_context:
                 try:
                     await client.prompt(initial_context)
                 except Exception:
-                    log.warning("Failed to send initial context for chat %d", chat_id)
+                    log.warning("Failed to send initial context for chat %s", chat_id)
 
         session = AgentSession(
             chat_id=chat_id,
@@ -169,28 +172,28 @@ async def get_or_create_session(
         raise
 
     _sessions[chat_id] = session
-    log.info("Created agent session for chat %d: %s", chat_id, agent_key)
+    log.info("Created agent session for chat %s: %s", chat_id, agent_key)
     return session
 
 
-def get_session(chat_id: int) -> AgentSession | None:
+def get_session(chat_id: int | str) -> AgentSession | None:
     """Get existing session for a chat, or None."""
     return _sessions.get(chat_id)
 
 
-async def destroy_session(chat_id: int) -> bool:
+async def destroy_session(chat_id: int | str) -> bool:
     """Destroy session for a chat. Returns True if a session existed."""
     return await _destroy_session_internal(chat_id)
 
 
-async def _destroy_session_internal(chat_id: int) -> bool:
+async def _destroy_session_internal(chat_id: int | str) -> bool:
     session = _sessions.pop(chat_id, None)
     if session:
         try:
             await session.client.stop()
         except Exception:
-            log.exception("Error stopping agent session for chat %d", chat_id)
-        log.info("Destroyed agent session for chat %d", chat_id)
+            log.exception("Error stopping agent session for chat %s", chat_id)
+        log.info("Destroyed agent session for chat %s", chat_id)
         return True
     return False
 
@@ -233,28 +236,29 @@ async def _health_check_loop() -> None:
     try:
         while True:
             await asyncio.sleep(15)
-            dead_chats: list[int] = []
+            dead_chats: list[int | str] = []
             for chat_id, session in list(_sessions.items()):
                 if not session.client.alive:
                     if session.is_busy:
                         # Force-clear stuck busy flag on dead sessions
                         session.is_busy = False
                         log.warning(
-                            "Health monitor: force-cleared is_busy for dead session chat %d",
+                            "Health monitor: force-cleared is_busy for dead session chat %s",
                             chat_id,
                         )
                     dead_chats.append(chat_id)
 
             for chat_id in dead_chats:
-                log.warning("Health monitor: dead session for chat %d, cleaning up", chat_id)
+                log.warning("Health monitor: dead session for chat %s, cleaning up", chat_id)
                 await _destroy_session_internal(chat_id)
-                if _health_bot:
+                # Only send Telegram notifications for integer chat_ids (not web sessions)
+                if _health_bot and isinstance(chat_id, int):
                     try:
                         await _health_bot.send_message(
                             chat_id=chat_id,
                             text="Agent session ended unexpectedly. Send a message to start a new session.",
                         )
                     except Exception:
-                        log.warning("Failed to notify chat %d about dead session", chat_id)
+                        log.warning("Failed to notify chat %s about dead session", chat_id)
     except asyncio.CancelledError:
         pass
