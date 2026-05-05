@@ -311,3 +311,21 @@ class PaginatedExecutors(BaseModel):
     total: int
     offset: int
     limit: int
+
+
+# ── Reports ──
+
+
+class ReportSummary(BaseModel):
+    id: str
+    title: str
+    filename: str
+    created_at: str
+    source_type: str = ""
+    source_name: str = ""
+    tags: list[str] = []
+
+
+class ReportsListResponse(BaseModel):
+    reports: list[ReportSummary]
+    total: int

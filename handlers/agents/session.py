@@ -147,21 +147,27 @@ async def get_or_create_session(
 
     await client.start()
 
-    # Send initial context about server and permissions
-    if user_id:
-        initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key)
-        if initial_context:
-            try:
-                await client.prompt(initial_context)
-            except Exception:
-                log.warning("Failed to send initial context for chat %d", chat_id)
+    try:
+        # Send initial context about server and permissions
+        if user_id:
+            initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key)
+            if initial_context:
+                try:
+                    await client.prompt(initial_context)
+                except Exception:
+                    log.warning("Failed to send initial context for chat %d", chat_id)
 
-    session = AgentSession(
-        chat_id=chat_id,
-        agent_key=agent_key,
-        client=client,
-        mode=mode,
-    )
+        session = AgentSession(
+            chat_id=chat_id,
+            agent_key=agent_key,
+            client=client,
+            mode=mode,
+        )
+    except Exception:
+        # Something failed after start -- stop client to prevent orphan subprocess
+        await client.stop()
+        raise
+
     _sessions[chat_id] = session
     log.info("Created agent session for chat %d: %s", chat_id, agent_key)
     return session

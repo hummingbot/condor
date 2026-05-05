@@ -1,17 +1,74 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Clock,
-  MessageSquareText,
-  Settings,
+  Save,
   Zap,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentDetail, type ExecutorInfo, api } from "@/lib/api";
+
+// ── Markdown Editor ──
+
+function MarkdownEditor({
+  slug,
+  label,
+  sublabel,
+  content,
+  mutationFn,
+}: {
+  slug: string;
+  label: string;
+  sublabel: string;
+  content: string;
+  mutationFn: (slug: string, value: string) => Promise<unknown>;
+}) {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState(content);
+  const [dirty, setDirty] = useState(false);
+
+  const saveMut = useMutation({
+    mutationFn: () => mutationFn(slug, value),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      setDirty(false);
+    },
+  });
+
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setValue(e.target.value);
+    setDirty(true);
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{label}</span>
+          <span className="ml-2 text-[10px] text-[var(--color-text-muted)]">{sublabel}</span>
+        </div>
+        <button
+          onClick={() => saveMut.mutate()}
+          disabled={!dirty || saveMut.isPending}
+          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-30"
+        >
+          <Save className="h-3.5 w-3.5" />
+          {saveMut.isPending ? "Saving..." : "Save"}
+        </button>
+      </div>
+      <textarea
+        value={value}
+        onChange={handleChange}
+        spellCheck={false}
+        className="min-h-[500px] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50"
+      />
+    </div>
+  );
+}
 
 // ── Instance Card ──
 
@@ -225,8 +282,6 @@ export function PerformancePanel({ slug }: { slug: string }) {
 
 export function OverviewTab({ agent }: { agent: AgentDetail }) {
   const config = agent.config as Record<string, unknown>;
-  const riskLimits = (config.risk_limits || {}) as Record<string, unknown>;
-  const defaultTradingContext = agent.default_trading_context || "";
   const instances = agent.instances || [];
   const hasRunning = instances.length > 0;
   const serverName = (config.server_name as string) || "";
@@ -259,7 +314,22 @@ export function OverviewTab({ agent }: { agent: AgentDetail }) {
 
   return (
     <div className="space-y-6">
-      {/* Market Context Strip — live prices for traded pairs */}
+      {/* Agent Meta Strip */}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
+        <span className="rounded-full bg-[var(--color-surface)] px-2.5 py-1 border border-[var(--color-border)]">
+          {agent.sessions.length} session{agent.sessions.length !== 1 ? "s" : ""}
+        </span>
+        <span className="rounded-full bg-[var(--color-surface)] px-2.5 py-1 border border-[var(--color-border)] font-mono">
+          {agent.slug}
+        </span>
+        {agent.agent_id && (
+          <span className="rounded-full bg-[var(--color-surface)] px-2.5 py-1 border border-[var(--color-border)] font-mono">
+            {agent.agent_id}
+          </span>
+        )}
+      </div>
+
+      {/* Market Context Strip */}
       {hasRunning && liveExecutors.length > 0 && (
         <AgentMarketStrip serverName={serverName} executors={liveExecutors} />
       )}
@@ -269,7 +339,7 @@ export function OverviewTab({ agent }: { agent: AgentDetail }) {
         <PerformancePanel slug={agent.slug} />
       </div>
 
-      {/* Live Executor Charts — candlestick + executor overlays */}
+      {/* Live Executor Charts */}
       {hasRunning && chartGroups.length > 0 && (
         <div className="space-y-4">
           <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -302,82 +372,22 @@ export function OverviewTab({ agent }: { agent: AgentDetail }) {
         </div>
       )}
 
-      {/* Default Trading Context */}
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-        <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          <MessageSquareText className="h-3.5 w-3.5" /> Default Trading Context
-        </h3>
-        {defaultTradingContext ? (
-          <p className="whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-3 text-sm leading-relaxed text-[var(--color-text-muted)]">
-            {defaultTradingContext}
-          </p>
-        ) : (
-          <p className="text-sm text-[var(--color-text-muted)]">
-            No default trading context set. You can set one per session when starting.
-          </p>
-        )}
-      </div>
-
-      {/* Config + Risk side-by-side */}
+      {/* Strategy + Learnings Editors */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-          <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-            <Settings className="h-3.5 w-3.5" /> Default Configuration
-          </h3>
-          <div className="space-y-2 font-mono text-sm">
-            {Object.entries(config)
-              .filter(([k]) => k !== "risk_limits" && k !== "trading_context")
-              .map(([k, v]) => (
-                <div key={k} className="flex justify-between">
-                  <span className="text-[var(--color-text-muted)]">{k}</span>
-                  <span className="text-[var(--color-text)]">{String(v)}</span>
-                </div>
-              ))}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-          <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-            <Zap className="h-3.5 w-3.5" /> Default Risk Limits
-          </h3>
-          <div className="space-y-2 font-mono text-sm">
-            {Object.entries(riskLimits).map(([k, v]) => (
-              <div key={k} className="flex justify-between">
-                <span className="text-[var(--color-text-muted)]">{k}</span>
-                <span className="text-[var(--color-text)]">{String(v)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Agent Info */}
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-        <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-          Agent Info
-        </h3>
-        <div className="grid grid-cols-2 gap-4 text-sm md:grid-cols-4">
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Sessions</span>
-            <span className="text-lg font-semibold text-[var(--color-text)]">{agent.sessions.length}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Status</span>
-            <span className={`text-lg font-semibold ${
-              agent.status === "running" ? "text-emerald-400" : agent.status === "paused" ? "text-amber-400" : "text-[var(--color-text-muted)]"
-            }`}>
-              {agent.status.toUpperCase()}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Agent ID</span>
-            <span className="font-mono text-sm text-[var(--color-text)]">{agent.agent_id || "--"}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Slug</span>
-            <span className="font-mono text-sm text-[var(--color-text)]">{agent.slug}</span>
-          </div>
-        </div>
+        <MarkdownEditor
+          slug={agent.slug}
+          label="Strategy"
+          sublabel="agent.md"
+          content={agent.agent_md}
+          mutationFn={api.updateAgentMd}
+        />
+        <MarkdownEditor
+          slug={agent.slug}
+          label="Learnings"
+          sublabel="persists across sessions"
+          content={agent.learnings}
+          mutationFn={api.updateAgentLearnings}
+        />
       </div>
     </div>
   );

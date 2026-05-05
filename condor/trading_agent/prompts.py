@@ -46,6 +46,11 @@ GENERAL:
 
 JOURNAL:
 - Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
+- Learnings must specify a category: "market" or "execution".
+  trading_agent_journal_write(entry_type="learning", category="market|execution", text="...")
+  - market: band behavior, volatility regimes, S/R patterns, routine observations.
+  - execution: executor errors, schema issues, fill problems, timing.
+- Keep learnings factual and short (1 line). No speculation.
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
 - Do NOT call trading_agent_journal_read — context is already in this prompt.
 

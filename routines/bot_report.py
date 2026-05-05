@@ -640,4 +640,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         return text.replace("\\", "")
 
     plain_report = "\n\n".join(_strip_md(m) for m in messages)
+
+    try:
+        from condor.reports import ReportBuilder
+        builder = ReportBuilder("Trading Report")
+        builder.source("routine", "bot_report").tags(["bots", "performance"])
+        builder.markdown(plain_report)
+        builder.save()
+    except Exception as e:
+        logger.warning(f"Report generation failed: {e}")
+
     return f"Report sent: {sent}/{len(messages)} messages\n\n{plain_report}"

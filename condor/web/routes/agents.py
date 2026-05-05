@@ -164,6 +164,8 @@ class UpdateLearningsRequest(BaseModel):
 class StartAgentRequest(BaseModel):
     config: dict[str, Any] = {}
     trading_context: str = ""
+    chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
+    user_id: int | None = None  # Override user_id (for internal/MCP calls)
 
 
 # ── Helpers ──
@@ -870,8 +872,8 @@ async def start_agent(
     new_engine = TickEngine(
         strategy=strategy,
         config=config_dict,
-        chat_id=0,  # Web-launched, no chat
-        user_id=user.id,
+        chat_id=req.chat_id,
+        user_id=req.user_id or user.id,
     )
     await new_engine.start()
 

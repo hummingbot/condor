@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   Brain,
+  FileText,
   Swords,
   Zap,
   LogOut,
@@ -29,6 +30,7 @@ const NAV_ITEMS = [
   { to: "/executors", icon: Activity, label: "Executors" },
   { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/routines", icon: Zap, label: "Routines" },
+  { to: "/reports", icon: FileText, label: "Reports" },
 ] as const;
 
 export function AppShell() {

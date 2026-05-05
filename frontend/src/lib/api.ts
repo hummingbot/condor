@@ -463,6 +463,23 @@ export interface PaginatedExecutors {
   limit: number;
 }
 
+// ── Reports ──
+
+export interface ReportSummary {
+  id: string;
+  title: string;
+  filename: string;
+  created_at: string;
+  source_type: string;
+  source_name: string;
+  tags: string[];
+}
+
+export interface ReportsListResponse {
+  reports: ReportSummary[];
+  total: number;
+}
+
 // ── Backtesting ──
 
 export interface BacktestTask {
@@ -831,6 +848,22 @@ export const api = {
     apiFetch<PaginatedExecutors>(
       `/api/v1/servers/${server}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
     ),
+
+  // ── Reports ──
+
+  getReports: (params?: { source_type?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.source_type) qs.set("source_type", params.source_type);
+    if (params?.tag) qs.set("tag", params.tag);
+    if (params?.search) qs.set("search", params.search);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.offset) qs.set("offset", String(params.offset));
+    const q = qs.toString();
+    return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
+  },
+
+  deleteReport: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/reports/${id}`, { method: "DELETE" }),
 
   // ── Routines ──
 

@@ -126,21 +126,22 @@ export function SessionMetricsBar({
   const stats = [
     { label: "Ticks", value: String(summary.lastTick || ticks.length), color: "text-[var(--color-text)]" },
     { label: "PnL", value: `$${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`, color: pnl >= 0 ? "text-emerald-400" : "text-red-400" },
-    { label: "Open Executors", value: String(openCount), color: "text-[var(--color-text)]" },
+    { label: "Open", value: String(openCount), color: "text-[var(--color-text)]" },
     volume !== undefined
       ? { label: "Volume", value: `$${volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}`, color: "text-[var(--color-text)]" }
       : { label: "Exposure", value: lastMetric ? `$${lastMetric.exposure.toFixed(2)}` : "$0.00", color: "text-[var(--color-text)]" },
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-      {stats.map((s) => (
-        <div key={s.label} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
-          <span className="block text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{s.label}</span>
-          <span className={`text-lg font-semibold ${s.color}`}>{s.value}</span>
+    <>
+      {stats.map((s, i) => (
+        <div key={s.label} className="flex items-center gap-2">
+          {i > 0 && <span className="text-[var(--color-border)]">|</span>}
+          <span className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">{s.label}:</span>
+          <span className={`text-sm font-semibold font-mono ${s.color}`}>{s.value}</span>
         </div>
       ))}
-    </div>
+    </>
   );
 }
 
@@ -194,16 +195,15 @@ export function SessionsTab({
 
   return (
     <div className="space-y-4">
-      {/* Session selector + metrics */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-4">
+      {/* Session selector + inline metrics */}
+      <div className="flex flex-wrap items-center gap-4">
         <SessionSelector
           sessions={sessions}
           selectedSessionNum={selectedSessionNum}
           onSelect={(num) => { setSelectedSessionNum(num); setActiveSubTab("overview"); }}
         />
+        {parsedJournal && <SessionMetricsBar journal={parsedJournal} perf={sessionPerf} />}
       </div>
-
-      {parsedJournal && <SessionMetricsBar journal={parsedJournal} perf={sessionPerf} />}
 
       {/* Sub-tab bar */}
       <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">

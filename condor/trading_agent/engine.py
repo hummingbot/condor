@@ -188,7 +188,8 @@ class TickEngine:
                 except Exception as e:
                     self._last_error = str(e)
                     log.exception("TickEngine %s tick error", self.agent_id)
-                    self.journal.append_error(str(e))
+                    if self.journal:
+                        self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
                 # Single-tick modes: stop after first tick
@@ -332,6 +333,8 @@ class TickEngine:
                                 tc["status"] = event.status
                             if event.title:
                                 tc["name"] = event.title
+                            if event.output:
+                                tc["output"] = event.output
         except asyncio.TimeoutError:
             log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
             response_chunks.append("(timed out)")

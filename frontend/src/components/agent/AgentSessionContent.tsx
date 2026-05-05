@@ -141,7 +141,7 @@ export function SessionOverview({
 
       {/* PnL Chart (replaces metrics timeline text) */}
       {pnlData.length > 1 && (
-        <AgentPnlChart data={pnlData} height={250} title="Metrics Timeline" />
+        <AgentPnlChart data={pnlData} height={400} title="Metrics Timeline" />
       )}
 
       {/* Metrics table (compact, below chart) */}
@@ -340,7 +340,7 @@ export function SessionExecutors({
           executors={group}
           connector={group[0].connector}
           tradingPair={group[0].trading_pair}
-          height={280}
+          height={400}
         />
       ))}
 
