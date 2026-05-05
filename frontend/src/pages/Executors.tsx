@@ -575,11 +575,11 @@ export function DetailPanel({
 
   return (
       <div
-        className="h-full bg-[var(--color-bg)] border-l border-[var(--color-border)] overflow-y-auto shadow-xl shrink-0 relative"
-        style={{ width: panelWidth }}
+        className="fixed inset-y-0 right-0 z-50 flex h-full flex-col bg-[var(--color-bg)] border-l border-[var(--color-border)] shadow-xl transition-all duration-300 md:relative md:shadow-none md:shrink-0"
+        style={{ width: window.innerWidth < 768 ? "100%" : panelWidth }}
       >
         <div
-          className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-[var(--color-primary)]/30 transition-colors z-10"
+          className="absolute top-0 left-0 hidden w-1.5 h-full cursor-col-resize hover:bg-[var(--color-primary)]/30 transition-colors z-10 md:block"
           onMouseDown={onMouseDown}
         />
 
@@ -1226,9 +1226,9 @@ export function Executors() {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
 
   return (
-    <div className="flex gap-0 -m-6 h-[calc(100vh)] overflow-hidden">
+    <div className="flex gap-0 -m-4 md:-m-6 h-[calc(100vh)] overflow-hidden">
       {/* Main content */}
-      <div className={`flex-1 overflow-auto p-6 transition-all duration-200 ${selectedExecutor ? "min-w-0" : ""}`}>
+      <div className={`flex-1 overflow-auto p-4 md:p-6 transition-all duration-200 ${selectedExecutor ? "min-w-0" : ""}`}>
       <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -1240,7 +1240,8 @@ export function Executors() {
             className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110"
           >
             <Plus className="h-3.5 w-3.5" />
-            New Executor
+            <span className="hidden sm:inline">New Executor</span>
+            <span className="sm:hidden">New</span>
           </button>
           {/* Export all */}
           <button
@@ -1255,16 +1256,18 @@ export function Executors() {
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap items-center">
-        <Filter className="h-4 w-4 text-[var(--color-text-muted)]" />
-        <input
-          type="text"
-          placeholder="Filter pair..."
-          value={filters.trading_pair}
-          onChange={(e) =>
-            setFilters((f) => ({ ...f, trading_pair: e.target.value }))
-          }
-          className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
-        />
+        <Filter className="h-4 w-4 text-[var(--color-text-muted)] shrink-0" />
+        <div className="flex-1 min-w-[140px] md:flex-none">
+          <input
+            type="text"
+            placeholder="Filter pair..."
+            value={filters.trading_pair}
+            onChange={(e) =>
+              setFilters((f) => ({ ...f, trading_pair: e.target.value }))
+            }
+            className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
+          />
+        </div>
         <MultiSelect
           options={executorTypes}
           selected={filters.executor_types}
@@ -1277,27 +1280,30 @@ export function Executors() {
           onChange={(v) => setFilters((f) => ({ ...f, controller_ids: v }))}
           placeholder="All controllers"
         />
-        <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
-          {executors.length} loaded
-          {isFetchingNextPage && " · loading…"}
-          {!hasNextPage && !isFetchingNextPage && executors.length > 0 && " · done"}
-          {reachedCap && " · cap reached"}
-        </span>
-        {reachedCap && (
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <span className="text-xs text-[var(--color-text-muted)] tabular-nums whitespace-nowrap">
+            {executors.length} loaded
+            {isFetchingNextPage && " · loading…"}
+            {!hasNextPage && !isFetchingNextPage && executors.length > 0 && " · done"}
+            {reachedCap && " · cap reached"}
+          </span>
+          <div className="flex-1" />
+          {reachedCap && (
+            <button
+              onClick={() => setMaxPages((p) => p + 40)}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+            >
+              Load more
+            </button>
+          )}
           <button
-            onClick={() => setMaxPages((p) => p + 40)}
+            onClick={() => refetch()}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+            title="Refresh"
           >
-            Load more
+            Refresh
           </button>
-        )}
-        <button
-          onClick={() => refetch()}
-          className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
-          title="Refresh"
-        >
-          Refresh
-        </button>
+        </div>
       </div>
 
       {isLoading ? (

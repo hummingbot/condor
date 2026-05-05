@@ -1,11 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
+  Brain,
   Clock,
   FlaskConical,
+  Lightbulb,
+  Save,
   Zap,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
@@ -18,11 +21,94 @@ import { api } from "@/lib/api";
 
 const TABS = [
   { id: "overview", label: "Overview", icon: Zap },
+  { id: "strategy", label: "Strategy", icon: Brain },
+  { id: "learnings", label: "Learnings", icon: Lightbulb },
   { id: "sessions", label: "Sessions", icon: Clock },
   { id: "experiments", label: "Dry-Run", icon: FlaskConical },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+// ── Strategy Tab (Markdown Editor) ──
+
+function StrategyTab({ slug, content }: { slug: string; content: string }) {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState(content);
+  const [dirty, setDirty] = useState(false);
+
+  const saveMut = useMutation({
+    mutationFn: () => api.updateAgentMd(slug, value),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      setDirty(false);
+    },
+  });
+
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setValue(e.target.value);
+    setDirty(true);
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-[var(--color-text-muted)]">agent.md</span>
+        <button
+          onClick={() => saveMut.mutate()}
+          disabled={!dirty || saveMut.isPending}
+          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-30"
+        >
+          <Save className="h-3.5 w-3.5" />
+          {saveMut.isPending ? "Saving..." : "Save"}
+        </button>
+      </div>
+      <textarea
+        value={value}
+        onChange={handleChange}
+        spellCheck={false}
+        className="min-h-[500px] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50"
+      />
+    </div>
+  );
+}
+
+// ── Learnings Tab ──
+
+function LearningsTab({ slug, content }: { slug: string; content: string }) {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState(content);
+  const [dirty, setDirty] = useState(false);
+
+  const saveMut = useMutation({
+    mutationFn: () => api.updateAgentLearnings(slug, value),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      setDirty(false);
+    },
+  });
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-[var(--color-text-muted)]">learnings.md — persists across sessions</span>
+        <button
+          onClick={() => saveMut.mutate()}
+          disabled={!dirty || saveMut.isPending}
+          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-30"
+        >
+          <Save className="h-3.5 w-3.5" />
+          {saveMut.isPending ? "Saving..." : "Save"}
+        </button>
+      </div>
+      <textarea
+        value={value}
+        onChange={(e) => { setValue(e.target.value); setDirty(true); }}
+        spellCheck={false}
+        className="min-h-[400px] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50"
+      />
+    </div>
+  );
+}
 
 // ── Main Page ──
 
@@ -55,7 +141,7 @@ export function AgentDetail() {
   const serverName = (agent.config.server_name as string) || "";
 
   return (
-    <div className="w-full">
+    <div className="mx-auto w-full max-w-7xl">
       {/* Header */}
       <div className="mb-6">
         <button
@@ -82,12 +168,12 @@ export function AgentDetail() {
       </div>
 
       {/* Tab bar */}
-      <div className="mb-6 flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
+      <div className="mb-6 flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1 overflow-x-auto no-scrollbar">
         {TABS.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setActiveTab(id)}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all whitespace-nowrap ${
               activeTab === id
                 ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
                 : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
@@ -101,6 +187,8 @@ export function AgentDetail() {
 
       {/* Tab content */}
       {activeTab === "overview" && <OverviewTab agent={agent} />}
+      {activeTab === "strategy" && <StrategyTab slug={slug!} content={agent.agent_md} />}
+      {activeTab === "learnings" && <LearningsTab slug={slug!} content={agent.learnings} />}
       {activeTab === "sessions" && (
         <SessionsTab
           slug={slug!}

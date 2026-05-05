@@ -130,15 +130,15 @@ function TokenBarChart({
           const barPct = maxVal > 0 ? (t.usd_value / maxVal) * 100 : 0;
           const allocPct = totalPortfolioValue > 0 ? (t.usd_value / totalPortfolioValue) * 100 : 0;
           return (
-            <div key={`${t.connector}-${t.token}`} className="flex items-center gap-3">
-              <div className="flex items-center gap-1.5 w-20 justify-end">
+            <div key={`${t.connector}-${t.token}`} className="flex items-center gap-2 md:gap-3">
+              <div className="flex items-center gap-1.5 w-16 md:w-20 justify-end shrink-0">
                 <div
                   className="h-2.5 w-2.5 rounded-sm shrink-0"
                   style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
                 />
-                <span className="text-xs font-medium truncate">{t.token}</span>
+                <span className="text-[10px] md:text-xs font-medium truncate">{t.token}</span>
               </div>
-              <div className="flex-1 h-5 rounded bg-[var(--color-bg)] overflow-hidden relative">
+              <div className="flex-1 h-4 md:h-5 rounded bg-[var(--color-bg)] overflow-hidden relative">
                 <div
                   className="h-full rounded transition-all duration-500"
                   style={{
@@ -148,7 +148,7 @@ function TokenBarChart({
                   }}
                 />
               </div>
-              <span className="text-xs tabular-nums text-[var(--color-text-muted)] w-32 text-right">
+              <span className="text-[10px] md:text-xs tabular-nums text-[var(--color-text-muted)] w-24 md:w-32 text-right shrink-0">
                 {formatUsd(t.usd_value)} ({allocPct.toFixed(1)}%)
               </span>
             </div>
@@ -765,8 +765,8 @@ export function Portfolio() {
           <p>No balances found</p>
         </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded-lg border border-[var(--color-border)]">
+          <table className="w-full text-sm min-w-[600px] md:min-w-0">
             <thead>
               <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
                 <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">

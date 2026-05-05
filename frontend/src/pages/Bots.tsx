@@ -1,9 +1,15 @@
-import { Archive, Bot, FlaskConical, Loader2, TerminalSquare } from "lucide-react";
+import { Archive, Bot, Code2, FileText, FlaskConical, Loader2 } from "lucide-react";
 import { lazy, Suspense, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 
 const ActiveBotsTab = lazy(() =>
   import("@/pages/tabs/ActiveBotsTab").then((m) => ({ default: m.ActiveBotsTab })),
+);
+const ControllersTab = lazy(() =>
+  import("@/pages/tabs/ControllersTab").then((m) => ({ default: m.ControllersTab })),
+);
+const ConfigsTab = lazy(() =>
+  import("@/pages/tabs/ConfigsTab").then((m) => ({ default: m.ConfigsTab })),
 );
 const ArchivedBotsTab = lazy(() =>
   import("@/pages/tabs/ArchivedBotsTab").then((m) => ({ default: m.ArchivedBotsTab })),
@@ -11,15 +17,13 @@ const ArchivedBotsTab = lazy(() =>
 const BacktestingTab = lazy(() =>
   import("@/pages/tabs/BacktestingTab").then((m) => ({ default: m.BacktestingTab })),
 );
-const EditorTab = lazy(() =>
-  import("@/pages/tabs/EditorTab").then((m) => ({ default: m.EditorTab })),
-);
 
 const TABS = [
   { key: "active", label: "Active", icon: Bot },
+  { key: "controllers", label: "Controllers", icon: Code2 },
+  { key: "configs", label: "Configs", icon: FileText },
   { key: "archived", label: "Archived", icon: Archive },
   { key: "backtest", label: "Backtest", icon: FlaskConical },
-  { key: "editor", label: "Editor", icon: TerminalSquare },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -35,6 +39,7 @@ function FallbackSpinner() {
 export function Bots() {
   const [searchParams, setSearchParams] = useSearchParams();
   const currentTab = (searchParams.get("tab") as TabKey) || "active";
+  // Track which tabs have been visited so we keep them mounted
   const visitedRef = useRef<Set<TabKey>>(new Set([currentTab]));
   visitedRef.current.add(currentTab);
 
@@ -49,12 +54,12 @@ export function Bots() {
   return (
     <div className="space-y-6">
       {/* Tab bar */}
-      <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1 w-fit">
+      <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1 w-full md:w-fit overflow-x-auto no-scrollbar">
         {TABS.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
             onClick={() => setTab(key)}
-            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+            className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors whitespace-nowrap ${
               currentTab === key
                 ? "bg-[var(--color-bg)] text-[var(--color-text)] shadow-sm"
                 : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
@@ -73,6 +78,16 @@ export function Bots() {
             <ActiveBotsTab />
           </div>
         )}
+        {visitedRef.current.has("controllers") && (
+          <div style={{ display: currentTab === "controllers" ? undefined : "none" }}>
+            <ControllersTab />
+          </div>
+        )}
+        {visitedRef.current.has("configs") && (
+          <div style={{ display: currentTab === "configs" ? undefined : "none" }}>
+            <ConfigsTab />
+          </div>
+        )}
         {visitedRef.current.has("archived") && (
           <div style={{ display: currentTab === "archived" ? undefined : "none" }}>
             <ArchivedBotsTab />
@@ -81,11 +96,6 @@ export function Bots() {
         {visitedRef.current.has("backtest") && (
           <div style={{ display: currentTab === "backtest" ? undefined : "none" }}>
             <BacktestingTab />
-          </div>
-        )}
-        {visitedRef.current.has("editor") && (
-          <div style={{ display: currentTab === "editor" ? undefined : "none" }}>
-            <EditorTab />
           </div>
         )}
       </Suspense>

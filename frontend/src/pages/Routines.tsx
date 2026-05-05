@@ -170,9 +170,9 @@ export function Routines() {
         </button>
       </div>
 
-      <div className="flex gap-4" style={{ minHeight: "calc(100vh - 160px)" }}>
+      <div className="flex flex-col md:flex-row gap-4" style={{ minHeight: "calc(100vh - 160px)" }}>
         {/* ── Left: Catalog ── */}
-        <div className="w-72 shrink-0 space-y-2">
+        <div className={`w-full md:w-72 shrink-0 space-y-2 ${selected ? "hidden md:block" : "block"}`}>
           {loadingRoutines ? (
             <div className="flex justify-center py-8">
               <Loader2 className="h-5 w-5 animate-spin text-[var(--color-text-muted)]" />
@@ -225,13 +225,21 @@ export function Routines() {
         </div>
 
         {/* ── Right: Detail ── */}
-        <div className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5">
+        <div className={`flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 md:p-5 ${!selected ? "hidden md:block" : "block"}`}>
           {!selectedRoutine ? (
             <div className="flex h-full items-center justify-center text-sm text-[var(--color-text-muted)]">
               Select a routine from the catalog
             </div>
           ) : (
             <div className="space-y-5">
+              {/* Mobile Back Button */}
+              <button
+                onClick={() => setSelected(null)}
+                className="flex items-center gap-2 text-xs font-medium text-[var(--color-primary)] md:hidden mb-2"
+              >
+                <RefreshCw className="h-3 w-3 rotate-180" /> Back to Catalog
+              </button>
+
               {/* Title */}
               <div>
                 <h2 className="text-lg font-semibold text-[var(--color-text)]">
@@ -295,7 +303,7 @@ export function Routines() {
 
               {/* Result display — persists because activeInstanceId stays set */}
               {activeInstance && activeInstance.status !== "running" && (activeInstance.result_text || activeInstance.has_result) && (
-                <div>
+                <div className="overflow-x-auto">
                   <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
                     Last Result
                   </h3>
@@ -313,11 +321,11 @@ export function Routines() {
                     {selectedInstances.map((inst) => (
                       <div
                         key={inst.instance_id}
-                        className="flex items-center justify-between rounded-md border border-[var(--color-border)] bg-[var(--color-surface-hover)]/50 px-3 py-2"
+                        className="flex flex-col sm:flex-row sm:items-center justify-between rounded-md border border-[var(--color-border)] bg-[var(--color-surface-hover)]/50 px-3 py-2 gap-2"
                       >
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                           <code className="text-xs font-mono text-[var(--color-primary)]">
-                            #{inst.instance_id}
+                            #{inst.instance_id.slice(0, 8)}
                           </code>
                           <span
                             className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
@@ -333,27 +341,29 @@ export function Routines() {
                           {inst.schedule?.type === "interval" && (
                             <span className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
                               <Clock className="h-3 w-3" />
-                              every {(inst.schedule.interval_sec as number)}s
+                              {(inst.schedule.interval_sec as number)}s
                             </span>
                           )}
                           <span className="text-[10px] text-[var(--color-text-muted)]">
-                            #{inst.run_count} runs · {formatAgo(inst.last_run_at)}
+                            {inst.run_count} runs · {formatAgo(inst.last_run_at)}
                           </span>
+                        </div>
+                        <div className="flex items-center justify-end gap-3">
                           {inst.last_duration != null && (
                             <span className="text-[10px] text-[var(--color-text-muted)]">
                               {formatDuration(inst.last_duration)}
                             </span>
                           )}
+                          <button
+                            type="button"
+                            onClick={() => stopMutation.mutate(inst.instance_id)}
+                            disabled={stopMutation.isPending}
+                            className="rounded p-1 text-[var(--color-red)] hover:bg-[var(--color-red)]/10"
+                            title="Stop"
+                          >
+                            <Square className="h-3.5 w-3.5" />
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => stopMutation.mutate(inst.instance_id)}
-                          disabled={stopMutation.isPending}
-                          className="rounded p-1 text-[var(--color-red)] hover:bg-[var(--color-red)]/10"
-                          title="Stop"
-                        >
-                          <Square className="h-3.5 w-3.5" />
-                        </button>
                       </div>
                     ))}
                   </div>

@@ -4,21 +4,17 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowUpDown,
-  BarChart3,
   CheckCircle,
   Grid3X3,
   Layers,
   Loader2,
   Rocket,
-  Settings2,
   TrendingUp,
 } from "lucide-react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
-import { TradingRulesInfo } from "@/components/market/TradingRulesInfo";
-import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { GridChart } from "@/components/grid/GridChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
@@ -201,7 +197,6 @@ export function CreateExecutor() {
   const isSpot = isSpotConnector(connector);
 
   const [successId, setSuccessId] = useState<string | null>(null);
-  const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
 
   const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],
@@ -209,12 +204,9 @@ export function CreateExecutor() {
     enabled: !!server,
   });
 
-  // WS for executor data (candle streams are managed by candleStore)
-  const wsChannels = useMemo(
-    () => server ? [`executors:${server}`] : [],
-    [server],
-  );
-  useCondorWebSocket(wsChannels, server);
+  // WS subscription for executor data
+  const execChannels = useMemo(() => server ? [`executors:${server}`] : [], [server]);
+  useCondorWebSocket(execChannels, server);
 
   // Main controller data (executors + positions filtered by connector/pair)
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
@@ -279,11 +271,6 @@ export function CreateExecutor() {
     if (inc >= 1) return 0;
     return Math.max(0, Math.ceil(-Math.log10(inc)));
   }, [rulesData, pair]);
-
-  const selectedRule = useMemo(
-    () => rulesData?.rules?.find((r) => r.trading_pair === pair),
-    [rulesData, pair],
-  );
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
@@ -404,47 +391,49 @@ export function CreateExecutor() {
   }
 
   return (
-    <div className="-m-6 flex h-[calc(100%+3rem)] flex-col">
+    <div className="-m-4 md:-m-6 flex h-[calc(100%+2rem)] md:h-[calc(100%+3rem)] flex-col">
       {/* Top Bar */}
-      <div className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
-        {/* Back button */}
-        <button
-          onClick={() => navigate(-1)}
-          className="flex items-center gap-1 border-r border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-        </button>
+      <div className="flex flex-col md:flex-row md:items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+        <div className="flex items-center border-b md:border-b-0 md:border-r border-[var(--color-border)]">
+          {/* Back button */}
+          <button
+            onClick={() => navigate(-1)}
+            className="flex items-center gap-1 border-r border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+          </button>
 
-        {/* Pair + Exchange */}
-        <div className="flex items-center border-r border-[var(--color-border)]">
-          <PairSelector
-            server={server}
-            connector={connector}
-            value={pair}
-            onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
-          />
-          <div className="relative border-l border-[var(--color-border)]">
-            <ExchangeSelector
-              connectors={connectors}
-              value={connector}
-              onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
+          {/* Pair + Exchange */}
+          <div className="flex items-center flex-1">
+            <PairSelector
+              server={server}
+              connector={connector}
+              value={pair}
+              onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
             />
+            <div className="relative border-l border-[var(--color-border)]">
+              <ExchangeSelector
+                connectors={connectors}
+                value={connector}
+                onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
+              />
+            </div>
           </div>
         </div>
 
         {/* Price ticker */}
-        <div className="flex flex-1 items-center px-4 py-2">
+        <div className="flex items-center px-4 py-2 border-b md:border-b-0 md:border-r border-[var(--color-border)]">
           <PriceTicker server={server} connector={connector} pair={pair} />
         </div>
 
         {/* Interval + Range */}
-        <div className="flex items-center gap-3 border-l border-[var(--color-border)] px-4 py-2">
-          <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
+        <div className="flex items-center gap-3 px-4 py-2 overflow-x-auto no-scrollbar flex-nowrap shrink-0">
+          <div className="flex shrink-0 overflow-hidden rounded-md border border-[var(--color-border)] flex-nowrap">
             {INTERVALS.map((iv) => (
               <button
                 key={iv}
                 onClick={() => gridDispatch({ type: "SET_FIELD", field: "interval", value: iv })}
-                className={`px-2.5 py-1 text-xs ${
+                className={`px-2 md:px-2.5 py-1 text-[10px] md:text-xs whitespace-nowrap ${
                   gridState.interval === iv
                     ? "bg-[var(--color-primary)] text-white"
                     : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
@@ -455,14 +444,14 @@ export function CreateExecutor() {
             ))}
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] text-[var(--color-text-muted)]">Range:</span>
-            <div className="flex overflow-hidden rounded-md border border-[var(--color-border)]">
+          <div className="flex shrink-0 items-center gap-1.5 flex-nowrap">
+            <span className="text-[10px] text-[var(--color-text-muted)] whitespace-nowrap">Range:</span>
+            <div className="flex overflow-hidden rounded-md border border-[var(--color-border)] flex-nowrap">
               {LOOKBACK_OPTIONS.map((opt) => (
                 <button
                   key={opt.label}
                   onClick={() => gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: opt.seconds })}
-                  className={`px-2 py-1 text-xs ${
+                  className={`px-1.5 md:px-2 py-1 text-[10px] md:text-xs whitespace-nowrap ${
                     gridState.lookbackSeconds === opt.seconds
                       ? "bg-[var(--color-primary)] text-white"
                       : "bg-[var(--color-bg)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
@@ -477,18 +466,17 @@ export function CreateExecutor() {
       </div>
 
       {/* Main Area: Chart + Right Panel */}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row overflow-y-auto md:overflow-hidden">
         {/* Chart + Bottom Pane */}
-        <div className="min-w-0 flex-1 flex flex-col border-r border-[var(--color-border)]">
-          <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
+        <div className="min-w-0 flex-1 flex flex-col border-b md:border-b-0 md:border-r border-[var(--color-border)]">
+          <div className="h-[350px] md:flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)] shrink-0">
             <GridChart
-              key={`${connector}:${pair}:${gridState.interval}`}
+              key={`${connector}:${pair}:${gridState.interval}:${gridState.lookbackSeconds}`}
               server={server}
               connector={connector}
               pair={pair}
               interval={gridState.interval}
               lookbackSeconds={gridState.lookbackSeconds}
-
               startPrice={chartProps.startPrice}
               endPrice={chartProps.endPrice}
               limitPrice={chartProps.limitPrice}
@@ -502,104 +490,73 @@ export function CreateExecutor() {
               positions={mainPositions}
             />
           </div>
-          <TradingRulesInfo rule={selectedRule} />
-          <TradeBottomPane
-            executors={mainExecutors}
-            positions={mainPositions}
-            isLoadingPositions={isLoadingPositions}
-          />
+          <div className="hidden md:block">
+            <TradeBottomPane
+              executors={mainExecutors}
+              positions={mainPositions}
+              isLoadingPositions={isLoadingPositions}
+            />
+          </div>
         </div>
 
         {/* Right Panel */}
-        <div className="flex w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
-          {/* Panel Mode Toggle */}
-          <div className="flex border-b border-[var(--color-border)]">
-            <button
-              onClick={() => setRightPanel("config")}
-              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "config"
-                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              <Settings2 className="h-3.5 w-3.5" />
-              Execute
-            </button>
-            <button
-              onClick={() => setRightPanel("depth")}
-              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "depth"
-                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              <BarChart3 className="h-3.5 w-3.5" />
-              Data
-            </button>
+        <div className="flex w-full md:w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
+          {/* Type Tabs */}
+          <div className="border-b border-[var(--color-border)] shrink-0">
+            <div className="flex overflow-x-auto no-scrollbar">
+              {TYPE_TABS.map((tab) => (
+                <button
+                  key={tab.value}
+                  onClick={() => handleTypeChange(tab.value)}
+                  className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors whitespace-nowrap ${
+                    executorType === tab.value
+                      ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  {tab.icon}
+                  {tab.label}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {rightPanel === "config" ? (
-            <>
-              {/* Type Tabs */}
-              <div className="border-b border-[var(--color-border)]">
-                <div className="flex">
-                  {TYPE_TABS.map((tab) => (
-                    <button
-                      key={tab.value}
-                      onClick={() => handleTypeChange(tab.value)}
-                      className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
-                        executorType === tab.value
-                          ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                      }`}
-                    >
-                      {tab.icon}
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
+          {/* Config Panel */}
+          <div className="flex-1 overflow-y-auto">
+            {executorType === "grid" && (
+              <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
+            )}
+            {executorType === "position" && (
+              <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+            )}
+            {executorType === "order" && (
+              <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+            )}
+            {executorType === "dca" && (
+              <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+            )}
+          </div>
 
-              {/* Config Panel */}
-              <div className="flex-1 overflow-y-auto">
-                {executorType === "grid" && (
-                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
-                )}
-                {executorType === "position" && (
-                  <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-                )}
-                {executorType === "order" && (
-                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-                )}
-                {executorType === "dca" && (
-                  <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-                )}
-              </div>
-
-              {/* Sticky Create Footer */}
-              <div className="border-t border-[var(--color-border)] p-3">
-                {!activeValidation.valid && (
-                  <p className="mb-2 text-[11px] text-[var(--color-red)]">
-                    {activeValidation.errors[0]}
-                  </p>
-                )}
-                <button
-                  onClick={() => createMutation.mutate()}
-                  disabled={!activeValidation.valid || createMutation.isPending}
-                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {createMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Rocket className="h-4 w-4" />
-                  )}
-                  Create {TYPE_LABELS[executorType]}
-                </button>
-              </div>
-            </>
-          ) : (
-            <MarketDepthPanel server={server} connector={connector} pair={pair} />
-          )}
+          {/* Sticky Create Footer */}
+          <div className="border-t border-[var(--color-border)] p-3">
+            {!activeValidation.valid && (
+              <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                {activeValidation.errors[0]}
+              </p>
+            )}
+            <button
+              onClick={() => createMutation.mutate()}
+              disabled={!activeValidation.valid || createMutation.isPending}
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {createMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Rocket className="h-4 w-4" />
+              )}
+              Create {TYPE_LABELS[executorType]}
+            </button>
+          </div>
         </div>
       </div>
 
