@@ -157,8 +157,14 @@ Preferences are automatically saved and persist across sessions:
 ```bash
 TELEGRAM_TOKEN=your_bot_token
 ADMIN_USER_ID=123456789
-OPENAI_API_KEY=sk-...  # Optional, for AI features
+OPENAI_API_KEY=sk-...                    # Optional, for AI features
+OPENROUTER_API_KEY=sk-or-...             # Optional, unlocks the OpenRouter LLM picker
 ```
+
+> **OpenRouter:** Add `OPENROUTER_API_KEY` to `.env`, then in `/agent → Change LLM`
+> select **OpenRouter — Pick Model**. The picker fetches the live catalog and shows
+> only models that support tool-calling. Get a key at
+> [openrouter.ai/keys](https://openrouter.ai/keys).
 
 ### `config.yml` (auto-created on first run)
 ```yaml
