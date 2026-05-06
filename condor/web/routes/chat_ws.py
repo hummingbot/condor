@@ -141,6 +141,14 @@ async def chat_websocket(ws: WebSocket, token: str = Query(...)):
     sessions = _get_user_sessions(user_id)
     await _send(ws, {"event": "sessions_list", "sessions": sessions})
 
+    # Background tasks so long-running operations don't block the receive loop
+    bg_tasks: set[asyncio.Task] = set()
+
+    def _spawn(coro):
+        task = asyncio.create_task(coro)
+        bg_tasks.add(task)
+        task.add_done_callback(bg_tasks.discard)
+
     try:
         while True:
             raw = await ws.receive_text()
@@ -153,11 +161,11 @@ async def chat_websocket(ws: WebSocket, token: str = Query(...)):
             action = msg.get("action")
 
             if action == "start_session":
-                await _handle_start_session(ws, user_id, msg)
+                _spawn(_handle_start_session(ws, user_id, msg))
             elif action == "send_message":
-                await _handle_send_message(ws, user_id, msg)
+                _spawn(_handle_send_message(ws, user_id, msg))
             elif action == "destroy_session":
-                await _handle_destroy_session(ws, user_id, msg)
+                _spawn(_handle_destroy_session(ws, user_id, msg))
             elif action == "list_sessions":
                 sessions = _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
@@ -170,6 +178,12 @@ async def chat_websocket(ws: WebSocket, token: str = Query(...)):
         pass
     except Exception:
         log.exception("Chat WS error for user %d", user_id)
+    finally:
+        # Cancel any in-flight background tasks on disconnect
+        for task in bg_tasks:
+            task.cancel()
+        if bg_tasks:
+            await asyncio.gather(*bg_tasks, return_exceptions=True)
 
 
 async def _handle_start_session(
