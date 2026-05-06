@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CHARTS_DIR = Path(__file__).resolve().parent.parent / "charts"
+CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
 
@@ -80,7 +80,8 @@ _HTML_TEMPLATE = """\
   .section-table td {{ padding: 8px 12px; border-bottom: 1px solid var(--border); }}
   .section-table tr:nth-child(even) td {{ background: rgba(255,255,255,0.02); }}
   .section-table tr:last-child td {{ border-bottom: none; }}
-  .plotly-chart {{ min-height: 400px; margin-bottom: 24px; }}
+  .plotly-chart {{ min-height: 400px; margin-bottom: 24px; width: 100%; overflow: hidden; }}
+  .plotly-chart .js-plotly-plot, .plotly-chart .plot-container, .plotly-chart .plotly {{ width: 100% !important; }}
 </style>
 </head>
 <body>
@@ -92,6 +93,18 @@ _HTML_TEMPLATE = """\
   </div>
 </div>
 {sections_html}
+<script>
+window.addEventListener('load', function() {{
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {{
+    if (window.Plotly) Plotly.relayout(el, {{ autosize: true, width: undefined }});
+  }});
+}});
+window.addEventListener('resize', function() {{
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {{
+    if (window.Plotly) Plotly.Plots.resize(el);
+  }});
+}});
+</script>
 </body>
 </html>
 """
@@ -168,6 +181,31 @@ def list_reports(
 
     total = len(entries)
     return entries[offset : offset + limit], total
+
+
+def list_reports_grouped() -> list[dict]:
+    """Return latest report per source_name, with count."""
+    entries = _read_index()
+    entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+    groups: dict[str, dict] = {}
+    for e in entries:
+        sn = e.get("source_name", "")
+        if not sn:
+            continue
+        if sn not in groups:
+            groups[sn] = {
+                "source_name": sn,
+                "source_type": e.get("source_type", ""),
+                "latest_report": e,
+                "total_count": 1,
+                "all_tags": set(e.get("tags", [])),
+            }
+        else:
+            groups[sn]["total_count"] += 1
+            groups[sn]["all_tags"].update(e.get("tags", []))
+    for g in groups.values():
+        g["all_tags"] = sorted(g["all_tags"])
+    return sorted(groups.values(), key=lambda g: g["latest_report"]["created_at"], reverse=True)
 
 
 def get_report(report_id: str) -> dict | None:
