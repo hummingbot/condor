@@ -227,7 +227,7 @@ async def handle_token_action(query, context: ContextTypes.DEFAULT_TYPE) -> None
         # Handle pagination
         try:
             page = int(action_data.replace("page_", ""))
-            network_id = context.user_data.get("token_view_network")
+            network_id = context.user_data.get("token_manage_network")
             if network_id:
                 await show_network_tokens(query, context, network_id, page=page)
             else:
@@ -410,8 +410,7 @@ async def prompt_add_token(
             "*Option 2:* Full format\n"
             "`address,symbol,decimals,name`\n\n"
             "*Example:*\n"
-            "`9QFfgxdSqH5zT7j6rZb1y6SZhw2aFtcQu2r6BuYpump`\n\n"
-            "⚠️ _Restart Gateway after adding for changes to take effect\\._"
+            "`9QFfgxdSqH5zT7j6rZb1y6SZhw2aFtcQu2r6BuYpump`"
         )
 
         keyboard = [
@@ -622,8 +621,7 @@ async def prompt_edit_token(
             "`symbol,decimals,name`\n\n"
             "*Example:*\n"
             "`GOLD,9,Goldcoin`\n\n"
-            "_Leave name empty if not needed \\(e\\.g\\. `GOLD,9`\\)_\n\n"
-            "⚠️ _Restart Gateway after editing for changes to take effect\\._"
+            "_Leave name empty if not needed \\(e\\.g\\. `GOLD,9`\\)_"
         )
 
         keyboard = [
@@ -696,8 +694,7 @@ async def show_delete_token_confirmation(
 
         message_text += (
             f"Address: `{addr_escaped}`\n\n"
-            f"⚠️ This will remove the token from *{network_escaped}*\\.\n"
-            "You will need to restart the Gateway for changes to take effect\\.\n\n"
+            f"⚠️ This will remove the token from *{network_escaped}*\\.\n\n"
             "Are you sure you want to delete this token?"
         )
 
@@ -759,8 +756,7 @@ async def remove_token(
         success_text = (
             f"✅ *Token Removed*\n\n"
             f"`{addr_escaped}`\n\n"
-            f"Removed from {network_escaped}\n\n"
-            "⚠️ _Restart Gateway for changes to take effect\\._"
+            f"Removed from {network_escaped}"
         )
 
         keyboard = [
@@ -922,8 +918,7 @@ async def handle_token_input(
 
                 success_text = (
                     f"✅ *Token Added Successfully*\n\n"
-                    f"*{symbol_escaped}* added to {network_escaped}\n\n"
-                    "⚠️ _Restart Gateway for changes to take effect\\._"
+                    f"*{symbol_escaped}* added to {network_escaped}"
                 )
 
                 if message_id and chat_id:
@@ -1060,8 +1055,7 @@ async def handle_token_input(
 
                 success_text = (
                     f"✅ *Token Updated Successfully*\n\n"
-                    f"*{symbol_escaped}* updated on {network_escaped}\n\n"
-                    "⚠️ _Restart Gateway for changes to take effect\\._"
+                    f"*{symbol_escaped}* updated on {network_escaped}"
                 )
 
                 if message_id and chat_id:

@@ -23,6 +23,8 @@ LIQUIDITY_SUPPORTED_DEXES = {
     "meteora": "solana",
     "raydium": "solana",
     "orca": "solana",
+    "uniswap": "ethereum",
+    "pancakeswap": "bsc",
 }
 
 # GeckoTerminal network mapping
@@ -50,6 +52,8 @@ DEX_TO_GECKO = {
     "orca": "orca",
     "uniswap": "uniswap",
     "uniswap_v3": "uniswap_v3",
+    "pancakeswap": "pancakeswap",
+    "pancakeswap_v3": "pancakeswap_v3",
     "sushiswap": "sushiswap",
 }
 

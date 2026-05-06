@@ -99,19 +99,21 @@ def format_pair_from_addresses(
     return f"{base_symbol}-{quote_symbol}"
 
 
-def get_dex_pool_url(connector: str, pool_address: str) -> str:
+def get_dex_pool_url(connector: str, pool_address: str, network: str = "") -> str:
     """
     Generate the DEX web app URL for a pool.
 
     Args:
-        connector: DEX connector name (meteora, raydium, orca, etc.)
+        connector: DEX connector name (meteora, raydium, orca, uniswap, pancakeswap)
         pool_address: Pool address
+        network: Network for EVM connectors (ethereum, arbitrum, base, etc.)
 
     Returns:
         URL to the pool on the DEX web app, or empty string if unknown
     """
     connector_lower = connector.lower()
 
+    # Solana DEXes
     if connector_lower == "meteora":
         return f"https://app.meteora.ag/dlmm/{pool_address}?referrer=hummingbot"
     elif connector_lower == "raydium":
@@ -119,11 +121,37 @@ def get_dex_pool_url(connector: str, pool_address: str) -> str:
     elif connector_lower == "orca":
         return f"https://www.orca.so/pools/{pool_address}"
 
+    # EVM DEXes
+    elif connector_lower == "uniswap":
+        # Uniswap V3 pool URLs vary by network
+        network_lower = network.lower() if network else "ethereum"
+        if "arbitrum" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/arbitrum/{pool_address}"
+        elif "base" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/base/{pool_address}"
+        elif "optimism" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/optimism/{pool_address}"
+        elif "polygon" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/polygon/{pool_address}"
+        else:
+            return f"https://app.uniswap.org/explore/pools/ethereum/{pool_address}"
+    elif connector_lower == "pancakeswap":
+        # PancakeSwap V3 pool URLs
+        network_lower = network.lower() if network else "bsc"
+        if "ethereum" in network_lower:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=eth"
+        elif "arbitrum" in network_lower:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=arb"
+        elif "base" in network_lower:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=base"
+        else:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=bsc"
+
     return ""
 
 
 # ============================================
-# POOL INFO (by address - supports meteora, raydium, orca)
+# POOL INFO (by address - supports meteora, raydium, orca, uniswap, pancakeswap)
 # ============================================
 
 
@@ -132,11 +160,14 @@ async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     help_text = (
         r"🔍 *Pool Info*" + "\n\n"
         r"Reply with:" + "\n\n"
-        r"`connector pool_address`" + "\n\n"
-        r"*Examples:*" + "\n"
+        r"`connector pool_address [network]`" + "\n\n"
+        r"*Solana \(network optional\):*" + "\n"
         r"`meteora 5Q5...abc`" + "\n"
         r"`raydium 7Xy...def`" + "\n"
-        r"`orca 3Ab...ghi`"
+        r"`orca 3Ab...ghi`" + "\n\n"
+        r"*EVM \(network required\):*" + "\n"
+        r"`uniswap 0x1...abc ethereum`" + "\n"
+        r"`pancakeswap 0x2...def bsc`"
     )
 
     keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:liquidity")]]
@@ -227,18 +258,45 @@ async def process_pool_info(
         parts = user_input.split()
         if len(parts) < 2:
             raise ValueError(
-                "Need: connector pool_address\n\nExample: meteora 5Q5...abc"
+                "Need: connector pool_address [network]\n\nExample: meteora 5Q5...abc"
             )
 
         connector = parts[0].lower()
         pool_address = parts[1]
 
         # Validate connector - must be a supported CLMM connector
-        supported_connectors = ["meteora", "raydium", "orca"]
+        solana_connectors = ["meteora", "raydium", "orca"]
+        evm_connectors = ["uniswap", "pancakeswap"]
+        supported_connectors = solana_connectors + evm_connectors
+
         if connector not in supported_connectors:
             raise ValueError(
                 f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}"
             )
+
+        # Determine network based on connector type
+        if connector in solana_connectors:
+            network = "solana-mainnet-beta"
+        else:
+            # EVM connectors require network specification
+            if len(parts) < 3:
+                raise ValueError(
+                    f"EVM connector '{connector}' requires network.\n\n"
+                    f"Example: {connector} {pool_address} ethereum"
+                )
+            network = parts[2].lower()
+            # Normalize network names
+            network_mapping = {
+                "ethereum": "ethereum-mainnet",
+                "eth": "ethereum-mainnet",
+                "arbitrum": "arbitrum-one",
+                "arb": "arbitrum-one",
+                "base": "base-mainnet",
+                "bsc": "binance-smart-chain",
+                "polygon": "polygon-mainnet",
+                "optimism": "optimism-mainnet",
+            }
+            network = network_mapping.get(network, network)
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
@@ -252,7 +310,7 @@ async def process_pool_info(
         # Fetch pool info
         result = await client.gateway_clmm.get_pool_info(
             connector=connector,
-            network="solana-mainnet-beta",
+            network=network,
             pool_address=pool_address,
         )
 

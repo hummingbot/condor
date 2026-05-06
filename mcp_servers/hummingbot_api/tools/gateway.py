@@ -210,10 +210,32 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 "result": result
             }
 
+        elif request.action == "save":
+            # Simplified token addition - auto-fetches info from GeckoTerminal
+            if not request.network_id:
+                raise ToolError(
+                    "network_id is required for 'save' token action. "
+                    "Format: 'chain-network' (e.g., 'solana-mainnet-beta')"
+                )
+            if not request.token_address:
+                raise ToolError("token_address is required for 'save' token action")
+
+            result = await client.gateway.save_network_token(
+                network_id=request.network_id,
+                token_address=request.token_address
+            )
+            return {
+                "resource_type": "tokens",
+                "action": "save",
+                "network_id": request.network_id,
+                "token_address": request.token_address,
+                "result": result
+            }
+
         else:
             raise ToolError(
                 f"Action '{request.action}' not supported for tokens. "
-                f"Supported: list, add, delete"
+                f"Supported: list, add, delete, save"
             )
 
     # ============================================
@@ -345,10 +367,32 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 "result": result
             }
 
+        elif request.action == "save":
+            # Simplified pool addition - auto-fetches info from blockchain
+            if not request.network_id:
+                raise ToolError(
+                    "network_id is required for 'save' pool action. "
+                    "Format: 'chain-network' (e.g., 'solana-mainnet-beta')"
+                )
+            if not request.pool_address:
+                raise ToolError("pool_address is required for 'save' pool action")
+
+            result = await client.gateway.save_network_pool(
+                network_id=request.network_id,
+                pool_address=request.pool_address
+            )
+            return {
+                "resource_type": "pools",
+                "action": "save",
+                "network_id": request.network_id,
+                "pool_address": request.pool_address,
+                "result": result
+            }
+
         else:
             raise ToolError(
                 f"Action '{request.action}' not supported for pools. "
-                f"Supported: list, add, delete"
+                f"Supported: list, add, delete, save"
             )
 
     # ============================================
