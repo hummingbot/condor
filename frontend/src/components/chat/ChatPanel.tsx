@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Brain,
-  GripVertical,
   Loader2,
   MessageSquare,
   Plus,
@@ -32,6 +31,18 @@ export function ChatPanel() {
   const [isDragging, setIsDragging] = useState(false);
   const [showNewMenu, setShowNewMenu] = useState(false);
   const [pendingSession, setPendingSession] = useState(false);
+
+  // Keyboard shortcut: Cmd+K (Mac) / Ctrl+K (other) to toggle panel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setIsOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Connect when panel opens
   useEffect(() => {
@@ -89,12 +100,13 @@ export function ChatPanel() {
       {!isOpen && (
         <button
           onClick={() => setIsOpen(true)}
-          className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-[var(--color-primary)] text-white shadow-lg shadow-[var(--color-primary)]/25 transition-all duration-200 hover:scale-105 hover:shadow-xl hover:shadow-[var(--color-primary)]/30 active:scale-95"
-          title="Chat with Condor"
+          className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-full bg-amber-500 border border-amber-400 pl-3 pr-2.5 py-2 text-black shadow-md shadow-amber-500/20 transition-all duration-200 hover:bg-amber-400 hover:shadow-lg hover:shadow-amber-500/30 active:scale-95"
+          title="Chat with Condor (⌘K)"
         >
-          <MessageSquare className="h-6 w-6" />
-          {/* Subtle ping animation */}
-          <span className="absolute inset-0 animate-ping rounded-full bg-[var(--color-primary)] opacity-20" style={{ animationDuration: "3s" }} />
+          <MessageSquare className="h-4 w-4" />
+          <kbd className="rounded bg-amber-600/30 px-1.5 py-0.5 text-[10px] font-medium tracking-wide border border-amber-600/40 text-amber-900">
+            ⌘K
+          </kbd>
         </button>
       )}
 
@@ -110,11 +122,11 @@ export function ChatPanel() {
         {isOpen && (
           <div
             onMouseDown={startDrag}
-            className={`absolute left-0 top-0 z-10 flex h-full w-1.5 cursor-col-resize items-center justify-center transition-colors hover:bg-[var(--color-primary)]/20 ${
-              isDragging ? "bg-[var(--color-primary)]/30" : ""
+            className={`group/resize absolute left-0 top-0 z-10 flex h-full w-1.5 cursor-col-resize items-center justify-center transition-colors hover:bg-[var(--color-primary)]/10 ${
+              isDragging ? "bg-[var(--color-primary)]/20" : ""
             }`}
           >
-            <GripVertical className="h-4 w-4 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100" />
+            <div className="h-12 w-px rounded bg-amber-400/60 group-hover/resize:bg-amber-400 transition-colors" />
           </div>
         )}
 

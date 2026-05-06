@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { FileText, Loader2, Maximize2, Minimize2 } from "lucide-react";
+import { ExternalLink, FileText, Loader2 } from "lucide-react";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
+import { ReportViewer } from "@/components/routines/ReportViewer";
 import { type ReportSummary, api } from "@/lib/api";
 
 interface RoutineReportsProps {
@@ -18,7 +20,7 @@ function formatAgo(iso: string): string {
 
 export function RoutineReports({ routineName }: RoutineReportsProps) {
   const [viewReport, setViewReport] = useState<ReportSummary | null>(null);
-  const [fullscreen, setFullscreen] = useState(false);
+  const [, setSearchParams] = useSearchParams();
 
   const { data, isLoading } = useQuery({
     queryKey: ["routine-reports", routineName],
@@ -49,17 +51,27 @@ export function RoutineReports({ routineName }: RoutineReportsProps) {
 
   return (
     <div>
-      <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-        Reports ({reports.length})
-      </h3>
+      <div className="mb-2 flex items-center justify-between">
+        <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+          Reports ({reports.length})
+        </h3>
+        {reports.length > 12 && (
+          <button
+            onClick={() => setSearchParams({ tab: "reports", source: routineName })}
+            className="flex items-center gap-1 text-[10px] text-[var(--color-primary)] hover:underline"
+          >
+            Show all {reports.length} <ExternalLink className="h-3 w-3" />
+          </button>
+        )}
+      </div>
 
       {/* Report cards */}
       <div className="grid grid-cols-2 gap-2 mb-3">
-        {reports.slice(0, 6).map((r) => (
+        {reports.slice(0, 12).map((r) => (
           <button
             key={r.id}
             onClick={() => setViewReport(r)}
-            className={`rounded-md border p-2.5 text-left transition-all ${
+            className={`group rounded-md border p-2.5 text-left transition-all ${
               viewReport?.id === r.id
                 ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/5"
                 : "border-[var(--color-border)] hover:border-[var(--color-primary)]/20"
@@ -85,28 +97,24 @@ export function RoutineReports({ routineName }: RoutineReportsProps) {
         ))}
       </div>
 
+      {reports.length > 12 && !viewReport && (
+        <button
+          onClick={() => setSearchParams({ tab: "reports", source: routineName })}
+          className="mb-3 text-[11px] text-[var(--color-primary)] hover:underline"
+        >
+          Show all {reports.length} reports
+        </button>
+      )}
+
       {/* Inline viewer */}
       {viewReport && (
-        <div
-          className={`overflow-hidden rounded-lg border border-[var(--color-border)] ${
-            fullscreen ? "fixed inset-0 z-50 rounded-none" : ""
-          }`}
-        >
-          <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
-            <span className="text-xs font-medium text-[var(--color-text)] truncate">
-              {viewReport.title}
-            </span>
-            <button
-              onClick={() => setFullscreen((f) => !f)}
-              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-            >
-              {fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-          <iframe
-            src={`/charts/${viewReport.filename}`}
-            className={`w-full border-0 ${fullscreen ? "h-[calc(100vh-40px)]" : "h-[560px]"}`}
-            title={viewReport.title}
+        <div className="h-[560px]">
+          <ReportViewer
+            report={viewReport}
+            reports={reports}
+            onSelect={setViewReport}
+            onClose={() => setViewReport(null)}
+            allowFullscreen={true}
           />
         </div>
       )}

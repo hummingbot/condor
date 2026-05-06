@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Clock,
   FlaskConical,
+  ScrollText,
   Zap,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -11,6 +12,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { AgentControls } from "@/components/agent/AgentControls";
 import { ExperimentsTab } from "@/components/agent/AgentExperimentsTab";
 import { OverviewTab } from "@/components/agent/AgentOverviewTab";
+import { AgentRoutinesTab } from "@/components/agent/AgentRoutinesTab";
 import { SessionsTab } from "@/components/agent/AgentSessionsTab";
 import { api } from "@/lib/api";
 
@@ -19,6 +21,7 @@ import { api } from "@/lib/api";
 const TABS = [
   { id: "overview", label: "Overview", icon: Zap },
   { id: "sessions", label: "Sessions", icon: Clock },
+  { id: "routines", label: "Routines", icon: ScrollText },
   { id: "experiments", label: "Dry-Run", icon: FlaskConical },
 ] as const;
 
@@ -109,6 +112,7 @@ export function AgentDetail() {
           controllerIds={controllerIds}
         />
       )}
+      {activeTab === "routines" && <AgentRoutinesTab slug={slug!} />}
       {activeTab === "experiments" && <ExperimentsTab slug={slug!} experiments={agent.experiments || []} />}
     </div>
   );

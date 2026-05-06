@@ -483,6 +483,40 @@ export interface ReportsListResponse {
   total: number;
 }
 
+export interface ReportGroup {
+  source_name: string;
+  source_type: string;
+  latest_report: ReportSummary;
+  total_count: number;
+  all_tags: string[];
+}
+
+// ── Settings ──
+
+export interface GatewayStatus {
+  running: boolean;
+  info: Record<string, unknown> | null;
+}
+
+export interface CredentialInfo {
+  connector_name: string;
+  connector_type: string;
+}
+
+export interface ConnectorInfo {
+  name: string;
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface ConnectorFieldInfo {
+  key: string;
+  type: string;
+  required: boolean;
+  default?: unknown;
+  description?: string;
+}
+
 // ── Backtesting ──
 
 export interface BacktestTask {
@@ -865,6 +899,8 @@ export const api = {
     return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
   },
 
+  getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
+
   deleteReport: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/reports/${id}`, { method: "DELETE" }),
 
@@ -903,5 +939,87 @@ export const api = {
   getRoutineReports: (name: string) =>
     apiFetch<ReportsListResponse>(
       `/api/v1/routines/${encodeURIComponent(name)}/reports`,
+    ),
+
+  // ── Agent Routines & Reports ──
+
+  getAgentRoutines: (slug: string) =>
+    apiFetch<RoutineInfo[]>(`/api/v1/agents/${encodeURIComponent(slug)}/routines`),
+
+  getAgentReports: (slug: string) =>
+    apiFetch<ReportsListResponse>(`/api/v1/agents/${encodeURIComponent(slug)}/reports`),
+
+  // ── Settings ──
+
+  getSettingsServers: () => apiFetch<ServerInfo[]>("/api/v1/settings/servers"),
+
+  addServer: (data: { name: string; host: string; port: number; username: string; password: string }) =>
+    apiFetch<{ added: boolean; name: string }>("/api/v1/settings/servers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateServer: (name: string, data: { host?: string; port?: number; username?: string; password?: string }) =>
+    apiFetch<{ updated: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  deleteServer: (name: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+
+  setDefaultServer: (name: string) =>
+    apiFetch<{ default: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}/default`, {
+      method: "POST",
+    }),
+
+  getGatewayStatus: (server: string) =>
+    apiFetch<GatewayStatus>(`/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`),
+
+  startGateway: (server: string, data: { image: string; passphrase: string; port?: number; dev_mode?: boolean }) =>
+    apiFetch<{ started: boolean }>(`/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  stopGateway: (server: string) =>
+    apiFetch<{ stopped: boolean }>(`/api/v1/settings/gateway/stop?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+    }),
+
+  restartGateway: (server: string) =>
+    apiFetch<{ restarted: boolean }>(`/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+    }),
+
+  getGatewayLogs: (server: string) =>
+    apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
+
+  getCredentials: (server: string) =>
+    apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),
+
+  getAvailableConnectors: (server: string, type?: string) => {
+    let url = `/api/v1/settings/connectors?server=${encodeURIComponent(server)}`;
+    if (type) url += `&type=${encodeURIComponent(type)}`;
+    return apiFetch<{ connectors: ConnectorInfo[] }>(url);
+  },
+
+  getConnectorConfigMap: (server: string, name: string) =>
+    apiFetch<{ config_map: Record<string, unknown> }>(
+      `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
+    ),
+
+  addCredential: (server: string, data: { connector_name: string; credentials: Record<string, string> }) =>
+    apiFetch<{ added: boolean }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  deleteCredential: (server: string, connector: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/settings/credentials/${encodeURIComponent(connector)}?server=${encodeURIComponent(server)}`,
+      { method: "DELETE" },
     ),
 };

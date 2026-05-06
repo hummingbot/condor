@@ -265,6 +265,28 @@ export function GridChart({
     };
   }, []);
 
+  // ── Re-apply chart colors on theme change ──
+  useEffect(() => {
+    if (!chartRef.current || !chartModuleRef.current) return;
+    const chart = chartRef.current;
+    const mod = chartModuleRef.current;
+    const observer = new MutationObserver(() => {
+      const colors = getChartColors();
+      chart.applyOptions({
+        layout: {
+          background: { type: mod.ColorType.Solid, color: colors.bg },
+          textColor: colors.text,
+        },
+        grid: {
+          vertLines: { color: colors.grid },
+          horzLines: { color: colors.grid },
+        },
+      });
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, [chartReady]);
+
   // ── Push candle data to chart ──
   useEffect(() => {
     if (!chartReady || !seriesRef.current || !candles.length) return;
@@ -620,18 +642,16 @@ export function GridChart({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        {activePickField && (
+      {activePickField && (
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] text-[var(--color-text-muted)]">
             Click on chart to set {activePickField} price
           </p>
-        )}
-        {activePickField && (
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
             Pick mode: {activePickField}
           </span>
-        )}
-      </div>
+        </div>
+      )}
       <div className="relative flex-1">
         <div
           ref={containerRef}
@@ -649,12 +669,12 @@ export function GridChart({
             left: 0,
             zIndex: 10,
             pointerEvents: "none",
-            background: "rgba(15, 21, 37, 0.95)",
-            border: "1px solid rgba(107, 121, 148, 0.3)",
+            background: "var(--color-surface)",
+            border: "1px solid var(--color-border)",
             borderRadius: 6,
             padding: "6px 10px",
             fontSize: 11,
-            color: "#e2e8f0",
+            color: "var(--color-text)",
             maxWidth: 220,
             whiteSpace: "nowrap",
             lineHeight: 1.4,

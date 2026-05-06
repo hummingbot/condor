@@ -304,7 +304,7 @@ export function Agents() {
   const aggTotalColor = aggTotalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 
   return (
-    <div className="mx-auto w-full max-w-7xl">
+    <div className="w-full">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>
