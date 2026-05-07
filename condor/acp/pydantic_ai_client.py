@@ -51,7 +51,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     model_lower = model_name.lower()
 
     # Cloud providers always get full access (they're powerful enough)
-    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:"]):
+    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
 
@@ -92,12 +92,13 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Model prefix → pydantic-ai model string mapping
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
-PYDANTIC_AI_PREFIXES = frozenset({"ollama", "openai", "groq", "anthropic", "google", "lmstudio"})
+PYDANTIC_AI_PREFIXES = frozenset({"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"})
 
-# Default base URLs for local model providers
+# Default base URLs for local model providers and OpenRouter
 DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
 }
 
 
@@ -120,6 +121,7 @@ class PydanticAIClient:
       - "openai:my-model"  → with base_url, uses any OpenAI-compatible API (LM Studio, vLLM, etc.)
       - "groq:llama-3.3-70b-versatile" → uses Groq cloud
       - "anthropic:claude-sonnet-4-6" → uses Anthropic API
+      - "openrouter:anthropic/claude-sonnet-4-5" → uses OpenRouter (requires OPENROUTER_API_KEY)
     """
 
     def __init__(
@@ -151,16 +153,39 @@ class PydanticAIClient:
         environment variables like OLLAMA_BASE_URL.
 
         Resolution:
-          - ollama:model    → OpenAI-compat at localhost:11434/v1 (or custom base_url)
-          - lmstudio:model  → OpenAI-compat at localhost:1234/v1 (or custom base_url)
-          - openai:model    → OpenAI API (or custom base_url for vLLM, etc.)
-          - groq/anthropic  → standard pydantic-ai resolution
+          - ollama:model     → OpenAI-compat at localhost:11434/v1 (or custom base_url)
+          - lmstudio:model   → OpenAI-compat at localhost:1234/v1 (or custom base_url)
+          - openrouter:model → OpenAI-compat at https://openrouter.ai/api/v1,
+                               requires OPENROUTER_API_KEY; model id must be
+                               explicit (e.g. "openrouter:anthropic/claude-sonnet-4-5").
+          - openai:model     → OpenAI API (or custom base_url for vLLM, etc.)
+          - groq/anthropic   → standard pydantic-ai resolution
         """
         from pydantic_ai.models.openai import OpenAIModel
         from pydantic_ai.providers.openai import OpenAIProvider
 
         prefix, _, model_id = self.model_name.partition(":")
         base_url = self.base_url
+
+        # OpenRouter: OpenAI-compatible cloud gateway, requires API key.
+        # Handled before the generic DEFAULT_BASE_URLS branch because that branch
+        # uses api_key="not-needed", which OpenRouter rejects.
+        if prefix == "openrouter":
+            if not model_id:
+                raise RuntimeError(
+                    "OpenRouter requires an explicit model id, e.g. "
+                    "'openrouter:openai/gpt-4o' or 'openrouter:anthropic/claude-sonnet-4-5'."
+                )
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "OPENROUTER_API_KEY is not set. Add it to your .env to use openrouter:* models."
+                )
+            provider = OpenAIProvider(
+                base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
+                api_key=api_key,
+            )
+            return OpenAIModel(model_id, provider=provider)
 
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
@@ -431,5 +456,45 @@ class PydanticAIClient:
             yield PromptDone(stop_reason="timeout")
         except Exception as e:
             log.exception("PydanticAI prompt error: %s", e)
-            yield TextChunk(text=f"(error: {e})")
+            yield TextChunk(text=self._format_error(e))
             yield PromptDone(stop_reason="error")
+
+    def _format_error(self, e: Exception) -> str:
+        """Translate provider HTTP errors into actionable user-facing text.
+
+        Falls back to the raw exception string for anything we don't recognize.
+        """
+        try:
+            from pydantic_ai.exceptions import ModelHTTPError
+        except ImportError:
+            return f"(error: {e})"
+
+        if not isinstance(e, ModelHTTPError):
+            return f"(error: {e})"
+
+        is_openrouter = self.model_name.startswith("openrouter:")
+        status = getattr(e, "status_code", None)
+
+        if is_openrouter and status == 402:
+            return (
+                "OpenRouter rejected the request: insufficient credits.\n\n"
+                "Either top up at https://openrouter.ai/settings/credits, or "
+                "switch to a free model with /agent → Change LLM → OpenRouter "
+                "→ Enter model manually → openrouter/free."
+            )
+        if is_openrouter and status == 401:
+            return (
+                "OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY "
+                "in your .env and confirm the key is on the account that holds your credits."
+            )
+        if is_openrouter and status == 429:
+            return (
+                "OpenRouter rate-limited the request (429). Free models share a "
+                "tighter quota — wait a moment and retry, or switch to a paid model."
+            )
+        if is_openrouter and status and 500 <= status < 600:
+            return (
+                f"OpenRouter upstream error ({status}). The selected provider may "
+                "be down — try again, or switch models with /agent → Change LLM."
+            )
+        return f"(error: {e})"

@@ -19,13 +19,16 @@ A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
 git clone https://github.com/hummingbot/condor.git
 cd condor
 
-# Option 1: Local Python
+# Condor (source only)
 make install     # Interactive setup + uv deps + AI CLI tools
 make run         # Start the bot
+```
 
-# Option 2: Docker
-make setup       # Interactive configuration
-make deploy      # Start with Docker Compose
+If you need to run Hummingbot API locally, it can still be launched with Docker from the sibling repo:
+
+```bash
+cd ../hummingbot-api
+docker compose up -d
 ```
 
 ## Commands
@@ -157,8 +160,14 @@ Preferences are automatically saved and persist across sessions:
 ```bash
 TELEGRAM_TOKEN=your_bot_token
 ADMIN_USER_ID=123456789
-OPENAI_API_KEY=sk-...  # Optional, for AI features
+OPENAI_API_KEY=sk-...                    # Optional, for AI features
+OPENROUTER_API_KEY=sk-or-...             # Optional, unlocks the OpenRouter LLM picker
 ```
+
+> **OpenRouter:** Add `OPENROUTER_API_KEY` to `.env`, then in `/agent → Change LLM`
+> select **OpenRouter — Pick Model**. The picker fetches the live catalog and shows
+> only models that support tool-calling. Get a key at
+> [openrouter.ai/keys](https://openrouter.ai/keys).
 
 ### `config.yml` (auto-created on first run)
 ```yaml
@@ -186,19 +195,6 @@ audit_log: []
 | Connection refused | Check server host:port in `/config` |
 | Auth error | Verify server credentials |
 | DEX features unavailable | Ensure Gateway is configured and running |
-
-## Docker Deployment
-
-```bash
-# Setup and run with Docker
-make setup       # Interactive configuration
-docker compose up -d
-```
-
-Volumes mounted:
-- `condor_bot_data.pickle` - User preferences and state
-- `config.yml` - Server and permission configuration
-- `routines/` - Custom automation scripts
 
 ## Development
 
