@@ -17,6 +17,7 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     DEFAULT_MODE,
+    build_mode_context,
     build_trading_context,
     get_project_dir,
 )
@@ -220,10 +221,8 @@ async def _handle_mode_start(
             mode=mode,
         )
 
-        # Inject mode-specific context
-        extra_context = None
-        if mode == "agent_builder":
-            extra_context = build_trading_context()
+        # Inject mode-specific context (auto-loaded from assistants/*.md)
+        extra_context = build_mode_context(mode)
 
         if extra_context:
             try:
@@ -832,10 +831,8 @@ async def agent_message_handler(
                 mode=mode,
             )
 
-            # Inject mode-specific context for non-condor modes
-            extra_context = None
-            if mode == "agent_builder":
-                extra_context = build_trading_context()
+            # Inject mode-specific context (auto-loaded from assistants/*.md)
+            extra_context = build_mode_context(mode)
 
             if extra_context:
                 try:
