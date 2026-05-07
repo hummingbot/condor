@@ -19,7 +19,7 @@ help:
 	@echo ""
 	@echo "  make setup       - Interactive setup wizard"
 	@echo "  make install     - Setup + install all dependencies"
-	@echo "  make run         - Run locally (dev)"
+\t@echo "  make run         - Run locally (dev)"
 	@echo "  make test        - Run tests"
 	@echo "  make lint        - Run black + isort"
 

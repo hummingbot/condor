@@ -389,11 +389,11 @@ else
     done
     ADMIN_USER_ID="$admin_id"
 
-    # Prompt for Server IP (optional - for VPS deployments)
+    # Prompt for Server IP (optional - for VPS deployments without Tailscale)
     echo ""
-    msg_info "If running on a VPS, enter the server's IP address."
-    msg_info "Otherwise, press Enter to use localhost."
-    prompt_visible "Server IP address (or press Enter for localhost)" "" "server_ip"
+    msg_info "If running on a VPS without Tailscale, enter the server's public IP."
+    msg_info "Skip this (press Enter) if you're using Tailscale — it will set the web URL automatically."
+    prompt_visible "Server IP address (or press Enter for localhost/Tailscale)" "" "server_ip"
     SERVER_IP="$server_ip"
 
     # Write .env (preserve extra vars if file exists)
@@ -412,20 +412,13 @@ else
             echo "ADMIN_USER_ID=$(escape_env_value "$ADMIN_USER_ID")" >> "$ENV_FILE"
         fi
         
-        # Add WEB_URL and WEB_PORT if server IP was provided
+        # Add WEB_URL if server IP was provided
         if [ -n "$SERVER_IP" ]; then
             if grep -q "^WEB_URL=" "$ENV_FILE"; then
-                sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$(escape_env_value "$SERVER_IP")|" "$ENV_FILE"
+                sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$(escape_env_value "$SERVER_IP"):8088|" "$ENV_FILE"
                 rm -f "$ENV_FILE.bak"
             else
-                echo "WEB_URL=http://$(escape_env_value "$SERVER_IP")" >> "$ENV_FILE"
-            fi
-            
-            if grep -q "^WEB_PORT=" "$ENV_FILE"; then
-                sed -i.bak "s|^WEB_PORT=.*|WEB_PORT=8088|" "$ENV_FILE"
-                rm -f "$ENV_FILE.bak"
-            else
-                echo "WEB_PORT=8088" >> "$ENV_FILE"
+                echo "WEB_URL=http://$(escape_env_value "$SERVER_IP"):8088" >> "$ENV_FILE"
             fi
         fi
     else
@@ -433,8 +426,7 @@ else
             echo "TELEGRAM_TOKEN=$(escape_env_value "$TELEGRAM_TOKEN")"
             echo "ADMIN_USER_ID=$(escape_env_value "$ADMIN_USER_ID")"
             if [ -n "$SERVER_IP" ]; then
-                echo "WEB_URL=http://$(escape_env_value "$SERVER_IP")"
-                echo "WEB_PORT=8088"
+                echo "WEB_URL=http://$(escape_env_value "$SERVER_IP"):8088"
             fi
         } > "$ENV_FILE"
     fi
@@ -477,6 +469,65 @@ else
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
         echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
         msg_ok "Skipped Hummingbot API deployment"
+        echo ""
+        msg_info "Enter the Hummingbot API connection details."
+        prompt_visible "API URL + port (e.g. http://your-server:8000)" "http://localhost:8000" "hb_api_url_raw"
+        hb_api_url_raw="${hb_api_url_raw:-http://localhost:8000}"
+        prompt_visible "API admin username" "admin" "hb_username"
+        prompt_secret "API admin password" "admin" "hb_password"
+
+        HB_API_PROTOCOL=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.scheme or 'http')" 2>/dev/null || echo "http")
+        HB_API_HOST=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.hostname or 'localhost')" 2>/dev/null || echo "localhost")
+        _def_port=$([ "$HB_API_PROTOCOL" = "https" ] && echo "443" || echo "8000")
+        HB_API_PORT=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.port or ${_def_port})" 2>/dev/null || echo "$_def_port")
+
+        # ── Tailscale option for external API ──────────────
+        echo ""
+        prompt_visible "Is this hummingbot-api accessible via Tailscale? [y/N]" "N" "use_tailscale_remote"
+        if [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
+            echo ""
+            echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+            echo -e "  ${CYAN}  How to get a Tailscale auth key:${RESET}"
+            echo -e "  ${CYAN}    1. Create a free account at https://tailscale.com${RESET}"
+            echo -e "  ${CYAN}    2. Go to: https://tailscale.com/admin/settings/keys${RESET}"
+            echo -e "  ${CYAN}    3. Click 'Generate auth key'${RESET}"
+            echo -e "  ${CYAN}    4. Check 'Reusable' for multiple deployments${RESET}"
+            echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+            echo ""
+            while true; do
+                prompt_visible "Tailscale auth key (tskey-auth-...)" "" "ts_auth_key"
+                if [ -z "${ts_auth_key:-}" ]; then
+                    msg_warn "Auth key cannot be empty"
+                    continue
+                fi
+                if [[ ! "$ts_auth_key" =~ ^tskey-auth- ]]; then
+                    msg_warn "Auth key must start with 'tskey-auth-'"
+                    continue
+                fi
+                break
+            done
+            # Hostname defaults to "hummingbot-api" — matches the TS_HOSTNAME set on the server
+            ts_hostname="hummingbot-api"
+
+            msg_info "Installing Tailscale on this machine..."
+            curl -fsSL https://tailscale.com/install.sh | sh
+            msg_info "Connecting to Tailscale network..."
+            sudo tailscale up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+
+            # Use the Tailscale MagicDNS hostname to reach hummingbot-api (plain HTTP — WireGuard encrypts in transit)
+            HB_API_HOST="$ts_hostname"
+            HB_API_PORT="8000"
+            HB_API_PROTOCOL="http"
+            msg_ok "Tailscale connected — server URL: http://$ts_hostname:8000"
+            if grep -q "^WEB_URL=" "$ENV_FILE"; then
+                sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://condor:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+            else
+                echo "WEB_URL=http://condor:8088" >> "$ENV_FILE"
+            fi
+            msg_ok "Web dashboard will be reachable at http://condor:8088"
+        fi
+
+        hb_api_configured=true
     else
         # Check Docker (only for hummingbot-api launch)
         if ! command_exists docker; then
@@ -488,6 +539,49 @@ else
             docker_available=false
         else
             docker_available=true
+        fi
+
+        # ── Tailscale option for Docker deploy ─────────────
+        TS_DEPLOY=false
+        ts_auth_key=""
+        ts_hb_hostname="hummingbot-api"
+        echo ""
+        prompt_visible "Use Tailscale for secure private access? [y/N]" "N" "use_tailscale"
+        if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]]; then
+            echo ""
+            echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+            echo -e "  ${CYAN}  How to get a Tailscale auth key:${RESET}"
+            echo -e "  ${CYAN}    1. Create a free account at https://tailscale.com${RESET}"
+            echo -e "  ${CYAN}    2. Go to: https://tailscale.com/admin/settings/keys${RESET}"
+            echo -e "  ${CYAN}    3. Click 'Generate auth key'${RESET}"
+            echo -e "  ${CYAN}    4. Check 'Reusable' for multiple deployments${RESET}"
+            echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+            echo ""
+            while true; do
+                prompt_visible "Tailscale auth key (tskey-auth-...)" "" "ts_auth_key"
+                if [ -z "${ts_auth_key:-}" ]; then
+                    msg_warn "Auth key cannot be empty"
+                    continue
+                fi
+                if [[ ! "$ts_auth_key" =~ ^tskey-auth- ]]; then
+                    msg_warn "Auth key must start with 'tskey-auth-'"
+                    continue
+                fi
+                break
+            done
+            # Hostname defaults to "hummingbot-api" — override TAILSCALE_HOSTNAME in hummingbot-api/.env if needed
+            msg_info "Installing Tailscale on this machine..."
+            curl -fsSL https://tailscale.com/install.sh | sh
+            msg_info "Connecting to Tailscale network..."
+            sudo tailscale up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            TS_DEPLOY=true
+            if grep -q "^WEB_URL=" "$ENV_FILE"; then
+                sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://condor:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+            else
+                echo "WEB_URL=http://condor:8088" >> "$ENV_FILE"
+            fi
+            msg_ok "Tailscale connected — hummingbot-api will be reachable at http://$ts_hb_hostname:8000"
+            msg_ok "Web dashboard will be reachable at http://condor:8088"
         fi
 
         echo ""
@@ -527,13 +621,87 @@ DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@localhost:5432/hummingbot_
 GATEWAY_URL=http://localhost:15888
 GATEWAY_PASSPHRASE=${hb_config_password}
 BOTS_PATH=${hb_api_abs_path}
+TAILSCALE_ENABLED=${TS_DEPLOY}
+TAILSCALE_AUTH_KEY=${ts_auth_key}
+TAILSCALE_HOSTNAME=${ts_hb_hostname}
 HBEOF
             msg_ok "Hummingbot API .env configured"
 
-            # Launch hummingbot-api via Docker if available
+            # Generate docker-compose.tailscale.yml if Tailscale is enabled
+            if [ "$TS_DEPLOY" = true ] && [ ! -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
+                cat > "$HB_API_DIR/docker-compose.tailscale.yml" << 'TSEOF'
+services:
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: hummingbot-tailscale
+    network_mode: host
+    environment:
+      - TS_AUTHKEY=${TAILSCALE_AUTH_KEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-hummingbot-api}
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+volumes:
+  tailscale_state:
+TSEOF
+                msg_ok "docker-compose.tailscale.yml created"
+            fi
+
+            # Patch hummingbot-api Makefile so future 'make deploy' stays Tailscale-aware
+            if [ "$TS_DEPLOY" = true ] && [ -f "$HB_API_DIR/Makefile" ]; then
+                python3 - "$HB_API_DIR/Makefile" << 'PYEOF'
+import sys
+with open(sys.argv[1]) as f:
+    content = f.read()
+old = "# Deploy with Docker\ndeploy: $(SETUP_SENTINEL)\n\tdocker compose up -d"
+new = (
+    "# Deploy with Docker (Tailscale-aware: reads TAILSCALE_ENABLED from .env)\n"
+    "deploy: $(SETUP_SENTINEL)\n"
+    "\t@set -a; [ -f .env ] && . ./.env; set +a; \\\n"
+    "\tif [ \"$${TAILSCALE_ENABLED:-false}\" = \"true\" ]; then \\\n"
+    "\t\techo \"[INFO] Deploying with Tailscale sidecar...\"; \\\n"
+    "\t\tdocker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d; \\\n"
+    "\telse \\\n"
+    "\t\tdocker compose up -d; \\\n"
+    "\tfi"
+)
+content = content.replace(old, new)
+content = content.replace(
+    ".PHONY: setup run run-https deploy stop install uninstall build install-pre-commit generate-certs show-certs",
+    ".PHONY: setup run run-https deploy stop install uninstall build install-pre-commit generate-certs show-certs tailscale-status"
+)
+if "tailscale-status" not in content:
+    content += (
+        "\n# Show Tailscale connection status\n"
+        "tailscale-status:\n"
+        "\t@if command -v tailscale >/dev/null 2>&1; then \\\n"
+        "\t\ttailscale status; \\\n"
+        "\telse \\\n"
+        "\t\techo \"Tailscale is not installed or not on PATH.\"; \\\n"
+        "\tfi\n"
+    )
+with open(sys.argv[1], "w") as f:
+    f.write(content)
+PYEOF
+                msg_ok "Hummingbot API Makefile patched for Tailscale-aware deploy"
+            fi
+
+            # Deploy if Docker is available
             if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
-                if (cd "$HB_API_DIR" && docker compose up -d 2>/dev/null); then
+                if [ "$TS_DEPLOY" = true ] && [ -f "$HB_API_DIR/docker-compose.tailscale.yml" ]; then
+                    _compose_cmd="docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d"
+                    msg_info "Using Tailscale sidecar overlay..."
+                else
+                    _compose_cmd="docker compose up -d"
+                fi
+                if (cd "$HB_API_DIR" && eval "$_compose_cmd" 2>/dev/null); then
                     msg_ok "Hummingbot API stack started"
 
                     # Wait for API to be healthy
@@ -632,7 +800,7 @@ if grep -q "DATE_PLACEHOLDER" "$CONFIG_FILE" 2>/dev/null; then
     config_updated=true
 fi
 
-# If API was deployed, sync credentials to config.yml
+# If API was deployed, sync credentials (and Tailscale host if applicable) to config.yml
 if [ "${hb_api_deployed:-}" = true ]; then
     # Determine credentials (re-read from HB API .env if we didn't just set them)
     if [ -z "${hb_username:-}" ] && [ -f "$HB_API_DIR/.env" ]; then
@@ -641,19 +809,35 @@ if [ "${hb_api_deployed:-}" = true ]; then
     fi
 
     if [ -n "${hb_username:-}" ]; then
-        # Update config.yml 'local' server credentials using sed
         if grep -A5 "servers:" "$CONFIG_FILE" | grep -q "username:"; then
             sed -i.bak "/servers:/,/^[^ ]/ s/username: .*/username: $hb_username/" "$CONFIG_FILE"
             rm -f "$CONFIG_FILE.bak"
         fi
-
         if grep -A5 "servers:" "$CONFIG_FILE" | grep -q "password:"; then
             sed -i.bak "/servers:/,/^[^ ]/ s/password: .*/password: $hb_password/" "$CONFIG_FILE"
             rm -f "$CONFIG_FILE.bak"
         fi
-        
         msg_ok "Synced API credentials to $CONFIG_FILE"
     fi
+
+    # When Tailscale is enabled, update the server host to the Tailscale MagicDNS hostname
+    # so condor reaches hummingbot-api via the encrypted tailnet even on the same machine
+    if [ "${TS_DEPLOY:-false}" = true ]; then
+        sed -i.bak "/servers:/,/^[^ ]/ s/host: .*/host: $ts_hb_hostname/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+        sed -i.bak "/servers:/,/^[^ ]/ s/port: .*/port: 8000/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+        msg_ok "Updated server host to Tailscale hostname: $ts_hb_hostname"
+    fi
+fi
+
+# If user provided a remote API URL (skipped local deployment), update config.yml
+if [ "${hb_api_configured:-false}" = true ] && [ -f "$CONFIG_FILE" ]; then
+    sed -i.bak "/servers:/,/^[^ ]/ s/host: .*/host: $HB_API_HOST/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    sed -i.bak "/servers:/,/^[^ ]/ s/port: .*/port: $HB_API_PORT/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    if [ -n "${hb_username:-}" ]; then
+        sed -i.bak "/servers:/,/^[^ ]/ s/username: .*/username: $hb_username/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+        sed -i.bak "/servers:/,/^[^ ]/ s/password: .*/password: $hb_password/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    fi
+    msg_ok "Configured $CONFIG_FILE: ${HB_API_PROTOCOL:-http}://${HB_API_HOST}:${HB_API_PORT}"
 fi
 
 if [ "$config_updated" = false ] && [ -f "$CONFIG_FILE" ]; then
@@ -689,8 +873,21 @@ echo -e "  ${BOLD}Next steps:${RESET}"
 echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"
 echo -e "  ${BOLD}make run${RESET}          Run Condor locally (dev)"
 if [ "${hb_api_deployed:-}" = true ]; then
-echo -e "  ${BOLD}Hummingbot API${RESET}    Credentials configured in ../hummingbot-api/.env"
-echo -e "  ${BOLD}Start API${RESET}         cd ../hummingbot-api && docker compose up -d"
+echo ""
+echo -e "  Hummingbot API is running — config at ${BOLD}../hummingbot-api/.env${RESET}"
+fi
+if [ "${TS_DEPLOY:-false}" = true ]; then
+echo ""
+echo -e "  ${BOLD}Tailscale:${RESET}"
+echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000"
+echo -e "    Web dashboard URL:   http://condor:8088"
+echo -e "    Tailscale status:    tailscale status"
+elif [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
+echo ""
+echo -e "  ${BOLD}Tailscale:${RESET}"
+echo -e "    hummingbot-api URL:  http://${ts_hostname:-hummingbot-api}:8000"
+echo -e "    Web dashboard URL:   http://condor:8088"
+echo -e "    Tailscale status:    tailscale status"
 fi
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo ""
