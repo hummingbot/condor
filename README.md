@@ -19,13 +19,16 @@ A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
 git clone https://github.com/hummingbot/condor.git
 cd condor
 
-# Option 1: Local Python
+# Condor (source only)
 make install     # Interactive setup + uv deps + AI CLI tools
 make run         # Start the bot
+```
 
-# Option 2: Docker
-make setup       # Interactive configuration
-make deploy      # Start with Docker Compose
+If you need to run Hummingbot API locally, it can still be launched with Docker from the sibling repo:
+
+```bash
+cd ../hummingbot-api
+docker compose up -d
 ```
 
 ## Commands
@@ -192,19 +195,6 @@ audit_log: []
 | Connection refused | Check server host:port in `/config` |
 | Auth error | Verify server credentials |
 | DEX features unavailable | Ensure Gateway is configured and running |
-
-## Docker Deployment
-
-```bash
-# Setup and run with Docker
-make setup       # Interactive configuration
-docker compose up -d
-```
-
-Volumes mounted:
-- `condor_bot_data.pickle` - User preferences and state
-- `config.yml` - Server and permission configuration
-- `routines/` - Custom automation scripts
 
 ## Development
 
