@@ -34,6 +34,11 @@ _HTML_TEMPLATE = """\
     --text: #e6edf3; --text-muted: #8b949e;
     --green: #3fb950; --red: #f85149; --blue: #58a6ff;
   }}
+  :root.light {{
+    --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de;
+    --text: #1f2328; --text-muted: #656d76;
+    --green: #1a7f37; --red: #cf222e; --blue: #0969da;
+  }}
   * {{ margin: 0; padding: 0; box-sizing: border-box; }}
   body {{
     background: var(--bg); color: var(--text);
@@ -94,6 +99,11 @@ _HTML_TEMPLATE = """\
 </div>
 {sections_html}
 <script>
+window.addEventListener('message', function(e) {{
+  if (e.data && e.data.type === 'set-theme') {{
+    document.documentElement.classList.toggle('light', e.data.theme === 'light');
+  }}
+}});
 window.addEventListener('load', function() {{
   document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {{
     if (window.Plotly) Plotly.relayout(el, {{ autosize: true, width: undefined }});

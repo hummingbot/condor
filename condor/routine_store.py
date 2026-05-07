@@ -73,7 +73,7 @@ class RoutineStore:
         """Get report count per routine source_name."""
         try:
             from condor.reports import list_reports
-            reports, _ = list_reports(source_type="routine", limit=1000)
+            reports, _ = list_reports(limit=1000)
             counts: dict[str, int] = {}
             for r in reports:
                 sn = r.get("source_name", "")
@@ -95,7 +95,7 @@ class RoutineStore:
                 "category": info.category,
                 "source": info.source,
                 "fields": info.get_fields(),
-                "report_count": report_counts.get(name, 0),
+                "report_count": report_counts.get(name, 0) or report_counts.get(name.split("/")[-1], 0),
             })
         return out
 
