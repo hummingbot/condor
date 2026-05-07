@@ -685,3 +685,99 @@ class GatewayCLMMRequest(BaseModel):
         default=False,
         description="Return detailed table with more columns (default: False)"
     )
+
+
+class GatewayCLMMManageRequest(BaseModel):
+    """Request model for Gateway CLMM liquidity position management."""
+
+    action: Literal["open_position", "close_position", "collect_fees", "get_positions", "search"] = Field(
+        description="Action to perform: open_position, close_position, collect_fees, get_positions, or search"
+    )
+
+    connector: str | None = Field(
+        default=None,
+        description="CLMM connector name. Examples: 'meteora', 'raydium', 'uniswap'"
+    )
+
+    network: str | None = Field(
+        default=None,
+        description="Network ID in 'chain-network' format. Examples: 'solana-mainnet-beta', 'ethereum-mainnet'"
+    )
+
+    pool_address: str | None = Field(
+        default=None,
+        description="Pool contract address. Required for open_position and get_positions"
+    )
+
+    position_address: str | None = Field(
+        default=None,
+        description="Position NFT/address. Required for close_position and collect_fees"
+    )
+
+    lower_price: str | None = Field(
+        default=None,
+        description="Lower price bound for open_position"
+    )
+
+    upper_price: str | None = Field(
+        default=None,
+        description="Upper price bound for open_position"
+    )
+
+    base_token_amount: str | None = Field(
+        default=None,
+        description="Base token amount for open_position"
+    )
+
+    quote_token_amount: str | None = Field(
+        default=None,
+        description="Quote token amount for open_position"
+    )
+
+    slippage_pct: str | None = Field(
+        default="1.0",
+        description="Slippage percentage tolerance for open_position (default: 1.0)"
+    )
+
+    wallet_address: str | None = Field(
+        default=None,
+        description="Wallet address for mutating CLMM actions (optional, uses default wallet if omitted)"
+    )
+
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters, such as {'strategyType': 0} for Meteora"
+    )
+
+    trading_pair: str | None = Field(
+        default=None,
+        description="Trading pair filter for search action"
+    )
+
+    status: Literal["OPEN", "CLOSED"] | None = Field(
+        default=None,
+        description="Position status filter for search action"
+    )
+
+    position_addresses: list[str] | None = Field(
+        default=None,
+        description="Specific position addresses to filter in search action"
+    )
+
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Maximum number of results for search action (default: 50, max: 1000)"
+    )
+
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Pagination offset for search action"
+    )
+
+    refresh: bool = Field(
+        default=False,
+        description="Refresh position data from Gateway before returning search results"
+    )

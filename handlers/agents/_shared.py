@@ -516,6 +516,7 @@ def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = N
                 "mcp__mcp-hummingbot__explore_dex_pools",
                 "mcp__mcp-hummingbot__explore_geckoterminal",
                 "mcp__mcp-hummingbot__manage_gateway_swaps",
+                "mcp__mcp-hummingbot__manage_gateway_clmm",
                 "mcp__mcp-hummingbot__manage_gateway_config",
                 "mcp__mcp-hummingbot__manage_gateway_container",
                 "mcp__mcp-hummingbot__search_history",
