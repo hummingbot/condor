@@ -11,8 +11,10 @@ import {
   Server,
   BarChart3,
   Layers,
+  KeyRound,
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { useServer } from "@/hooks/useServer";
 import {
@@ -608,6 +610,7 @@ function PortfolioEvolution({ server }: { server: string }) {
 
 export function Portfolio() {
   const { server } = useServer();
+  const navigate = useNavigate();
 
   const { data, isLoading, error, isPlaceholderData } = useQuery({
     queryKey: ["portfolio", server],
@@ -724,30 +727,48 @@ export function Portfolio() {
   return (
     <div className={`space-y-6 transition-opacity duration-300 ${isPlaceholderData ? "opacity-60" : "opacity-100"}`}>
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard
-          label="Total Value"
-          value={formatUsd(totalUsd)}
-          icon={Wallet}
-          subtitle={weeklyPnl !== null ? `(${formatPnl(weeklyPnl)} this week)` : undefined}
-          subtitleColor={weeklyPnl !== null ? (weeklyPnl >= 0 ? "var(--color-green)" : "var(--color-red)") : undefined}
-        />
-        <StatCard
-          label="Active Bots"
-          value={`${activeBots.length} running`}
-          icon={Bot}
-        />
-        <StatCard
-          label="Bot PnL"
-          value={formatPnl(botPnl)}
-          icon={TrendingUp}
-          valueColor={botPnl >= 0 ? "var(--color-green)" : "var(--color-red)"}
-        />
-        <StatCard
-          label="System"
-          value={`${totalTokens} assets / ${activeExecutorCount} executors`}
-          icon={activeExecutorCount > 0 ? Activity : Coins}
-        />
+      <div className="flex gap-3">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 flex-1">
+          <StatCard
+            label="Total Value"
+            value={formatUsd(totalUsd)}
+            icon={Wallet}
+            subtitle={weeklyPnl !== null ? `(${formatPnl(weeklyPnl)} this week)` : undefined}
+            subtitleColor={weeklyPnl !== null ? (weeklyPnl >= 0 ? "var(--color-green)" : "var(--color-red)") : undefined}
+          />
+          <StatCard
+            label="Active Bots"
+            value={`${activeBots.length} running`}
+            icon={Bot}
+          />
+          <StatCard
+            label="Bot PnL"
+            value={formatPnl(botPnl)}
+            icon={TrendingUp}
+            valueColor={botPnl >= 0 ? "var(--color-green)" : "var(--color-red)"}
+          />
+          <StatCard
+            label="System"
+            value={`${totalTokens} assets / ${activeExecutorCount} executors`}
+            icon={activeExecutorCount > 0 ? Activity : Coins}
+          />
+        </div>
+        <div className="flex flex-col gap-2 shrink-0">
+          <button
+            onClick={() => navigate("/settings?tab=keys")}
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            <KeyRound className="h-4 w-4" />
+            <span>Keys</span>
+          </button>
+          <button
+            onClick={() => navigate("/settings?tab=servers")}
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            <Server className="h-4 w-4" />
+            <span>Servers</span>
+          </button>
+        </div>
       </div>
 
       {/* Portfolio Evolution + Top Holdings side by side */}

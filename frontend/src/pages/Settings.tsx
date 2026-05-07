@@ -1,8 +1,10 @@
+import { LogOut } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
 import { GatewaySettings } from "@/components/settings/GatewaySettings";
 import { ServersSettings } from "@/components/settings/ServersSettings";
+import { useAuth } from "@/lib/auth";
 
 const TABS = [
   { key: "servers", label: "Servers" },
@@ -15,10 +17,20 @@ type TabKey = (typeof TABS)[number]["key"];
 export function Settings() {
   const [params, setParams] = useSearchParams();
   const tab = (params.get("tab") as TabKey) || "servers";
+  const { logout } = useAuth();
 
   return (
     <div className="mx-auto max-w-3xl">
-      <h1 className="mb-4 text-lg font-bold text-[var(--color-text)]">Settings</h1>
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-lg font-bold text-[var(--color-text)]">Settings</h1>
+        <button
+          onClick={logout}
+          className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
+        >
+          <LogOut className="h-3.5 w-3.5" />
+          Logout
+        </button>
+      </div>
 
       {/* Tab bar */}
       <div className="mb-6 flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">

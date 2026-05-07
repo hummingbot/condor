@@ -4,6 +4,7 @@ import {
   Brain,
   Loader2,
   MessageSquare,
+  Minus,
   Plus,
   X,
   Zap,
@@ -21,12 +22,16 @@ const MODE_OPTIONS = [
   { key: "agent_builder", label: "Agent Builder", icon: Brain },
 ] as const;
 
-export function ChatPanel() {
+interface ChatPanelProps {
+  isOpen: boolean;
+  onToggle: (open: boolean | ((prev: boolean) => boolean)) => void;
+}
+
+export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const chat = useChatSocket();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  const [isOpen, setIsOpen] = useState(false);
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const [isDragging, setIsDragging] = useState(false);
   const [showNewMenu, setShowNewMenu] = useState(false);
@@ -37,12 +42,12 @@ export function ChatPanel() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        setIsOpen((prev) => !prev);
+        onToggle((prev) => !prev);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [onToggle]);
 
   // Connect when panel opens
   useEffect(() => {
@@ -86,7 +91,7 @@ export function ChatPanel() {
 
   const handleNewSession = (mode: string) => {
     setPendingSession(true);
-    setIsOpen(true);
+    onToggle(true);
     chat.startSession("claude-code", mode);
     setShowNewMenu(false);
   };
@@ -96,25 +101,11 @@ export function ChatPanel() {
 
   return (
     <>
-      {/* Floating chat button — always visible when panel is closed */}
-      {!isOpen && (
-        <button
-          onClick={() => setIsOpen(true)}
-          className="fixed bottom-5 right-5 z-50 flex items-center gap-2 rounded-full bg-amber-500 border border-amber-400 pl-3 pr-2.5 py-2 text-black shadow-md shadow-amber-500/20 transition-all duration-200 hover:bg-amber-400 hover:shadow-lg hover:shadow-amber-500/30 active:scale-95"
-          title="Chat with Condor (⌘K)"
-        >
-          <MessageSquare className="h-4 w-4" />
-          <kbd className="rounded bg-amber-600/30 px-1.5 py-0.5 text-[10px] font-medium tracking-wide border border-amber-600/40 text-amber-900">
-            ⌘K
-          </kbd>
-        </button>
-      )}
-
-      {/* Panel */}
+      {/* Panel — slides from right, below navbar */}
       <div
         ref={panelRef}
         style={{ width: isOpen ? width : 0 }}
-        className={`fixed right-0 top-0 z-50 flex h-full flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl transition-[width] duration-200 ease-out ${
+        className={`fixed right-0 top-12 z-[60] flex h-[calc(100%-3rem)] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl transition-[width] duration-200 ease-out ${
           isOpen ? "" : "overflow-hidden border-l-0"
         }`}
       >
@@ -134,7 +125,10 @@ export function ChatPanel() {
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
           <div className="flex items-center gap-2">
             <MessageSquare className="h-4 w-4 text-[var(--color-primary)]" />
-            <span className="text-sm font-semibold whitespace-nowrap">AI Chat</span>
+            <span className="text-sm font-semibold whitespace-nowrap">Agent</span>
+            <kbd className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--color-text-muted)] border border-[var(--color-border)]">
+              ⌘K
+            </kbd>
             {chat.isConnected && (
               <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
             )}
@@ -171,11 +165,11 @@ export function ChatPanel() {
               )}
             </div>
             <button
-              onClick={() => setIsOpen(false)}
+              onClick={() => onToggle(false)}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              title="Close"
+              title="Minimize"
             >
-              <X className="h-4 w-4" />
+              <Minus className="h-4 w-4" />
             </button>
           </div>
         </div>

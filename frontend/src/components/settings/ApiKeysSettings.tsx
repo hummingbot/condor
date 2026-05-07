@@ -46,7 +46,8 @@ export function ApiKeysSettings() {
   const { data: connectorsData, isLoading: loadingConnectors } = useQuery({
     queryKey: ["settings-connectors", server, flow.connectorType],
     queryFn: () => api.getAvailableConnectors(server!, flow.connectorType || undefined),
-    enabled: !!server && (flow.step === "select-exchange" || flow.step === "select-type"),
+    enabled: !!server && !!flow.connectorType && flow.step === "select-exchange",
+    staleTime: 5 * 60 * 1000,
   });
 
   const { data: configMapData, isLoading: loadingConfigMap } = useQuery({
@@ -149,6 +150,7 @@ export function ApiKeysSettings() {
 
   if (flow.step === "select-exchange") {
     const connectors: ConnectorInfo[] = connectorsData?.connectors ?? [];
+    const configuredNames = new Set(credentials.map((c) => c.connector_name));
     return (
       <div className="space-y-4">
         <button
@@ -166,17 +168,28 @@ export function ApiKeysSettings() {
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {connectors.map((c) => (
-              <button
-                key={c.name}
-                onClick={() =>
-                  setFlow({ ...flow, step: "fill-fields", connectorName: c.name, values: {} })
-                }
-                className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-left text-sm text-[var(--color-text)] transition-colors hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)]"
-              >
-                {c.name}
-              </button>
-            ))}
+            {connectors.map((c) => {
+              const alreadyConnected = configuredNames.has(c.name);
+              return (
+                <button
+                  key={c.name}
+                  disabled={alreadyConnected}
+                  onClick={() =>
+                    setFlow({ ...flow, step: "fill-fields", connectorName: c.name, values: {} })
+                  }
+                  className={`rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                    alreadyConnected
+                      ? "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 text-[var(--color-text-muted)] cursor-default"
+                      : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)]"
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    {c.name}
+                    {alreadyConnected && <Check className="h-3 w-3 text-[var(--color-primary)]" />}
+                  </span>
+                </button>
+              );
+            })}
             {connectors.length === 0 && (
               <p className="col-span-full py-4 text-center text-xs text-[var(--color-text-muted)]">
                 No {flow.connectorType} connectors available.

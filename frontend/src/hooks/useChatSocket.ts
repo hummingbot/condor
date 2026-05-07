@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
+import { getViewContext } from "@/lib/viewContext";
 
 export interface ToolCall {
   tool_call_id: string;
@@ -297,7 +298,14 @@ export function useChatSocket() {
         ...msgs,
         { id, role: "user" as const, text, toolCalls: [] },
       ]);
-      send({ action: "send_message", slot_id: slotId, text });
+
+      // Inject report context if the user is viewing a report
+      const ctx = getViewContext();
+      const wireText = ctx
+        ? `${text}\n\n[System: The user is currently viewing the report file: ${ctx.filename}. If the question might relate to this report, you can read it for context.]`
+        : text;
+
+      send({ action: "send_message", slot_id: slotId, text: wireText });
     },
     [send, updateSlotMessages],
   );
