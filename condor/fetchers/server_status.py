@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 
 async def fetch_server_status(client, **_kw) -> dict:
-    """Check if a server is online by listing accounts."""
+    """Check if a server is online by listing accounts (lightweight call)."""
     try:
         await client.accounts.list_accounts()
         return {"status": "online"}
