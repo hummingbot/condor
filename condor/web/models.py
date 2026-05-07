@@ -247,6 +247,10 @@ class DeployBotRequest(BaseModel):
     max_controller_drawdown_quote: float | None = None
 
 
+class ControllerActionRequest(BaseModel):
+    controller_names: list[str]
+
+
 # ── Archived Bots ──
 
 
@@ -359,6 +363,10 @@ class GatewayStartRequest(BaseModel):
 class CredentialInfo(BaseModel):
     connector_name: str
     connector_type: str = ""
+
+
+class GatewayPullRequest(BaseModel):
+    image: str = "hummingbot/gateway:latest"
 
 
 class AddCredentialRequest(BaseModel):

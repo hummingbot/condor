@@ -19,8 +19,10 @@ async def list_servers(user: WebUser = Depends(get_current_user)):
     results = []
     for name, cfg in accessible.items():
         perm = cm.get_server_permission(user.id, name)
-        # Read from SDS cache — instant, no network calls
+        # Try cache first, fetch if missing/expired
         status = sds.get(name, ServerDataType.SERVER_STATUS)
+        if status is None:
+            status = await sds.get_or_fetch(name, ServerDataType.SERVER_STATUS)
         online = status.get("status") == "online" if isinstance(status, dict) else False
         results.append(ServerInfo(
             name=name,
@@ -39,7 +41,7 @@ async def server_status(name: str, user: WebUser = Depends(get_current_user)):
     if not cm.has_server_access(user.id, name):
         return {"online": False, "error": "No access"}
     sds = get_server_data_service()
-    status = sds.get(name, ServerDataType.SERVER_STATUS)
+    status = await sds.get_or_fetch(name, ServerDataType.SERVER_STATUS)
     if isinstance(status, dict):
         return status
     return {"status": "unknown"}

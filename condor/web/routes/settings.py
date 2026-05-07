@@ -11,6 +11,7 @@ from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
     CredentialInfo,
+    GatewayPullRequest,
     GatewayStartRequest,
     ServerInfo,
     UpdateServerRequest,
@@ -146,9 +147,52 @@ async def gateway_status(
         info = await client.gateway.get_status()
         # The inner "running" field from the API is the actual status
         is_running = info.get("running", False) if isinstance(info, dict) else False
-        return {"running": is_running, "info": info}
+        result = {"running": is_running, "info": info}
+        # Extract container details if available
+        if isinstance(info, dict):
+            result["image"] = info.get("image", None)
+            result["created_at"] = info.get("created", info.get("created_at", None))
+            result["container_status"] = info.get("status", None)
+        return result
     except Exception:
         return {"running": False, "info": None}
+
+
+@router.post("/gateway/pull")
+async def gateway_pull(
+    req: GatewayPullRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        # Parse "image:tag" format (e.g. "hummingbot/gateway:latest")
+        parts = req.image.rsplit(":", 1)
+        image_name = parts[0]
+        tag = parts[1] if len(parts) > 1 else "latest"
+        result = await client.docker._post("/docker/pull-image/", json={"image_name": image_name, "tag": tag})
+        return {"pulled": True, "image": req.image, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/gateway/pull-status")
+async def gateway_pull_status(
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.docker.get_pull_status()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/gateway/start")
@@ -162,12 +206,12 @@ async def gateway_start(
         raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
-        result = await client.gateway.start(
-            image=req.image,
-            passphrase=req.passphrase,
-            port=req.port,
-            dev_mode=req.dev_mode,
-        )
+        result = await client.gateway.start({
+            "image": req.image,
+            "passphrase": req.passphrase,
+            "port": req.port,
+            "dev_mode": req.dev_mode,
+        })
         return {"started": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

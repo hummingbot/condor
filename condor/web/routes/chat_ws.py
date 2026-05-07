@@ -30,6 +30,7 @@ from handlers.agents._shared import (
     DEFAULT_AGENT,
     DEFAULT_MODE,
     is_dangerous_tool_call,
+    load_assistant,
 )
 from handlers.agents.confirmation import _format_tool_summary
 from handlers.agents.session import (
@@ -213,14 +214,23 @@ async def _handle_start_session(
         return await _web_permission_callback(ws, tool_call, options)
 
     try:
-        await get_or_create_session(
+        session = await get_or_create_session(
             chat_id=session_key,
             agent_key=agent_key,
             permission_callback=perm_cb,
             user_id=user_id,
             mode=mode,
             platform="web",
+            lazy_context=True,  # Don't block — inject context on first message
         )
+
+        # Append mode-specific assistant context (e.g. agent_builder instructions)
+        if mode != DEFAULT_MODE:
+            mode_context = load_assistant(mode)
+            if mode_context:
+                existing = session.pending_context or ""
+                session.pending_context = f"{existing}\n\n{mode_context}".strip() or None
+
         _user_slots.setdefault(user_id, []).append(slot_id)
         await _send(ws, {
             "event": "session_started",
