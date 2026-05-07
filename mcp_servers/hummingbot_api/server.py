@@ -25,6 +25,7 @@ from mcp_servers.hummingbot_api.schemas import (
     GatewayCLMMRequest,
     GatewayConfigRequest,
     GatewayContainerRequest,
+    ManageRateOracleRequest,
     GatewaySwapRequest,
     ManageExecutorsRequest,
     SetupConnectorRequest,
@@ -34,6 +35,7 @@ from mcp_servers.hummingbot_api.tools import bot_management as bot_management_to
 from mcp_servers.hummingbot_api.tools import controllers as controllers_tools
 from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
 from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
+from mcp_servers.hummingbot_api.tools import rate_oracle as rate_oracle_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 from mcp_servers.hummingbot_api.tools.account import setup_connector as setup_connector_impl
 from mcp_servers.hummingbot_api.tools.executors import manage_executors as manage_executors_impl
@@ -351,6 +353,46 @@ async def search_history(
         position_addresses=position_addresses,
     )
 
+    return result.get("formatted_output", str(result))
+
+
+# Rate Oracle Tools
+
+
+@mcp.tool()
+@handle_errors("manage rate oracle")
+async def manage_rate_oracle(
+        operation: Literal["list_sources", "get_config", "set_source", "set_global_token"],
+        source: str | None = None,
+        global_token_name: str | None = None,
+        global_token_symbol: str | None = None,
+) -> str:
+    """Manage Hummingbot rate oracle configuration without endpoint discovery.
+
+    Use this tool when a user asks to view or change the rate oracle source
+    or global token (for example: "change my rate oracle source to hyperliquid"
+    or "change my global token to USDC").
+
+    Operations:
+    - list_sources: List available rate oracle sources.
+    - get_config: Show current rate oracle source and global token settings.
+    - set_source: Change the rate oracle source (requires source).
+    - set_global_token: Change the global token (requires global_token_name).
+
+    Args:
+        operation: Operation to perform: list_sources, get_config, set_source, or set_global_token.
+        source: Rate oracle source to set for operation='set_source' (e.g., 'hyperliquid').
+        global_token_name: Global token to set for operation='set_global_token' (e.g., 'USDC').
+        global_token_symbol: Optional display symbol for the global token (e.g., '$').
+    """
+    request = ManageRateOracleRequest(
+        operation=operation,
+        source=source,
+        global_token_name=global_token_name,
+        global_token_symbol=global_token_symbol,
+    )
+    client = await hummingbot_client.get_client()
+    result = await rate_oracle_tools.manage_rate_oracle(client, request)
     return result.get("formatted_output", str(result))
 
 
