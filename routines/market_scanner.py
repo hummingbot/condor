@@ -426,8 +426,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             yaxis_type="log",
             paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
             font=dict(color="#c9d1d9", size=10),
-            margin=dict(l=60, r=30, t=60, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(l=60, r=30, t=100, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
         )
         fig.update_xaxes(gridcolor="#21262d")
         fig.update_yaxes(gridcolor="#21262d")

@@ -89,11 +89,19 @@ class RoutineInfo:
         for name, field_info in self.config_class.model_fields.items():
             annotation = field_info.annotation
             type_name = getattr(annotation, "__name__", str(annotation))
-            fields[name] = {
+            entry: dict = {
                 "type": type_name,
                 "default": field_info.default,
                 "description": field_info.description or name,
             }
+            # Pass through widget hints from json_schema_extra
+            extra = field_info.json_schema_extra
+            if isinstance(extra, dict):
+                if "widget" in extra:
+                    entry["widget"] = extra["widget"]
+                if "options_from" in extra:
+                    entry["options_from"] = extra["options_from"]
+            fields[name] = entry
         return fields
 
 
