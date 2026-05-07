@@ -122,8 +122,6 @@ export function PairSelector({
     );
   }
 
-  const [base, quote] = value ? value.split("-") : ["", ""];
-
   return (
     <div ref={containerRef} className="relative">
       <button
@@ -133,11 +131,7 @@ export function PairSelector({
         {isLoading ? (
           <span className="text-sm text-[var(--color-text-muted)]">Loading...</span>
         ) : value ? (
-          <>
-            <span className="text-[15px] font-semibold text-[var(--color-text)]">{base}</span>
-            <span className="text-[15px] font-semibold text-[var(--color-text-muted)]">/</span>
-            <span className="text-[15px] font-semibold text-[var(--color-text-muted)]">{quote}</span>
-          </>
+          <span className="text-[15px] font-semibold text-[var(--color-text)]">{value}</span>
         ) : (
           <span className="text-sm text-[var(--color-text-muted)]">Select pair</span>
         )}
@@ -209,7 +203,7 @@ export function PairSelector({
                     }`}
                   >
                     <span className="font-medium">{base}</span>
-                    <span className="text-[var(--color-text-muted)]">/ {quote}</span>
+                    <span className="text-[var(--color-text-muted)]">-{quote}</span>
                   </button>
                 );
               })

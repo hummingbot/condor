@@ -100,9 +100,8 @@ class TickEngine:
             self.session_dir.mkdir(parents=True, exist_ok=True)
 
             # Save config per session
-            from .config import AgentConfig, save_agent_config
-            agent_config = AgentConfig.from_dict(self.config)
-            save_agent_config(self.session_dir, agent_config)
+            from .config import save_full_config
+            save_full_config(self.session_dir, self.config)
 
             self.journal = JournalManager(
                 self.agent_id,

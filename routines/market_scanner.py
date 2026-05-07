@@ -1,5 +1,7 @@
 """Scan top perpetual markets by volume, analyze volatility and volume patterns."""
 
+CATEGORY = "Market Data"
+
 import asyncio
 import logging
 import time
@@ -15,7 +17,7 @@ from config_manager import get_client
 logger = logging.getLogger(__name__)
 
 BINANCE_FUTURES_TICKER = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-MAX_CONCURRENT = 10  # concurrent candle fetches
+MAX_CONCURRENT = 30  # concurrent candle fetches
 
 
 class Config(BaseModel):
@@ -372,6 +374,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     text = format_results(classified, config.lookback_hours)
 
     try:
+        import plotly.graph_objects as go
         from condor.reports import ReportBuilder
 
         def _to_table(items):
@@ -383,9 +386,56 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 for m in items
             ]
 
+        # Scatter plot: NATR vs Volume, colored by classification
+        mature_set = {m["trading_pair"] for m in classified["mature"]}
+        degen_set = {m["trading_pair"] for m in classified["degen"]}
+
+        fig = go.Figure()
+        for a in analyses:
+            pair = a["trading_pair"]
+            if pair in mature_set:
+                color, group, name = "#3fb950", "mature", "Mature"
+            elif pair in degen_set:
+                color, group, name = "#f85149", "degen", "Degen"
+            else:
+                color, group, name = "#8b949e", "other", "Other"
+
+            fig.add_trace(go.Scatter(
+                x=[a["natr_mean"]],
+                y=[a["volume_24h_usd"]],
+                mode="markers+text",
+                marker=dict(color=color, size=max(6, 20 - a["bucket_cv"] * 10),
+                            line=dict(width=1, color="#0d1117")),
+                text=[pair.replace("-USDT", "")],
+                textposition="top center",
+                textfont=dict(size=8, color="#8b949e"),
+                name=name,
+                legendgroup=group,
+                showlegend=False,
+                hovertemplate=f"{pair}<br>NATR: {a['natr_mean']:.3f}%<br>Vol: {format_volume(a['volume_24h_usd'])}<extra></extra>",
+            ))
+
+        # Add invisible traces for legend
+        for label, color in [("Mature", "#3fb950"), ("Degen", "#f85149"), ("Other", "#8b949e")]:
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                                     marker=dict(color=color, size=10), name=label))
+
+        fig.update_layout(
+            title=f"Market Scanner — NATR vs Volume ({config.lookback_hours}h)",
+            xaxis_title="NATR Mean (%)", yaxis_title="24h Volume (USD)",
+            yaxis_type="log",
+            paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
+            font=dict(color="#c9d1d9", size=10),
+            margin=dict(l=60, r=30, t=60, b=40),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        fig.update_xaxes(gridcolor="#21262d")
+        fig.update_yaxes(gridcolor="#21262d")
+
         builder = ReportBuilder(f"Market Scanner ({config.lookback_hours}h)")
         builder.source("routine", "market_scanner").tags(["scanner", "volatility"])
-        builder.markdown(f"Analyzed {classified['total_analyzed']} pairs · {config.lookback_hours}h lookback · 1m candles")
+        builder.markdown(f"Analyzed {classified['total_analyzed']} pairs with {config.lookback_hours}h lookback on 1m candles")
+        builder.plotly(fig)
         builder.markdown("### Mature Markets\nHigh volume, stable volatility")
         builder.table(_to_table(classified["mature"]))
         builder.markdown("### Degen Markets\nHigh volatility, spiky activity")

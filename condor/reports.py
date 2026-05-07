@@ -14,7 +14,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-CHARTS_DIR = Path(__file__).resolve().parent.parent / "charts"
+CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
 
@@ -40,9 +40,23 @@ _HTML_TEMPLATE = """\
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
     font-size: 14px; line-height: 1.6; padding: 24px; max-width: 1400px; margin: 0 auto;
   }}
-  h1 {{ font-size: 20px; margin-bottom: 8px; }}
-  .meta {{ color: var(--text-muted); font-size: 12px; margin-bottom: 24px; }}
-  .meta span {{ margin-right: 16px; }}
+  .report-header {{
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px;
+  }}
+  .report-header h1 {{ font-size: 20px; }}
+  .report-header .meta {{ color: var(--text-muted); font-size: 12px; }}
+  .report-header .meta span {{ margin-left: 16px; }}
+  .kpi-bar {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }}
+  .kpi-card {{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 150px; flex: 1;
+  }}
+  .kpi-card .label {{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }}
+  .kpi-card .value {{ font-size: 24px; font-weight: 700; margin: 4px 0; }}
+  .kpi-card .delta {{ font-size: 12px; }}
+  .kpi-card .delta.up {{ color: var(--green); }}
+  .kpi-card .delta.down {{ color: var(--red); }}
   .section {{ margin-bottom: 32px; }}
   .section-md {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; }}
   .section-md h1, .section-md h2, .section-md h3 {{ color: var(--text); margin: 12px 0 6px; }}
@@ -66,16 +80,31 @@ _HTML_TEMPLATE = """\
   .section-table td {{ padding: 8px 12px; border-bottom: 1px solid var(--border); }}
   .section-table tr:nth-child(even) td {{ background: rgba(255,255,255,0.02); }}
   .section-table tr:last-child td {{ border-bottom: none; }}
-  .plotly-chart {{ margin: 8px 0; }}
+  .plotly-chart {{ min-height: 400px; margin-bottom: 24px; width: 100%; overflow: hidden; }}
+  .plotly-chart .js-plotly-plot, .plotly-chart .plot-container, .plotly-chart .plotly {{ width: 100% !important; }}
 </style>
 </head>
 <body>
-<h1>{title}</h1>
-<div class="meta">
-  <span>{created_at}</span>
-  {meta_badges}
+<div class="report-header">
+  <h1>{title}</h1>
+  <div class="meta">
+    <span>{created_at}</span>
+    {meta_badges}
+  </div>
 </div>
 {sections_html}
+<script>
+window.addEventListener('load', function() {{
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {{
+    if (window.Plotly) Plotly.relayout(el, {{ autosize: true, width: undefined }});
+  }});
+}});
+window.addEventListener('resize', function() {{
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {{
+    if (window.Plotly) Plotly.Plots.resize(el);
+  }});
+}});
+</script>
 </body>
 </html>
 """
@@ -154,6 +183,31 @@ def list_reports(
     return entries[offset : offset + limit], total
 
 
+def list_reports_grouped() -> list[dict]:
+    """Return latest report per source_name, with count."""
+    entries = _read_index()
+    entries.sort(key=lambda e: e.get("created_at", ""), reverse=True)
+    groups: dict[str, dict] = {}
+    for e in entries:
+        sn = e.get("source_name", "")
+        if not sn:
+            continue
+        if sn not in groups:
+            groups[sn] = {
+                "source_name": sn,
+                "source_type": e.get("source_type", ""),
+                "latest_report": e,
+                "total_count": 1,
+                "all_tags": set(e.get("tags", [])),
+            }
+        else:
+            groups[sn]["total_count"] += 1
+            groups[sn]["all_tags"].update(e.get("tags", []))
+    for g in groups.values():
+        g["all_tags"] = sorted(g["all_tags"])
+    return sorted(groups.values(), key=lambda g: g["latest_report"]["created_at"], reverse=True)
+
+
 def get_report(report_id: str) -> dict | None:
     for e in _read_index():
         if e["id"] == report_id:
@@ -195,6 +249,9 @@ def _cleanup(max_reports: int = MAX_REPORTS) -> None:
 # ── ReportBuilder ──
 
 
+_SECTION_PRIORITY = {"kpi": 0, "plotly": 1, "table": 2, "markdown": 3}
+
+
 class ReportBuilder:
     def __init__(self, title: str = "Report"):
         self._title = title
@@ -202,6 +259,7 @@ class ReportBuilder:
         self._source_name: str = ""
         self._tags: list[str] = []
         self._sections: list[dict] = []
+        self._manual_order = False
 
     def source(self, source_type: str, source_name: str) -> ReportBuilder:
         self._source_type = source_type
@@ -210,6 +268,14 @@ class ReportBuilder:
 
     def tags(self, tags: list[str]) -> ReportBuilder:
         self._tags = tags
+        return self
+
+    def manual_order(self) -> ReportBuilder:
+        self._manual_order = True
+        return self
+
+    def kpi(self, label: str, value: str, delta: str | None = None, trend: str = "neutral") -> ReportBuilder:
+        self._sections.append({"type": "kpi", "label": label, "value": value, "delta": delta, "trend": trend})
         return self
 
     def markdown(self, text: str) -> ReportBuilder:
@@ -270,14 +336,45 @@ class ReportBuilder:
         return report_id
 
     def _render_sections(self) -> str:
+        sections = list(self._sections)
+        if not self._manual_order:
+            # Stable sort: kpi first, then plotly, table, markdown
+            sections = sorted(sections, key=lambda s: _SECTION_PRIORITY.get(s["type"], 99))
+
         parts = []
-        for sec in self._sections:
-            if sec["type"] == "markdown":
+        i = 0
+        while i < len(sections):
+            sec = sections[i]
+            if sec["type"] == "kpi":
+                # Group consecutive KPIs into a single kpi-bar
+                kpis = []
+                while i < len(sections) and sections[i]["type"] == "kpi":
+                    kpis.append(sections[i])
+                    i += 1
+                cards = []
+                for k in kpis:
+                    delta_html = ""
+                    if k["delta"]:
+                        cls = f' {k["trend"]}' if k["trend"] in ("up", "down") else ""
+                        delta_html = f'<div class="delta{cls}">{k["delta"]}</div>'
+                    cards.append(
+                        f'<div class="kpi-card">'
+                        f'<div class="label">{k["label"]}</div>'
+                        f'<div class="value">{k["value"]}</div>'
+                        f'{delta_html}</div>'
+                    )
+                parts.append(f'<div class="kpi-bar">{"".join(cards)}</div>')
+            elif sec["type"] == "markdown":
                 parts.append(f'<div class="section section-md">{_md_to_html(sec["content"])}</div>')
+                i += 1
             elif sec["type"] == "plotly":
                 parts.append(f'<div class="section plotly-chart">{sec["content"]}</div>')
+                i += 1
             elif sec["type"] == "table":
                 parts.append(self._render_table(sec["columns"], sec["rows"]))
+                i += 1
+            else:
+                i += 1
         return "\n".join(parts)
 
     @staticmethod

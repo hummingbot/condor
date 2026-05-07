@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -17,7 +17,6 @@ import {
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
-import { TradingRulesInfo } from "@/components/market/TradingRulesInfo";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { GridChart } from "@/components/grid/GridChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
@@ -202,6 +201,42 @@ export function CreateExecutor() {
 
   const [successId, setSuccessId] = useState<string | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
+  const [rightPanelWidth, setRightPanelWidth] = useState(288);
+  const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
+
+  const startHDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = rightPanelWidth;
+    document.body.style.cursor = "col-resize";
+    const onMove = (ev: MouseEvent) => {
+      setRightPanelWidth(Math.max(260, Math.min(500, startW + (startX - ev.clientX))));
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [rightPanelWidth]);
+
+  const startVDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = bottomPaneHeight;
+    document.body.style.cursor = "row-resize";
+    const onMove = (ev: MouseEvent) => {
+      setBottomPaneHeight(Math.max(100, Math.min(500, startH + (startY - ev.clientY))));
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [bottomPaneHeight]);
 
   const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],
@@ -279,11 +314,6 @@ export function CreateExecutor() {
     if (inc >= 1) return 0;
     return Math.max(0, Math.ceil(-Math.log10(inc)));
   }, [rulesData, pair]);
-
-  const selectedRule = useMemo(
-    () => rulesData?.rules?.find((r) => r.trading_pair === pair),
-    [rulesData, pair],
-  );
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
@@ -479,7 +509,7 @@ export function CreateExecutor() {
       {/* Main Area: Chart + Right Panel */}
       <div className="flex min-h-0 flex-1">
         {/* Chart + Bottom Pane */}
-        <div className="min-w-0 flex-1 flex flex-col border-r border-[var(--color-border)]">
+        <div className="min-w-0 flex-1 flex flex-col">
           <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
             <GridChart
               key={`${connector}:${pair}:${gridState.interval}`}
@@ -502,16 +532,32 @@ export function CreateExecutor() {
               positions={mainPositions}
             />
           </div>
-          <TradingRulesInfo rule={selectedRule} />
-          <TradeBottomPane
-            executors={mainExecutors}
-            positions={mainPositions}
-            isLoadingPositions={isLoadingPositions}
-          />
+          {/* Horizontal resize handle */}
+          <div
+            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20 transition-colors"
+            onMouseDown={startVDrag}
+          >
+            <div className="absolute inset-x-0 top-1/2 mx-auto h-px w-12 -translate-y-1/2 rounded bg-amber-400/60 group-hover/hdrag:bg-amber-400 transition-colors" />
+          </div>
+          <div style={{ height: bottomPaneHeight }} className="shrink-0 overflow-hidden">
+            <TradeBottomPane
+              executors={mainExecutors}
+              positions={mainPositions}
+              isLoadingPositions={isLoadingPositions}
+            />
+          </div>
+        </div>
+
+        {/* Vertical resize handle */}
+        <div
+          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20 transition-colors"
+          onMouseDown={startHDrag}
+        >
+          <div className="absolute inset-y-0 left-1/2 my-auto h-12 w-px -translate-x-1/2 rounded bg-amber-400/60 group-hover/vdrag:bg-amber-400 transition-colors" />
         </div>
 
         {/* Right Panel */}
-        <div className="flex w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
+        <div className="flex shrink-0 flex-col bg-[var(--color-surface)]" style={{ width: rightPanelWidth }}>
           {/* Panel Mode Toggle */}
           <div className="flex border-b border-[var(--color-border)]">
             <button

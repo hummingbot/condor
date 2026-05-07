@@ -1032,10 +1032,9 @@ async def _local_agent_lifecycle(
             return {"error": f"Strategy '{strategy_id}' not found"}
 
         # Build config with server resolution and overrides
-        from condor.trading_agent.config import load_agent_config
+        from condor.trading_agent.config import load_full_config
         from config_manager import get_config_manager, get_effective_server
-        agent_config = load_agent_config(strategy.agent_dir, strategy.default_config)
-        config_dict = agent_config.model_dump()
+        config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
         if config:
             if config.get("dry_run") and "execution_mode" not in config:
                 config["execution_mode"] = "dry_run"

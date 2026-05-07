@@ -11,8 +11,10 @@ import {
   Server,
   BarChart3,
   Layers,
+  KeyRound,
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { useServer } from "@/hooks/useServer";
 import {
@@ -123,15 +125,15 @@ function TokenBarChart({
   const maxVal = tokens[0]?.usd_value ?? 0;
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 h-full flex flex-col">
       <h3 className="text-sm font-medium text-[var(--color-text-muted)] mb-3">{title}</h3>
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-2.5 flex-1 justify-center">
         {tokens.map((t, i) => {
           const barPct = maxVal > 0 ? (t.usd_value / maxVal) * 100 : 0;
           const allocPct = totalPortfolioValue > 0 ? (t.usd_value / totalPortfolioValue) * 100 : 0;
           return (
-            <div key={`${t.connector}-${t.token}`} className="flex items-center gap-3">
-              <div className="flex items-center gap-1.5 w-20 justify-end">
+            <div key={`${t.connector}-${t.token}`} className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 w-16 justify-end shrink-0">
                 <div
                   className="h-2.5 w-2.5 rounded-sm shrink-0"
                   style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
@@ -148,8 +150,8 @@ function TokenBarChart({
                   }}
                 />
               </div>
-              <span className="text-xs tabular-nums text-[var(--color-text-muted)] w-32 text-right">
-                {formatUsd(t.usd_value)} ({allocPct.toFixed(1)}%)
+              <span className="text-xs tabular-nums text-[var(--color-text-muted)] shrink-0 text-right">
+                {allocPct.toFixed(1)}%
               </span>
             </div>
           );
@@ -401,7 +403,7 @@ function PortfolioEvolution({ server }: { server: string }) {
   const tooltipW = stacked && hoverTokenEntries.length > 0 ? 150 : 108;
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 h-full">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium text-[var(--color-text-muted)]">Portfolio Evolution</h3>
         <div className="flex items-center gap-2">
@@ -608,6 +610,7 @@ function PortfolioEvolution({ server }: { server: string }) {
 
 export function Portfolio() {
   const { server } = useServer();
+  const navigate = useNavigate();
 
   const { data, isLoading, error, isPlaceholderData } = useQuery({
     queryKey: ["portfolio", server],
@@ -724,39 +727,61 @@ export function Portfolio() {
   return (
     <div className={`space-y-6 transition-opacity duration-300 ${isPlaceholderData ? "opacity-60" : "opacity-100"}`}>
       {/* Stat cards */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard
-          label="Total Value"
-          value={formatUsd(totalUsd)}
-          icon={Wallet}
-          subtitle={weeklyPnl !== null ? `(${formatPnl(weeklyPnl)} this week)` : undefined}
-          subtitleColor={weeklyPnl !== null ? (weeklyPnl >= 0 ? "var(--color-green)" : "var(--color-red)") : undefined}
-        />
-        <StatCard
-          label="Active Bots"
-          value={`${activeBots.length} running`}
-          icon={Bot}
-        />
-        <StatCard
-          label="Bot PnL"
-          value={formatPnl(botPnl)}
-          icon={TrendingUp}
-          valueColor={botPnl >= 0 ? "var(--color-green)" : "var(--color-red)"}
-        />
-        <StatCard
-          label="System"
-          value={`${totalTokens} assets / ${activeExecutorCount} executors`}
-          icon={activeExecutorCount > 0 ? Activity : Coins}
-        />
+      <div className="flex gap-3">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 flex-1">
+          <StatCard
+            label="Total Value"
+            value={formatUsd(totalUsd)}
+            icon={Wallet}
+            subtitle={weeklyPnl !== null ? `(${formatPnl(weeklyPnl)} this week)` : undefined}
+            subtitleColor={weeklyPnl !== null ? (weeklyPnl >= 0 ? "var(--color-green)" : "var(--color-red)") : undefined}
+          />
+          <StatCard
+            label="Active Bots"
+            value={`${activeBots.length} running`}
+            icon={Bot}
+          />
+          <StatCard
+            label="Bot PnL"
+            value={formatPnl(botPnl)}
+            icon={TrendingUp}
+            valueColor={botPnl >= 0 ? "var(--color-green)" : "var(--color-red)"}
+          />
+          <StatCard
+            label="System"
+            value={`${totalTokens} assets / ${activeExecutorCount} executors`}
+            icon={activeExecutorCount > 0 ? Activity : Coins}
+          />
+        </div>
+        <div className="flex flex-col gap-2 shrink-0">
+          <button
+            onClick={() => navigate("/settings?tab=keys")}
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            <KeyRound className="h-4 w-4" />
+            <span>Keys</span>
+          </button>
+          <button
+            onClick={() => navigate("/settings?tab=servers")}
+            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            <Server className="h-4 w-4" />
+            <span>Servers</span>
+          </button>
+        </div>
       </div>
 
-      {/* Portfolio Evolution */}
-      <PortfolioEvolution server={server!} />
-
-      {/* Top Holdings */}
-      {connectors.length > 0 && topTokens.length > 0 && (
-        <TokenBarChart tokens={topTokens} title="Top Holdings" totalPortfolioValue={totalUsd} />
-      )}
+      {/* Portfolio Evolution + Top Holdings side by side */}
+      <div className="flex flex-col lg:flex-row gap-4">
+        <div className={connectors.length > 0 && topTokens.length > 0 ? "lg:flex-[2] min-w-0" : "w-full"}>
+          <PortfolioEvolution server={server!} />
+        </div>
+        {connectors.length > 0 && topTokens.length > 0 && (
+          <div className="lg:flex-1 min-w-0">
+            <TokenBarChart tokens={topTokens} title="Top Holdings" totalPortfolioValue={totalUsd} />
+          </div>
+        )}
+      </div>
 
       {/* Balance table */}
       {connectors.length === 0 ? (

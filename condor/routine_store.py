@@ -12,7 +12,9 @@ import logging
 import time
 from typing import Any
 
-from routines.base import RoutineResult, discover_routines, get_routine, normalize_result
+from pathlib import Path
+
+from routines.base import RoutineResult, discover_routines, discover_routines_from_path, get_routine, normalize_result
 
 logger = logging.getLogger(__name__)
 
@@ -47,15 +49,53 @@ class RoutineStore:
 
     # ── Discovery ──
 
+    def _discover_all(self) -> dict[str, "RoutineInfo"]:
+        """Discover global routines + agent routines, merged into one dict."""
+        all_routines = dict(discover_routines())
+
+        # Scan trading_agents/*/routines/
+        agents_dir = Path(__file__).resolve().parent.parent / "trading_agents"
+        if agents_dir.exists():
+            for agent_dir in sorted(agents_dir.iterdir()):
+                routines_path = agent_dir / "routines"
+                if not routines_path.is_dir():
+                    continue
+                slug = agent_dir.name
+                agent_routines = discover_routines_from_path(routines_path, agent_slug=slug)
+                for rname, rinfo in agent_routines.items():
+                    prefixed = f"{slug}/{rname}"
+                    rinfo.name = prefixed
+                    all_routines[prefixed] = rinfo
+
+        return all_routines
+
+    def _get_report_counts(self) -> dict[str, int]:
+        """Get report count per routine source_name."""
+        try:
+            from condor.reports import list_reports
+            reports, _ = list_reports(source_type="routine", limit=1000)
+            counts: dict[str, int] = {}
+            for r in reports:
+                sn = r.get("source_name", "")
+                if sn:
+                    counts[sn] = counts.get(sn, 0) + 1
+            return counts
+        except Exception:
+            return {}
+
     def list_routines(self) -> list[dict]:
-        routines = discover_routines()
+        all_routines = self._discover_all()
+        report_counts = self._get_report_counts()
         out = []
-        for name, info in routines.items():
+        for name, info in all_routines.items():
             out.append({
                 "name": name,
                 "description": info.description,
                 "is_continuous": info.is_continuous,
+                "category": info.category,
+                "source": info.source,
                 "fields": info.get_fields(),
+                "report_count": report_counts.get(name, 0),
             })
         return out
 
@@ -105,6 +145,20 @@ class RoutineStore:
     def _gen_id(self) -> str:
         return hashlib.md5(f"{time.time()}{id(object())}".encode()).hexdigest()[:8]
 
+    def _resolve_routine(self, routine_name: str):
+        """Resolve a routine by name, supporting 'agent_slug/routine_name' format."""
+        # Try global first
+        routine = get_routine(routine_name)
+        if routine:
+            return routine
+        # Try agent format: slug/name
+        if "/" in routine_name:
+            slug, rname = routine_name.split("/", 1)
+            agents_dir = Path(__file__).resolve().parent.parent / "trading_agents" / slug / "routines"
+            agent_routines = discover_routines_from_path(agents_dir, agent_slug=slug)
+            return agent_routines.get(rname)
+        return None
+
     async def execute(
         self,
         routine_name: str,
@@ -113,7 +167,7 @@ class RoutineStore:
         user_id: int = 0,
     ) -> str:
         """Run a one-shot routine from the web. Returns instance_id."""
-        routine = get_routine(routine_name)
+        routine = self._resolve_routine(routine_name)
         if not routine:
             raise ValueError(f"Routine '{routine_name}' not found")
 
@@ -170,7 +224,7 @@ class RoutineStore:
         user_id: int = 0,
     ) -> str:
         """Schedule a routine to repeat at interval_sec. Returns instance_id."""
-        routine = get_routine(routine_name)
+        routine = self._resolve_routine(routine_name)
         if not routine:
             raise ValueError(f"Routine '{routine_name}' not found")
 

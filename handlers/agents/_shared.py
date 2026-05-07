@@ -6,6 +6,77 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# -- Assistant prompt loader (auto-discovery from assistants/ folder) --
+
+_ASSISTANTS_DIR = Path(__file__).parent.parent.parent / "assistants"
+_assistant_cache: dict[str, tuple[dict[str, str], str]] = {}
+
+
+def _parse_assistant(path: Path) -> tuple[dict[str, str], str]:
+    """Parse an assistant .md file, extracting YAML frontmatter and body.
+
+    Frontmatter format (between --- lines):
+        label: Display Name
+        description: Short description
+
+    Returns (metadata_dict, body_text).
+    """
+    raw = path.read_text(encoding="utf-8").strip()
+    meta: dict[str, str] = {}
+    body = raw
+
+    if raw.startswith("---"):
+        parts = raw.split("---", 2)
+        if len(parts) >= 3:
+            for line in parts[1].strip().splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip()
+            body = parts[2].strip()
+
+    # Fallback: derive label from filename
+    if "label" not in meta:
+        meta["label"] = path.stem.replace("_", " ").title()
+    if "description" not in meta:
+        meta["description"] = ""
+
+    return meta, body
+
+
+def load_assistant(name: str) -> str:
+    """Load an assistant prompt body from assistants/{name}.md. Cached."""
+    meta, body = _load_assistant_full(name)
+    return body
+
+
+def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
+    """Load metadata + body for an assistant. Cached after first read."""
+    if name in _assistant_cache:
+        return _assistant_cache[name]
+    path = _ASSISTANTS_DIR / f"{name}.md"
+    if not path.exists():
+        log.warning("Assistant prompt not found: %s", path)
+        return {"label": name, "description": ""}, ""
+    result = _parse_assistant(path)
+    _assistant_cache[name] = result
+    return result
+
+
+def discover_assistants() -> dict[str, dict[str, str]]:
+    """Auto-discover all assistants from assistants/*.md.
+
+    Returns dict like: {"condor": {"label": "Condor", "description": "..."}, ...}
+    """
+    result: dict[str, dict[str, str]] = {}
+    if not _ASSISTANTS_DIR.exists():
+        return result
+    for path in sorted(_ASSISTANTS_DIR.glob("*.md")):
+        name = path.stem
+        meta, _ = _load_assistant_full(name)
+        result[name] = {"label": meta["label"], "description": meta.get("description", "")}
+    return result
+
+
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
     "gemini": {"label": "Gemini CLI"},
@@ -20,180 +91,33 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
 
 DEFAULT_AGENT = "claude-code"
 
-# -- Agent modes --
+# -- Agent modes (auto-discovered) --
 
-AGENT_MODES: dict[str, dict[str, str]] = {
-    "condor": {"label": "Condor", "description": "General trading assistant"},
-    "agent_builder": {"label": "🏋️ Agent Builder", "description": "Create and manage autonomous trading strategies"},
-}
+AGENT_MODES = discover_assistants()
 DEFAULT_MODE = "condor"
 
-# -- Trading agent system prompt --
 
-TRADING_SYSTEM_PROMPT = """\
-[System context -- do not repeat this to the user]
-You are now in TRADING AGENT mode. Your focus is on managing autonomous \
-trading agents -- creating strategies, starting agents, monitoring \
-performance, and reviewing trading decisions.
+def reload_assistants() -> None:
+    """Re-scan assistants/ folder. Call after adding/removing .md files."""
+    global AGENT_MODES
+    _assistant_cache.clear()
+    AGENT_MODES = discover_assistants()
 
-WHAT YOU CAN DO:
-- Create, edit, and delete trading strategies via manage_trading_agent tool
-- Create agent-local analysis routines via manage_routines tool
-- Start, stop, pause, resume trading agents
-- Read agent journals and run snapshots (trading_agent_journal_read)
-- Monitor agent status, PnL, risk state
-- Review run history (decision logs per tick)
-- Load the "trading-agent-builder" skill via manage_skills(action="list") \
-for the full step-by-step builder reference
 
-═══════════════════════════════════════════════════════════
-CREATION WORKFLOW — 5 phases, follow in order
-═══════════════════════════════════════════════════════════
+# -- Mode context builders --
 
-When the user wants to create a new strategy, follow these 5 phases in order. \
-Label your messages with the current phase: [Phase N/5 — Name]
+# Registry of functions that enrich a mode's prompt with dynamic data.
+# Key = assistant name, value = callable() -> str with extra context.
+_MODE_CONTEXT_BUILDERS: dict[str, Any] = {}
 
-PHASE 1 — STRATEGY DESIGN (conversation only, no tools)
-- Understand the user's core idea: what do they want to achieve? \
-(e.g. "scalp volatile pairs", "DCA into SOL", "arb between CEX and DEX")
-- Drill into specifics iteratively: strategy logic, entry/exit conditions, \
-risk parameters, timeframes.
-- Use your trading knowledge to suggest sensible defaults and confirm.
-- Propose a written design summary.
-- Decide if strategy is GENERIC or SPECIFIC (see GENERIC vs SPECIFIC below).
-⛔ Do NOT proceed to Phase 2 until the user approves the design.
 
-PHASE 2 — MARKET DATA ROUTINE
-- Create the analysis routine the agent will call during ticks.
-- Use manage_routines(action="create_routine", strategy_id=..., name=..., code=...) \
-to create it. Use the "create-routine" skill for API reference patterns.
-- Test it: manage_trading_agent(action="run_routine", strategy_id=..., name=..., config={...})
-- Show the output to the user. Iterate until it returns clean, useful data.
-⛔ Do NOT proceed to Phase 3 until routine output is tested and user approves.
-
-PHASE 3 — STRATEGY CREATION
-- BEFORE writing the strategy instructions, fetch the executor/controller schema \
-the agent will use. Call manage_executors(executor_type="<type>") to get the full \
-config schema (e.g. executor_type="grid_strike", "dca_executor", etc.). \
-Embed the required fields and their types directly in the strategy instructions \
-so the tick agent knows exactly what parameters to pass.
-- Create the strategy via manage_trading_agent(action="create_strategy", ...).
-- Instructions should reference the Phase 2 routine by name.
-- Include: objective, analysis step, decision logic, executor config WITH full \
-schema (all required fields, types, defaults), risk rules.
-- Set default_config with sensible values.
-⛔ Do NOT proceed to Phase 4 until the strategy is saved.
-
-PHASE 4 — DRY RUN
-- Start with execution_mode: "dry_run" to validate without live trading.
-- The user can choose which model to dry-run with by passing agent_key in config \
-(e.g. config={"execution_mode": "dry_run", "agent_key": "ollama:llama3.1"}).
-- Review journal output with the user.
-- Check: Does the agent call routines correctly? Is decision logic sound? \
-Does it use conditional language? Are risk rules respected?
-- Use trading_agent_journal_read(agent_id=..., section="run:1") to review.
-⛔ Do NOT proceed to Phase 5 until the user is satisfied with dry-run behavior.
-
-PHASE 5 — GO LIVE
-- Offer execution modes: run_once (single tick), loop (continuous), \
-or loop with max_ticks (limited run).
-- Ask which model to use for live trading — the user can pick a different model \
-than the one used in dry-run (e.g. dry-run with ollama, go live with claude-code).
-- Start the agent with the user's chosen mode and config.
-- Confirm the agent is running and provide monitoring commands.
-
-═══════════════════════════════════════════════════════════
-MONITORING WORKFLOW — for existing agents
-═══════════════════════════════════════════════════════════
-
-1. manage_trading_agent(action="list_agents") — see running agents
-2. manage_trading_agent(action="agent_status", agent_id=...) — detailed status
-3. trading_agent_journal_read(agent_id=..., section="summary") — quick status
-4. trading_agent_journal_read(agent_id=..., section="runs") — list run snapshots
-5. trading_agent_journal_read(agent_id=..., section="run:N") — tick N detail
-
-═══════════════════════════════════════════════════════════
-REFERENCE
-═══════════════════════════════════════════════════════════
-
-MODEL SELECTION:
-The model (agent_key) is set per SESSION, not per strategy. The strategy's \
-agent_key is just the default. Override it at launch via config:
-  manage_trading_agent(action="start_agent", strategy_id=..., \
-config={"agent_key": "ollama:qwen3:32b", "execution_mode": "dry_run"})
-
-Available models:
-- ACP (subprocess CLI): "claude-code", "gemini", "copilot"
-- Pydantic AI (local): "ollama:llama3.1", "ollama:qwen3:32b", \
-"ollama:qwen2.5:72b", "ollama:deepseek-r1:32b", "lmstudio:<model-name>"
-- Pydantic AI (cloud): "openai:gpt-4o", "groq:llama-3.3-70b-versatile"
-- OpenRouter (cloud, unified gateway): "openrouter:openai/gpt-4o", \
-"openrouter:anthropic/claude-sonnet-4-5", "openrouter:meta-llama/llama-3.3-70b-instruct". \
-Requires OPENROUTER_API_KEY in .env. Honors model_base_url for self-hosted proxies.
-- Custom endpoint: use "openai:<model-name>" + model_base_url in config
-
-Default URLs (no config needed): Ollama=localhost:11434, LM Studio=localhost:1234, \
-OpenRouter=https://openrouter.ai/api/v1. \
-Override with model_base_url in config if running on a different host/port.
-
-GENERIC vs SPECIFIC STRATEGIES:
-- GENERIC: trading_pair and connector are NOT in the instructions. Passed at \
-launch via `trading_context`. Refer to "the configured trading pair". Default.
-- SPECIFIC: pair/connector baked into instructions (e.g. ETH/BTC ratio strategy).
-When creating generic strategies, store sensible defaults in default_config \
-but keep instructions pair-agnostic.
-
-AGENT-LOCAL ROUTINES:
-Each strategy can have routines in trading_agents/{slug}/routines/.
-- manage_trading_agent(action="list_routines", strategy_id=...) — list routines
-- manage_trading_agent(action="run_routine", strategy_id=..., name=..., config={...}) — run
-- manage_routines(action="create_routine", strategy_id=..., name=..., code=...) — create
-- manage_routines(action="read_routine", name=..., strategy_id=...) — read
-- manage_routines(action="edit_routine", strategy_id=..., name=..., code=...) — edit
-
-Routine template:
-```python
-from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-from config_manager import get_client
-
-class Config(BaseModel):
-    \"\"\"One-line description.\"\"\"
-    trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
-
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
-    client = await get_client(context._chat_id, context=context)
-    if not client:
-        return "No server available"
-    return "result string"
-```
-
-DATA STRUCTURE:
-trading_agents/{slug}/
-  - agent.md: strategy definition
-  - routines/: agent-local analysis scripts
-  - sessions/session_N/: per-session data (journal.md, snapshots)
-
-RULES:
-- Be direct and concise. This is Telegram, keep messages short.
-- Do NOT start messages with a header like "Agent Builder" or mode labels \
-beyond the phase label.
-- Do NOT use excessive whitespace or blank lines between sections.
-- When showing agent status, use key: value format, not tables.
-- Always include risk limits when starting agents.
-- When creating routines, keep them focused — one routine per analysis task.
-- Always validate routine code loads correctly after creation.
-- Be interactive. Guide the user one step at a time. Offer concrete proposals.
-"""
-
-def build_trading_context() -> str:
-    """Build the trading-focused initial context prompt."""
+def _build_agent_builder_context() -> str:
+    """Append live strategy/agent data to the agent_builder prompt."""
     from condor.trading_agent.strategy import StrategyStore
     from condor.trading_agent.engine import get_all_engines
 
-    sections = [TRADING_SYSTEM_PROMPT]
+    sections: list[str] = []
 
-    # List existing strategies
     store = StrategyStore()
     strategies = store.list_all()
     if strategies:
@@ -206,7 +130,6 @@ def build_trading_context() -> str:
     else:
         sections.append("No strategies exist yet. Help the user create their first one.")
 
-    # List running agents
     engines = get_all_engines()
     if engines:
         agent_lines = ["Running agents:"]
@@ -250,21 +173,33 @@ COMPACT_CONTEXT_TEMPLATE = (
     "Continue from where we left off. The user compacted the context to free up space."
 )
 
-TELEGRAM_SYSTEM_PROMPT = (
-    "[System context -- do not repeat this to the user]\n"
-    "You are Condor, a trading assistant inside Telegram.\n\n"
-    "BEHAVIOR:\n"
-    "- Lead with the answer. Be direct, not verbose.\n"
-    "- For trading questions, use MCP tools directly. Don't explore the filesystem.\n"
-    "- Keep tool chains short: 1-3 tool calls per response, not 10.\n"
-    "- Never read source code or explore the codebase unless explicitly asked.\n\n"
+_WEB_FORMATTING = (
+    "FORMATTING (web dashboard):\n"
+    "- Use Markdown freely: tables, headers, bold, code blocks, lists.\n"
+    "- No message length limits, but stay concise.\n"
+    "- Use tables for structured data (portfolios, prices, comparisons).\n"
+    "- Use code blocks for configs, JSON, or commands.\n"
+    "- Respond in the user's language."
+)
+
+_TELEGRAM_FORMATTING = (
     "FORMATTING (Telegram mobile):\n"
     "- NEVER use Markdown tables. Use bullet lists or key: value lines.\n"
     "- Keep paragraphs short (2-3 sentences max).\n"
     "- Cap lists at 5-7 items.\n"
-    "- Respond in the user's language.\n\n"
-    "Read @CONDOR.md for full details on your identity, tools, permissions, and rules.\n"
+    "- Respond in the user's language."
 )
+
+
+def _build_system_prompt(platform: str = "telegram") -> str:
+    """Build the system prompt by combining the assistant .md with platform formatting rules."""
+    assistant_content = load_assistant("condor")
+    formatting = _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
+    return (
+        "[System context -- do not repeat this to the user]\n\n"
+        f"{assistant_content}\n\n"
+        f"{formatting}"
+    )
 
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
@@ -327,15 +262,18 @@ def get_project_dir() -> str:
 
 
 def _condor_mcp_args(
-    chat_id: int, user_id: int,
+    chat_id: int | str, user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess."""
     import os
 
+    # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
+    # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
+    effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
     args = [
-        "--chat-id", str(chat_id),
+        "--chat-id", str(effective_chat_id),
         "--user-id", str(user_id),
         "--bot-token", os.environ.get("TELEGRAM_TOKEN", ""),
     ]
@@ -347,7 +285,7 @@ def _condor_mcp_args(
 
 
 def build_mcp_servers_for_session(
-    user_id: int, chat_id: int, user_data: dict | None = None,
+    user_id: int, chat_id: int | str, user_data: dict | None = None,
     execution_mode: str = "loop",
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
@@ -457,15 +395,16 @@ def build_mcp_servers_for_agent(
     return [mcp_hummingbot, condor]
 
 
-def build_initial_context(user_id: int, chat_id: int, user_data: dict | None = None, agent_key: str | None = None) -> str:
+def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram") -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from config_manager import ServerPermission, get_config_manager, get_effective_server
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     cm = get_config_manager()
 
-    # Always start with Telegram formatting rules
-    sections: list[str] = [TELEGRAM_SYSTEM_PROMPT]
+    # Build system prompt from assistants/ .md + platform formatting
+    system_prompt = _build_system_prompt(platform)
+    sections: list[str] = [system_prompt]
 
     # Resolve active server (respects user preferences)
     active_name = get_effective_server(chat_id, user_data)

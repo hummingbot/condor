@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ChevronRight,
   Clock,
   Save,
   Zap,
@@ -14,7 +15,7 @@ import { type AgentDetail, type ExecutorInfo, api } from "@/lib/api";
 
 // ── Markdown Editor ──
 
-function MarkdownEditor({
+export function MarkdownEditor({
   slug,
   label,
   sublabel,
@@ -140,7 +141,7 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 // ── Performance Panel ──
 
-export function PerformancePanel({ slug }: { slug: string }) {
+export function PerformancePanel({ slug, onSessionClick }: { slug: string; onSessionClick?: (sessionNum: number) => void }) {
   const { data } = useQuery({
     queryKey: ["agent-performance", slug],
     queryFn: () => api.getAgentPerformance(slug),
@@ -238,6 +239,7 @@ export function PerformancePanel({ slug }: { slug: string }) {
                   <th className="px-2 py-1 text-right">Volume</th>
                   <th className="px-2 py-1 text-right">Trades</th>
                   <th className="px-2 py-1 text-right">Open</th>
+                  {onSessionClick && <th className="px-2 py-1 w-6" />}
                 </tr>
               </thead>
               <tbody>
@@ -249,7 +251,8 @@ export function PerformancePanel({ slug }: { slug: string }) {
                     return (
                       <tr
                         key={s.agent_id}
-                        className="border-t border-[var(--color-border)]/40 font-mono"
+                        onClick={() => onSessionClick?.(s.session_num)}
+                        className={`border-t border-[var(--color-border)]/40 font-mono ${onSessionClick ? "cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]" : ""}`}
                       >
                         <td className="px-2 py-1.5 text-[var(--color-text)]">{s.session_num}</td>
                         <td className="px-2 py-1.5 text-[var(--color-text-muted)]">{s.kind}</td>
@@ -266,6 +269,11 @@ export function PerformancePanel({ slug }: { slug: string }) {
                         </td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.trade_count}</td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.open_count}</td>
+                        {onSessionClick && (
+                          <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          </td>
+                        )}
                       </tr>
                     );
                   })}

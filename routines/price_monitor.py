@@ -1,5 +1,7 @@
 """Monitor price and alert on threshold."""
 
+CATEGORY = "Monitoring"
+
 import asyncio
 import logging
 import time
