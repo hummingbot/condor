@@ -123,7 +123,7 @@ export function AppShell() {
       {/* Main content */}
       <main className="relative flex-1 overflow-auto p-6">
         <ErrorBoundary resetKey={pathname + server}>
-          <Outlet />
+          <Outlet key={server} />
         </ErrorBoundary>
         {showKeysOverlay && <ConnectKeysOverlay />}
       </main>

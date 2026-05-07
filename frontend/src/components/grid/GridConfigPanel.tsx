@@ -230,13 +230,22 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
       }
     }
 
-    // Compute estimated levels
+    // Compute estimated levels (mirrors _generate_grid_levels logic)
     let levels = 0;
-    if (state.start_price > 0 && state.end_price > 0 && state.min_spread_between_orders > 0) {
-      const range = state.end_price - state.start_price;
-      const stepSize = state.start_price * state.min_spread_between_orders;
-      if (stepSize > 0) {
-        levels = Math.floor(range / stepSize);
+    let levelConstraint: "spread" | "amount" | null = null;
+    if (state.start_price > 0 && state.end_price > 0 && state.start_price < state.end_price) {
+      const range = (state.end_price - state.start_price) / state.start_price;
+      const levelsBySpread = state.min_spread_between_orders > 0
+        ? Math.floor(range / state.min_spread_between_orders)
+        : Infinity;
+      const levelsByAmount = state.min_order_amount_quote > 0
+        ? Math.floor(state.total_amount_quote / state.min_order_amount_quote)
+        : Infinity;
+
+      if (levelsBySpread !== Infinity || levelsByAmount !== Infinity) {
+        levels = Math.min(levelsBySpread, levelsByAmount);
+        levels = Math.max(1, levels);
+        levelConstraint = levelsByAmount < levelsBySpread ? "amount" : "spread";
       }
     }
 
@@ -244,7 +253,7 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
       warnings.push("Fewer than 3 grid levels");
     }
 
-    return { errors, warnings, levels, valid: errors.length === 0 };
+    return { errors, warnings, levels, levelConstraint, valid: errors.length === 0 };
   }, [state]);
 
   const handleAutoFill = () => {
@@ -268,6 +277,9 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
   };
 
   const perLevel = validation.levels > 0 ? state.total_amount_quote / validation.levels : 0;
+  const totalRange = state.start_price > 0 && state.end_price > 0 && state.start_price < state.end_price
+    ? ((state.end_price - state.start_price) / state.start_price) * 100
+    : 0;
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
@@ -375,10 +387,28 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
           isPercent
           suffix="%"
         />
-        {validation.levels > 0 && (
-          <p className="rounded bg-[var(--color-bg)] px-2.5 py-1.5 text-[10px] text-[var(--color-text-muted)]">
-            ~{validation.levels} levels &middot; ~${perLevel.toFixed(2)} per level
-          </p>
+        {(validation.levels > 0 || totalRange > 0) && (
+          <div className="space-y-1 rounded bg-[var(--color-bg)] px-2.5 py-1.5 text-[10px] text-[var(--color-text-muted)]">
+            {totalRange > 0 && (
+              <p>Range: {totalRange.toFixed(2)}%</p>
+            )}
+            {validation.levels > 0 && (
+              <>
+                <p>
+                  ~{validation.levels} levels &middot; ~${perLevel.toFixed(2)}/level
+                  {validation.levelConstraint === "amount" && (
+                    <span className="ml-1 text-amber-400">(limited by amount)</span>
+                  )}
+                  {validation.levelConstraint === "spread" && (
+                    <span className="ml-1 text-[var(--color-text-muted)]">(limited by spread)</span>
+                  )}
+                </p>
+                {validation.levels > 1 && (
+                  <p>Step: {(totalRange / (validation.levels - 1)).toFixed(3)}%</p>
+                )}
+              </>
+            )}
+          </div>
         )}
         <LeverageField value={state.leverage} field="leverage" dispatch={dispatch as unknown as FieldDispatch} isSpot={isSpot} />
       </div>

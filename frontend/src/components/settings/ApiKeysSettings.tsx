@@ -8,7 +8,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { type ConnectorInfo, type CredentialInfo, api } from "@/lib/api";
@@ -54,7 +54,21 @@ export function ApiKeysSettings() {
     queryKey: ["settings-config-map", server, flow.connectorName],
     queryFn: () => api.getConnectorConfigMap(server!, flow.connectorName),
     enabled: !!server && !!flow.connectorName && flow.step === "fill-fields",
+    staleTime: 30 * 60 * 1000,
   });
+
+  // Prefetch config-maps for all connectors when the exchange list loads
+  useEffect(() => {
+    const connectors: ConnectorInfo[] = connectorsData?.connectors ?? [];
+    if (!server || connectors.length === 0) return;
+    for (const c of connectors) {
+      qc.prefetchQuery({
+        queryKey: ["settings-config-map", server, c.name],
+        queryFn: () => api.getConnectorConfigMap(server, c.name),
+        staleTime: 30 * 60 * 1000,
+      });
+    }
+  }, [connectorsData, server, qc]);
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["settings-credentials", server] });
 

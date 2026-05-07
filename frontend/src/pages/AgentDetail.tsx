@@ -1,21 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Zap } from "lucide-react";
+import { ArrowLeft, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
-import { ExperimentsTab } from "@/components/agent/AgentExperimentsTab";
-import { AgentFloatingPanel } from "@/components/agent/AgentFloatingPanel";
 import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
 import {
   InstanceCard,
   MarkdownEditor,
   PerformancePanel,
 } from "@/components/agent/AgentOverviewTab";
-import { AgentToolbar, type PanelId } from "@/components/agent/AgentToolbar";
 import { SessionReviewer } from "@/components/agent/SessionReviewer";
-import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
+import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type ExecutorInfo, api } from "@/lib/api";
 
@@ -26,9 +23,10 @@ export function AgentDetail() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [activePanel, setActivePanel] = useState<PanelId | null>(null);
   const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
-  const [showReportBrowser, setShowReportBrowser] = useState(false);
+  const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
+  const [showStrategyModal, setShowStrategyModal] = useState(false);
+  const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
 
   // Check location.state for agent-switching (SessionReviewer up/down nav)
   useEffect(() => {
@@ -39,10 +37,31 @@ export function AgentDetail() {
     }
   }, [location.state, location.pathname, navigate]);
 
+  // Close strategy modal on Escape
+  useEffect(() => {
+    if (!showStrategyModal) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowStrategyModal(false);
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [showStrategyModal]);
+
   const { data: agent, isLoading } = useQuery({
     queryKey: ["agent", slug],
     queryFn: () => api.getAgent(slug!),
     enabled: !!slug,
+    refetchInterval: 5000,
+  });
+
+  // Routine instances for ReportBrowser
+  const { data: routineInstances = [] } = useQuery({
+    queryKey: ["routine-instances"],
+    queryFn: api.getRoutineInstances,
+    enabled: showRoutinesBrowser,
     refetchInterval: 5000,
   });
 
@@ -51,18 +70,6 @@ export function AgentDetail() {
     queryKey: ["agents"],
     queryFn: api.getAgents,
   });
-
-  const { data: allInstances = [] } = useQuery({
-    queryKey: ["routine-instances"],
-    queryFn: api.getRoutineInstances,
-    enabled: showReportBrowser,
-    refetchInterval: 5000,
-  });
-
-  const agentInstances = useMemo(
-    () => allInstances.filter((i) => i.routine_name.startsWith(`${slug}/`)),
-    [allInstances, slug],
-  );
 
   // Derive controller IDs from active instances for WS executor streaming
   const instances = agent?.instances || [];
@@ -94,21 +101,10 @@ export function AgentDetail() {
     return Array.from(groups.entries());
   }, [liveExecutors, serverName]);
 
-  // Toolbar toggle handler
-  const handlePanelToggle = useCallback((id: PanelId) => {
-    if (id === "routines") {
-      // Open full-screen ReportBrowser for this agent
-      setShowReportBrowser(true);
-      setActivePanel(null);
-    } else {
-      setActivePanel((prev) => (prev === id ? null : id));
-      setShowReportBrowser(false);
-    }
-  }, []);
-
-  // Session click -> open reviewer
-  const handleSessionClick = useCallback((sessionNum: number) => {
+  // Session/experiment click -> open reviewer
+  const handleSessionClick = useCallback((sessionNum: number, kind?: "session" | "experiment") => {
     setReviewerSessionNum(sessionNum);
+    setReviewerKind(kind || "session");
   }, []);
 
   // Agent switching from SessionReviewer
@@ -136,7 +132,7 @@ export function AgentDetail() {
   return (
     <div className="w-full">
       {/* Header */}
-      <div className="mb-6">
+      <div className="mb-4">
         <button
           onClick={() => navigate("/agents")}
           className="mb-3 flex items-center gap-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
@@ -151,20 +147,17 @@ export function AgentDetail() {
               <p className="mt-1 text-sm text-[var(--color-text-muted)]">{agent.description}</p>
             )}
           </div>
-          <div className="flex items-center gap-3 shrink-0">
-            <AgentToolbar activePanel={activePanel} onToggle={handlePanelToggle} />
-            <AgentControls
-              slug={slug!}
-              status={agent.status}
-              defaultContext={agent.default_trading_context || (agent.config.trading_context as string) || ""}
-              agentConfig={agent.config}
-            />
-          </div>
+          <AgentControls
+            slug={slug!}
+            status={agent.status}
+            defaultContext={agent.default_trading_context || (agent.config.trading_context as string) || ""}
+            agentConfig={agent.config}
+          />
         </div>
       </div>
 
       {/* Meta strip */}
-      <div className="mb-6 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
         <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
           {agent.sessions.length} session{agent.sessions.length !== 1 ? "s" : ""}
         </span>
@@ -184,11 +177,6 @@ export function AgentDetail() {
           <AgentMarketStrip serverName={serverName} executors={liveExecutors} />
         </div>
       )}
-
-      {/* Performance Panel + PnL Chart */}
-      <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <PerformancePanel slug={agent.slug} onSessionClick={handleSessionClick} />
-      </div>
 
       {/* Live Executor Charts */}
       {hasRunning && chartGroups.length > 0 && (
@@ -223,47 +211,79 @@ export function AgentDetail() {
         </div>
       )}
 
-      {/* Floating Panel (Strategy / Learnings / Experiments) */}
-      <AgentFloatingPanel panelId={activePanel} onClose={() => setActivePanel(null)}>
-        {activePanel === "strategy" && (
-          <MarkdownEditor
-            slug={agent.slug}
-            label="Strategy"
-            sublabel="agent.md"
-            content={agent.agent_md}
-            mutationFn={api.updateAgentMd}
-          />
-        )}
-        {activePanel === "learnings" && (
-          <MarkdownEditor
-            slug={agent.slug}
-            label="Learnings"
-            sublabel="persists across sessions"
-            content={agent.learnings}
-            mutationFn={api.updateAgentLearnings}
-          />
-        )}
-        {activePanel === "experiments" && (
-          <ExperimentsTab slug={slug!} experiments={agent.experiments || []} />
-        )}
-      </AgentFloatingPanel>
+      {/* Performance Panel + Sessions table */}
+      <div className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <PerformancePanel
+          slug={agent.slug}
+          onSessionClick={handleSessionClick}
+          onOpenStrategy={() => setShowStrategyModal(true)}
+          onOpenRoutines={() => setShowRoutinesBrowser(true)}
+        />
+      </div>
 
-      {/* Report Browser overlay (full-screen, filtered to this agent) */}
-      {showReportBrowser && (
+      {/* Strategy & Learnings Modal (near full-screen) */}
+      {showStrategyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/60"
+            onClick={() => setShowStrategyModal(false)}
+          />
+          {/* Modal panel */}
+          <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-7xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
+            {/* Modal header */}
+            <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-3">
+              <h3 className="text-sm font-semibold text-[var(--color-text)]">
+                Strategy & Learnings — {agent.name}
+              </h3>
+              <button
+                onClick={() => setShowStrategyModal(false)}
+                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {/* Modal content */}
+            <div className="flex-1 overflow-y-auto p-6">
+              <div className="grid h-full grid-cols-1 gap-6 lg:grid-cols-2">
+                <MarkdownEditor
+                  slug={agent.slug}
+                  label="Strategy"
+                  sublabel="agent.md"
+                  content={agent.agent_md}
+                  mutationFn={api.updateAgentMd}
+                />
+                <MarkdownEditor
+                  slug={agent.slug}
+                  label="Learnings"
+                  sublabel="persists across sessions"
+                  content={agent.learnings}
+                  mutationFn={api.updateAgentLearnings}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Routines ReportBrowser (full-screen overlay with agent filter) */}
+      {showRoutinesBrowser && (
         <ReportBrowser
-          initialSource={`${slug}/`}
-          instances={agentInstances}
-          onClose={() => setShowReportBrowser(false)}
+          initialSourceTypeFilter={agent.slug}
+          instances={routineInstances}
+          onClose={() => setShowRoutinesBrowser(false)}
         />
       )}
 
       {/* Session Reviewer Overlay */}
-      {reviewerOpen && agent.sessions.length > 0 && (
+      {reviewerOpen && (agent.sessions.length > 0 || agent.experiments.length > 0) && (
         <SessionReviewer
           slug={slug!}
           agentName={agent.name}
           sessions={agent.sessions}
+          experiments={agent.experiments}
           initialSessionNum={resolvedReviewerSession}
+          initialKind={reviewerKind}
           serverName={serverName}
           controllerIds={controllerIds}
           allAgents={allAgents}

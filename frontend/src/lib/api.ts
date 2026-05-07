@@ -390,6 +390,8 @@ export interface RoutineFieldInfo {
   type: string;
   default: unknown;
   description: string;
+  widget?: "select";
+  options_from?: string;
 }
 
 export interface RoutineInfo {
@@ -496,6 +498,9 @@ export interface ReportGroup {
 export interface GatewayStatus {
   running: boolean;
   info: Record<string, unknown> | null;
+  image?: string;
+  created_at?: string;
+  container_status?: string;
 }
 
 export interface CredentialInfo {
@@ -618,6 +623,18 @@ export const api = {
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/stop`,
       { method: "POST" },
+    ),
+
+  stopControllers: (server: string, botName: string, controllerNames: string[]) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/stop`,
+      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
+    ),
+
+  startControllers: (server: string, botName: string, controllerNames: string[]) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/start`,
+      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
     ),
 
   getExecutors: (
@@ -941,6 +958,11 @@ export const api = {
       `/api/v1/routines/${encodeURIComponent(name)}/reports`,
     ),
 
+  getRoutineFieldOptions: (source: string, server: string) =>
+    apiFetch<{ options: string[] }>(
+      `/api/v1/routines/options/${encodeURIComponent(source)}?server=${encodeURIComponent(server)}`,
+    ),
+
   // ── Agent Routines & Reports ──
 
   getAgentRoutines: (slug: string) =>
@@ -993,6 +1015,17 @@ export const api = {
     apiFetch<{ restarted: boolean }>(`/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`, {
       method: "POST",
     }),
+
+  pullGatewayImage: (server: string, data: { image: string }) =>
+    apiFetch<{ pulled: boolean; image: string }>(`/api/v1/settings/gateway/pull?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getGatewayPullStatus: (server: string) =>
+    apiFetch<{ pull_operations: Record<string, { status: string; progress: string; duration_seconds: number; started_at: number }>; total_operations: number }>(
+      `/api/v1/settings/gateway/pull-status?server=${encodeURIComponent(server)}`,
+    ),
 
   getGatewayLogs: (server: string) =>
     apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),

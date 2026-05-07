@@ -19,12 +19,15 @@ interface GridChartProps {
   limitPrice: number;
   side: 1 | 2;
   minSpread: number;
+  totalAmountQuote?: number;
+  minOrderAmountQuote?: number;
   activePickField: PickField;
   onPriceSet: (field: "start" | "end" | "limit", price: number) => void;
   pricePrecision?: number;
   extraLines?: ExtraLine[];
   executorOverlays?: ExecutorOverlay[];
   positions?: ConsolidatedPosition[];
+  selectedExecutorId?: string | null;
 }
 
 function getChartColors() {
@@ -49,12 +52,15 @@ export function GridChart({
   limitPrice,
   side,
   minSpread,
+  totalAmountQuote,
+  minOrderAmountQuote,
   activePickField,
   onPriceSet,
   pricePrecision,
   extraLines,
   executorOverlays,
   positions,
+  selectedExecutorId,
 }: GridChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
@@ -394,29 +400,30 @@ export function GridChart({
     }
     extraLinesRef.current = [];
 
-    // Grid level preview lines
-    if (startPrice > 0 && endPrice > 0 && minSpread > 0 && startPrice < endPrice) {
-      const range = endPrice - startPrice;
-      const stepSize = startPrice * minSpread;
-      if (stepSize > 0) {
-        const numLevels = Math.floor(range / stepSize);
-        if (numLevels >= 2 && numLevels <= 200) {
-          const maxDraw = Math.min(numLevels, 50);
-          const drawStep = numLevels > maxDraw ? numLevels / maxDraw : 1;
-          for (let idx = 0; idx < maxDraw; idx++) {
-            const i = Math.round((idx + 1) * drawStep);
-            const levelPrice = startPrice + stepSize * i;
-            if (levelPrice >= endPrice) break;
-            const gl = series.createPriceLine({
-              price: levelPrice,
-              color: "rgba(34, 197, 94, 0.15)",
-              lineWidth: 1,
-              lineStyle: mod.LineStyle.Dotted,
-              axisLabelVisible: false,
-              title: "",
-            });
-            gridLinesRef.current.push(gl);
-          }
+    // Grid level preview lines (mirrors _generate_grid_levels logic)
+    if (startPrice > 0 && endPrice > 0 && startPrice < endPrice) {
+      const range = (endPrice - startPrice) / startPrice;
+      const levelsBySpread = minSpread > 0 ? Math.floor(range / minSpread) : Infinity;
+      const levelsByAmount = (totalAmountQuote && minOrderAmountQuote && minOrderAmountQuote > 0)
+        ? Math.floor(totalAmountQuote / minOrderAmountQuote)
+        : Infinity;
+      const numLevels = Math.max(1, Math.min(levelsBySpread, levelsByAmount));
+      if (numLevels >= 2 && numLevels <= 200) {
+        const maxDraw = Math.min(numLevels, 50);
+        const drawStep = numLevels > maxDraw ? numLevels / maxDraw : 1;
+        for (let idx = 0; idx < maxDraw; idx++) {
+          const i = Math.round(idx * drawStep);
+          const levelPrice = startPrice + (endPrice - startPrice) * (i / (numLevels - 1));
+          if (levelPrice <= startPrice || levelPrice >= endPrice) continue;
+          const gl = series.createPriceLine({
+            price: levelPrice,
+            color: "rgba(34, 197, 94, 0.15)",
+            lineWidth: 1,
+            lineStyle: mod.LineStyle.Dotted,
+            axisLabelVisible: false,
+            title: "",
+          });
+          gridLinesRef.current.push(gl);
         }
       }
     }
@@ -441,7 +448,7 @@ export function GridChart({
         extraLinesRef.current.push(pl);
       }
     }
-  }, [startPrice, endPrice, limitPrice, side, minSpread, activePickField, extraLines]);
+  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines]);
 
   // ── Executor overlays ──
   useEffect(() => {
@@ -464,14 +471,29 @@ export function GridChart({
 
     if (!executorOverlays?.length) return;
 
+    const hasSelection = !!selectedExecutorId;
     const isMulti = executorOverlays.length > 1;
 
     executorOverlays.forEach((overlay, idx) => {
-      const color = isMulti ? getExecutorColor(idx, overlay.pnl) : undefined;
+      const isSelectedOverlay = hasSelection && overlay.executorId === selectedExecutorId;
+      const isDimmed = hasSelection && !isSelectedOverlay;
+      // When selected: use bright color and thicker lines; when dimmed: reduce opacity
+      const baseColor = isMulti ? getExecutorColor(idx, overlay.pnl) : undefined;
+      const dimAlpha = 0.2;
+
+      function applyDim(c: string): string {
+        if (!isDimmed) return c;
+        // Add alpha to hex colors
+        if (c.startsWith("#") && c.length === 7) return c + "33";
+        if (c.startsWith("#") && c.length === 4) return c + "3";
+        if (c.startsWith("rgba")) return c.replace(/[\d.]+\)$/, `${dimAlpha})`);
+        return c;
+      }
 
       const box = overlay.gridBox;
       if (box) {
-        const boxColor = color ?? box.color;
+        const boxColor = applyDim(baseColor ?? box.color);
+        const lineW = (isSelectedOverlay ? 3 : 2) as import("lightweight-charts").LineWidth;
         const t1 = box.startTime > 1e12 ? Math.floor(box.startTime / 1000) : box.startTime;
         const t2 = box.endTime > 1e12 ? Math.floor(box.endTime / 1000) : box.endTime;
         type TS = import("lightweight-charts").UTCTimestamp;
@@ -479,7 +501,7 @@ export function GridChart({
         const span = t2 - t1;
         if (span < 4) {
           const seg = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 2,
+            color: boxColor, lineWidth: lineW,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           seg.setData([
@@ -492,7 +514,7 @@ export function GridChart({
 
         try {
           const top = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 2,
+            color: boxColor, lineWidth: lineW,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           top.setData([
@@ -502,7 +524,7 @@ export function GridChart({
           overlaySeriesRef.current.push(top);
 
           const bottom = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
+            color: boxColor, lineWidth: lineW, lineStyle: mod.LineStyle.Dashed,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           bottom.setData([
@@ -533,7 +555,7 @@ export function GridChart({
 
           if (box.limitPrice) {
             const limit = chart.addSeries(mod.LineSeries, {
-              color: "#ef4444", lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
+              color: applyDim("#ef4444"), lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
               priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
             });
             limit.setData([
@@ -549,15 +571,16 @@ export function GridChart({
       const seg = overlay.segment;
       if (!seg) return;
 
-      const segColor = color ?? seg.color;
+      const segColor = applyDim(baseColor ?? seg.color);
       const entryT = seg.entryTime > 1e12 ? Math.floor(seg.entryTime / 1000) : seg.entryTime;
       const exitT = seg.exitTime > 1e12 ? Math.floor(seg.exitTime / 1000) : seg.exitTime;
 
       const isOrderActive = overlay.type === "order" && (overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active");
       const lineStyle = isOrderActive ? mod.LineStyle.Solid : mod.LineStyle.Dashed;
+      const lineW = (isSelectedOverlay ? 3 : 2) as import("lightweight-charts").LineWidth;
 
       const lineSeries = chart.addSeries(mod.LineSeries, {
-        color: segColor, lineWidth: 2, lineStyle,
+        color: segColor, lineWidth: lineW, lineStyle,
         priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
       });
       lineSeries.setData([
@@ -567,7 +590,7 @@ export function GridChart({
       overlaySeriesRef.current.push(lineSeries);
     });
 
-    // Full-width price lines for active executors
+    // Full-width price lines for active or selected executor
     if (series && executorOverlays?.length) {
       const styleMap: Record<string, number> = {
         solid: mod.LineStyle.Solid,
@@ -576,7 +599,9 @@ export function GridChart({
       };
       for (const overlay of executorOverlays) {
         const isRunning = overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active";
-        if (!isRunning) continue;
+        const isSelectedOverlay = overlay.executorId === selectedExecutorId;
+        // Show price lines for active executors, and always for the selected one
+        if (!isRunning && !isSelectedOverlay) continue;
         for (const pl of overlay.priceLines) {
           if (pl.price <= 0) continue;
           const priceLine = series.createPriceLine({
@@ -591,7 +616,24 @@ export function GridChart({
         }
       }
     }
-  }, [executorOverlays]);
+  }, [executorOverlays, selectedExecutorId]);
+
+  // ── Zoom to selected executor ──
+  useEffect(() => {
+    if (!selectedExecutorId || !chartRef.current || !executorOverlays?.length) return;
+    const overlay = executorOverlays.find((o) => o.executorId === selectedExecutorId);
+    if (!overlay) return;
+
+    const toSec = (ts: number) => (ts > 1e12 ? Math.floor(ts / 1000) : ts);
+    const start = toSec(overlay.timeRange.start);
+    const end = toSec(overlay.timeRange.end);
+    const padding = Math.max((end - start) * 0.3, 300);
+
+    chartRef.current.timeScale().setVisibleRange({
+      from: (start - padding) as import("lightweight-charts").UTCTimestamp,
+      to: (end + padding) as import("lightweight-charts").UTCTimestamp,
+    });
+  }, [selectedExecutorId, executorOverlays]);
 
   // Keep overlaysRef in sync for tooltip
   useEffect(() => {

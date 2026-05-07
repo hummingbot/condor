@@ -202,8 +202,7 @@ export function PairSelector({
                           : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
                     }`}
                   >
-                    <span className="font-medium">{base}</span>
-                    <span className="text-[var(--color-text-muted)]">-{quote}</span>
+                    <span><span className="font-medium">{base}</span><span className="text-[var(--color-text-muted)]">-{quote}</span></span>
                   </button>
                 );
               })

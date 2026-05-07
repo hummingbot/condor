@@ -199,10 +199,28 @@ export function CreateExecutor() {
   const pair = gridState.pair;
   const isSpot = isSpotConnector(connector);
 
+  // Apply connector/pair from URL params (e.g. from Executors detail panel)
+  useEffect(() => {
+    const urlConnector = searchParams.get("connector");
+    const urlPair = searchParams.get("pair");
+    if (urlConnector) {
+      gridDispatch({ type: "SET_CONNECTOR", value: urlConnector });
+      searchParams.delete("connector");
+    }
+    if (urlPair) {
+      gridDispatch({ type: "SET_PAIR", value: urlPair });
+      searchParams.delete("pair");
+    }
+    if (urlConnector || urlPair) {
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const [successId, setSuccessId] = useState<string | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
+  const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
 
   const startHDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -257,11 +275,12 @@ export function CreateExecutor() {
 
   const rulesData = useTradingRules(server ?? "", connector);
 
-  // Persist last-used connector/pair to localStorage
+  // Persist last-used connector/pair to localStorage & clear executor selection
   useEffect(() => {
     try {
       localStorage.setItem(LAST_MARKET_KEY, JSON.stringify({ connector, pair }));
     } catch { /* ok */ }
+    setSelectedExecutorId(null);
   }, [connector, pair]);
 
   // Sync connector to filtered list
@@ -530,6 +549,7 @@ export function CreateExecutor() {
               extraLines={chartProps.extraLines}
               executorOverlays={mainOverlays}
               positions={mainPositions}
+              selectedExecutorId={selectedExecutorId}
             />
           </div>
           {/* Horizontal resize handle */}
@@ -544,6 +564,11 @@ export function CreateExecutor() {
               executors={mainExecutors}
               positions={mainPositions}
               isLoadingPositions={isLoadingPositions}
+              connector={connector}
+              pair={pair}
+              isSpot={isSpot}
+              selectedExecutorId={selectedExecutorId}
+              onExecutorSelect={(ex) => setSelectedExecutorId(ex?.id ?? null)}
             />
           </div>
         </div>

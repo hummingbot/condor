@@ -1,13 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
+  Download,
   Loader2,
   Play,
   RefreshCw,
   Square,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
@@ -17,16 +19,68 @@ const IMAGE_OPTIONS = [
   { label: "Development", value: "hummingbot/gateway:development" },
 ];
 
+function formatRelativeTime(dateStr: string): string {
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) return dateStr;
+  const now = Date.now();
+  const diffMs = now - date.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return "just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays === 1) return "1 day ago";
+  return `${diffDays} days ago`;
+}
+
+function formatDuration(sec: number): string {
+  if (sec < 60) return `${Math.floor(sec)}s`;
+  return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
+}
+
 export function GatewaySettings() {
   const { server } = useServer();
   const qc = useQueryClient();
   const [showLogs, setShowLogs] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
+  const [showPull, setShowPull] = useState(false);
   const [image, setImage] = useState(IMAGE_OPTIONS[0].value);
   const [customImage, setCustomImage] = useState("");
+  const [pullImage, setPullImage] = useState(IMAGE_OPTIONS[0].value);
+  const [pullCustomImage, setPullCustomImage] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const [port, setPort] = useState(15888);
   const [confirmStop, setConfirmStop] = useState(false);
+  const [isPulling, setIsPulling] = useState(false);
+  const [pullDone, setPullDone] = useState(false);
+
+  // Poll pull status while pulling
+  const { data: pullStatus } = useQuery({
+    queryKey: ["gateway-pull-status", server],
+    queryFn: () => api.getGatewayPullStatus(server!),
+    enabled: !!server && isPulling,
+    refetchInterval: 1500,
+  });
+
+  // Derive active pull operation from status
+  const resolvedPullImage = pullImage === "custom" ? pullCustomImage : pullImage;
+  const pullImageName = resolvedPullImage.split(":")[0];
+  const activePull = pullStatus?.pull_operations?.[pullImageName];
+
+  // Detect when pull completes
+  useEffect(() => {
+    if (!isPulling || !activePull) return;
+    if (activePull.status === "completed" || activePull.status === "failed") {
+      setIsPulling(false);
+      if (activePull.status === "completed") {
+        setPullDone(true);
+        qc.invalidateQueries({ queryKey: ["gateway-status", server] });
+        setTimeout(() => setPullDone(false), 4000);
+      }
+    }
+  }, [activePull?.status, isPulling, server, qc]);
 
   const { data: status, isLoading } = useQuery({
     queryKey: ["gateway-status", server],
@@ -64,6 +118,14 @@ export function GatewaySettings() {
     onSuccess: invalidate,
   });
 
+  const pullMut = useMutation({
+    mutationFn: () =>
+      api.pullGatewayImage(server!, { image: resolvedPullImage }),
+    onSuccess: () => {
+      setIsPulling(true);
+    },
+  });
+
   if (!server) {
     return (
       <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
@@ -73,6 +135,7 @@ export function GatewaySettings() {
   }
 
   const running = status?.running ?? false;
+  const pulling = pullMut.isPending || isPulling;
 
   return (
     <div className="space-y-4">
@@ -145,6 +208,141 @@ export function GatewaySettings() {
             )}
           </div>
         </div>
+
+        {/* Container details */}
+        {running && (status?.image || status?.created_at) && (
+          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[var(--color-border)] pt-3">
+            {status.image && (
+              <div className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+                <span className="text-[var(--color-text-muted)]/60">Image:</span>
+                <code className="rounded bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-[var(--color-text)]">
+                  {status.image}
+                </code>
+              </div>
+            )}
+            {status.created_at && (
+              <div className="text-xs text-[var(--color-text-muted)]">
+                <span className="text-[var(--color-text-muted)]/60">Created: </span>
+                {formatRelativeTime(status.created_at)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Pull Image */}
+      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+        <button
+          onClick={() => setShowPull(!showPull)}
+          className="flex w-full items-center justify-between p-3 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+        >
+          <div className="flex items-center gap-2">
+            <Download className="h-4 w-4" />
+            <span className="font-medium">Pull Image</span>
+            {pulling && (
+              <span className="flex items-center gap-1 text-xs text-[var(--color-primary)]">
+                <Loader2 className="h-3 w-3 animate-spin" /> pulling...
+              </span>
+            )}
+          </div>
+          {showPull ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+        </button>
+        {showPull && (
+          <div className="border-t border-[var(--color-border)] p-4 space-y-3">
+            <div className="flex flex-wrap items-end gap-2">
+              {IMAGE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setPullImage(opt.value)}
+                  disabled={pulling}
+                  className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
+                    pullImage === opt.value
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                      : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]"
+                  } disabled:opacity-50`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+              <button
+                onClick={() => setPullImage("custom")}
+                disabled={pulling}
+                className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
+                  pullImage === "custom"
+                    ? "border-[var(--color-primary)] bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                    : "border-[var(--color-border)] text-[var(--color-text-muted)] hover:border-[var(--color-border-hover)]"
+                } disabled:opacity-50`}
+              >
+                Custom
+              </button>
+              {pullImage !== "custom" && (
+                <button
+                  onClick={() => pullMut.mutate()}
+                  disabled={pulling}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                >
+                  {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                  Pull
+                </button>
+              )}
+            </div>
+            {pullImage === "custom" && (
+              <div className="flex items-center gap-2">
+                <input
+                  value={pullCustomImage}
+                  onChange={(e) => setPullCustomImage(e.target.value)}
+                  disabled={pulling}
+                  className="flex-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
+                  placeholder="org/image:tag"
+                />
+                <button
+                  onClick={() => pullMut.mutate()}
+                  disabled={pulling || !pullCustomImage}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                >
+                  {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                  Pull
+                </button>
+              </div>
+            )}
+
+            {/* Pull progress */}
+            {isPulling && activePull && (
+              <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5 text-[var(--color-primary)]">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Pulling {resolvedPullImage}
+                  </span>
+                  <span className="text-[var(--color-text-muted)]">
+                    {formatDuration(activePull.duration_seconds)}
+                  </span>
+                </div>
+                <p className="text-xs text-[var(--color-text-muted)] font-mono truncate">
+                  {activePull.progress}
+                </p>
+              </div>
+            )}
+            {isPulling && !activePull && (
+              <div className="flex items-center gap-1.5 text-xs text-[var(--color-primary)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Starting pull...
+              </div>
+            )}
+
+            {pullDone && (
+              <p className="flex items-center gap-1 text-xs text-emerald-400">
+                <Check className="h-3 w-3" /> Image pulled successfully.
+              </p>
+            )}
+            {!isPulling && pullMut.error && (
+              <p className="text-xs text-[var(--color-red)]">{pullMut.error.message}</p>
+            )}
+            {!isPulling && activePull?.status === "failed" && (
+              <p className="text-xs text-[var(--color-red)]">Pull failed: {activePull.progress}</p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Deploy form */}

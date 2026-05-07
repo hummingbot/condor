@@ -410,7 +410,6 @@ export function ExecutorTable({
               <SortHeader label="PnL%" sortKey="net_pnl_pct" currentKey={sortKey} currentDir={sortDir} onSort={onSort} align="right" />
               <SortHeader label="Volume" sortKey="volume" currentKey={sortKey} currentDir={sortDir} onSort={onSort} align="right" />
               <SortHeader label="Fees" sortKey="cum_fees_quote" currentKey={sortKey} currentDir={sortDir} onSort={onSort} align="right" />
-              <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={onSort} align="center" />
               <SortHeader label="Close Type" sortKey="close_type" currentKey={sortKey} currentDir={sortDir} onSort={onSort} />
               <SortHeader label="Age" sortKey="timestamp" currentKey={sortKey} currentDir={sortDir} onSort={onSort} align="right" />
               <th className="px-3 py-3 w-10" />
@@ -477,11 +476,6 @@ export function ExecutorTable({
                   <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
                     {ex.cum_fees_quote ? formatUsd(ex.cum_fees_quote) : "\u2014"}
                   </td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex items-center gap-1.5 justify-center">
-                      <StatusDot status={ex.status} />
-                    </div>
-                  </td>
                   <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
                     {ex.close_type || "\u2014"}
                   </td>
@@ -528,6 +522,7 @@ export function DetailPanel({
   onStop: (id: string) => void;
   stopping: boolean;
 }) {
+  const navigate = useNavigate();
   const [panelWidth, setPanelWidth] = useState(480);
   const isDragging = useRef(false);
 
@@ -588,6 +583,13 @@ export function DetailPanel({
             {executor.id.slice(0, 12)}\u2026
           </h2>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => navigate(`/trade?connector=${encodeURIComponent(executor.connector)}&pair=${encodeURIComponent(executor.trading_pair)}`)}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-surface)] border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+            >
+              <TrendingUp className="h-3 w-3" />
+              Trade
+            </button>
             {isExecutorActive(executor.status) && (
               <button
                 onClick={() => onStop(executor.id)}

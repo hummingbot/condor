@@ -2,7 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight,
   Clock,
+  FileText,
+  FlaskConical,
   Save,
+  ScrollText,
   Zap,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
@@ -141,7 +144,17 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 // ── Performance Panel ──
 
-export function PerformancePanel({ slug, onSessionClick }: { slug: string; onSessionClick?: (sessionNum: number) => void }) {
+export function PerformancePanel({
+  slug,
+  onSessionClick,
+  onOpenStrategy,
+  onOpenRoutines,
+}: {
+  slug: string;
+  onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
+  onOpenStrategy?: () => void;
+  onOpenRoutines?: () => void;
+}) {
   const { data } = useQuery({
     queryKey: ["agent-performance", slug],
     queryFn: () => api.getAgentPerformance(slug),
@@ -173,43 +186,69 @@ export function PerformancePanel({ slug, onSessionClick }: { slug: string; onSes
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <Zap className="h-3.5 w-3.5" /> Performance
         </h3>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-            <span className={`text-lg font-mono font-semibold ${pnlColor}`}>
-              ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
-            </span>
+        <div className="flex items-center gap-4">
+          <div className="grid flex-1 grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
+              <span className={`text-lg font-mono font-semibold ${pnlColor}`}>
+                ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+              </span>
+            </div>
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Realized</span>
+              <span className="text-lg font-mono text-[var(--color-text)]">${realized.toFixed(2)}</span>
+            </div>
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Unrealized</span>
+              <span className="text-lg font-mono text-[var(--color-text)]">${unrealized.toFixed(2)}</span>
+            </div>
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
+              <span className="text-lg font-mono text-[var(--color-text)]">
+                ${volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </span>
+            </div>
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
+              <span className="text-lg font-mono text-[var(--color-text)]">${fees.toFixed(2)}</span>
+            </div>
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Win Rate</span>
+              <span className="text-lg font-mono text-[var(--color-text)]">{winRate.toFixed(0)}%</span>
+            </div>
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Trades</span>
+              <span className="text-lg font-mono text-[var(--color-text)]">{trades}</span>
+            </div>
+            <div>
+              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
+              <span className="text-lg font-mono text-[var(--color-text)]">{openPos}</span>
+            </div>
           </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Realized</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">${realized.toFixed(2)}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Unrealized</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">${unrealized.toFixed(2)}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">
-              ${volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">${fees.toFixed(2)}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Win Rate</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">{winRate.toFixed(0)}%</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Trades</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">{trades}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">{openPos}</span>
-          </div>
+          {(onOpenStrategy || onOpenRoutines) && (
+            <div className="flex shrink-0 gap-2">
+              {onOpenStrategy && (
+                <button
+                  onClick={onOpenStrategy}
+                  className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+                  title="Strategy & Learnings"
+                >
+                  <FileText className="h-4.5 w-4.5" />
+                  <span className="text-[8px] font-semibold uppercase tracking-wider">Strategy</span>
+                </button>
+              )}
+              {onOpenRoutines && (
+                <button
+                  onClick={onOpenRoutines}
+                  className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+                  title="Routines & Reports"
+                >
+                  <ScrollText className="h-4.5 w-4.5" />
+                  <span className="text-[8px] font-semibold uppercase tracking-wider">Routines</span>
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -218,12 +257,18 @@ export function PerformancePanel({ slug, onSessionClick }: { slug: string; onSes
         <AgentPnlChart data={pnlData} height={180} title="PnL Equity Curve" />
       )}
 
-      {/* Sessions table */}
+      {/* Sessions & Experiments table */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <Clock className="h-3.5 w-3.5" /> Sessions ({sessions.length})
+          {allRows.filter((s) => s.kind === "experiment").length > 0 && (
+            <span className="ml-1 flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
+              <FlaskConical className="h-2.5 w-2.5" />
+              {allRows.filter((s) => s.kind === "experiment").length} experiments
+            </span>
+          )}
         </h3>
-        {sessions.length === 0 ? (
+        {allRows.length === 0 ? (
           <p className="text-xs text-[var(--color-text-muted)]">No sessions yet.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -243,19 +288,29 @@ export function PerformancePanel({ slug, onSessionClick }: { slug: string; onSes
                 </tr>
               </thead>
               <tbody>
-                {sessions
+                {allRows
                   .slice()
                   .sort((a, b) => (b.kind === a.kind ? b.session_num - a.session_num : a.kind === "experiment" ? 1 : -1))
                   .map((s) => {
                     const pnlCol = s.total_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+                    const isExperiment = s.kind === "experiment";
                     return (
                       <tr
                         key={s.agent_id}
-                        onClick={() => onSessionClick?.(s.session_num)}
+                        onClick={() => onSessionClick?.(s.session_num, s.kind)}
                         className={`border-t border-[var(--color-border)]/40 font-mono ${onSessionClick ? "cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]" : ""}`}
                       >
                         <td className="px-2 py-1.5 text-[var(--color-text)]">{s.session_num}</td>
-                        <td className="px-2 py-1.5 text-[var(--color-text-muted)]">{s.kind}</td>
+                        <td className="px-2 py-1.5">
+                          {isExperiment ? (
+                            <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-400">
+                              <FlaskConical className="h-2.5 w-2.5" />
+                              exp
+                            </span>
+                          ) : (
+                            <span className="text-[var(--color-text-muted)]">{s.kind}</span>
+                          )}
+                        </td>
                         <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : "text-[var(--color-text-muted)]"}`}>
                           {s.status || "—"}
                         </td>

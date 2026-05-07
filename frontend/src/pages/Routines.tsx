@@ -11,6 +11,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useServer } from "@/hooks/useServer";
@@ -21,8 +22,10 @@ type SourceTypeFilter = "all" | "routine" | "agent" | string;
 export function Routines() {
   const { server } = useServer();
   const qc = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const agentParam = searchParams.get("agent");
   const [browserSource, setBrowserSource] = useState<string | null>(null);
-  const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>("all");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>(agentParam || "all");
   const [search, setSearch] = useState("");
 
   const { data: routines = [], isLoading: loadingRoutines } = useQuery({
@@ -345,6 +348,7 @@ export function Routines() {
       {browserSource !== null && (
         <ReportBrowser
           initialSource={browserSource}
+          initialSourceTypeFilter={sourceTypeFilter}
           instances={instances}
           onClose={() => setBrowserSource(null)}
         />

@@ -8,9 +8,12 @@ import {
   Clock,
   Loader2,
   MessageSquare,
+  Moon,
   Play,
+  PlayCircle,
   Settings2,
   Square,
+  Sun,
   Trash2,
   X,
   Zap,
@@ -25,6 +28,7 @@ import { ScheduleDropdown } from "./ScheduleDropdown";
 
 interface ReportBrowserProps {
   initialSource?: string;
+  initialSourceTypeFilter?: string;
   instances: RoutineInstance[];
   onClose: () => void;
 }
@@ -32,14 +36,17 @@ interface ReportBrowserProps {
 export function ReportBrowser({
   instances,
   initialSource,
+  initialSourceTypeFilter,
   onClose,
 }: ReportBrowserProps) {
   const { server } = useServer();
   const qc = useQueryClient();
-  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>("all");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
   const [isCompact, setIsCompact] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
+  const [reportTheme, setReportTheme] = useState<"dark" | "light">("dark");
   const sidebarRef = useRef<HTMLDivElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
 
   // Fetch all routines for the sidebar
   const { data: routines = [] } = useQuery({
@@ -125,12 +132,32 @@ export function ReportBrowser({
     setShowConfigPanel(false);
   }, [activeSource, activeRoutine, instances]);
 
-  const runMutation = useMutation({
-    mutationFn: () => api.runRoutine(server!, activeSource, configValues),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+  // Track running instance to poll for completion
+  const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
+
+  const { data: polledInstance } = useQuery({
+    queryKey: ["routine-instance", pollingInstanceId],
+    queryFn: () => api.getRoutineInstance(pollingInstanceId!),
+    enabled: !!pollingInstanceId,
+    refetchInterval: 2000,
+  });
+
+  // When polled instance completes, refresh reports
+  useEffect(() => {
+    if (polledInstance && polledInstance.status !== "running") {
+      setPollingInstanceId(null);
       qc.invalidateQueries({ queryKey: ["routine-reports", activeSource] });
       qc.invalidateQueries({ queryKey: ["reports-grouped"] });
+      qc.invalidateQueries({ queryKey: ["routines"] });
+      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+    }
+  }, [polledInstance, activeSource, qc]);
+
+  const runMutation = useMutation({
+    mutationFn: () => api.runRoutine(server!, activeSource, configValues),
+    onSuccess: (data) => {
+      setPollingInstanceId(data.instance_id);
+      qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
     },
   });
@@ -162,6 +189,45 @@ export function ReportBrowser({
       }
     },
   });
+
+  // Run All state
+  const [runAllProgress, setRunAllProgress] = useState<{ current: number; total: number } | null>(null);
+
+  const runAll = useCallback(async () => {
+    if (!server || filteredRoutines.length === 0) return;
+    const toRun = filteredRoutines;
+    setRunAllProgress({ current: 0, total: toRun.length });
+    for (let i = 0; i < toRun.length; i++) {
+      setRunAllProgress({ current: i + 1, total: toRun.length });
+      const routine = toRun[i];
+      const defaults: Record<string, unknown> = {};
+      for (const [key, field] of Object.entries(routine.fields)) {
+        defaults[key] = field.default;
+      }
+      try {
+        await api.runRoutine(server, routine.name, defaults);
+      } catch {
+        // continue with remaining routines
+      }
+    }
+    setRunAllProgress(null);
+    qc.invalidateQueries({ queryKey: ["routine-reports"] });
+    qc.invalidateQueries({ queryKey: ["reports-grouped"] });
+    qc.invalidateQueries({ queryKey: ["routines"] });
+    qc.invalidateQueries({ queryKey: ["routine-instances"] });
+  }, [server, filteredRoutines, qc]);
+
+  // Sync theme to iframe when it changes or report changes
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const sendTheme = () => {
+      iframe.contentWindow?.postMessage({ type: "set-theme", theme: reportTheme }, "*");
+    };
+    iframe.addEventListener("load", sendTheme);
+    sendTheme();
+    return () => iframe.removeEventListener("load", sendTheme);
+  }, [reportTheme, selectedReport]);
 
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -476,6 +542,26 @@ export function ReportBrowser({
                     disabled={scheduleMutation.isPending || !server}
                   />
                 )}
+                {filteredRoutines.length > 1 && (
+                  <button
+                    onClick={runAll}
+                    disabled={!!runAllProgress || !server}
+                    className="flex items-center gap-1 rounded bg-[var(--color-surface-hover)] px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text)] transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
+                    title="Run all filtered routines with default configs"
+                  >
+                    {runAllProgress ? (
+                      <>
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        {runAllProgress.current}/{runAllProgress.total}
+                      </>
+                    ) : (
+                      <>
+                        <PlayCircle className="h-3 w-3" />
+                        Run All
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
             )}
             {/* Report navigation */}
@@ -530,6 +616,14 @@ export function ReportBrowser({
                 </button>
               )
             )}
+            {/* Report theme toggle */}
+            <button
+              onClick={() => setReportTheme((t) => (t === "dark" ? "light" : "dark"))}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title={`Switch to ${reportTheme === "dark" ? "light" : "dark"} report theme`}
+            >
+              {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
             {/* Agent chat toggle */}
             <button
               onClick={() => {
@@ -659,6 +753,7 @@ export function ReportBrowser({
             </div>
           ) : (
             <iframe
+              ref={iframeRef}
               src={`/reports/${selectedReport.filename}`}
               className="h-full w-full border-0"
               title={selectedReport.title}
