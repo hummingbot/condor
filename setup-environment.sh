@@ -472,19 +472,19 @@ if [ -n "${DEPLOY_HUMMINGBOT_API:-}" ]; then
 else
     msg_info "Condor connects to Hummingbot Backend API for trading."
     echo ""
-    prompt_visible "Deploy Hummingbot API locally with Docker? [Y/n]" "Y" "deploy_hb"
+    prompt_visible "Configure and launch local Hummingbot API with Docker? [Y/n]" "Y" "deploy_hb"
 
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
         echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
         msg_ok "Skipped Hummingbot API deployment"
     else
-        # Check Docker
+        # Check Docker (only for hummingbot-api launch)
         if ! command_exists docker; then
-            msg_warn "Docker not found. Config will be saved but deployment skipped."
+            msg_warn "Docker not found. API config will be saved but launch skipped."
             msg_info "Install Docker: https://docs.docker.com/get-docker/"
             docker_available=false
         elif ! docker info >/dev/null 2>&1; then
-            msg_warn "Docker is not running. Config will be saved but deployment skipped."
+            msg_warn "Docker is not running. API config will be saved but launch skipped."
             docker_available=false
         else
             docker_available=true
@@ -530,7 +530,7 @@ BOTS_PATH=${hb_api_abs_path}
 HBEOF
             msg_ok "Hummingbot API .env configured"
 
-            # Deploy if Docker is available
+            # Launch hummingbot-api via Docker if available
             if [ "$docker_available" = true ] && [ -f "$HB_API_DIR/docker-compose.yml" ]; then
                 msg_info "Starting Hummingbot API stack..."
                 if (cd "$HB_API_DIR" && docker compose up -d 2>/dev/null); then
@@ -541,25 +541,24 @@ HBEOF
                     for i in $(seq 1 30); do
                         if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
                             msg_ok "Hummingbot API is healthy"
-                            hb_api_deployed=true
                             break
                         fi
                         sleep 2
                     done
-                    if [ "$hb_api_deployed" = false ]; then
+                    if ! curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
                         msg_warn "API not responding yet (may still be starting)"
                         msg_info "Check status: cd $HB_API_DIR && docker compose ps"
-                        hb_api_deployed=true  # Config is still valid
                     fi
                 else
                     msg_error "Failed to start Hummingbot API stack"
                     msg_info "Try manually: cd $HB_API_DIR && docker compose up -d"
-                    hb_api_deployed=true  # Config is still valid
                 fi
-            elif [ "$docker_available" = false ]; then
-                msg_info "Start it later: cd $HB_API_DIR && docker compose up -d"
-                hb_api_deployed=true  # Config is valid, just not running
+            else
+                msg_info "Start API later: cd $HB_API_DIR && docker compose up -d"
             fi
+
+            msg_ok "Hummingbot API credentials saved"
+            hb_api_deployed=true
         fi
     fi
 fi
@@ -689,11 +688,9 @@ echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"
 echo -e "  ${BOLD}make run${RESET}          Run Condor locally (dev)"
-echo -e "  ${BOLD}make deploy${RESET}       Deploy Condor (Docker)"
 if [ "${hb_api_deployed:-}" = true ]; then
-echo -e "  ${BOLD}make deploy-full${RESET}  Deploy Condor + Hummingbot API (Docker)"
+echo -e "  ${BOLD}Hummingbot API${RESET}    Credentials configured in ../hummingbot-api/.env"
+echo -e "  ${BOLD}Start API${RESET}         cd ../hummingbot-api && docker compose up -d"
 fi
-echo -e "  ${BOLD}make stop${RESET}         Stop everything"
-echo -e "  ${BOLD}make status${RESET}       Show container status"
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo ""
