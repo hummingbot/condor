@@ -43,6 +43,7 @@ class ServerDataType(Enum):
     BOT_RUNS = "bot_runs"
     CANDLE_CONNECTORS = "candle_connectors"
     SERVER_STATUS = "server_status"
+    ALL_CONNECTORS = "all_connectors"
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120, stale_threshold=10),
     ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
     ServerDataType.SERVER_STATUS: DataTypeDefaults(interval=60, ttl=120, stale_threshold=15),
+    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
 }
 
 
@@ -519,6 +521,7 @@ class ServerDataService:
             ServerDataType.POSITIONS,
             ServerDataType.ACTIVE_ORDERS,
             ServerDataType.SERVER_STATUS,
+            ServerDataType.ALL_CONNECTORS,
         ]
         subscriber_id = "_auto"
 
@@ -804,6 +807,7 @@ def register_default_fetches() -> None:
         fetch_positions,
         fetch_active_orders,
         fetch_trading_rules,
+        fetch_connectors,
         fetch_available_cex_connectors,
         fetch_executors,
         fetch_bots_status,
@@ -825,6 +829,7 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.ACTIVE_ORDERS, fetch_active_orders)
     sds.register_fetch(ServerDataType.TRADING_RULES, fetch_trading_rules)
     sds.register_fetch(ServerDataType.CONNECTORS, fetch_available_cex_connectors)
+    sds.register_fetch(ServerDataType.ALL_CONNECTORS, fetch_connectors)
     sds.register_fetch(ServerDataType.BOTS_STATUS, fetch_bots_status)
     sds.register_fetch(ServerDataType.EXECUTORS, fetch_executors)
     sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)
