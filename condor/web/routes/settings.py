@@ -46,24 +46,28 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
     cm = get_config_manager()
     accessible = cm.list_accessible_servers(user.id)
 
-    async def _build(name: str, cfg: dict) -> ServerInfo:
+    from condor.server_data_service import ServerDataType, get_server_data_service
+    sds = get_server_data_service()
+
+    # Fetch status for all servers concurrently (uses SDS cache, instant if warm)
+    async def _get_status(name: str) -> dict:
+        result = await sds.get_or_fetch(name, ServerDataType.SERVER_STATUS)
+        return result if isinstance(result, dict) else {}
+
+    statuses = await asyncio.gather(*[_get_status(name) for name in accessible])
+
+    results = []
+    for (name, cfg), status in zip(accessible.items(), statuses):
         perm = cm.get_server_permission(user.id, name)
-        try:
-            status = await cm.check_server_status(name)
-            online = status.get("status") == "online"
-        except Exception:
-            online = False
-        return ServerInfo(
+        online = status.get("status") == "online"
+        results.append(ServerInfo(
             name=name,
             host=cfg.get("host", ""),
             port=cfg.get("port", 0),
             online=online,
             permission=perm.value if perm else "trader",
-        )
+        ))
 
-    results = await asyncio.gather(
-        *(_build(name, cfg) for name, cfg in accessible.items())
-    )
     return sorted(results, key=lambda s: (not s.online, s.name))
 
 
@@ -256,14 +260,23 @@ async def list_connectors(
     cm = get_config_manager()
     if not cm.has_server_access(user.id, server):
         raise HTTPException(status_code=403, detail="No access")
-    client = await _get_client(cm, server)
-    try:
-        connectors = await client.connectors.list_connectors()
-        if type:
-            connectors = [c for c in connectors if c.get("type", "").lower() == type.lower()]
-        return {"connectors": connectors}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    from condor.server_data_service import ServerDataType, get_server_data_service
+
+    sds = get_server_data_service()
+    raw = await sds.get_or_fetch(server, ServerDataType.ALL_CONNECTORS)
+    if raw is None:
+        raise HTTPException(status_code=502, detail="Cannot fetch connectors from server")
+
+    # API returns plain strings — filter out testnet/gateway connectors
+    names = [c for c in raw if isinstance(c, str) and "testnet" not in c.lower() and "sandbox" not in c.lower() and "/" not in c]
+    if type:
+        if type.lower() == "perpetual":
+            names = [c for c in names if "perpetual" in c.lower()]
+        else:
+            names = [c for c in names if "perpetual" not in c.lower()]
+    connectors = [{"name": c, "type": "perpetual" if "perpetual" in c.lower() else "spot"} for c in names]
+    return {"connectors": connectors}
 
 
 @router.get("/connectors/{name}/config-map")
@@ -299,6 +312,9 @@ async def add_credential(
             connector_name=req.connector_name,
             credentials=req.credentials,
         )
+        # Invalidate configured connectors cache
+        from condor.server_data_service import ServerDataType, get_server_data_service
+        get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
         return {"added": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -319,6 +335,9 @@ async def delete_credential(
             account_name="master_account",
             connector_name=connector,
         )
+        # Invalidate configured connectors cache
+        from condor.server_data_service import ServerDataType, get_server_data_service
+        get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
         return {"deleted": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
