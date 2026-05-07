@@ -17,8 +17,7 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     DEFAULT_MODE,
-    build_mode_context,
-    build_trading_context,
+    load_assistant,
     get_project_dir,
 )
 from .confirmation import resolve_confirmation
@@ -222,7 +221,7 @@ async def _handle_mode_start(
         )
 
         # Inject mode-specific context (auto-loaded from assistants/*.md)
-        extra_context = build_mode_context(mode)
+        extra_context = load_assistant(mode)
 
         if extra_context:
             try:
@@ -832,7 +831,7 @@ async def agent_message_handler(
             )
 
             # Inject mode-specific context (auto-loaded from assistants/*.md)
-            extra_context = build_mode_context(mode)
+            extra_context = load_assistant(mode)
 
             if extra_context:
                 try:

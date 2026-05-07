@@ -39,6 +39,7 @@ class AgentSession:
     client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False
+    pending_context: str | None = None  # Lazy context: injected on first prompt
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def prompt_stream(self, text: str):
@@ -48,6 +49,12 @@ class AgentSession:
         waiting forever when a previous prompt is stuck, and an overall
         wall-clock timeout (PROMPT_OVERALL_TIMEOUT) to kill runaway prompts.
         """
+        # Consume pending context on first prompt (lazy injection)
+        if self.pending_context:
+            ctx = self.pending_context
+            self.pending_context = None
+            text = f"{ctx}\n\n---\n\nUser message:\n{text}"
+
         # Acquire lock with timeout -- prevents infinite wait when previous prompt is stuck
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=PROMPT_LOCK_TIMEOUT)
@@ -87,6 +94,7 @@ async def get_or_create_session(
     user_data: dict | None = None,
     mode: str = "condor",
     platform: str = "telegram",
+    lazy_context: bool = False,
 ) -> AgentSession:
     """Get existing session or create a new one.
 
@@ -151,20 +159,25 @@ async def get_or_create_session(
     await client.start()
 
     try:
-        # Send initial context about server and permissions
+        # Build initial context about server and permissions
+        initial_context = ""
         if user_id:
             initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key, platform=platform)
-            if initial_context:
-                try:
-                    await client.prompt(initial_context)
-                except Exception:
-                    log.warning("Failed to send initial context for chat %s", chat_id)
+
+        if initial_context and not lazy_context:
+            # Eager: send context now (blocks until agent processes it)
+            try:
+                await client.prompt(initial_context)
+            except Exception:
+                log.warning("Failed to send initial context for chat %s", chat_id)
+            initial_context = ""  # Already sent
 
         session = AgentSession(
             chat_id=chat_id,
             agent_key=agent_key,
             client=client,
             mode=mode,
+            pending_context=initial_context or None,
         )
     except Exception:
         # Something failed after start -- stop client to prevent orphan subprocess
