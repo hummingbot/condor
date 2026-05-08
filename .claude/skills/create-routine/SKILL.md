@@ -1,11 +1,15 @@
 ---
 name: create-routine
-description: Create agent-local analysis routines with full hummingbot-api-client API reference. Use when creating or editing routines for trading agents.
+description: Create standalone Python routines for market analysis, monitoring, and data visualization. Use when the user asks to create or edit a routine in the routines/ folder.
 ---
 
 # Create Routine
 
-You are creating an agent-local routine for a Condor trading agent. Follow the template, rules, and API reference below exactly.
+You are creating a standalone routine for Condor — a Python script auto-discovered from `routines/`. Routines run via Telegram (`/routines`) or the web dashboard.
+
+**Two types of routines exist — pick the right one:**
+- **General routines** (this skill): Standalone scripts in `routines/`. For market analysis, monitoring, alerting, data viz. Run by users on demand or on schedule.
+- **Agent routines**: Created inside a trading agent strategy via `/trading-agent-builder`. The agent calls them during ticks to inform trading decisions. Use that skill instead if the user is building a trading agent.
 
 ## Routine Template
 
@@ -14,6 +18,7 @@ from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 from config_manager import get_client
 
+CATEGORY = "Market Data"  # Used for grouping in the UI
 
 class Config(BaseModel):
     """One-line description of what this routine does."""
@@ -31,13 +36,23 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     return "result"
 ```
 
+## Categories
+
+Use one of the existing categories to group the routine in the UI:
+- `"Market Data"` — scanners, top movers, pool explorers, price comparisons
+- `"Analysis"` — technical analysis, indicators, chart generation
+- `"Arbitrage"` — cross-venue price comparisons, basis spreads
+- `"Monitoring"` — continuous price alerts, threshold watchers
+- `"Bot Analysis"` — backtest charts, executor performance, bot reports
+
 ## Rules
 
-- **Naming**: lowercase with underscores, e.g. `microstructure_levels`, `funding_scanner`
-- **Config docstring** becomes the routine description shown in listings
+- **File goes in `routines/`** as `snake_case.py` (e.g. `routines/funding_scanner.py`)
+- **Config docstring** becomes the routine description shown in UI listings
+- **CATEGORY** at module level groups the routine in the catalog
 - **One routine = one task**. Keep routines focused and composable
 - **Always return a string** from `run()`. For rich output (charts, tables), return `RoutineResult`
-- **Use `get_client(context._chat_id, context=context)`** to get the API client
+- **Use `get_client(context._chat_id, context=context)`** to get the API client — but it's optional (routines can use external APIs directly like aiohttp)
 - **Never hardcode credentials** or server URLs
 - **For parallel fetches**, use `asyncio.gather`
 - **Handle missing data gracefully** — return informative error strings, don't raise
@@ -301,4 +316,4 @@ async def fetch_one(pair):
 results = await asyncio.gather(*[fetch_one(p) for p in pairs], return_exceptions=True)
 ```
 
-Now create the routine using `manage_routines(action="create_routine", strategy_id=..., name=..., code=...)`.
+Now create the routine file in `routines/` using the Write tool. The routine will be auto-discovered by Condor on next reload.

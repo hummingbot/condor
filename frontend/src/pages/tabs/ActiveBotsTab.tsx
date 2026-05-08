@@ -6,18 +6,17 @@ import {
   ChevronUp,
   Circle,
   Layers,
+  Pause,
+  Play,
   Rocket,
   Square,
   TrendingUp,
   Volume2,
-  X,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
-import yaml from "js-yaml";
+import { useMemo, useState } from "react";
 
-import { HIDDEN_KEYS } from "@/components/bots/DeployBotDialog";
+import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
-import { CodeEditor } from "@/components/editor/CodeEditor";
 
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -68,10 +67,6 @@ function formatUptime(deployedAt: string | null): string {
   }
 }
 
-function parseSide(raw: string): string {
-  const dot = raw.lastIndexOf(".");
-  return dot >= 0 ? raw.slice(dot + 1) : raw;
-}
 
 // ── Sort types ──
 
@@ -198,82 +193,6 @@ function SortHeader({
   );
 }
 
-// ── Side Panel ──
-
-function PositionCard({ pos }: { pos: Record<string, unknown> }) {
-  const connector = String(pos.connector_name || pos.connector || "");
-  const pair = String(pos.trading_pair || "");
-  const side = parseSide(String(pos.side || ""));
-  const realizedPnl = Number(pos.realized_pnl_quote || 0);
-  const unrealizedPnl = Number(pos.unrealized_pnl_quote || 0);
-  const volume = Number(pos.volume_traded_quote || pos.volume_traded || 0);
-
-  const primaryKeys = new Set([
-    "connector_name", "connector", "trading_pair", "side",
-    "realized_pnl_quote", "unrealized_pnl_quote",
-    "volume_traded_quote", "volume_traded",
-  ]);
-  const secondaryEntries = Object.entries(pos).filter(([k]) => !primaryKeys.has(k));
-
-  return (
-    <div className="rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-bg)] p-3 space-y-2">
-      <div className="flex items-center gap-2 text-sm">
-        {connector && (
-          <span className="text-[var(--color-text-muted)]">{connector}</span>
-        )}
-        {pair && <span className="font-medium">{pair}</span>}
-        {side && (
-          <span
-            className="ml-auto rounded px-1.5 py-0.5 text-xs font-semibold uppercase"
-            style={{
-              color: side.toLowerCase() === "buy" ? "var(--color-green)" : "var(--color-red)",
-              background: side.toLowerCase() === "buy" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)",
-            }}
-          >
-            {side}
-          </span>
-        )}
-      </div>
-
-      <div className="grid grid-cols-3 gap-2 text-xs">
-        <div>
-          <div className="text-[var(--color-text-muted)] mb-0.5">Realized</div>
-          <div className="font-medium tabular-nums" style={{ color: pnlColor(realizedPnl) }}>
-            {formatPnl(realizedPnl)}
-          </div>
-        </div>
-        <div>
-          <div className="text-[var(--color-text-muted)] mb-0.5">Unrealized</div>
-          <div className="font-medium tabular-nums" style={{ color: pnlColor(unrealizedPnl) }}>
-            {formatPnl(unrealizedPnl)}
-          </div>
-        </div>
-        <div>
-          <div className="text-[var(--color-text-muted)] mb-0.5">Volume</div>
-          <div className="font-medium tabular-nums">{formatVolume(volume)}</div>
-        </div>
-      </div>
-
-      {secondaryEntries.length > 0 && (
-        <div className="grid grid-cols-2 gap-x-3 gap-y-1 pt-1.5 border-t border-[var(--color-border)]/30 text-xs">
-          {secondaryEntries.map(([key, val]) => (
-            <div key={key} className="flex justify-between gap-1 min-w-0">
-              <span className="text-[var(--color-text-muted)] truncate">{key}</span>
-              <span className="tabular-nums text-right shrink-0">
-                {typeof val === "number"
-                  ? val.toFixed(4)
-                  : String(val ?? "").includes(".")
-                    ? parseSide(String(val))
-                    : String(val ?? "")}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function formatLogTime(ts?: number): string {
   if (!ts) return "";
   try {
@@ -344,181 +263,105 @@ function LogsSection({ logs }: { logs: BotLogEntry[] }) {
   );
 }
 
-function DetailPanel({
+// ── Controller Row with actions ──
+
+function ControllerRow({
   ctrl,
-  onClose,
+  server,
+  isSelected,
+  onSelect,
 }: {
   ctrl: ControllerInfo;
-  onClose: () => void;
+  server: string;
+  isSelected: boolean;
+  onSelect: () => void;
 }) {
-  const [panelWidth, setPanelWidth] = useState(480);
-  const isDragging = useRef(false);
+  const queryClient = useQueryClient();
+  const isKilled = ctrl.config?.manual_kill_switch === true;
 
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isDragging.current = true;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!isDragging.current) return;
-      const newWidth = window.innerWidth - ev.clientX;
-      setPanelWidth(Math.max(300, Math.min(newWidth, window.innerWidth * 0.8)));
-    };
-    const onMouseUp = () => {
-      isDragging.current = false;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, []);
-
-  const configEntries = Object.entries(ctrl.config || {});
+  const toggleMutation = useMutation({
+    mutationFn: () =>
+      isKilled
+        ? api.startControllers(server, ctrl.bot_name, [ctrl.controller_name])
+        : api.stopControllers(server, ctrl.bot_name, [ctrl.controller_name]),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["bots", server] });
+    },
+  });
 
   return (
-    <>
-      <div className="fixed inset-0 bg-black/30 z-40" onClick={onClose} />
-      <div
-        className="fixed top-0 right-0 h-full bg-[var(--color-bg)] border-l border-[var(--color-border)] z-50 overflow-y-auto shadow-xl"
-        style={{ width: panelWidth }}
+    <tr
+      className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
+      onClick={onSelect}
+    >
+      <td className="px-4 py-2.5">
+        <div className="flex flex-col">
+          <span className="text-sm font-medium" title={ctrl.controller_name}>
+            {ctrl.controller_name}
+          </span>
+          {ctrl.controller_id && ctrl.controller_id !== ctrl.controller_name && (
+            <span className="text-xs text-[var(--color-text-muted)] font-mono truncate" title={ctrl.controller_id}>
+              {ctrl.controller_id}
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
+        {ctrl.connector || "—"}
+      </td>
+      <td className="px-4 py-2.5 text-sm">{ctrl.trading_pair || "—"}</td>
+      <td
+        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+        style={{ color: pnlColor(ctrl.realized_pnl_quote) }}
       >
-        <div
-          className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-[var(--color-primary)]/30 transition-colors z-10"
-          onMouseDown={onMouseDown}
-        />
-
-        <div className="sticky top-0 bg-[var(--color-bg)] border-b border-[var(--color-border)] px-5 py-4 flex items-center justify-between">
-          <div className="truncate pr-4">
-            <h2 className="text-sm font-semibold truncate" title={ctrl.controller_name}>
-              {ctrl.controller_name}
-            </h2>
-            {ctrl.controller_id && ctrl.controller_id !== ctrl.controller_name && (
-              <span className="text-xs text-[var(--color-text-muted)] font-mono truncate block" title={ctrl.controller_id}>
-                {ctrl.controller_id}
-              </span>
-            )}
-          </div>
+        {formatPnl(ctrl.realized_pnl_quote)}
+      </td>
+      <td
+        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+        style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}
+      >
+        {formatPnl(ctrl.unrealized_pnl_quote)}
+      </td>
+      <td
+        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+        style={{ color: pnlColor(ctrl.global_pnl_quote) }}
+      >
+        {formatPnl(ctrl.global_pnl_quote)}
+      </td>
+      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+        {formatVolume(ctrl.volume_traded)}
+      </td>
+      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+        {formatUptime(ctrl.deployed_at)}
+      </td>
+      <td className="px-4 py-2.5">
+        <div className="flex items-center gap-1.5 justify-center">
+          <StatusDot status={isKilled ? "stopped" : ctrl.status} />
+        </div>
+      </td>
+      <td className="px-4 py-2.5">
+        <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
           <button
-            onClick={onClose}
-            className="p-1 rounded hover:bg-[var(--color-surface-hover)] transition-colors"
+            onClick={() => toggleMutation.mutate()}
+            disabled={toggleMutation.isPending}
+            className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+              isKilled
+                ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
+                : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
+            }`}
+            title={isKilled ? "Start controller" : "Pause controller"}
           >
-            <X className="h-4 w-4" />
+            {toggleMutation.isPending ? (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            ) : isKilled ? (
+              <Play className="h-3.5 w-3.5" />
+            ) : (
+              <Pause className="h-3.5 w-3.5" />
+            )}
           </button>
         </div>
-
-        <div className="p-5 space-y-5">
-          {/* Status & Meta */}
-          <div className="flex items-center gap-4 text-sm">
-            <div className="flex items-center gap-1.5">
-              <StatusDot status={ctrl.status} />
-              <span className="capitalize">{ctrl.status}</span>
-            </div>
-            {ctrl.connector && (
-              <span className="text-[var(--color-text-muted)]">{ctrl.connector}</span>
-            )}
-            {ctrl.trading_pair && (
-              <span className="text-[var(--color-text-muted)]">{ctrl.trading_pair}</span>
-            )}
-          </div>
-
-          {/* PnL Breakdown */}
-          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3">
-            <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              PnL Breakdown
-            </h3>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Realized</div>
-                <div className="font-medium tabular-nums" style={{ color: pnlColor(ctrl.realized_pnl_quote) }}>
-                  {formatPnl(ctrl.realized_pnl_quote)}
-                </div>
-              </div>
-              <div>
-                <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Unrealized</div>
-                <div className="font-medium tabular-nums" style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}>
-                  {formatPnl(ctrl.unrealized_pnl_quote)}
-                </div>
-              </div>
-              <div>
-                <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Total PnL</div>
-                <div className="font-medium tabular-nums" style={{ color: pnlColor(ctrl.global_pnl_quote) }}>
-                  {formatPnl(ctrl.global_pnl_quote)}
-                </div>
-              </div>
-              {ctrl.global_pnl_pct !== 0 && (
-                <div>
-                  <div className="text-[var(--color-text-muted)] text-xs mb-0.5">PnL %</div>
-                  <div className="font-medium tabular-nums" style={{ color: pnlColor(ctrl.global_pnl_pct) }}>
-                    {ctrl.global_pnl_pct >= 0 ? "+" : ""}
-                    {ctrl.global_pnl_pct.toFixed(2)}%
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="pt-2 border-t border-[var(--color-border)]/50 text-sm">
-              <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Volume Traded</div>
-              <div className="font-medium tabular-nums">{formatVolume(ctrl.volume_traded)}</div>
-            </div>
-          </div>
-
-          {/* Close Type Counts */}
-          {Object.keys(ctrl.close_type_counts).length > 0 && (
-            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-2">
-              <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                Close Types
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(ctrl.close_type_counts).map(([type, count]) => (
-                  <span
-                    key={type}
-                    className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-bg)] px-2.5 py-1 text-xs border border-[var(--color-border)]/50"
-                  >
-                    <span className="text-[var(--color-text-muted)]">{type}</span>
-                    <span className="font-semibold">{count}</span>
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Positions Summary */}
-          {ctrl.positions_summary.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                Positions ({ctrl.positions_summary.length})
-              </h3>
-              <div className="space-y-2">
-                {ctrl.positions_summary.map((pos, i) => (
-                  <PositionCard key={i} pos={pos} />
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Controller Config (read-only YAML) */}
-          {configEntries.length > 0 && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                Controller Config
-              </h3>
-              <CodeEditor
-                value={yaml.dump(
-                  Object.fromEntries(configEntries.filter(([k]) => !HIDDEN_KEYS.has(k))),
-                  { sortKeys: false, lineWidth: -1 },
-                )}
-                language="yaml"
-                readOnly
-                height="200px"
-              />
-            </div>
-          )}
-
-        </div>
-      </div>
-    </>
+      </td>
+    </tr>
   );
 }
 
@@ -575,8 +418,7 @@ function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
         <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
           {formatUptime(bot.deployed_at)}
         </span>
-        {bot.status === "running" && (
-          confirmStop ? (
+        {confirmStop ? (
             <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => stopMutation.mutate()}
@@ -601,8 +443,7 @@ function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
               <Square className="h-3 w-3" />
               Stop
             </button>
-          )
-        )}
+          )}
       </div>
       {showLogs && (
         <div className="px-4 pb-3 pt-1">
@@ -676,10 +517,17 @@ export function ActiveBotsTab() {
   const controllers = data?.controllers ?? [];
   const bots = data?.bots ?? [];
 
-  // Derive live controller from latest data instead of stale snapshot
-  const selectedController = selectedKey
-    ? controllers.find((c) => `${c.bot_name}-${c.controller_name}` === selectedKey) ?? null
-    : null;
+  // Aggregate logs per bot for the overlay
+  const allLogsByBot = useMemo(() => {
+    const map: Record<string, BotLogEntry[]> = {};
+    for (const bot of bots) {
+      map[bot.bot_name] = [
+        ...(bot.error_logs || []).map((l) => ({ ...l, log_category: "error" as const })),
+        ...(bot.general_logs || []).map((l) => ({ ...l, log_category: "general" as const })),
+      ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    }
+    return map;
+  }, [bots]);
 
   const sortedControllers = useMemo(
     () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
@@ -722,19 +570,8 @@ export function ActiveBotsTab() {
 
   return (
     <div className="space-y-6">
-      {/* Header: deploy button */}
-      <div className="flex items-center justify-end">
-        <button
-          onClick={() => setShowDeploy(true)}
-          className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
-        >
-          <Rocket className="h-4 w-4" />
-          Deploy Bot
-        </button>
-      </div>
-
-      {/* Summary stat cards */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      {/* Summary stat cards + deploy button */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]">
         <StatCard
           label="Total PnL"
           value={formatPnl(totalPnl)}
@@ -744,6 +581,13 @@ export function ActiveBotsTab() {
         <StatCard label="Volume" value={formatVolume(totalVolume)} icon={Volume2} />
         <StatCard label="Active Bots" value={String(activeBots)} icon={Bot} />
         <StatCard label="Controllers" value={String(controllers.length)} icon={Layers} />
+        <button
+          onClick={() => setShowDeploy(true)}
+          className="flex items-center gap-2 justify-center rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20 h-full col-span-2 lg:col-span-1"
+        >
+          <Rocket className="h-4 w-4" />
+          Deploy Bot
+        </button>
       </div>
 
       {isEmpty ? (
@@ -769,66 +613,21 @@ export function ActiveBotsTab() {
                       <SortHeader label="Volume" sortKey="volume_traded" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Age" sortKey="deployed_at" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="center" />
+                      <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)] text-center">
+                        Actions
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedControllers.map((ctrl) => {
-                      const ctrlKey = `${ctrl.bot_name}-${ctrl.controller_name}`;
-                      const isSelected = selectedKey === ctrlKey;
-                      return (
-                        <tr
-                          key={ctrlKey}
-                          className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
-                          onClick={() => setSelectedKey(ctrlKey)}
-                        >
-                          <td className="px-4 py-2.5">
-                            <div className="flex flex-col">
-                              <span className="text-sm font-medium" title={ctrl.controller_name}>
-                                {ctrl.controller_name}
-                              </span>
-                              {ctrl.controller_id && ctrl.controller_id !== ctrl.controller_name && (
-                                <span className="text-xs text-[var(--color-text-muted)] font-mono truncate" title={ctrl.controller_id}>
-                                  {ctrl.controller_id}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
-                            {ctrl.connector || "—"}
-                          </td>
-                          <td className="px-4 py-2.5 text-sm">{ctrl.trading_pair || "—"}</td>
-                          <td
-                            className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-                            style={{ color: pnlColor(ctrl.realized_pnl_quote) }}
-                          >
-                            {formatPnl(ctrl.realized_pnl_quote)}
-                          </td>
-                          <td
-                            className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-                            style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}
-                          >
-                            {formatPnl(ctrl.unrealized_pnl_quote)}
-                          </td>
-                          <td
-                            className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-                            style={{ color: pnlColor(ctrl.global_pnl_quote) }}
-                          >
-                            {formatPnl(ctrl.global_pnl_quote)}
-                          </td>
-                          <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-                            {formatVolume(ctrl.volume_traded)}
-                          </td>
-                          <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-                            {formatUptime(ctrl.deployed_at)}
-                          </td>
-                          <td className="px-4 py-2.5">
-                            <div className="flex items-center gap-1.5 justify-center">
-                              <StatusDot status={ctrl.status} />
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {sortedControllers.map((ctrl) => (
+                      <ControllerRow
+                        key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                        ctrl={ctrl}
+                        server={server!}
+                        isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_name}`}
+                        onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_name}`)}
+                      />
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -840,9 +639,15 @@ export function ActiveBotsTab() {
         </>
       )}
 
-      {/* Side panel */}
-      {selectedController && (
-        <DetailPanel ctrl={selectedController} onClose={() => setSelectedKey(null)} />
+      {/* Fullscreen controller overlay */}
+      {selectedKey && controllers.length > 0 && (
+        <ControllerBrowser
+          controllers={sortedControllers}
+          server={server}
+          initialControllerKey={selectedKey}
+          allLogs={allLogsByBot}
+          onClose={() => setSelectedKey(null)}
+        />
       )}
 
       {/* Deploy dialog */}

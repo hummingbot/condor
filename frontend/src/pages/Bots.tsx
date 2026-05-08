@@ -17,9 +17,9 @@ const EditorTab = lazy(() =>
 
 const TABS = [
   { key: "active", label: "Active", icon: Bot },
-  { key: "archived", label: "Archived", icon: Archive },
-  { key: "backtest", label: "Backtest", icon: FlaskConical },
   { key: "editor", label: "Editor", icon: TerminalSquare },
+  { key: "backtest", label: "Backtest", icon: FlaskConical },
+  { key: "archived", label: "Archived", icon: Archive },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];

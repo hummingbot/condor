@@ -10,6 +10,13 @@ import {
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
 
+export interface SnapshotBubble {
+  tick: number;
+  timestamp: string; // human-readable, e.g. "2024-01-15 14:30:22"
+  agentResponse?: string;
+  toolCallCount?: number;
+}
+
 interface ExecutorChartProps {
   server: string;
   executors: ExecutorInfo[];
@@ -17,6 +24,8 @@ interface ExecutorChartProps {
   tradingPair: string;
   interval?: string;
   height?: number;
+  snapshots?: SnapshotBubble[];
+  onSnapshotClick?: (tick: number) => void;
 }
 
 function getChartColors() {
@@ -39,10 +48,12 @@ function tsToSeconds(ts: number): number {
   return ts > 1e12 ? Math.floor(ts / 1000) : ts;
 }
 
-function formatPnl(pnl: number): string {
-  const sign = pnl >= 0 ? "+" : "";
-  if (Math.abs(pnl) >= 1000) return `${sign}$${(pnl / 1000).toFixed(1)}K`;
-  return `${sign}$${pnl.toFixed(2)}`;
+/** Parse snapshot timestamp string to unix seconds */
+function parseSnapshotTs(ts: string): number {
+  // Handle formats like "2024-01-15 14:30:22" or ISO
+  const d = new Date(ts.replace(" ", "T"));
+  if (isNaN(d.getTime())) return 0;
+  return Math.floor(d.getTime() / 1000);
 }
 
 export function ExecutorChart({
@@ -52,9 +63,14 @@ export function ExecutorChart({
   tradingPair,
   interval = "1m",
   height = 350,
+  snapshots,
+  onSnapshotClick,
 }: ExecutorChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
+  const snapshotTooltipRef = useRef<HTMLDivElement>(null);
+  const bubblesRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
@@ -193,29 +209,99 @@ export function ExecutorChart({
         }
 
         const o = bestOverlay;
-        const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
-        const pnlStr = formatPnl(o.pnl);
-        const pctStr = o.pnlPct !== 0 ? ` (${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%)` : "";
+        // Read theme colors for tooltip content
+        const cs = getComputedStyle(document.documentElement);
+        const textMuted = cs.getPropertyValue("--color-text-muted").trim() || "#6b7994";
+        const textColor = cs.getPropertyValue("--color-text").trim() || "#e2e8f0";
+        const borderColor = cs.getPropertyValue("--color-border").trim() || "#1c2541";
 
-        let detailLine = "";
-        if (o.segment) {
-          detailLine = `<div style="color:#9ca3af;font-size:10px">Entry: ${o.segment.entryPrice.toPrecision(6)} → Exit: ${o.segment.exitPrice.toPrecision(6)}</div>`;
-        } else if (o.gridBox) {
-          detailLine = `<div style="color:#9ca3af;font-size:10px">Range: ${o.gridBox.startPrice.toPrecision(6)} – ${o.gridBox.endPrice.toPrecision(6)}</div>`;
+        const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
+        const pnlSign = o.pnl >= 0 ? "+" : "";
+        const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
+        const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
+        const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
+        const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
+
+        const sideClr = o.side === "buy" ? "#22c55e" : "#ef4444";
+        const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
+        const statusBg = isActive(o.status) ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
+        const statusClr = isActive(o.status) ? "#22c55e" : textMuted;
+
+        // Build config detail rows
+        const cfg = o.config || {};
+        const tripleBarrier: Record<string, unknown> = (() => {
+          const raw = cfg.triple_barrier_config;
+          if (!raw) return {};
+          if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
+          return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+        })();
+
+        let detailRows = "";
+        const fmtPrice = (p: number) => {
+          if (p === 0) return "—";
+          if (Math.abs(p) >= 1000) return p.toFixed(2);
+          if (Math.abs(p) >= 1) return p.toFixed(4);
+          return p.toPrecision(6);
+        };
+        const fmtUsd = (v: number) => {
+          if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
+          if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
+          return "$" + v.toFixed(2);
+        };
+
+        const addRow = (label: string, value: string, color?: string) => {
+          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : `color:${textColor}`}">${value}</span></div>`;
+        };
+
+        if (o.type === "grid" && o.gridBox) {
+          addRow("Start Price", fmtPrice(o.gridBox.startPrice));
+          addRow("End Price", fmtPrice(o.gridBox.endPrice));
+          if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
+        } else if (o.segment) {
+          addRow("Entry", fmtPrice(o.segment.entryPrice));
+          if (o.segment.exitPrice > 0 && o.segment.exitPrice !== o.segment.entryPrice) {
+            addRow(isActive(o.status) ? "Current" : "Close", fmtPrice(o.segment.exitPrice));
+          }
         }
 
+        if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
+        if (cfg.total_amount_quote != null) addRow("Amount", fmtUsd(Number(cfg.total_amount_quote)));
+        else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
+
+        const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
+        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, "#22c55e");
+        const sl = Number(cfg.stop_loss);
+        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, "#ef4444");
+
         tooltip.innerHTML = `
-          <div style="font-weight:600;margin-bottom:2px">${o.executorId.slice(0, 8)}… · ${o.type.toUpperCase()} ${o.side.toUpperCase()}</div>
-          <div style="color:${pnlClr}">${pnlStr}${pctStr}</div>
-          ${detailLine}
-          <div style="color:#9ca3af;font-size:10px">${o.status} · ${o.closeType || "—"}</div>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="font-weight:700;font-size:12px;font-family:monospace;color:${textColor}">${o.executorId.slice(0, 10)}\u2026</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${o.side}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${o.status}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
+            <span style="background:${borderColor};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${borderColor};color:${textColor}">${o.type.toUpperCase()}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${o.closeType}</span>` : ""}
+          </div>
+          <div style="border-top:1px solid ${borderColor};margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px;color:${textColor}">${volStr}</div></div>
+            <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px;color:${textColor}">${feesStr || "—"}</div></div>
+          </div>
+          ${detailRows ? `<div style="border-top:1px solid ${borderColor};margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
         `;
         tooltip.style.display = "block";
 
-        // Position tooltip
+        // Position tooltip on opposite side of cursor
         const containerRect = containerRef.current.getBoundingClientRect();
-        let left = param.point.x + 16;
-        if (left + 200 > containerRect.width) left = param.point.x - 210;
+        const tooltipW = 280;
+        const cursorInRightHalf = param.point.x > containerRect.width / 2;
+        let left = cursorInRightHalf
+          ? param.point.x - tooltipW - 16
+          : param.point.x + 16;
+        if (left < 4) left = 4;
+        if (left + tooltipW > containerRect.width - 4) left = containerRect.width - tooltipW - 4;
         let top = param.point.y - 10;
         if (top < 0) top = 4;
 
@@ -397,6 +483,48 @@ export function ExecutorChart({
     });
   }, [overlays, chartReady]);
 
+  // Position snapshot bubbles along the time axis
+  const snapshotPositions = useRef<{ tick: number; x: number }[]>([]);
+
+  const updateBubblePositions = useCallback(() => {
+    const chart = chartRef.current;
+    const bubbles = bubblesRef.current;
+    if (!chart || !bubbles || !snapshots?.length) return;
+
+    const ts = chart.timeScale();
+    const positions: { tick: number; x: number }[] = [];
+    const children = bubbles.children;
+
+    for (let i = 0; i < snapshots.length; i++) {
+      const snap = snapshots[i];
+      const time = parseSnapshotTs(snap.timestamp);
+      if (!time) continue;
+      const x = ts.timeToCoordinate(time as import("lightweight-charts").UTCTimestamp);
+      if (x === null) {
+        if (children[i]) (children[i] as HTMLElement).style.display = "none";
+        continue;
+      }
+      positions.push({ tick: snap.tick, x });
+      if (children[i]) {
+        const el = children[i] as HTMLElement;
+        el.style.display = "";
+        el.style.left = `${x}px`;
+      }
+    }
+    snapshotPositions.current = positions;
+  }, [snapshots]);
+
+  // Subscribe to time scale changes for bubble repositioning
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart || !chartReady || !snapshots?.length) return;
+
+    updateBubblePositions();
+    const handler = () => updateBubblePositions();
+    chart.timeScale().subscribeVisibleLogicalRangeChange(handler);
+    return () => { chart.timeScale().unsubscribeVisibleLogicalRangeChange(handler); };
+  }, [chartReady, snapshots, updateBubblePositions]);
+
   const [fullscreen, setFullscreen] = useState(false);
 
   const toggleFullscreen = useCallback(() => {
@@ -477,15 +605,102 @@ export function ExecutorChart({
           </button>
         </div>
       </div>
+      {/* Snapshot bubble strip */}
+      {snapshots && snapshots.length > 0 && (
+        <div
+          style={{ position: "relative", height: 28, borderBottom: "1px solid var(--color-border)", background: "var(--color-bg)", overflow: "hidden" }}
+        >
+          <div ref={bubblesRef} style={{ position: "absolute", inset: 0 }}>
+            {snapshots.map((snap, i) => (
+              <div
+                key={snap.tick}
+                data-idx={i}
+                style={{
+                  position: "absolute",
+                  top: 4,
+                  transform: "translateX(-50%)",
+                  display: "none", // positioned by updateBubblePositions
+                }}
+                className="group cursor-pointer"
+                onClick={() => onSnapshotClick?.(snap.tick)}
+                onMouseEnter={(e) => {
+                  const tip = snapshotTooltipRef.current;
+                  const wrapper = wrapperRef.current;
+                  if (!tip || !wrapper) return;
+
+                  const cs = getComputedStyle(document.documentElement);
+                  const muted = cs.getPropertyValue("--color-text-muted").trim() || "#6b7994";
+                  const txt = cs.getPropertyValue("--color-text").trim() || "#e2e8f0";
+                  const bdr = cs.getPropertyValue("--color-border").trim() || "#1c2541";
+
+                  const preview = snap.agentResponse
+                    ? snap.agentResponse.length > 280
+                      ? snap.agentResponse.slice(0, 280) + "..."
+                      : snap.agentResponse
+                    : "No response recorded";
+                  const toolLine = snap.toolCallCount
+                    ? `<div style="margin-top:4px;font-size:10px;color:${muted}">${snap.toolCallCount} tool call${snap.toolCallCount !== 1 ? "s" : ""}</div>`
+                    : "";
+
+                  tip.innerHTML = `
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+                      <span style="background:rgba(139,92,246,0.15);color:#a78bfa;font-size:10px;font-weight:700;padding:1px 6px;border-radius:3px">TICK #${snap.tick}</span>
+                      <span style="font-size:10px;color:${muted}">${snap.timestamp}</span>
+                    </div>
+                    <div style="font-size:11px;line-height:1.5;color:${txt};white-space:pre-wrap;word-break:break-word">${preview.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</div>
+                    ${toolLine}
+                    <div style="margin-top:6px;font-size:9px;color:${muted};border-top:1px solid ${bdr};padding-top:4px">Click to view full snapshot</div>
+                  `;
+                  tip.style.display = "block";
+
+                  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  const wrapperRect = wrapper.getBoundingClientRect();
+                  const tipW = 320;
+                  let left = rect.left - wrapperRect.left + rect.width / 2 - tipW / 2;
+                  if (left < 4) left = 4;
+                  if (left + tipW > wrapperRect.width - 4) left = wrapperRect.width - tipW - 4;
+                  tip.style.left = `${left}px`;
+                  tip.style.top = `${28 + 4}px`;
+                }}
+                onMouseLeave={() => {
+                  if (snapshotTooltipRef.current) snapshotTooltipRef.current.style.display = "none";
+                }}
+              >
+                <div
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderRadius: "50%",
+                    background: "rgba(139, 92, 246, 0.15)",
+                    border: "1.5px solid rgba(139, 92, 246, 0.5)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: "#a78bfa",
+                    transition: "all 150ms",
+                  }}
+                  className="group-hover:!bg-[rgba(139,92,246,0.3)] group-hover:!border-[rgba(139,92,246,0.8)] group-hover:scale-110"
+                >
+                  {snap.tick}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Chart area */}
-      <div style={{ position: "relative", flex: fullscreen ? 1 : undefined }}>
+      <div ref={wrapperRef} style={{ position: "relative", flex: fullscreen ? 1 : undefined }}>
         <div
           ref={containerRef}
           style={{ height: fullscreen ? "100%" : height, width: "100%" }}
         />
-        {/* Tooltip overlay */}
+        {/* Executor tooltip overlay */}
         <div
           ref={tooltipRef}
+          className="chart-tooltip"
           style={{
             display: "none",
             position: "absolute",
@@ -493,16 +708,43 @@ export function ExecutorChart({
             left: 0,
             zIndex: 10,
             pointerEvents: "none",
-            background: "rgba(15, 21, 37, 0.95)",
-            border: "1px solid rgba(107, 121, 148, 0.3)",
+            background: "var(--color-surface)",
+            border: "1px solid var(--color-border)",
             borderRadius: 6,
             padding: "6px 10px",
             fontSize: 11,
-            color: "#e2e8f0",
-            maxWidth: 220,
-            whiteSpace: "nowrap",
+            color: "var(--color-text)",
+            maxWidth: 280,
+            minWidth: 200,
             lineHeight: 1.4,
             backdropFilter: "blur(8px)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+          }}
+        />
+        {/* Snapshot tooltip overlay */}
+        <div
+          ref={snapshotTooltipRef}
+          className="chart-tooltip"
+          style={{
+            display: "none",
+            position: "absolute",
+            top: 0,
+            left: 0,
+            zIndex: 20,
+            pointerEvents: "none",
+            background: "var(--color-surface)",
+            border: "1px solid rgba(139, 92, 246, 0.3)",
+            borderRadius: 8,
+            padding: "10px 14px",
+            fontSize: 11,
+            color: "var(--color-text)",
+            maxWidth: 360,
+            minWidth: 240,
+            maxHeight: 300,
+            overflow: "hidden",
+            lineHeight: 1.4,
+            backdropFilter: "blur(12px)",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.25)",
           }}
         />
       </div>

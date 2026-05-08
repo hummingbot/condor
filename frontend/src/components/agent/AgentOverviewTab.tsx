@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ChevronRight,
   Clock,
+  FlaskConical,
   Save,
   Zap,
 } from "lucide-react";
@@ -14,7 +16,7 @@ import { type AgentDetail, type ExecutorInfo, api } from "@/lib/api";
 
 // ── Markdown Editor ──
 
-function MarkdownEditor({
+export function MarkdownEditor({
   slug,
   label,
   sublabel,
@@ -140,7 +142,13 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 // ── Performance Panel ──
 
-export function PerformancePanel({ slug }: { slug: string }) {
+export function PerformancePanel({
+  slug,
+  onSessionClick,
+}: {
+  slug: string;
+  onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
+}) {
   const { data } = useQuery({
     queryKey: ["agent-performance", slug],
     queryFn: () => api.getAgentPerformance(slug),
@@ -217,12 +225,18 @@ export function PerformancePanel({ slug }: { slug: string }) {
         <AgentPnlChart data={pnlData} height={180} title="PnL Equity Curve" />
       )}
 
-      {/* Sessions table */}
+      {/* Sessions & Experiments table */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <Clock className="h-3.5 w-3.5" /> Sessions ({sessions.length})
+          {allRows.filter((s) => s.kind === "experiment").length > 0 && (
+            <span className="ml-1 flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-400">
+              <FlaskConical className="h-2.5 w-2.5" />
+              {allRows.filter((s) => s.kind === "experiment").length} experiments
+            </span>
+          )}
         </h3>
-        {sessions.length === 0 ? (
+        {allRows.length === 0 ? (
           <p className="text-xs text-[var(--color-text-muted)]">No sessions yet.</p>
         ) : (
           <div className="overflow-x-auto">
@@ -238,21 +252,33 @@ export function PerformancePanel({ slug }: { slug: string }) {
                   <th className="px-2 py-1 text-right">Volume</th>
                   <th className="px-2 py-1 text-right">Trades</th>
                   <th className="px-2 py-1 text-right">Open</th>
+                  {onSessionClick && <th className="px-2 py-1 w-6" />}
                 </tr>
               </thead>
               <tbody>
-                {sessions
+                {allRows
                   .slice()
                   .sort((a, b) => (b.kind === a.kind ? b.session_num - a.session_num : a.kind === "experiment" ? 1 : -1))
                   .map((s) => {
                     const pnlCol = s.total_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+                    const isExperiment = s.kind === "experiment";
                     return (
                       <tr
                         key={s.agent_id}
-                        className="border-t border-[var(--color-border)]/40 font-mono"
+                        onClick={() => onSessionClick?.(s.session_num, s.kind)}
+                        className={`border-t border-[var(--color-border)]/40 font-mono ${onSessionClick ? "cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]" : ""}`}
                       >
                         <td className="px-2 py-1.5 text-[var(--color-text)]">{s.session_num}</td>
-                        <td className="px-2 py-1.5 text-[var(--color-text-muted)]">{s.kind}</td>
+                        <td className="px-2 py-1.5">
+                          {isExperiment ? (
+                            <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-amber-400">
+                              <FlaskConical className="h-2.5 w-2.5" />
+                              exp
+                            </span>
+                          ) : (
+                            <span className="text-[var(--color-text-muted)]">{s.kind}</span>
+                          )}
+                        </td>
                         <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : "text-[var(--color-text-muted)]"}`}>
                           {s.status || "—"}
                         </td>
@@ -266,6 +292,11 @@ export function PerformancePanel({ slug }: { slug: string }) {
                         </td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.trade_count}</td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.open_count}</td>
+                        {onSessionClick && (
+                          <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
+                            <ChevronRight className="h-3.5 w-3.5" />
+                          </td>
+                        )}
                       </tr>
                     );
                   })}

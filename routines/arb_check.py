@@ -1,5 +1,7 @@
 """Check for CEX/DEX arbitrage opportunities."""
 
+CATEGORY = "Arbitrage"
+
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -147,5 +149,46 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         results.extend(opportunities)
     else:
         results.append("No profitable arbitrage found.")
+
+    # Generate HTML report
+    try:
+        from condor.reports import ReportBuilder
+
+        builder = ReportBuilder(f"Arb Check: {config.trading_pair}")
+        builder.source("routine", "arb_check").tags(["arbitrage", config.trading_pair])
+        if cex_buy and dex_sell:
+            spread = ((float(dex_sell) - float(cex_buy)) / float(cex_buy)) * 100
+            builder.kpi("CEX→DEX Spread", f"{spread:+.2f}%", trend="up" if spread > 0 else "down")
+        if dex_buy and cex_sell:
+            spread = ((float(cex_sell) - float(dex_buy)) / float(dex_buy)) * 100
+            builder.kpi("DEX→CEX Spread", f"{spread:+.2f}%", trend="up" if spread > 0 else "down")
+        builder.markdown("\n".join(results))
+
+        table_rows = []
+        if cex_buy or cex_sell:
+            table_rows.append({
+                "Source": f"CEX ({config.cex_connector})",
+                "Buy": f"{float(cex_buy):.6f}" if cex_buy else "N/A",
+                "Sell": f"{float(cex_sell):.6f}" if cex_sell else "N/A",
+            })
+        if dex_buy or dex_sell:
+            table_rows.append({
+                "Source": f"DEX ({config.dex_connector})",
+                "Buy": f"{float(dex_buy):.6f}" if dex_buy else "N/A",
+                "Sell": f"{float(dex_sell):.6f}" if dex_sell else "N/A",
+            })
+        if cex_buy and dex_sell:
+            spread = ((float(dex_sell) - float(cex_buy)) / float(cex_buy)) * 100
+            table_rows.append({"Source": "Spread (CEX->DEX)", "Buy": "", "Sell": f"{spread:+.2f}%"})
+        if dex_buy and cex_sell:
+            spread = ((float(cex_sell) - float(dex_buy)) / float(dex_buy)) * 100
+            table_rows.append({"Source": "Spread (DEX->CEX)", "Buy": "", "Sell": f"{spread:+.2f}%"})
+
+        if table_rows:
+            builder.table(table_rows)
+        builder.save()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Report generation failed: {e}")
 
     return "\n".join(results)

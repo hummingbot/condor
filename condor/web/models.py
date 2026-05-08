@@ -247,6 +247,10 @@ class DeployBotRequest(BaseModel):
     max_controller_drawdown_quote: float | None = None
 
 
+class ControllerActionRequest(BaseModel):
+    controller_names: list[str]
+
+
 # ── Archived Bots ──
 
 
@@ -329,3 +333,42 @@ class ReportSummary(BaseModel):
 class ReportsListResponse(BaseModel):
     reports: list[ReportSummary]
     total: int
+
+
+# ── Settings ──
+
+
+class AddServerRequest(BaseModel):
+    name: str
+    host: str
+    port: int
+    username: str
+    password: str
+
+
+class UpdateServerRequest(BaseModel):
+    host: Optional[str] = None
+    port: Optional[int] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class GatewayStartRequest(BaseModel):
+    image: str = "hummingbot/gateway:latest"
+    passphrase: str
+    port: int = 15888
+    dev_mode: bool = True
+
+
+class CredentialInfo(BaseModel):
+    connector_name: str
+    connector_type: str = ""
+
+
+class GatewayPullRequest(BaseModel):
+    image: str = "hummingbot/gateway:latest"
+
+
+class AddCredentialRequest(BaseModel):
+    connector_name: str
+    credentials: dict[str, Any]

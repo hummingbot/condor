@@ -47,6 +47,7 @@ export interface ExecutorOverlay {
   pnl: number;
   pnlPct: number;
   volume: number;
+  fees: number;
   /** Full-width price lines (only shown for ≤ 1 executor) */
   priceLines: PriceLine[];
   markers: ChartMarker[];
@@ -55,6 +56,12 @@ export interface ExecutorOverlay {
   /** Grid range box (grid executors) */
   gridBox?: GridBox;
   timeRange: { start: number; end: number };
+  /** Original executor config for rich tooltips */
+  config?: Record<string, unknown>;
+  /** Entry price for display */
+  entryPrice?: number;
+  /** Exit/current price for display */
+  exitPrice?: number;
 }
 
 // ── Helpers ──
@@ -221,10 +228,14 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
     pnl: executor.pnl,
     pnlPct: executor.net_pnl_pct,
     volume: executor.volume,
+    fees: executor.cum_fees_quote,
     priceLines: lines,
     markers,
     segment,
     timeRange: { start, end },
+    config: executor.config,
+    entryPrice: entry,
+    exitPrice: closePrice,
   };
 }
 
@@ -264,10 +275,14 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
     pnl: executor.pnl,
     pnlPct: executor.net_pnl_pct,
     volume: executor.volume,
+    fees: executor.cum_fees_quote,
     priceLines: [],
     markers: [],
     gridBox,
     timeRange: { start, end },
+    config: executor.config,
+    entryPrice: startPrice,
+    exitPrice: endPrice,
   };
 }
 
@@ -371,10 +386,14 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
     pnl: executor.pnl,
     pnlPct: executor.net_pnl_pct,
     volume: executor.volume,
+    fees: executor.cum_fees_quote,
     priceLines: lines,
     markers,
     segment,
     timeRange: { start, end },
+    config: executor.config,
+    entryPrice: orderPrice,
+    exitPrice: closePrice,
   };
 }
 
@@ -450,10 +469,14 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
     pnl: executor.pnl,
     pnlPct: executor.net_pnl_pct,
     volume: executor.volume,
+    fees: executor.cum_fees_quote,
     priceLines: lines,
     markers,
     segment,
     timeRange: { start, end },
+    config: executor.config,
+    entryPrice: entryPrice,
+    exitPrice: closePrice,
   };
 }
 
