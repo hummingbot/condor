@@ -23,6 +23,8 @@ LIQUIDITY_SUPPORTED_DEXES = {
     "meteora": "solana",
     "raydium": "solana",
     "orca": "solana",
+    "uniswap": "ethereum",
+    "pancakeswap": "bsc",
 }
 
 # GeckoTerminal network mapping
@@ -50,6 +52,8 @@ DEX_TO_GECKO = {
     "orca": "orca",
     "uniswap": "uniswap",
     "uniswap_v3": "uniswap_v3",
+    "pancakeswap": "pancakeswap",
+    "pancakeswap_v3": "pancakeswap_v3",
     "sushiswap": "sushiswap",
 }
 
@@ -215,6 +219,7 @@ async def fetch_liquidity_bins(
     network: str = "solana-mainnet-beta",
     user_data: dict = None,
     chat_id: int = None,
+    context=None,
 ) -> Tuple[Optional[List], Optional[Dict], Optional[str]]:
     """Fetch liquidity bin data for CLMM pools via gateway
 

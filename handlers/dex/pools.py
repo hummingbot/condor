@@ -99,19 +99,21 @@ def format_pair_from_addresses(
     return f"{base_symbol}-{quote_symbol}"
 
 
-def get_dex_pool_url(connector: str, pool_address: str) -> str:
+def get_dex_pool_url(connector: str, pool_address: str, network: str = "") -> str:
     """
     Generate the DEX web app URL for a pool.
 
     Args:
-        connector: DEX connector name (meteora, raydium, orca, etc.)
+        connector: DEX connector name (meteora, raydium, orca, uniswap, pancakeswap)
         pool_address: Pool address
+        network: Network for EVM connectors (ethereum, arbitrum, base, etc.)
 
     Returns:
         URL to the pool on the DEX web app, or empty string if unknown
     """
     connector_lower = connector.lower()
 
+    # Solana DEXes
     if connector_lower == "meteora":
         return f"https://app.meteora.ag/dlmm/{pool_address}?referrer=hummingbot"
     elif connector_lower == "raydium":
@@ -119,11 +121,37 @@ def get_dex_pool_url(connector: str, pool_address: str) -> str:
     elif connector_lower == "orca":
         return f"https://www.orca.so/pools/{pool_address}"
 
+    # EVM DEXes
+    elif connector_lower == "uniswap":
+        # Uniswap V3 pool URLs vary by network
+        network_lower = network.lower() if network else "ethereum"
+        if "arbitrum" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/arbitrum/{pool_address}"
+        elif "base" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/base/{pool_address}"
+        elif "optimism" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/optimism/{pool_address}"
+        elif "polygon" in network_lower:
+            return f"https://app.uniswap.org/explore/pools/polygon/{pool_address}"
+        else:
+            return f"https://app.uniswap.org/explore/pools/ethereum/{pool_address}"
+    elif connector_lower == "pancakeswap":
+        # PancakeSwap V3 pool URLs
+        network_lower = network.lower() if network else "bsc"
+        if "ethereum" in network_lower:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=eth"
+        elif "arbitrum" in network_lower:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=arb"
+        elif "base" in network_lower:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=base"
+        else:
+            return f"https://pancakeswap.finance/liquidity/{pool_address}?chain=bsc"
+
     return ""
 
 
 # ============================================
-# POOL INFO (by address - supports meteora, raydium, orca)
+# POOL INFO (by address - supports meteora, raydium, orca, uniswap, pancakeswap)
 # ============================================
 
 
@@ -132,11 +160,14 @@ async def handle_pool_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     help_text = (
         r"🔍 *Pool Info*" + "\n\n"
         r"Reply with:" + "\n\n"
-        r"`connector pool_address`" + "\n\n"
-        r"*Examples:*" + "\n"
+        r"`connector pool_address [network]`" + "\n\n"
+        r"*Solana \(network optional\):*" + "\n"
         r"`meteora 5Q5...abc`" + "\n"
         r"`raydium 7Xy...def`" + "\n"
-        r"`orca 3Ab...ghi`"
+        r"`orca 3Ab...ghi`" + "\n\n"
+        r"*EVM \(network required\):*" + "\n"
+        r"`uniswap 0x1...abc ethereum`" + "\n"
+        r"`pancakeswap 0x2...def bsc`"
     )
 
     keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:liquidity")]]
@@ -164,10 +195,11 @@ def _format_pool_info(pool: dict) -> str:
     lines.append(f"🏊 Pool: {pair}")
     lines.append("")
 
-    # Basic info
+    # Basic info - show full address for copy/paste
     if pool.get("pool_address") or pool.get("address"):
         addr = pool.get("pool_address") or pool.get("address")
-        lines.append(f"📍 Address: {addr[:12]}...{addr[-8:]}")
+        lines.append(f"📍 Address:")
+        lines.append(f"`{addr}`")
 
     if pool.get("bin_step"):
         lines.append(f"📊 Bin Step: {pool.get('bin_step')}")
@@ -226,18 +258,45 @@ async def process_pool_info(
         parts = user_input.split()
         if len(parts) < 2:
             raise ValueError(
-                "Need: connector pool_address\n\nExample: meteora 5Q5...abc"
+                "Need: connector pool_address [network]\n\nExample: meteora 5Q5...abc"
             )
 
         connector = parts[0].lower()
         pool_address = parts[1]
 
         # Validate connector - must be a supported CLMM connector
-        supported_connectors = ["meteora", "raydium", "orca"]
+        solana_connectors = ["meteora", "raydium", "orca"]
+        evm_connectors = ["uniswap", "pancakeswap"]
+        supported_connectors = solana_connectors + evm_connectors
+
         if connector not in supported_connectors:
             raise ValueError(
                 f"Unsupported connector '{connector}'. Use: {', '.join(supported_connectors)}"
             )
+
+        # Determine network based on connector type
+        if connector in solana_connectors:
+            network = "solana-mainnet-beta"
+        else:
+            # EVM connectors require network specification
+            if len(parts) < 3:
+                raise ValueError(
+                    f"EVM connector '{connector}' requires network.\n\n"
+                    f"Example: {connector} {pool_address} ethereum"
+                )
+            network = parts[2].lower()
+            # Normalize network names
+            network_mapping = {
+                "ethereum": "ethereum-mainnet",
+                "eth": "ethereum-mainnet",
+                "arbitrum": "arbitrum-one",
+                "arb": "arbitrum-one",
+                "base": "base-mainnet",
+                "bsc": "binance-smart-chain",
+                "polygon": "polygon-mainnet",
+                "optimism": "optimism-mainnet",
+            }
+            network = network_mapping.get(network, network)
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
@@ -251,7 +310,7 @@ async def process_pool_info(
         # Fetch pool info
         result = await client.gateway_clmm.get_pool_info(
             connector=connector,
-            network="solana-mainnet-beta",
+            network=network,
             pool_address=pool_address,
         )
 
@@ -361,25 +420,28 @@ def _build_balance_table_compact(gateway_data: dict) -> str:
     return "\n".join(lines)
 
 
-async def handle_pool_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle CLMM pool list"""
+async def handle_pool_list(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, connector: str = "meteora"
+) -> None:
+    """Handle CLMM pool list for a specific connector"""
     # Get cached gateway balances (cached from /lp menu)
     gateway_data = get_cached(context.user_data, "gateway_balances", ttl=120)
     balance_table = _build_balance_table_compact(gateway_data)
 
+    connector_name = connector.capitalize()
     help_text = (
-        r"📋 *List CLMM Pools*" + "\n\n" + balance_table + r"Reply with:" + "\n\n"
+        rf"📋 *List {connector_name} Pools*" + "\n\n" + balance_table + r"Reply with:" + "\n\n"
         r"`[search_term] [limit]`" + "\n\n"
         r"*Examples:*" + "\n"
         r"`SOL 10`" + "\n"
-        r"`USDC 5`" + "\n\n"
-        r"_\(Uses Meteora connector\)_"
+        r"`USDC 5`" + "\n"
     )
 
     keyboard = [[InlineKeyboardButton("« Cancel", callback_data="dex:liquidity")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     context.user_data["dex_state"] = "pool_list"
+    context.user_data["pool_list_connector"] = connector
     # Store message for later editing with results
     context.user_data["pool_list_message_id"] = update.callback_query.message.message_id
     context.user_data["pool_list_chat_id"] = update.callback_query.message.chat_id
@@ -387,6 +449,13 @@ async def handle_pool_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.callback_query.message.edit_text(
         help_text, parse_mode="MarkdownV2", reply_markup=reply_markup
     )
+
+
+async def handle_pool_list_orca(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle Orca CLMM pool list"""
+    await handle_pool_list(update, context, connector="orca")
 
 
 def _format_number(value, decimals: int = 2) -> str:
@@ -448,8 +517,16 @@ def _format_pool_table(pools: list) -> str:
 
     for i, pool in enumerate(pools):
         idx = str(i + 1)
-        # Truncate pair to 11 chars
-        pair = pool.get("trading_pair", "N/A")[:11]
+        # Format pair to fit 11 chars - abbreviate base token if needed, keep quote
+        full_pair = pool.get("trading_pair", "N/A")
+        if "-" in full_pair and len(full_pair) > 11:
+            base, quote = full_pair.rsplit("-", 1)
+            max_base_len = 11 - len(quote) - 1  # -1 for the dash
+            if max_base_len > 2:
+                base = base[:max_base_len-1] + "…"
+            pair = f"{base}-{quote}"[:11]
+        else:
+            pair = full_pair[:11]
 
         # Get TVL value
         tvl_val = 0
@@ -624,8 +701,8 @@ async def process_pool_list(
         # Otherwise, search for pools
         parts = user_input.split()
 
-        # Always use meteora - only connector that supports pool listing
-        connector = "meteora"
+        # Use connector from context (set by handle_pool_list), default to meteora
+        connector = context.user_data.get("pool_list_connector", "meteora")
         search_term = parts[0] if len(parts) > 0 and parts[0] != "_" else None
         # Parse limit from user input (default 15, max 30 for display)
         requested_limit = int(parts[1]) if len(parts) > 1 else 15
@@ -682,6 +759,10 @@ async def process_pool_list(
 
         pools = result.get("pools", [])
 
+        # Add connector to each pool for later use
+        for pool in pools:
+            pool["connector"] = connector
+
         if not pools:
             message = escape_markdown_v2("📋 No pools found")
             context.user_data["pool_list_cache"] = []
@@ -713,9 +794,10 @@ async def process_pool_list(
             # Use actual pool count (active_pools or pools), not API total which may be inaccurate
             actual_total = len(active_pools) if active_pools else len(pools)
             search_info = f" for '{search_term}'" if search_term else ""
+            connector_name = connector.capitalize()
 
             header = (
-                rf"📋 *CLMM Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {actual_total}\)"
+                rf"📋 *{connector_name} Pools*{escape_markdown_v2(search_info)} \({len(display_pools)} of {actual_total}\)"
                 + "\n\n"
             )
 
@@ -1226,12 +1308,7 @@ async def _show_pool_detail(
 
     # Pool header - compact info
     message += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
-    addr_short = (
-        f"{pool_address[:6]}...{pool_address[-4:]}"
-        if len(pool_address) > 12
-        else pool_address
-    )
-    message += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
+    message += f"📍 *Address:*\n`{escape_markdown_v2(pool_address)}`\n"
     if current_price:
         message += f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"
     if bin_step:
@@ -2183,6 +2260,7 @@ async def handle_pool_combined_chart(
                 connector=connector,
                 user_data=context.user_data,
                 chat_id=chat_id,
+                context=context,
             )
 
         if not ohlcv_data and not bins:
@@ -4018,12 +4096,7 @@ async def show_add_position_menu(
         # Pool info header - show pair and address
         help_text += f"🏊 *Pool:* `{escape_markdown_v2(pair)}`\n"
         if pool_address:
-            addr_short = (
-                f"{pool_address[:6]}...{pool_address[-4:]}"
-                if len(pool_address) > 12
-                else pool_address
-            )
-            help_text += f"📍 *Address:* `{escape_markdown_v2(addr_short)}`\n"
+            help_text += f"📍 *Address:*\n`{escape_markdown_v2(pool_address)}`\n"
         if current_price:
             help_text += (
                 f"💱 *Price:* `{escape_markdown_v2(str(current_price)[:10])}`\n"

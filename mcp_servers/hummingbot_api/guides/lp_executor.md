@@ -1,11 +1,15 @@
 ### LP Executor
 **This is the standard way to manage LP positions on CLMM DEXs.**
 
-Manages liquidity provider positions on CLMM DEXs (Meteora, Raydium).
+Manages liquidity provider positions on CLMM DEXs.
 Opens positions within price bounds, monitors range status, tracks fees.
 
+**Supported DEXs:**
+- **Solana:** Meteora (DLMM), Raydium (CLMM), Orca (Whirlpools)
+- **EVM:** Uniswap V3 (Ethereum, Arbitrum, Base, etc.), PancakeSwap V3 (BSC, Ethereum)
+
 **Use when:**
-- Providing liquidity on Solana DEXs
+- Providing liquidity on Solana or EVM DEXs
 - Want automated position monitoring and fee tracking
 - Earning trading fees from LP positions
 
@@ -13,6 +17,33 @@ Opens positions within price bounds, monitors range status, tracks fees.
 - Trading on CEX (use other executors)
 - Want directional exposure only
 - Not familiar with impermanent loss risks
+
+#### Setup Workflow
+
+**If user provides pool_address:** Skip to step 3 (get pool info directly)
+
+1. **Find pools** (skip if pool_address provided):
+   - Use `explore_dex_pools` with `action="list_pools"` and `connector`
+   - Solana connectors: `meteora`, `raydium`, `orca`
+   - EVM connectors: `uniswap`, `pancakeswap`
+   - Filter by `search_term` (e.g., "SOL", "ETH", "USDC") to find relevant pools
+   - Sort by `volume` or `tvl` to find active pools
+
+2. **Select pool**: User picks from list or provides address directly
+
+3. **Get pool info**:
+   - Use `explore_dex_pools` with `action="get_pool_info"`, `connector`, `network`, and `pool_address`
+   - **Networks:** `solana-mainnet-beta` (Solana), `ethereum-mainnet`, `arbitrum-one`, `base-mainnet`, `binance-smart-chain` (EVM)
+   - Get current price, bin_step, trading_pair for position setup
+
+4. **Determine position parameters**:
+   - Ask user for amount(s) and range preference
+   - Calculate `lower_price` / `upper_price` based on current price and user preference
+   - Set `side` based on which tokens user is providing (0=both, 1=quote-only, 2=base-only)
+
+5. **Create executor**:
+   - Use `manage_executors` with `action="create"`, `executor_type="lp_executor"`
+   - Include all required params: `connector_name`, `trading_pair`, `pool_address`, `lower_price`, `upper_price`, amounts
 
 #### State Machine
 
@@ -30,7 +61,9 @@ NOT_ACTIVE → OPENING → IN_RANGE ↔ OUT_OF_RANGE → CLOSING → COMPLETE
 #### Key Parameters
 
 **Required:**
-- `connector_name`: CLMM connector in `connector/clmm` format (e.g., `meteora/clmm`, `raydium/clmm`)
+- `connector_name`: CLMM connector in `connector/clmm` format
+  - **Solana:** `meteora/clmm`, `raydium/clmm`, `orca/clmm`
+  - **EVM:** `uniswap/clmm`, `pancakeswap/clmm`
   - **IMPORTANT:** Must include the `/clmm` suffix — using just `meteora` will fail
 - `trading_pair`: Token pair (e.g., `SOL-USDC`)
 - `pool_address`: Pool contract address

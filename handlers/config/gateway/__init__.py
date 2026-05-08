@@ -56,6 +56,7 @@ from .networks import (
     show_networks_menu,
 )
 from .pools import handle_pool_action, handle_pool_input, show_pools_menu
+from .rpc_providers import handle_rpc_action, handle_rpc_input, show_rpc_providers_menu
 from .tokens import handle_token_action, handle_token_input, show_tokens_menu
 from .wallets import handle_wallet_action, handle_wallet_input, show_wallets_menu
 
@@ -108,6 +109,10 @@ async def handle_gateway_callback(
         await show_tokens_menu(query, context)
     elif query.data.startswith("gateway_token_"):
         await handle_token_action(query, context)
+    elif query.data == "gateway_rpc_providers":
+        await show_rpc_providers_menu(query, context)
+    elif query.data.startswith("gateway_rpc_"):
+        await handle_rpc_action(query, context)
 
 
 async def handle_gateway_input(
@@ -127,6 +132,8 @@ async def handle_gateway_input(
         await handle_network_config_input(update, context)
     elif context.user_data.get("awaiting_connector_config"):
         await handle_connector_config_input(update, context)
+    elif context.user_data.get("awaiting_rpc_input"):
+        await handle_rpc_input(update, context)
 
 
 __all__ = [

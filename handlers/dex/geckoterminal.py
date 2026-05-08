@@ -2314,6 +2314,7 @@ async def show_gecko_liquidity(
             connector=connector,
             user_data=context.user_data,
             chat_id=chat_id,
+            context=context,
         )
 
         if error or not bins:
@@ -2465,6 +2466,7 @@ async def show_gecko_combined(
             connector=connector,
             user_data=context.user_data,
             chat_id=chat_id,
+            context=context,
         )
 
         if not ohlcv_data and not bins:

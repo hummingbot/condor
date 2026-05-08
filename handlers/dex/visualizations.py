@@ -972,12 +972,55 @@ def generate_combined_chart(
             xaxis_config["rangebreaks"] = [dict(dvalue=gap_threshold)]
 
         fig.update_xaxes(**xaxis_config)
+
+        # Calculate Y-axis range from OHLCV data with padding
+        ohlcv_min = min(lows) if lows else 0
+        ohlcv_max = max(highs) if highs else 0
+
+        # Include range bounds if provided
+        if lower_price and lower_price < ohlcv_min:
+            ohlcv_min = lower_price
+        if upper_price and upper_price > ohlcv_max:
+            ohlcv_max = upper_price
+        if current_price:
+            ohlcv_min = min(ohlcv_min, current_price)
+            ohlcv_max = max(ohlcv_max, current_price)
+
+        # Add 5% padding
+        price_range = ohlcv_max - ohlcv_min
+        if price_range > 0:
+            padding = price_range * 0.05
+            y_min = ohlcv_min - padding
+            y_max = ohlcv_max + padding
+        else:
+            y_min = ohlcv_min * 0.95
+            y_max = ohlcv_max * 1.05
+
         fig.update_yaxes(
             gridcolor=DARK_THEME["grid_color"],
             color=DARK_THEME["axis_color"],
             showgrid=True,
             zeroline=False,
+            range=[y_min, y_max],  # Set explicit range based on OHLCV data
+            row=1,
+            col=1,
         )
+        # Volume axis doesn't need explicit range
+        fig.update_yaxes(
+            gridcolor=DARK_THEME["grid_color"],
+            color=DARK_THEME["axis_color"],
+            showgrid=True,
+            zeroline=False,
+            row=2,
+            col=1,
+        )
+        if has_liquidity:
+            # Liquidity panel shares Y-axis with OHLCV
+            fig.update_yaxes(
+                range=[y_min, y_max],
+                row=1,
+                col=2,
+            )
 
         # Axis titles
         fig.update_yaxes(title_text="Price", row=1, col=1, side="left")
