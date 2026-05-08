@@ -87,6 +87,7 @@ async def send_notification(
 
 
 def _local_manage_routines_list(strategy_id: str | None = None) -> dict:
+    from pathlib import Path
     from routines.base import discover_routines, discover_routines_from_path
 
     routines = discover_routines(force_reload=True)
@@ -99,21 +100,51 @@ def _local_manage_routines_list(strategy_id: str | None = None) -> dict:
             "scope": "global",
         })
 
-    # Merge agent-local routines: use strategy_id if provided, else CONDOR_AGENT_SLUG
-    agent_routines_dir = _get_agent_routines_dir(strategy_id) if strategy_id else None
-    if not agent_routines_dir and CONDOR_AGENT_SLUG:
-        from pathlib import Path
-        agent_routines_dir = Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
-
-    if agent_routines_dir and agent_routines_dir.exists():
-        agent_routines = discover_routines_from_path(agent_routines_dir)
-        for name, routine in sorted(agent_routines.items()):
-            result.append({
-                "name": name,
-                "description": routine.description,
-                "type": "continuous" if routine.is_continuous else "one-shot",
-                "scope": "agent",
-            })
+    if strategy_id:
+        # Specific strategy requested — only list its routines
+        agent_routines_dir = _get_agent_routines_dir(strategy_id)
+        if agent_routines_dir and agent_routines_dir.exists():
+            agent_routines = discover_routines_from_path(agent_routines_dir)
+            for name, routine in sorted(agent_routines.items()):
+                result.append({
+                    "name": name,
+                    "description": routine.description,
+                    "type": "continuous" if routine.is_continuous else "one-shot",
+                    "scope": "agent",
+                    "agent": strategy_id,
+                })
+    else:
+        # No specific strategy — scan all agents for their local routines
+        # First try CONDOR_AGENT_SLUG (scoped MCP session)
+        if CONDOR_AGENT_SLUG:
+            agent_routines_dir = Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
+            if agent_routines_dir.exists():
+                agent_routines = discover_routines_from_path(agent_routines_dir)
+                for name, routine in sorted(agent_routines.items()):
+                    result.append({
+                        "name": name,
+                        "description": routine.description,
+                        "type": "continuous" if routine.is_continuous else "one-shot",
+                        "scope": "agent",
+                        "agent": CONDOR_AGENT_SLUG,
+                    })
+        else:
+            # No agent scope — discover routines from ALL strategies
+            from condor.trading_agent.strategy import StrategyStore
+            store = StrategyStore()
+            for s in store.list_all():
+                agent_routines_dir = Path("trading_agents") / s.slug / "routines"
+                if not agent_routines_dir.exists():
+                    continue
+                agent_routines = discover_routines_from_path(agent_routines_dir)
+                for name, routine in sorted(agent_routines.items()):
+                    result.append({
+                        "name": name,
+                        "description": routine.description,
+                        "type": "continuous" if routine.is_continuous else "one-shot",
+                        "scope": "agent",
+                        "agent": s.slug,
+                    })
 
     return {"routines": result}
 
