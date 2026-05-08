@@ -341,6 +341,7 @@ def build_mcp_servers_for_session(
             "--url", api_url,
             "--username", server["username"],
             "--password", server["password"],
+            "--server-name", server_name,
         ],
         "env": [],
     }
@@ -388,6 +389,7 @@ def build_mcp_servers_for_agent(
             "--url", api_url,
             "--username", server["username"],
             "--password", server["password"],
+            "--server-name", server_name,
         ],
         "env": [],
     }
@@ -413,7 +415,7 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
         active_name = accessible[0] if accessible else None
 
     if active_name:
-        # Build server list with credentials and permissions
+        # Build server list with permissions (no credentials needed — MCP is pre-configured)
         server_lines: list[str] = []
         for name in accessible:
             server = cm.get_server(name)
@@ -422,31 +424,17 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
             perm = cm.get_server_permission(user_id, name)
             perm_label = perm.value.upper() if perm else "UNKNOWN"
             active_tag = " (active)" if name == active_name else ""
-            server_lines.append(
-                f"- {name}{active_tag} [{perm_label}]: "
-                f"host={server['host']}, port={server['port']}, "
-                f"user={server['username']}, pass={server['password']}"
-            )
+            server_lines.append(f"- {name}{active_tag} [{perm_label}]")
 
-        # Build configure_server call for the active server
-        active_server = cm.get_server(active_name)
-        if active_server:
-            configure_hint = (
-                f'IMPORTANT: Before making ANY tool calls to mcp-hummingbot, you MUST first call '
-                f'configure_server(host="{active_server["host"]}", port={active_server["port"]}, '
-                f'username="{active_server["username"]}", password="{active_server["password"]}") '
-                f'to ensure the MCP is connected to the correct server. '
-                f'Do this silently without telling the user.'
-            )
-        else:
-            configure_hint = ""
+        # Get active server permission for enforcement
+        active_perm = cm.get_server_permission(user_id, active_name)
+        active_perm_label = active_perm.value.upper() if active_perm else "UNKNOWN"
 
         # For ACP agents (Claude Code): instruct them to preload MCP tools via ToolSearch
         # Pydantic-ai agents get tools directly, no preload needed
         tool_preload_hint = ""
         if agent_key and not is_pydantic_ai_model(agent_key):
             mcp_tools = [
-                "mcp__mcp-hummingbot__configure_server",
                 "mcp__mcp-hummingbot__get_market_data",
                 "mcp__mcp-hummingbot__get_portfolio_overview",
                 "mcp__mcp-hummingbot__manage_executors",
@@ -479,27 +467,27 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
             )
 
         # Build server info section
-        server_info = [f"Active server: {active_name}", ""]
+        server_info = [
+            f"Active server: {active_name} (permission: {active_perm_label})",
+            "The MCP server is already connected to this server. Do NOT call configure_server — it is pre-configured.",
+            "",
+        ]
 
         if tool_preload_hint:
             server_info.extend([tool_preload_hint, ""])
-
-        if configure_hint:
-            server_info.extend([configure_hint, ""])
 
         server_info.extend([
             "Available servers:",
             *server_lines,
             "",
-            "To switch servers, use configure_server with the credentials above.",
-            'Example: configure_server(host="localhost", port=8000, username="admin", password="admin")',
-            "Only use servers listed here.",
+            "Server switching is not supported mid-session. If the user wants a different server, "
+            "tell them to start a new session with that server selected.",
             "",
             "Permission rules:",
+            f"- Your current permission on '{active_name}' is {active_perm_label}.",
             "- OWNER: Full access including trading operations and server management.",
             "- TRADER: Can trade, view balances, and manage own settings.",
-            "",
-            "After switching servers, enforce the permission level shown for that server.",
+            "- Enforce the permission level for this server.",
         ])
 
         sections.append("\n".join(server_info))
