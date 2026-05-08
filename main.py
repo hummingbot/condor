@@ -385,6 +385,12 @@ async def post_init(application: Application) -> None:
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
+    # Preload Whisper model in background so first voice message is fast
+    import asyncio
+    from utils.transcribe import _get_model, DEFAULT_MODEL
+
+    asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
+
     # Clear any previously set commands for all scopes to avoid stale overrides
     from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeDefault
 
