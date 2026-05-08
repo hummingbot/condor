@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, X, Zap } from "lucide-react";
+import { ArrowLeft, FileText, ScrollText, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
@@ -147,12 +147,30 @@ export function AgentDetail() {
               <p className="mt-1 text-sm text-[var(--color-text-muted)]">{agent.description}</p>
             )}
           </div>
-          <AgentControls
-            slug={slug!}
-            status={agent.status}
-            defaultContext={agent.default_trading_context || (agent.config.trading_context as string) || ""}
-            agentConfig={agent.config}
-          />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowStrategyModal(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              title="Strategy & Learnings"
+            >
+              <FileText className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Strategy</span>
+            </button>
+            <button
+              onClick={() => setShowRoutinesBrowser(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              title="Routines & Reports"
+            >
+              <ScrollText className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Routines</span>
+            </button>
+            <AgentControls
+              slug={slug!}
+              status={agent.status}
+              defaultContext={agent.default_trading_context || (agent.config.trading_context as string) || ""}
+              agentConfig={agent.config}
+            />
+          </div>
         </div>
       </div>
 
@@ -216,8 +234,6 @@ export function AgentDetail() {
         <PerformancePanel
           slug={agent.slug}
           onSessionClick={handleSessionClick}
-          onOpenStrategy={() => setShowStrategyModal(true)}
-          onOpenRoutines={() => setShowRoutinesBrowser(true)}
         />
       </div>
 

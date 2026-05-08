@@ -4,21 +4,20 @@ import {
   ChevronDown,
   ChevronRight,
   Wallet,
-  Bot,
-  TrendingUp,
-  Coins,
-  Activity,
   Server,
   BarChart3,
   Layers,
   KeyRound,
+  ArrowUpRight,
+  ArrowDownRight,
 } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useServer } from "@/hooks/useServer";
 import {
   api,
+  type AgentSummary,
   type BalanceItem,
   type ConnectorBalance,
   type PortfolioHistoryPoint,
@@ -73,39 +72,156 @@ const CHART_COLORS = [
   "#a78bfa", // light violet
 ];
 
-// ── Stat Card ──
+// ── KPI helpers ──
 
-function StatCard({
+const TIME_PERIODS = ["1D", "1W", "1M"] as const;
+
+function isExecutorActive(status: string) {
+  return status === "active" || status === "running";
+}
+
+function computeExecutorStats(executors: import("@/lib/api").ExecutorInfo[], period: string) {
+  const now = Date.now() / 1000;
+  const cutoff =
+    period === "1D" ? now - 86400 :
+    period === "1W" ? now - 7 * 86400 :
+    now - 30 * 86400;
+
+  const filtered = executors.filter((e) => e.timestamp >= cutoff);
+  const pnl = filtered.reduce((s, e) => s + e.pnl, 0);
+  const volume = filtered.reduce((s, e) => s + e.volume, 0);
+  const count = filtered.length;
+  return { pnl, volume, count };
+}
+
+// ── Unified Dashboard Strip ──
+
+function KpiCell({
   label,
-  value,
-  icon: Icon,
-  valueColor,
-  subtitle,
-  subtitleColor,
+  mainValue,
+  pnl,
+  details,
 }: {
   label: string;
-  value: string;
-  icon: React.ComponentType<{ className?: string }>;
-  valueColor?: string;
-  subtitle?: string;
-  subtitleColor?: string;
+  mainValue: string | number;
+  pnl?: number;
+  details: string;
 }) {
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
-      <div className="flex items-center gap-2 mb-1">
-        <Icon className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-        <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">
-          {label}
-        </span>
+    <div className="flex-1 px-5 py-3 min-w-0">
+      <span className="text-[11px] uppercase tracking-wider font-medium text-[var(--color-text-muted)]">{label}</span>
+      <div className="flex items-baseline gap-2.5 mt-1">
+        <span className="text-2xl font-bold tabular-nums tracking-tight leading-none">{mainValue}</span>
+        {pnl !== undefined && pnl !== null && (
+          <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold"
+            style={{ color: pnl >= 0 ? "var(--color-green)" : "var(--color-red)" }}>
+            {pnl >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
+            {formatPnl(pnl)}
+          </span>
+        )}
       </div>
-      <p className="text-xl font-bold tabular-nums" style={valueColor ? { color: valueColor } : {}}>
-        {value}
-      </p>
-      {subtitle && (
-        <p className="text-xs tabular-nums mt-0.5" style={subtitleColor ? { color: subtitleColor } : {}}>
-          {subtitle}
-        </p>
-      )}
+      <div className="text-xs text-[var(--color-text-muted)] mt-1 truncate">{details}</div>
+    </div>
+  );
+}
+
+function DashboardStrip({
+  totalUsd,
+  totalTokens,
+  connectorCount,
+  portfolioPnl,
+  botCount,
+  controllerCount,
+  botPnl,
+  botVolume,
+  activeExecutorCount,
+  allExecutors,
+  agents,
+  period,
+  onPeriodChange,
+  onNavigate,
+}: {
+  totalUsd: number;
+  totalTokens: number;
+  connectorCount: number;
+  portfolioPnl: number | null;
+  botCount: number;
+  controllerCount: number;
+  botPnl: number;
+  botVolume: number;
+  activeExecutorCount: number;
+  allExecutors: import("@/lib/api").ExecutorInfo[];
+  agents: AgentSummary[];
+  period: string;
+  onPeriodChange: (p: string) => void;
+  onNavigate: (path: string) => void;
+}) {
+  const execStats = useMemo(() => computeExecutorStats(allExecutors, period), [allExecutors, period]);
+
+  const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
+  const agentPnl = agents.reduce((s, a) => s + a.daily_pnl, 0);
+  const agentSessions = agents.reduce((s, a) => s + a.session_count, 0);
+
+  const btnClass = "flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] w-full";
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+      <div className="flex items-stretch divide-x divide-[var(--color-border)]">
+        <KpiCell
+          label="Portfolio"
+          mainValue={formatUsd(totalUsd)}
+          pnl={portfolioPnl ?? undefined}
+          details={`${totalTokens} assets · ${connectorCount} connector${connectorCount !== 1 ? "s" : ""}`}
+        />
+
+        <KpiCell
+          label="Bots"
+          mainValue={botCount}
+          pnl={botPnl}
+          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatUsd(botVolume)}`}
+        />
+
+        <KpiCell
+          label="Executors"
+          mainValue={`${activeExecutorCount} active`}
+          pnl={execStats.pnl}
+          details={`${execStats.count} in ${period} · vol ${formatUsd(execStats.volume)}`}
+        />
+
+        <KpiCell
+          label="Agents"
+          mainValue={activeAgents.length}
+          pnl={agentPnl}
+          details={`${agents.length} total · ${agentSessions} session${agentSessions !== 1 ? "s" : ""}`}
+        />
+
+        {/* ── Period + Quick Links ── */}
+        <div className="flex flex-col justify-center gap-1 px-2.5 py-2 shrink-0 w-[100px]">
+          <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] p-0.5 bg-[var(--color-bg)] w-full justify-center">
+            {TIME_PERIODS.map((p) => (
+              <button
+                key={p}
+                onClick={() => onPeriodChange(p)}
+                className={`px-1.5 py-1 text-[10px] rounded font-medium transition-colors flex-1 ${
+                  period === p
+                    ? "bg-[var(--color-accent)] text-white shadow-sm"
+                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                }`}
+              >
+                {p}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => onNavigate("/settings?tab=keys")} className={btnClass}>
+            <KeyRound className="h-3 w-3" />
+            Keys
+          </button>
+          <button onClick={() => onNavigate("/settings?tab=servers")} className={btnClass}>
+            <Server className="h-3 w-3" />
+            Servers
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -251,8 +367,6 @@ function ConnectorRow({
 
 // ── Portfolio Evolution Chart ──
 
-const RANGES = ["1D", "1W", "1M", "3M"] as const;
-
 function formatAxisTime(ts: number, range: string) {
   const d = new Date(ts * 1000);
   if (range === "1D") return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
@@ -267,15 +381,14 @@ function formatTooltipDate(ts: number, range: string) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function PortfolioEvolution({ server }: { server: string }) {
-  const [range, setRange] = useState<string>("1D");
+function PortfolioEvolution({ server, range }: { server: string; range: string }) {
   const [stacked, setStacked] = useState(false);
   const [hover, setHover] = useState<{ x: number; point: PortfolioHistoryPoint } | null>(null);
   const queryClient = useQueryClient();
 
   useEffect(() => {
     if (!server) return;
-    RANGES.forEach((r) => {
+    TIME_PERIODS.forEach((r) => {
       queryClient.prefetchQuery({
         queryKey: ["portfolio-history", server, r],
         queryFn: () => api.getPortfolioHistory(server, r),
@@ -406,38 +519,21 @@ function PortfolioEvolution({ server }: { server: string }) {
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 h-full">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium text-[var(--color-text-muted)]">Portfolio Evolution</h3>
-        <div className="flex items-center gap-2">
-          <div className="flex gap-0.5 rounded border border-[var(--color-border)] p-0.5">
-            <button
-              onClick={() => setStacked(false)}
-              className={`p-1 rounded transition-colors ${!stacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
-              title="Line chart"
-            >
-              <BarChart3 className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={() => setStacked(true)}
-              className={`p-1 rounded transition-colors ${stacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
-              title="Stacked area chart"
-            >
-              <Layers className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <div className="flex gap-1">
-            {RANGES.map((r) => (
-              <button
-                key={r}
-                onClick={() => setRange(r)}
-                className={`px-2.5 py-1 text-xs rounded font-medium transition-colors ${
-                  range === r
-                    ? "bg-[var(--color-accent)] text-white"
-                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-bg)]"
-                }`}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
+        <div className="flex gap-0.5 rounded border border-[var(--color-border)] p-0.5">
+          <button
+            onClick={() => setStacked(false)}
+            className={`p-1 rounded transition-colors ${!stacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
+            title="Line chart"
+          >
+            <BarChart3 className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={() => setStacked(true)}
+            className={`p-1 rounded transition-colors ${stacked ? "bg-[var(--color-accent)] text-white" : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"}`}
+            title="Stacked area chart"
+          >
+            <Layers className="h-3.5 w-3.5" />
+          </button>
         </div>
       </div>
 
@@ -611,6 +707,7 @@ function PortfolioEvolution({ server }: { server: string }) {
 export function Portfolio() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const [period, setPeriod] = useState<string>("1W");
 
   const { data, isLoading, error, isPlaceholderData } = useQuery({
     queryKey: ["portfolio", server],
@@ -628,17 +725,24 @@ export function Portfolio() {
     placeholderData: keepPreviousData,
   });
 
-  const { data: executors } = useQuery({
-    queryKey: ["executors-active", server],
-    queryFn: () => api.getExecutors(server!, { status: "active" }),
+  const { data: allExecutors } = useQuery({
+    queryKey: ["executors-all", server],
+    queryFn: () => api.getExecutors(server!),
     enabled: !!server,
     refetchInterval: 30000,
     placeholderData: keepPreviousData,
   });
 
-  const { data: weekHistory } = useQuery({
-    queryKey: ["portfolio-history", server, "1W"],
-    queryFn: () => api.getPortfolioHistory(server!, "1W"),
+  const { data: agents } = useQuery({
+    queryKey: ["agents"],
+    queryFn: () => api.getAgents(),
+    refetchInterval: 30000,
+    placeholderData: keepPreviousData,
+  });
+
+  const { data: periodHistory } = useQuery({
+    queryKey: ["portfolio-history", server, period],
+    queryFn: () => api.getPortfolioHistory(server!, period),
     enabled: !!server,
     refetchInterval: 60000,
   });
@@ -660,15 +764,13 @@ export function Portfolio() {
   if (isLoading && !data) {
     return (
       <div className="space-y-6">
-        {/* Skeleton stat cards */}
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div
-              key={i}
-              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3"
-            >
-              <div className="h-3 w-20 rounded bg-[var(--color-border)] animate-pulse mb-2" />
-              <div className="h-6 w-28 rounded bg-[var(--color-border)] animate-pulse" />
+        {/* Skeleton dashboard strip */}
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-5 py-4 flex gap-8">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="flex-1">
+              <div className="h-3 w-16 rounded bg-[var(--color-border)] animate-pulse mb-2" />
+              <div className="h-7 w-24 rounded bg-[var(--color-border)] animate-pulse mb-1.5" />
+              <div className="h-3 w-32 rounded bg-[var(--color-border)] animate-pulse" />
             </div>
           ))}
         </div>
@@ -703,19 +805,20 @@ export function Portfolio() {
   const totalUsd = data?.total_usd ?? 0;
   const connectors = data?.connectors ?? [];
 
-  // Compute weekly PnL from history
-  const weekPoints = weekHistory?.points ?? [];
-  const weeklyPnl =
-    weekPoints.length >= 2
-      ? weekPoints[weekPoints.length - 1].total_usd - weekPoints[0].total_usd
+  // Compute portfolio PnL from history (follows period selector)
+  const historyPoints = periodHistory?.points ?? [];
+  const portfolioPnl =
+    historyPoints.length >= 2
+      ? historyPoints[historyPoints.length - 1].total_usd - historyPoints[0].total_usd
       : null;
 
   // Compute aggregate stats
   const totalTokens = connectors.reduce((s, c) => s + c.balances.length, 0);
   const botsList = bots?.bots ?? [];
-  const activeBots = botsList.filter((b) => b.status === "running" || b.status === "active");
+  const controllerCount = bots?.controllers?.length ?? 0;
   const botPnl = bots?.total_pnl ?? 0;
-  const activeExecutorCount = executors?.length ?? 0;
+  const botVolume = bots?.total_volume ?? 0;
+  const activeExecutorCount = (allExecutors ?? []).filter((e) => isExecutorActive(e.status)).length;
 
   // Flatten all tokens for top holdings
   const allTokens = connectors.flatMap((c) =>
@@ -726,55 +829,28 @@ export function Portfolio() {
 
   return (
     <div className={`space-y-6 transition-opacity duration-300 ${isPlaceholderData ? "opacity-60" : "opacity-100"}`}>
-      {/* Stat cards */}
-      <div className="flex gap-3">
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 flex-1">
-          <StatCard
-            label="Total Value"
-            value={formatUsd(totalUsd)}
-            icon={Wallet}
-            subtitle={weeklyPnl !== null ? `(${formatPnl(weeklyPnl)} this week)` : undefined}
-            subtitleColor={weeklyPnl !== null ? (weeklyPnl >= 0 ? "var(--color-green)" : "var(--color-red)") : undefined}
-          />
-          <StatCard
-            label="Active Bots"
-            value={`${activeBots.length} running`}
-            icon={Bot}
-          />
-          <StatCard
-            label="Bot PnL"
-            value={formatPnl(botPnl)}
-            icon={TrendingUp}
-            valueColor={botPnl >= 0 ? "var(--color-green)" : "var(--color-red)"}
-          />
-          <StatCard
-            label="System"
-            value={`${totalTokens} assets / ${activeExecutorCount} executors`}
-            icon={activeExecutorCount > 0 ? Activity : Coins}
-          />
-        </div>
-        <div className="flex flex-col gap-2 shrink-0">
-          <button
-            onClick={() => navigate("/settings?tab=keys")}
-            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          >
-            <KeyRound className="h-4 w-4" />
-            <span>Keys</span>
-          </button>
-          <button
-            onClick={() => navigate("/settings?tab=servers")}
-            className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          >
-            <Server className="h-4 w-4" />
-            <span>Servers</span>
-          </button>
-        </div>
-      </div>
+      {/* Dashboard Strip */}
+      <DashboardStrip
+        totalUsd={totalUsd}
+        totalTokens={totalTokens}
+        connectorCount={connectors.length}
+        portfolioPnl={portfolioPnl}
+        botCount={botsList.length}
+        controllerCount={controllerCount}
+        botPnl={botPnl}
+        botVolume={botVolume}
+        activeExecutorCount={activeExecutorCount}
+        allExecutors={allExecutors ?? []}
+        agents={agents ?? []}
+        period={period}
+        onPeriodChange={setPeriod}
+        onNavigate={navigate}
+      />
 
       {/* Portfolio Evolution + Top Holdings side by side */}
       <div className="flex flex-col lg:flex-row gap-4">
         <div className={connectors.length > 0 && topTokens.length > 0 ? "lg:flex-[2] min-w-0" : "w-full"}>
-          <PortfolioEvolution server={server!} />
+          <PortfolioEvolution server={server!} range={period} />
         </div>
         {connectors.length > 0 && topTokens.length > 0 && (
           <div className="lg:flex-1 min-w-0">

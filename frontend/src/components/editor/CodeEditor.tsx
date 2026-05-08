@@ -105,7 +105,7 @@ export function CodeEditor({
   return (
     <div
       ref={containerRef}
-      className={`rounded-md border border-[var(--color-border)] overflow-hidden ${className ?? ""}`}
+      className={`rounded-md border border-[var(--color-border)] overflow-hidden h-full ${className ?? ""}`}
     />
   );
 }

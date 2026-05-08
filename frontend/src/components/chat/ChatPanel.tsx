@@ -105,9 +105,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
       <div
         ref={panelRef}
         style={{ width: isOpen ? width : 0 }}
-        className={`fixed right-0 top-12 z-[60] flex h-[calc(100%-3rem)] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl transition-[width] duration-200 ease-out ${
-          isOpen ? "" : "overflow-hidden border-l-0"
-        }`}
+        className={`fixed right-0 top-12 z-[60] flex h-[calc(100%-3rem)] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl ${
+          isDragging ? "" : "transition-[width] duration-200 ease-out"
+        } ${isOpen ? "" : "overflow-hidden border-l-0"}`}
       >
         {/* Resize handle */}
         {isOpen && (

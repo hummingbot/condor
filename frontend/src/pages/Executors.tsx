@@ -232,37 +232,6 @@ function compareExecutors(a: ExecutorInfo, b: ExecutorInfo, key: SortKey, dir: S
   return dir === "asc" ? cmp : -cmp;
 }
 
-// ── Stat Card ──
-
-function StatCard({
-  label,
-  value,
-  icon: Icon,
-  valueColor,
-}: {
-  label: string;
-  value: string;
-  icon: React.ComponentType<{ className?: string }>;
-  valueColor?: string;
-}) {
-  return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
-      <div className="flex items-center gap-2 mb-1">
-        <Icon className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-        <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">
-          {label}
-        </span>
-      </div>
-      <p
-        className="text-xl font-bold tabular-nums"
-        style={valueColor ? { color: valueColor } : {}}
-      >
-        {value}
-      </p>
-    </div>
-  );
-}
-
 // ── Status Dot ──
 
 export function StatusDot({ status }: { status: string }) {
@@ -1053,6 +1022,7 @@ export function Executors() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [pendingStopIds, setPendingStopIds] = useState<string[] | null>(null);
+  const [kpiPeriod, setKpiPeriod] = useState<string>("3M");
 
   // WebSocket for real-time updates
   const wsChannels = useMemo(
@@ -1176,16 +1146,26 @@ export function Executors() {
     [filteredExecutors],
   );
 
-  // Aggregate stats (archived only for win rate)
+  // Aggregate stats (archived only for win rate), filtered by kpiPeriod
   const activePnl = useMemo(() => activeExecutors.reduce((s, ex) => s + ex.pnl, 0), [activeExecutors]);
   const activeVolume = useMemo(() => activeExecutors.reduce((s, ex) => s + ex.volume, 0), [activeExecutors]);
-  const archivedPnl = useMemo(() => archivedExecutors.reduce((s, ex) => s + ex.pnl, 0), [archivedExecutors]);
-  const archivedVolume = useMemo(() => archivedExecutors.reduce((s, ex) => s + ex.volume, 0), [archivedExecutors]);
-  const archivedFees = useMemo(() => archivedExecutors.reduce((s, ex) => s + ex.cum_fees_quote, 0), [archivedExecutors]);
+
+  const periodFilteredArchived = useMemo(() => {
+    const now = Date.now() / 1000;
+    const cutoff =
+      kpiPeriod === "1W" ? now - 7 * 86400 :
+      kpiPeriod === "1M" ? now - 30 * 86400 :
+      now - 90 * 86400;
+    return archivedExecutors.filter((ex) => ex.timestamp >= cutoff);
+  }, [archivedExecutors, kpiPeriod]);
+
+  const archivedPnl = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + ex.pnl, 0), [periodFilteredArchived]);
+  const archivedVolume = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + ex.volume, 0), [periodFilteredArchived]);
+  const archivedFees = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + ex.cum_fees_quote, 0), [periodFilteredArchived]);
   const winRate = useMemo(() => {
-    if (archivedExecutors.length === 0) return 0;
-    return archivedExecutors.filter((ex) => ex.pnl > 0).length / archivedExecutors.length;
-  }, [archivedExecutors]);
+    if (periodFilteredArchived.length === 0) return 0;
+    return periodFilteredArchived.filter((ex) => ex.pnl > 0).length / periodFilteredArchived.length;
+  }, [periodFilteredArchived]);
 
   // Selection helpers
   const toggleSelect = useCallback((id: string) => {
@@ -1235,24 +1215,6 @@ export function Executors() {
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <h2 className="text-xl font-bold">Executors</h2>
-        <div className="flex items-center gap-2">
-          {/* New Executor button */}
-          <button
-            onClick={() => navigate("/trade")}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            New Executor
-          </button>
-          {/* Export all */}
-          <button
-            onClick={() => exportCsv(filteredExecutors)}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
-            title="Export all to CSV"
-          >
-            <Download className="h-3.5 w-3.5" />
-          </button>
-        </div>
       </div>
 
       {/* Filters */}
@@ -1300,6 +1262,23 @@ export function Executors() {
         >
           Refresh
         </button>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => navigate("/trade")}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10 transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New Executor
+          </button>
+          <button
+            onClick={() => exportCsv(filteredExecutors)}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-muted)] hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] hover:bg-[var(--color-primary)]/10 transition-colors"
+            title="Export all to CSV"
+          >
+            <Download className="h-3.5 w-3.5" />
+            Export CSV
+          </button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -1315,22 +1294,58 @@ export function Executors() {
         </div>
       ) : (
         <>
-          {/* ── Performance Summary (always visible at top) ── */}
+          {/* ── Performance Summary ── */}
           {archivedExecutors.length > 0 && (
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-              <StatCard
-                label="Total PnL"
-                value={formatPnl(archivedPnl)}
-                icon={TrendingUp}
-                valueColor={pnlColor(archivedPnl)}
-              />
-              <StatCard
-                label="Win Rate"
-                value={winRate > 0 ? (winRate * 100).toFixed(1) + "%" : "\u2014"}
-                icon={Percent}
-              />
-              <StatCard label="Total Volume" value={formatVolume(archivedVolume)} icon={Volume2} />
-              <StatCard label="Total Fees" value={archivedFees > 0 ? formatUsd(archivedFees) : "\u2014"} icon={Layers} />
+            <div className="flex items-stretch rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden divide-x divide-[var(--color-border)]">
+              <div className="flex-1 px-4 py-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <TrendingUp className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+                  <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">Total PnL</span>
+                </div>
+                <p className="text-xl font-bold tabular-nums" style={{ color: pnlColor(archivedPnl) }}>
+                  {formatPnl(archivedPnl)}
+                </p>
+              </div>
+              <div className="flex-1 px-4 py-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <Percent className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+                  <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">Win Rate</span>
+                </div>
+                <p className="text-xl font-bold tabular-nums">
+                  {winRate > 0 ? (winRate * 100).toFixed(1) + "%" : "\u2014"}
+                </p>
+              </div>
+              <div className="flex-1 px-4 py-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <Volume2 className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+                  <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">Total Volume</span>
+                </div>
+                <p className="text-xl font-bold tabular-nums">{formatVolume(archivedVolume)}</p>
+              </div>
+              <div className="flex-1 px-4 py-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <Layers className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+                  <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">Total Fees</span>
+                </div>
+                <p className="text-xl font-bold tabular-nums">{archivedFees > 0 ? formatUsd(archivedFees) : "\u2014"}</p>
+              </div>
+              <div className="flex items-center px-3 shrink-0">
+                <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] p-0.5 bg-[var(--color-bg)]">
+                  {(["1W", "1M", "3M"] as const).map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setKpiPeriod(p)}
+                      className={`px-2 py-1 text-[10px] rounded font-medium transition-colors ${
+                        kpiPeriod === p
+                          ? "bg-[var(--color-accent)] text-white shadow-sm"
+                          : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 

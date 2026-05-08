@@ -56,13 +56,6 @@ export function ReportBrowser({
 
   const [activeSource, setActiveSource] = useState(initialSource ?? "");
 
-  // Set initial source once routines load if not set
-  useEffect(() => {
-    if (!activeSource && routines.length > 0) {
-      setActiveSource(routines[0].name);
-    }
-  }, [activeSource, routines]);
-
   // Filter routines by source type
   const filteredRoutines = useMemo(() => {
     if (sourceTypeFilter === "all") return routines;
@@ -71,6 +64,13 @@ export function ReportBrowser({
     // Specific agent name
     return routines.filter((r) => r.source === `agent:${sourceTypeFilter}`);
   }, [routines, sourceTypeFilter]);
+
+  // Set initial source once routines load if not set — pick from filtered list
+  useEffect(() => {
+    if (!activeSource && filteredRoutines.length > 0) {
+      setActiveSource(filteredRoutines[0].name);
+    }
+  }, [activeSource, filteredRoutines]);
 
   // Unique source types for filter
   const hasAgents = routines.some((r) => r.source.startsWith("agent:"));
@@ -391,7 +391,9 @@ export function ReportBrowser({
                   ) : hasActiveInstance ? (
                     <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]" />
                   ) : (
-                    <Zap className="h-3.5 w-3.5" />
+                    <span className="text-[10px] font-bold uppercase leading-none">
+                      {displayName.slice(0, 2)}
+                    </span>
                   )}
                 </button>
               );

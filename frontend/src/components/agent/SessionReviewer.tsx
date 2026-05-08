@@ -2,10 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   Camera,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   FlaskConical,
   LayoutList,
   X,
@@ -61,9 +59,9 @@ export function SessionReviewer({
   initialKind = "session",
   serverName,
   controllerIds,
-  allAgents,
+  allAgents: _allAgents,
   onClose,
-  onSwitchAgent,
+  onSwitchAgent: _onSwitchAgent,
 }: SessionReviewerProps) {
   const [selectedNum, setSelectedNum] = useState(initialSessionNum);
   const [selectedKind, setSelectedKind] = useState<"session" | "experiment">(initialKind);
@@ -142,42 +140,23 @@ export function SessionReviewer({
     setActiveSubTab("overview");
   }, []);
 
-  const goPrev = useCallback(() => {
-    if (currentIdx < sidebarItems.length - 1) selectItem(sidebarItems[currentIdx + 1]);
-  }, [currentIdx, sidebarItems, selectItem]);
+  // Snapshot click from chart → navigate to snapshots tab with that tick
+  const [pendingSnapshotTick, setPendingSnapshotTick] = useState<number | null>(null);
 
-  const goNext = useCallback(() => {
-    if (currentIdx > 0) selectItem(sidebarItems[currentIdx - 1]);
-  }, [currentIdx, sidebarItems, selectItem]);
+  const handleSnapshotClick = useCallback((tick: number) => {
+    setPendingSnapshotTick(tick);
+    setActiveSubTab("snapshots");
+  }, []);
 
-  // Agent switching
-  const agentIdx = allAgents?.findIndex((a) => a.slug === slug) ?? -1;
-
-  const goAgentUp = useCallback(() => {
-    if (!allAgents || agentIdx <= 0) return;
-    const prev = allAgents[agentIdx - 1];
-    onSwitchAgent?.(prev.slug);
-  }, [allAgents, agentIdx, onSwitchAgent]);
-
-  const goAgentDown = useCallback(() => {
-    if (!allAgents || agentIdx >= allAgents.length - 1) return;
-    const next = allAgents[agentIdx + 1];
-    onSwitchAgent?.(next.slug);
-  }, [allAgents, agentIdx, onSwitchAgent]);
-
-  // Keyboard navigation
+  // Keyboard: Escape only
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
-      if (e.key === "ArrowLeft") { goPrev(); e.preventDefault(); }
-      else if (e.key === "ArrowRight") { goNext(); e.preventDefault(); }
-      else if (e.key === "ArrowUp") { goAgentUp(); e.preventDefault(); }
-      else if (e.key === "ArrowDown") { goAgentDown(); e.preventDefault(); }
-      else if (e.key === "Escape") { onClose(); e.preventDefault(); }
+      if (e.key === "Escape") { onClose(); e.preventDefault(); }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goPrev, goNext, goAgentUp, goAgentDown, onClose]);
+  }, [onClose]);
 
   // PnL for current session
   const pnl = sessionPerf?.total_pnl ?? 0;
@@ -285,17 +264,7 @@ export function SessionReviewer({
         {/* Navigation hint */}
         {!sidebarCollapsed && (
           <div className="border-t border-[var(--color-border)] px-3 py-2 text-[9px] text-[var(--color-text-muted)]/40">
-            <span className="flex items-center gap-1">
-              <ChevronLeft className="h-2.5 w-2.5" />
-              <ChevronRight className="h-2.5 w-2.5" />
-              sessions
-              <span className="mx-1">|</span>
-              <ChevronUp className="h-2.5 w-2.5" />
-              <ChevronDown className="h-2.5 w-2.5" />
-              agents
-              <span className="mx-1">|</span>
-              esc close
-            </span>
+            esc close
           </div>
         )}
       </div>
@@ -327,35 +296,16 @@ export function SessionReviewer({
             )}
           </div>
 
-          <div className="flex items-center gap-1">
-            {/* Item navigation */}
-            <button
-              onClick={goPrev}
-              disabled={currentIdx >= sidebarItems.length - 1}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] disabled:opacity-30"
-              title="Previous"
-            >
-              <ChevronLeft className="h-4 w-4" />
-            </button>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-[var(--color-text-muted)]">{agentName}</span>
             <span className="text-[10px] text-[var(--color-text-muted)]">
-              {sidebarItems.length - currentIdx} of {sidebarItems.length}
+              {sidebarItems.length - currentIdx} / {sidebarItems.length}
             </span>
-            <button
-              onClick={goNext}
-              disabled={currentIdx <= 0}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] disabled:opacity-30"
-              title="Next"
-            >
-              <ChevronRight className="h-4 w-4" />
-            </button>
-
-            {/* Agent name */}
-            <span className="ml-3 text-xs text-[var(--color-text-muted)]">{agentName}</span>
 
             {/* Close */}
             <button
               onClick={onClose}
-              className="ml-2 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               title="Close (Esc)"
             >
               <X className="h-4 w-4" />
@@ -441,44 +391,20 @@ export function SessionReviewer({
                       sessionNum={selectedNum}
                       serverName={serverName}
                       controllerIds={controllerIds}
+                      onSnapshotClick={handleSnapshotClick}
                     />
                     <SessionOverview journal={parsedJournal} perf={sessionPerf} />
                   </div>
                 )}
                 {activeSubTab === "activity" && <SessionActivity journal={parsedJournal} />}
                 {activeSubTab === "snapshots" && (
-                  <SessionSnapshots slug={slug} sessionNum={selectedNum} />
+                  <SessionSnapshots slug={slug} sessionNum={selectedNum} initialTick={pendingSnapshotTick} />
                 )}
               </>
             )
           )}
         </div>
 
-        {/* Bottom timeline strip */}
-        {sidebarItems.length > 1 && (
-          <div className="flex items-center gap-1 border-t border-[var(--color-border)] px-4 py-1.5 overflow-x-auto scrollbar-thin">
-            {sidebarItems.map((item) => {
-              const isActive = item.number === selectedNum && item.kind === selectedKind;
-              const isExp = item.kind === "experiment";
-              return (
-                <button
-                  key={`${item.kind}-${item.number}`}
-                  onClick={() => selectItem(item)}
-                  className={`shrink-0 flex items-center gap-1 rounded px-2.5 py-1 text-[10px] transition-all ${
-                    isActive
-                      ? isExp
-                        ? "bg-amber-500/10 text-amber-400 font-medium"
-                        : "bg-[var(--color-primary)]/10 text-[var(--color-primary)] font-medium"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                >
-                  {isExp && <FlaskConical className="h-2.5 w-2.5" />}
-                  #{item.number}
-                </button>
-              );
-            })}
-          </div>
-        )}
       </div>
     </div>
   );

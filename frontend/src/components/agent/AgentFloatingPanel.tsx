@@ -66,9 +66,9 @@ export function AgentFloatingPanel({ panelId, onClose, children }: AgentFloating
   return (
     <div
       style={{ width: isOpen ? width : 0 }}
-      className={`fixed right-0 top-12 z-40 flex h-[calc(100%-3rem)] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl transition-[width] duration-200 ease-out ${
-        isOpen ? "" : "overflow-hidden border-l-0"
-      }`}
+      className={`fixed right-0 top-12 z-40 flex h-[calc(100%-3rem)] flex-col border-l border-[var(--color-border)] bg-[var(--color-bg)] shadow-xl ${
+        isDragging ? "" : "transition-[width] duration-200 ease-out"
+      } ${isOpen ? "" : "overflow-hidden border-l-0"}`}
     >
       {/* Resize handle */}
       {isOpen && (

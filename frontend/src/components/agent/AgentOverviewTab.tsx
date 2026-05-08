@@ -2,10 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronRight,
   Clock,
-  FileText,
   FlaskConical,
   Save,
-  ScrollText,
   Zap,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
@@ -147,13 +145,9 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 export function PerformancePanel({
   slug,
   onSessionClick,
-  onOpenStrategy,
-  onOpenRoutines,
 }: {
   slug: string;
   onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
-  onOpenStrategy?: () => void;
-  onOpenRoutines?: () => void;
 }) {
   const { data } = useQuery({
     queryKey: ["agent-performance", slug],
@@ -186,69 +180,43 @@ export function PerformancePanel({
         <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <Zap className="h-3.5 w-3.5" /> Performance
         </h3>
-        <div className="flex items-center gap-4">
-          <div className="grid flex-1 grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-              <span className={`text-lg font-mono font-semibold ${pnlColor}`}>
-                ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
-              </span>
-            </div>
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Realized</span>
-              <span className="text-lg font-mono text-[var(--color-text)]">${realized.toFixed(2)}</span>
-            </div>
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Unrealized</span>
-              <span className="text-lg font-mono text-[var(--color-text)]">${unrealized.toFixed(2)}</span>
-            </div>
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
-              <span className="text-lg font-mono text-[var(--color-text)]">
-                ${volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-              </span>
-            </div>
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
-              <span className="text-lg font-mono text-[var(--color-text)]">${fees.toFixed(2)}</span>
-            </div>
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Win Rate</span>
-              <span className="text-lg font-mono text-[var(--color-text)]">{winRate.toFixed(0)}%</span>
-            </div>
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Trades</span>
-              <span className="text-lg font-mono text-[var(--color-text)]">{trades}</span>
-            </div>
-            <div>
-              <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
-              <span className="text-lg font-mono text-[var(--color-text)]">{openPos}</span>
-            </div>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-8">
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
+            <span className={`text-lg font-mono font-semibold ${pnlColor}`}>
+              ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+            </span>
           </div>
-          {(onOpenStrategy || onOpenRoutines) && (
-            <div className="flex shrink-0 gap-2">
-              {onOpenStrategy && (
-                <button
-                  onClick={onOpenStrategy}
-                  className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-                  title="Strategy & Learnings"
-                >
-                  <FileText className="h-4.5 w-4.5" />
-                  <span className="text-[8px] font-semibold uppercase tracking-wider">Strategy</span>
-                </button>
-              )}
-              {onOpenRoutines && (
-                <button
-                  onClick={onOpenRoutines}
-                  className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-                  title="Routines & Reports"
-                >
-                  <ScrollText className="h-4.5 w-4.5" />
-                  <span className="text-[8px] font-semibold uppercase tracking-wider">Routines</span>
-                </button>
-              )}
-            </div>
-          )}
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Realized</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">${realized.toFixed(2)}</span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Unrealized</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">${unrealized.toFixed(2)}</span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">
+              ${volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            </span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">${fees.toFixed(2)}</span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Win Rate</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">{winRate.toFixed(0)}%</span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Trades</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">{trades}</span>
+          </div>
+          <div>
+            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">{openPos}</span>
+          </div>
         </div>
       </div>
 

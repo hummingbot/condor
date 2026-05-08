@@ -70,6 +70,7 @@ export function GridChart({
   const initializedRef = useRef(false);
   const crosshairPriceRef = useRef<number | null>(null);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
+  const lastZoomedIdRef = useRef<string | null>(null);
   const [chartReady, setChartReady] = useState(false);
 
   // Price line refs
@@ -226,26 +227,95 @@ export function GridChart({
         const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
         const pnlSign = o.pnl >= 0 ? "+" : "";
         const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
-        const pctStr = o.pnlPct !== 0 ? ` (${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%)` : "";
+        const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
+        const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
+        const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
 
-        let detailLine = "";
-        if (o.segment) {
-          detailLine = `<div style="color:#9ca3af;font-size:10px">Entry: ${o.segment.entryPrice.toPrecision(6)} → Exit: ${o.segment.exitPrice.toPrecision(6)}</div>`;
-        } else if (o.gridBox) {
-          detailLine = `<div style="color:#9ca3af;font-size:10px">Range: ${o.gridBox.startPrice.toPrecision(6)} – ${o.gridBox.endPrice.toPrecision(6)}</div>`;
+        const sideClr = o.side === "buy" ? "#22c55e" : "#ef4444";
+        const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
+        const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
+          ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
+        const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
+          ? "#22c55e" : "#9ca3af";
+
+        // Build config detail rows
+        const cfg = o.config || {};
+        const tripleBarrier: Record<string, unknown> = (() => {
+          const raw = cfg.triple_barrier_config;
+          if (!raw) return {};
+          if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
+          return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+        })();
+
+        let detailRows = "";
+        const fmtPrice = (p: number) => {
+          if (p === 0) return "—";
+          if (Math.abs(p) >= 1000) return p.toFixed(2);
+          if (Math.abs(p) >= 1) return p.toFixed(4);
+          return p.toPrecision(6);
+        };
+        const fmtUsd = (v: number) => {
+          if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
+          if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
+          return "$" + v.toFixed(2);
+        };
+
+        const addRow = (label: string, value: string, color?: string) => {
+          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${value}</span></div>`;
+        };
+
+        // Grid-specific details
+        if (o.type === "grid" && o.gridBox) {
+          addRow("Start Price", fmtPrice(o.gridBox.startPrice));
+          addRow("End Price", fmtPrice(o.gridBox.endPrice));
+          if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
+        } else if (o.entryPrice && o.entryPrice > 0) {
+          addRow("Entry", fmtPrice(o.entryPrice));
+          if (o.exitPrice && o.exitPrice > 0 && o.exitPrice !== o.entryPrice) {
+            addRow(o.status?.toLowerCase() === "running" ? "Current" : "Close", fmtPrice(o.exitPrice));
+          }
         }
 
+        if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
+        if (cfg.total_amount_quote != null) addRow("Amount", fmtUsd(Number(cfg.total_amount_quote)));
+        else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
+
+        const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
+        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, "#22c55e");
+        const sl = Number(cfg.stop_loss);
+        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, "#ef4444");
+        if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
+
         tooltip.innerHTML = `
-          <div style="font-weight:600;margin-bottom:2px">${o.executorId.slice(0, 8)}… · ${o.type.toUpperCase()} ${o.side.toUpperCase()}</div>
-          <div style="color:${pnlClr}">${pnlStr}${pctStr}</div>
-          ${detailLine}
-          <div style="color:#9ca3af;font-size:10px">${o.status} · ${o.closeType || "—"}</div>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="font-weight:700;font-size:12px;font-family:monospace">${o.executorId.slice(0, 10)}\u2026</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${o.side}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${o.status}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
+            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${o.type.toUpperCase()}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${o.closeType}</span>` : ""}
+          </div>
+          <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px">${volStr}</div></div>
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px">${feesStr || "—"}</div></div>
+          </div>
+          ${detailRows ? `<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
         `;
         tooltip.style.display = "block";
 
         const containerRect = containerRef.current.getBoundingClientRect();
-        let left = param.point.x + 16;
-        if (left + 200 > containerRect.width) left = param.point.x - 210;
+        const tooltipW = 280;
+        // Show tooltip on opposite side of cursor to avoid covering the executor
+        const cursorInRightHalf = param.point.x > containerRect.width / 2;
+        let left = cursorInRightHalf
+          ? param.point.x - tooltipW - 16
+          : param.point.x + 16;
+        // Clamp to container bounds
+        if (left < 4) left = 4;
+        if (left + tooltipW > containerRect.width - 4) left = containerRect.width - tooltipW - 4;
         let top = param.point.y - 10;
         if (top < 0) top = 4;
 
@@ -618,11 +688,15 @@ export function GridChart({
     }
   }, [executorOverlays, selectedExecutorId]);
 
-  // ── Zoom to selected executor ──
+  // ── Zoom to selected executor (one-time action) ──
   useEffect(() => {
     if (!selectedExecutorId || !chartRef.current || !executorOverlays?.length) return;
+    // Only zoom once per selection — don't re-zoom on overlay data refresh
+    if (lastZoomedIdRef.current === selectedExecutorId) return;
     const overlay = executorOverlays.find((o) => o.executorId === selectedExecutorId);
     if (!overlay) return;
+
+    lastZoomedIdRef.current = selectedExecutorId;
 
     const toSec = (ts: number) => (ts > 1e12 ? Math.floor(ts / 1000) : ts);
     const start = toSec(overlay.timeRange.start);
@@ -634,6 +708,11 @@ export function GridChart({
       to: (end + padding) as import("lightweight-charts").UTCTimestamp,
     });
   }, [selectedExecutorId, executorOverlays]);
+
+  // Reset zoom tracking when executor is deselected
+  useEffect(() => {
+    if (!selectedExecutorId) lastZoomedIdRef.current = null;
+  }, [selectedExecutorId]);
 
   // Keep overlaysRef in sync for tooltip
   useEffect(() => {
@@ -713,14 +792,14 @@ export function GridChart({
             pointerEvents: "none",
             background: "var(--color-surface)",
             border: "1px solid var(--color-border)",
-            borderRadius: 6,
-            padding: "6px 10px",
+            borderRadius: 8,
+            padding: "10px 14px",
             fontSize: 11,
             color: "var(--color-text)",
-            maxWidth: 220,
-            whiteSpace: "nowrap",
+            width: 280,
             lineHeight: 1.4,
-            backdropFilter: "blur(8px)",
+            backdropFilter: "blur(12px)",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
           }}
         />
       </div>
