@@ -173,6 +173,21 @@ from .menu import (  # Controller chart & edit
 logger = logging.getLogger(__name__)
 
 
+def _split_action_payload(action: str) -> tuple[str, str | None]:
+    main_action, separator, payload = action.partition(":")
+    return main_action, payload if separator else None
+
+
+_PAIR_PAYLOAD_HANDLERS = {
+    "pv1_pair": handle_pv1_wizard_pair,
+    "pv1_pair_select": handle_pv1_pair_select,
+    "gs_pair": handle_gs_wizard_pair,
+    "gs_pair_select": handle_gs_pair_select,
+    "pmm_pair": handle_pmm_wizard_pair,
+    "pmm_pair_select": handle_pmm_pair_select,
+}
+
+
 # ============================================
 # MAIN BOTS COMMAND
 # ============================================
@@ -258,8 +273,15 @@ async def bots_callback_handler(
         action = callback_parts[1] if len(callback_parts) > 1 else query.data
 
         # Parse action and any additional parameters
+        main_action, action_payload = _split_action_payload(action)
         action_parts = action.split(":")
-        main_action = action_parts[0]
+
+        if main_action in _PAIR_PAYLOAD_HANDLERS:
+            if action_payload is not None:
+                await _PAIR_PAYLOAD_HANDLERS[main_action](
+                    update, context, action_payload
+                )
+            return
 
         # Menu navigation
         if main_action == "main_menu":
@@ -288,18 +310,16 @@ async def bots_callback_handler(
             await show_type_selector(update, context)
 
         elif main_action == "cfg_type":
-            if len(action_parts) > 1:
-                controller_type = action_parts[1]
-                await show_configs_by_type(update, context, controller_type)
+            if action_payload is not None:
+                await show_configs_by_type(update, context, action_payload)
 
         elif main_action == "cfg_toggle":
-            if len(action_parts) > 1:
-                config_id = action_parts[1]
-                await handle_cfg_toggle(update, context, config_id)
+            if action_payload is not None:
+                await handle_cfg_toggle(update, context, action_payload)
 
         elif main_action == "cfg_page":
-            if len(action_parts) > 1:
-                page = int(action_parts[1])
+            if action_payload is not None:
+                page = int(action_payload)
                 await handle_cfg_page(update, context, page)
 
         elif main_action == "cfg_clear_selection":
@@ -367,16 +387,6 @@ async def bots_callback_handler(
             if len(action_parts) > 1:
                 connector = action_parts[1]
                 await handle_pv1_wizard_connector(update, context, connector)
-
-        elif main_action == "pv1_pair":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pv1_wizard_pair(update, context, pair)
-
-        elif main_action == "pv1_pair_select":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pv1_pair_select(update, context, pair)
 
         elif main_action == "pv1_amount":
             if len(action_parts) > 1:
@@ -487,10 +497,8 @@ async def bots_callback_handler(
                 await handle_select_credentials(update, context, creds)
 
         elif main_action == "select_image":
-            if len(action_parts) > 1:
-                # Rejoin parts to preserve colons in image tag (e.g., "hummingbot:development")
-                image = ":".join(action_parts[1:])
-                await handle_select_image(update, context, image)
+            if action_payload is not None:
+                await handle_select_image(update, context, action_payload)
 
         elif main_action == "select_name":
             if len(action_parts) > 1:
@@ -508,16 +516,6 @@ async def bots_callback_handler(
             if len(action_parts) > 1:
                 connector = action_parts[1]
                 await handle_gs_wizard_connector(update, context, connector)
-
-        elif main_action == "gs_pair":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_gs_wizard_pair(update, context, pair)
-
-        elif main_action == "gs_pair_select":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_gs_pair_select(update, context, pair)
 
         elif main_action == "gs_side":
             if len(action_parts) > 1:
@@ -605,16 +603,6 @@ async def bots_callback_handler(
             if len(action_parts) > 1:
                 connector = action_parts[1]
                 await handle_pmm_wizard_connector(update, context, connector)
-
-        elif main_action == "pmm_pair":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pmm_wizard_pair(update, context, pair)
-
-        elif main_action == "pmm_pair_select":
-            if len(action_parts) > 1:
-                pair = action_parts[1]
-                await handle_pmm_pair_select(update, context, pair)
 
         elif main_action == "pmm_leverage":
             if len(action_parts) > 1:

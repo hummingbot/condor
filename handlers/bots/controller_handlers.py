@@ -14,6 +14,7 @@ Provides:
 
 import asyncio
 import copy
+import hashlib
 import logging
 from typing import List
 
@@ -72,6 +73,26 @@ logger = logging.getLogger(__name__)
 
 # Pagination settings for configs
 CONFIGS_PER_PAGE = 8  # Reduced to leave space for action buttons
+
+
+def _config_callback_token(config_id: str) -> str:
+    """Short stable token for Telegram callback_data's 64-byte limit."""
+    return hashlib.blake2s(config_id.encode("utf-8"), digest_size=6).hexdigest()
+
+
+def _resolve_config_callback_token(context: ContextTypes.DEFAULT_TYPE, token: str) -> str:
+    """Resolve a short callback token to the original config ID."""
+    callback_ids = context.user_data.get("config_callback_ids", {})
+    return callback_ids.get(token, token)
+
+
+def _escape_markdown_v2_code(text: object) -> str:
+    """Escape text for a MarkdownV2 inline code span."""
+    return str(text).replace("\\", "\\\\").replace("`", "\\`").replace("\n", "\\n")
+
+
+def _code_span(text: object) -> str:
+    return f"`{_escape_markdown_v2_code(text)}`"
 
 
 def _get_controller_type_display(controller_name: str) -> tuple[str, str]:
@@ -163,6 +184,11 @@ async def show_controller_configs_menu(
 
         # Store all configs
         context.user_data["controller_configs_list"] = configs
+        context.user_data["config_callback_ids"] = {
+            _config_callback_token(cfg.get("id", "")): cfg.get("id", "")
+            for cfg in configs
+            if cfg.get("id")
+        }
 
         # Get available types from registry (always shows all supported types)
         all_types = get_supported_controller_types()
@@ -258,6 +284,7 @@ async def show_controller_configs_menu(
         # Config checkboxes - show just the controller name/ID
         for i, cfg in enumerate(page_configs):
             config_id = cfg.get("id", f"config_{start_idx + i}")
+            config_token = _config_callback_token(config_id)
             is_selected = selected.get(config_id, False)
             checkbox = "✅" if is_selected else "⬜"
 
@@ -267,7 +294,7 @@ async def show_controller_configs_menu(
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        display, callback_data=f"bots:cfg_toggle:{config_id}"
+                        display, callback_data=f"bots:cfg_toggle:{config_token}"
                     )
                 ]
             )
@@ -453,6 +480,7 @@ async def handle_cfg_toggle(
     update: Update, context: ContextTypes.DEFAULT_TYPE, config_id: str
 ) -> None:
     """Toggle config selection by config ID"""
+    config_id = _resolve_config_callback_token(context, config_id)
     selected = context.user_data.get("selected_configs", {})
 
     if selected.get(config_id):
@@ -734,7 +762,7 @@ async def show_cfg_edit_form(
     if status_msg:
         header += f" — {escape_markdown_v2(status_msg)}"
     lines = [header, ""]
-    lines.append(f"`{escape_markdown_v2(config_id)}`")
+    lines.append(_code_span(config_id))
     lines.append("")
 
     # Add context info for Grid Strike (connector, trading pair, side)
@@ -751,9 +779,9 @@ async def show_cfg_edit_form(
 
     # Build config text for display (each line copyable)
     for key, value in editable_fields.items():
-        lines.append(f"`{key}={value}`")
+        lines.append(_code_span(f"{key}={value}"))
     lines.append("")
-    lines.append("✏️ _Send `key=value` to update_")
+    lines.append(f"✏️ Send {_code_span('key=value')} to update")
 
     # Build keyboard - simplified, no field buttons
     keyboard = []
@@ -994,7 +1022,7 @@ async def process_cfg_edit_input(
     config_id = config.get("id", "unknown")
 
     lines = [f"*Edit Config* \\({current_idx + 1}/{total}\\)", ""]
-    lines.append(f"`{escape_markdown_v2(config_id)}`")
+    lines.append(_code_span(config_id))
     lines.append("")
 
     # Add context info for Grid Strike (connector, trading pair, side)
@@ -1010,9 +1038,9 @@ async def process_cfg_edit_input(
         lines.append("")
 
     for key, value in editable_fields.items():
-        lines.append(f"`{key}={value}`")
+        lines.append(_code_span(f"{key}={value}"))
     lines.append("")
-    lines.append("✏️ _Send `key=value` to update_")
+    lines.append(f"✏️ Send {_code_span('key=value')} to update")
 
     # Build keyboard
     keyboard = []
