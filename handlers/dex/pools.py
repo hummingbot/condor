@@ -1851,7 +1851,7 @@ async def handle_add_to_gateway(
                 name = attrs.get("name")
 
                 # Add to gateway
-                client = await get_config_manager().get_default_client()
+                client = await get_config_manager().get_client()
                 await client.gateway.add_token(
                     network_id=network_id,
                     address=token_address,
@@ -3191,11 +3191,21 @@ async def handle_pos_collect_fees(
 
         # Edit message to show collecting status
         await query.answer()
-        await query.message.edit_text(
-            f"⏳ Collecting fees from {escape_markdown_v2(pair)}\\.\\.\\.",
-            parse_mode="MarkdownV2",
-            reply_markup=None,
-        )
+        try:
+            await query.message.edit_text(
+                f"⏳ Collecting fees from {escape_markdown_v2(pair)}\\.\\.\\.",
+                parse_mode="MarkdownV2",
+                reply_markup=None,
+            )
+        except Exception as edit_err:
+            if "no text in the message" in str(edit_err).lower():
+                # Message is likely a photo/media - send a new message instead
+                await query.message.reply_text(
+                    f"⏳ Collecting fees from {escape_markdown_v2(pair)}\\.\\.\\.",
+                    parse_mode="MarkdownV2",
+                )
+            else:
+                raise
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
@@ -3246,15 +3256,27 @@ async def handle_pos_collect_fees(
                 if tx_hash:
                     success_msg += f"\n\nTx: `{tx_hash[:30]}...`"
 
-            await query.message.edit_text(
-                success_msg, parse_mode="MarkdownV2", reply_markup=back_keyboard
-            )
+            try:
+                await query.message.edit_text(
+                    success_msg, parse_mode="MarkdownV2", reply_markup=back_keyboard
+                )
+            except Exception:
+                await query.message.reply_text(
+                    success_msg, parse_mode="MarkdownV2", reply_markup=back_keyboard
+                )
         else:
-            await query.message.edit_text(
-                f"ℹ️ No fees to collect from {escape_markdown_v2(pair)}",
-                parse_mode="MarkdownV2",
-                reply_markup=back_keyboard,
-            )
+            try:
+                await query.message.edit_text(
+                    f"ℹ️ No fees to collect from {escape_markdown_v2(pair)}",
+                    parse_mode="MarkdownV2",
+                    reply_markup=back_keyboard,
+                )
+            except Exception:
+                await query.message.reply_text(
+                    f"ℹ️ No fees to collect from {escape_markdown_v2(pair)}",
+                    parse_mode="MarkdownV2",
+                    reply_markup=back_keyboard,
+                )
 
     except Exception as e:
         logger.error(f"Error collecting fees: {e}", exc_info=True)
@@ -3285,6 +3307,14 @@ async def handle_pos_collect_fees(
             )
         except Exception as edit_error:
             logger.warning(f"Could not edit message: {edit_error}")
+            try:
+                await query.message.reply_text(
+                    f"❌ *Failed to collect fees*\n\n{display_error}",
+                    parse_mode="MarkdownV2",
+                    reply_markup=back_keyboard,
+                )
+            except Exception:
+                pass  # Last resort - at least don't crash
 
 
 async def handle_pos_close_confirm(
@@ -3320,9 +3350,19 @@ async def handle_pos_close_confirm(
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.callback_query.message.edit_text(
-            message, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
+        # Try to edit the message, fallback to sending new message if it's a media message
+        try:
+            await update.callback_query.message.edit_text(
+                message, parse_mode="MarkdownV2", reply_markup=reply_markup
+            )
+        except Exception as edit_err:
+            if "no text in the message" in str(edit_err).lower():
+                # Message is likely a photo/media - send a new message instead
+                await update.callback_query.message.reply_text(
+                    message, parse_mode="MarkdownV2", reply_markup=reply_markup
+                )
+            else:
+                raise
 
     except Exception as e:
         logger.error(f"Error showing close confirmation: {e}", exc_info=True)
@@ -3354,9 +3394,14 @@ async def handle_pos_close_execute(
         closing_msg += r"_Please wait, this may take a moment\._"
 
         await update.callback_query.answer()
-        await update.callback_query.message.edit_text(
-            closing_msg, parse_mode="MarkdownV2"
-        )
+        try:
+            await update.callback_query.message.edit_text(
+                closing_msg, parse_mode="MarkdownV2"
+            )
+        except Exception:
+            await update.callback_query.message.reply_text(
+                closing_msg, parse_mode="MarkdownV2"
+            )
 
         chat_id = update.effective_chat.id
         client = await get_client(chat_id, context=context)
@@ -3396,9 +3441,14 @@ async def handle_pos_close_execute(
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.callback_query.message.edit_text(
-                success_msg, parse_mode="MarkdownV2", reply_markup=reply_markup
-            )
+            try:
+                await update.callback_query.message.edit_text(
+                    success_msg, parse_mode="MarkdownV2", reply_markup=reply_markup
+                )
+            except Exception:
+                await update.callback_query.message.reply_text(
+                    success_msg, parse_mode="MarkdownV2", reply_markup=reply_markup
+                )
         else:
             await update.callback_query.answer("Failed to close position")
 

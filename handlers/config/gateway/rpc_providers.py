@@ -291,13 +291,16 @@ async def handle_rpc_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """Handle text input for API key or node URL"""
     input_type = context.user_data.get("awaiting_rpc_input")
     if not input_type:
+        logger.debug("handle_rpc_input called but no awaiting_rpc_input state")
         return
 
-    # Delete user's input message for security
+    logger.info(f"handle_rpc_input called with input_type: {input_type}")
+
+    # Delete user's input message for security (contains API key or URL)
     try:
         await update.message.delete()
-    except:
-        pass
+    except Exception as del_err:
+        logger.debug(f"Could not delete user message: {del_err}")
 
     # Check if this is a URL input or API key input
     if input_type.startswith("url_"):
@@ -310,14 +313,22 @@ async def _handle_api_key_input(
     update: Update, context: ContextTypes.DEFAULT_TYPE, provider_key: str
 ) -> None:
     """Handle API key input"""
+    # Always clear state at the start to prevent stuck states
+    message_id = context.user_data.pop("rpc_message_id", None)
+    chat_id = context.user_data.pop("rpc_chat_id", None)
+    context.user_data.pop("awaiting_rpc_input", None)
+
     try:
-        api_key = update.message.text.strip()
+        logger.info(f"Processing API key input for provider: {provider_key}")
+
+        api_key = update.message.text.strip() if update.message and update.message.text else ""
         provider_info = RPC_PROVIDERS.get(provider_key)
 
         if not provider_info:
+            logger.error(f"Unknown provider: {provider_key}")
             await update.get_bot().send_message(
                 chat_id=update.effective_chat.id,
-                text="❌ Unknown provider"
+                text=f"❌ Unknown provider: {provider_key}"
             )
             return
 
@@ -328,11 +339,6 @@ async def _handle_api_key_input(
             )
             return
 
-        # Clear input state
-        context.user_data.pop("awaiting_rpc_input", None)
-        message_id = context.user_data.pop("rpc_message_id", None)
-        chat_id = context.user_data.pop("rpc_chat_id", None)
-
         # Show saving message
         if message_id and chat_id:
             try:
@@ -341,31 +347,37 @@ async def _handle_api_key_input(
                     message_id=message_id,
                     text=f"💾 Saving {provider_info['name']} API key..."
                 )
-            except:
-                pass
+            except Exception as edit_err:
+                logger.debug(f"Could not edit message: {edit_err}")
 
         # Save API key
         from config_manager import get_config_manager
 
+        logger.info(f"Getting client for chat {update.effective_chat.id}")
         client = await get_config_manager().get_client_for_chat(
             update.effective_chat.id,
             preferred_server=get_active_server(context.user_data)
         )
 
         # Step 1: Update API key
-        await client.gateway.update_api_keys({provider_key: api_key})
+        logger.info(f"Updating API key for {provider_key}")
+        result = await client.gateway.update_api_keys({provider_key: api_key})
+        logger.info(f"API key update result: {result}")
 
         # Step 2: Set rpcProvider on the default network
         network_id = provider_info["default_network"]
-        await client.gateway.update_network_config(
+        logger.info(f"Setting rpc_provider to {provider_key} for {network_id}")
+        config_result = await client.gateway.update_network_config(
             network_id,
             {"rpc_provider": provider_key}
         )
+        logger.info(f"Network config update result: {config_result}")
 
         # Show success and return to provider details
+        network_escaped = escape_markdown_v2(network_id)
         success_text = (
             f"✅ {provider_info['name']} configured\\!\n\n"
-            f"API key saved and set as RPC provider for {escape_markdown_v2(network_id)}\\.\n\n"
+            f"API key saved and set as RPC provider for `{network_escaped}`\\.\n\n"
             f"_Restart Gateway for changes to take effect\\._"
         )
 
@@ -376,13 +388,22 @@ async def _handle_api_key_input(
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if message_id and chat_id:
-            await update.get_bot().edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=success_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+            try:
+                await update.get_bot().edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=success_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception as edit_err:
+                logger.warning(f"Could not edit message, sending new: {edit_err}")
+                await update.get_bot().send_message(
+                    chat_id=update.effective_chat.id,
+                    text=success_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
         else:
             await update.get_bot().send_message(
                 chat_id=update.effective_chat.id,
@@ -391,23 +412,34 @@ async def _handle_api_key_input(
                 reply_markup=reply_markup
             )
 
+        logger.info(f"Successfully configured {provider_key}")
+
     except Exception as e:
         logger.error(f"Error handling API key input: {e}", exc_info=True)
-        context.user_data.pop("awaiting_rpc_input", None)
-        await update.get_bot().send_message(
-            chat_id=update.effective_chat.id,
-            text=f"❌ Error saving API key: {str(e)}"
-        )
+        try:
+            await update.get_bot().send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Error saving API key: {str(e)}"
+            )
+        except Exception as send_err:
+            logger.error(f"Could not send error message: {send_err}")
 
 
 async def _handle_url_input(
     update: Update, context: ContextTypes.DEFAULT_TYPE, input_type: str
 ) -> None:
     """Handle node URL input"""
+    # Always clear state at the start to prevent stuck states
+    message_id = context.user_data.pop("rpc_message_id", None)
+    chat_id = context.user_data.pop("rpc_chat_id", None)
+    context.user_data.pop("awaiting_rpc_input", None)
+
     try:
         # Extract network_id from input_type (format: "url_{network_id}")
         network_id = input_type.replace("url_", "")
-        node_url = update.message.text.strip()
+        node_url = update.message.text.strip() if update.message and update.message.text else ""
+
+        logger.info(f"Processing URL input for network: {network_id}")
 
         if not node_url:
             await update.get_bot().send_message(
@@ -424,11 +456,6 @@ async def _handle_url_input(
             )
             return
 
-        # Clear input state
-        context.user_data.pop("awaiting_rpc_input", None)
-        message_id = context.user_data.pop("rpc_message_id", None)
-        chat_id = context.user_data.pop("rpc_chat_id", None)
-
         # Show saving message
         if message_id and chat_id:
             try:
@@ -437,8 +464,8 @@ async def _handle_url_input(
                     message_id=message_id,
                     text=f"💾 Saving node URL for {network_id}..."
                 )
-            except:
-                pass
+            except Exception as edit_err:
+                logger.debug(f"Could not edit message: {edit_err}")
 
         # Save URL
         from config_manager import get_config_manager
@@ -449,17 +476,19 @@ async def _handle_url_input(
         )
 
         # Update node_url and set rpc_provider to "url"
-        await client.gateway.update_network_config(
+        logger.info(f"Updating node_url for {network_id}")
+        result = await client.gateway.update_network_config(
             network_id,
             {
                 "node_url": node_url,
                 "rpc_provider": "url"
             }
         )
+        logger.info(f"Network config update result: {result}")
 
         network_escaped = escape_markdown_v2(network_id)
         success_text = (
-            f"✅ Node URL updated for {network_escaped}\\!\n\n"
+            f"✅ Node URL updated for `{network_escaped}`\\!\n\n"
             f"_Restart Gateway for changes to take effect\\._"
         )
 
@@ -470,13 +499,22 @@ async def _handle_url_input(
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if message_id and chat_id:
-            await update.get_bot().edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=success_text,
-                parse_mode="MarkdownV2",
-                reply_markup=reply_markup
-            )
+            try:
+                await update.get_bot().edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=success_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
+            except Exception as edit_err:
+                logger.warning(f"Could not edit message, sending new: {edit_err}")
+                await update.get_bot().send_message(
+                    chat_id=update.effective_chat.id,
+                    text=success_text,
+                    parse_mode="MarkdownV2",
+                    reply_markup=reply_markup
+                )
         else:
             await update.get_bot().send_message(
                 chat_id=update.effective_chat.id,
@@ -485,13 +523,17 @@ async def _handle_url_input(
                 reply_markup=reply_markup
             )
 
+        logger.info(f"Successfully updated URL for {network_id}")
+
     except Exception as e:
         logger.error(f"Error handling URL input: {e}", exc_info=True)
-        context.user_data.pop("awaiting_rpc_input", None)
-        await update.get_bot().send_message(
-            chat_id=update.effective_chat.id,
-            text=f"❌ Error saving URL: {str(e)}"
-        )
+        try:
+            await update.get_bot().send_message(
+                chat_id=update.effective_chat.id,
+                text=f"❌ Error saving URL: {str(e)}"
+            )
+        except Exception as send_err:
+            logger.error(f"Could not send error message: {send_err}")
 
 
 async def activate_provider(

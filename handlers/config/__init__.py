@@ -267,6 +267,7 @@ def get_modify_value_handler():
             or context.user_data.get("awaiting_network_input")
             or context.user_data.get("awaiting_token_input")
             or context.user_data.get("awaiting_pool_input")
+            or context.user_data.get("awaiting_rpc_input")
         ):
             await handle_gateway_input(update, context)
             return
