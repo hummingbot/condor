@@ -717,9 +717,18 @@ async def agent_voice_handler(
         tg_file = await voice.get_file()
         file_bytes = await tg_file.download_as_bytearray()
 
+        # Resolve user voice preferences (language, model)
+        from condor.preferences import get_voice_prefs
+
+        voice_prefs = get_voice_prefs(context.user_data)
+        voice_lang = voice_prefs.get("language")  # None = auto-detect
+        voice_model = voice_prefs.get("whisper_model", "base")
+
         from utils.transcribe import transcribe_voice
 
-        text = await transcribe_voice(bytes(file_bytes))
+        text = await transcribe_voice(
+            bytes(file_bytes), language=voice_lang, model_size=voice_model
+        )
     except Exception as e:
         log.exception("Voice transcription failed")
         await status_msg.edit_text(f"Transcription failed: {e}")

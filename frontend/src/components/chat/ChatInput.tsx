@@ -1,5 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
 import { useRef, useState, useEffect, useCallback } from "react";
 import { Loader2, Mic, Send, Square } from "lucide-react";
+
+import { api } from "@/lib/api";
 
 const TOKEN_KEY = "condor_token";
 
@@ -20,6 +23,13 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  // Voice preferences (auto_send default true)
+  const { data: voiceSettings } = useQuery({
+    queryKey: ["voice-settings"],
+    queryFn: () => api.getVoiceSettings(),
+    staleTime: 5 * 60 * 1000,
+  });
 
   // Auto-resize textarea
   useEffect(() => {
@@ -98,13 +108,18 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         try {
           const text = await transcribeAudio(blob);
           if (text) {
-            // Append to existing input or set directly
-            setValue((prev) => {
-              const combined = prev ? `${prev} ${text}` : text;
-              return combined;
-            });
-            // Focus the textarea after transcription
-            setTimeout(() => textareaRef.current?.focus(), 50);
+            // Check auto_send preference from the latest query data
+            const latestSettings = voiceSettingsRef.current;
+            const shouldAutoSend = latestSettings?.voice?.auto_send ?? true;
+
+            if (shouldAutoSend) {
+              // Send immediately
+              onSend(text);
+            } else {
+              // Append to textarea for editing
+              setValue((prev) => (prev ? `${prev} ${text}` : text));
+              setTimeout(() => textareaRef.current?.focus(), 50);
+            }
           }
         } catch (err) {
           console.error("Transcription failed:", err);
@@ -124,11 +139,33 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       console.error("Microphone access denied:", err);
       setRecordingState("idle");
     }
-  }, []);
+  }, [onSend]);
 
   const stopRecording = useCallback(() => {
     mediaRecorderRef.current?.stop();
   }, []);
+
+  // Keep a ref to voice settings so the onstop callback can read latest value
+  const voiceSettingsRef = useRef(voiceSettings);
+  useEffect(() => {
+    voiceSettingsRef.current = voiceSettings;
+  }, [voiceSettings]);
+
+  // Global keyboard shortcut: ⌘M to toggle recording
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "m") {
+        e.preventDefault();
+        if (recordingState === "recording") {
+          stopRecording();
+        } else if (recordingState === "idle") {
+          startRecording();
+        }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [recordingState, startRecording, stopRecording]);
 
   const formatDuration = (secs: number) => {
     const m = Math.floor(secs / 60);
@@ -149,7 +186,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
             {formatDuration(recordingDuration)}
           </span>
           <span className="flex-1 text-xs text-[var(--color-text-muted)]">
-            Recording...
+            Recording... <kbd className="ml-1 rounded bg-[var(--color-bg)] px-1 py-0.5 text-[10px] font-mono border border-[var(--color-border)]">⌘M</kbd> to stop
           </span>
         </div>
       ) : isTranscribing ? (
@@ -179,7 +216,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         <button
           onClick={stopRecording}
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500 text-white transition-opacity hover:opacity-90"
-          title="Stop recording"
+          title="Stop recording (⌘M)"
         >
           <Square className="h-3.5 w-3.5" />
         </button>
@@ -192,7 +229,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
           onClick={startRecording}
           disabled={disabled}
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--color-border)] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)] hover:text-[var(--color-primary)] disabled:opacity-40"
-          title="Record voice message"
+          title="Record voice message (⌘M)"
         >
           <Mic className="h-4 w-4" />
         </button>

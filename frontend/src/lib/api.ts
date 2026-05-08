@@ -522,6 +522,20 @@ export interface ConnectorFieldInfo {
   description?: string;
 }
 
+// ── Voice Settings ──
+
+export interface VoicePrefs {
+  whisper_model: string;
+  language: string | null;
+  auto_send: boolean;
+}
+
+export interface VoiceSettingsResponse {
+  voice: VoicePrefs;
+  available_models: Record<string, string>;
+  available_languages: Record<string, string>;
+}
+
 // ── Backtesting ──
 
 export interface BacktestTask {
@@ -1055,4 +1069,15 @@ export const api = {
       `/api/v1/settings/credentials/${encodeURIComponent(connector)}?server=${encodeURIComponent(server)}`,
       { method: "DELETE" },
     ),
+
+  // ── Voice Settings ──
+
+  getVoiceSettings: () =>
+    apiFetch<VoiceSettingsResponse>("/api/v1/settings/voice"),
+
+  updateVoiceSettings: (data: Partial<VoicePrefs>) =>
+    apiFetch<{ voice: VoicePrefs }>("/api/v1/settings/voice", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
 };

@@ -265,6 +265,58 @@ async def gateway_logs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Voice Preferences ──
+
+
+@router.get("/voice")
+async def get_voice_settings(user: WebUser = Depends(get_current_user)):
+    """Get voice/transcription preferences for the current user."""
+    cm = get_config_manager()
+    prefs = cm.get_user_preferences(user.id)
+    voice = prefs.get("voice", {
+        "whisper_model": "small",
+        "language": None,
+        "auto_send": True,
+    })
+    from condor.preferences import WHISPER_MODELS, VOICE_LANGUAGES
+    return {
+        "voice": voice,
+        "available_models": WHISPER_MODELS,
+        "available_languages": VOICE_LANGUAGES,
+    }
+
+
+@router.put("/voice")
+async def update_voice_settings(
+    body: dict,
+    user: WebUser = Depends(get_current_user),
+):
+    """Update voice/transcription preferences."""
+    cm = get_config_manager()
+    prefs = cm.get_user_preferences(user.id)
+    voice = prefs.get("voice", {
+        "whisper_model": "small",
+        "language": None,
+        "auto_send": True,
+    })
+    allowed_keys = {"whisper_model", "language", "auto_send"}
+    for key in allowed_keys:
+        if key in body:
+            voice[key] = body[key]
+
+    # Validate whisper_model
+    from condor.preferences import WHISPER_MODELS
+    if voice.get("whisper_model") not in WHISPER_MODELS:
+        voice["whisper_model"] = "base"
+
+    # Normalize empty language to None (auto-detect)
+    if not voice.get("language"):
+        voice["language"] = None
+
+    cm.set_user_preference(user.id, "voice", voice)
+    return {"voice": voice}
+
+
 # ── API Keys / Credentials ──
 
 

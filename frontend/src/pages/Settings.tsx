@@ -4,12 +4,14 @@ import { useSearchParams } from "react-router-dom";
 import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
 import { GatewaySettings } from "@/components/settings/GatewaySettings";
 import { ServersSettings } from "@/components/settings/ServersSettings";
+import { VoiceSettings } from "@/components/settings/VoiceSettings";
 import { useAuth } from "@/lib/auth";
 
 const TABS = [
   { key: "servers", label: "Servers" },
   { key: "gateway", label: "Gateway" },
   { key: "keys", label: "API Keys" },
+  { key: "voice", label: "Voice & AI" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
@@ -53,6 +55,7 @@ export function Settings() {
       {tab === "servers" && <ServersSettings />}
       {tab === "gateway" && <GatewaySettings />}
       {tab === "keys" && <ApiKeysSettings />}
+      {tab === "voice" && <VoiceSettings />}
     </div>
   );
 }
