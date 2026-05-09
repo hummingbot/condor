@@ -87,5 +87,27 @@ export function usePrefetchData() {
       queryFn: () =>
         api.getCandles(server, defaults.connector, defaults.pair, defaults.interval, 5000, startTime),
     });
+
+    // Prefetch settings data so Settings page loads instantly
+    queryClient.prefetchQuery({
+      queryKey: ["settings-servers"],
+      queryFn: () => api.getSettingsServers(),
+      staleTime: 60 * 1000,
+    });
+    queryClient.prefetchQuery({
+      queryKey: ["settings-credentials", server],
+      queryFn: () => api.getCredentials(server),
+      staleTime: 5 * 60 * 1000,
+    });
+    queryClient.prefetchQuery({
+      queryKey: ["settings-connectors", server, "spot"],
+      queryFn: () => api.getAvailableConnectors(server, "spot"),
+      staleTime: 5 * 60 * 1000,
+    });
+    queryClient.prefetchQuery({
+      queryKey: ["settings-connectors", server, "perpetual"],
+      queryFn: () => api.getAvailableConnectors(server, "perpetual"),
+      staleTime: 5 * 60 * 1000,
+    });
   }, [server, queryClient]);
 }

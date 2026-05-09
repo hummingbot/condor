@@ -1,43 +1,78 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 
 interface PriceTickerProps {
   server: string;
   connector: string;
   pair: string;
+  /** Candle interval to track — defaults to "1m" for most responsive updates */
+  interval?: string;
 }
 
-export function PriceTicker({ server, connector, pair }: PriceTickerProps) {
+export function PriceTicker({ server, connector, pair, interval = "1m" }: PriceTickerProps) {
   const prevPriceRef = useRef<number>(0);
+  const [candlePrice, setCandlePrice] = useState<number>(0);
 
+  // Subscribe to candle store for real-time last close price
+  useEffect(() => {
+    if (!server || !connector || !pair) {
+      setCandlePrice(0);
+      return;
+    }
+
+    const key = `candles:${server}:${connector}:${pair}:${interval}`;
+
+    // Check existing cached candles
+    const cached = candleStore.subscribe(key);
+    if (cached.length > 0) {
+      setCandlePrice(cached[cached.length - 1].close);
+    }
+
+    const removeListener = candleStore.onUpdate(key, (candles) => {
+      if (candles.length > 0) {
+        setCandlePrice(candles[candles.length - 1].close);
+      }
+    });
+
+    return () => {
+      removeListener();
+      candleStore.unsubscribe(key);
+    };
+  }, [server, connector, pair, interval]);
+
+  // REST fallback for bid/ask/spread (less frequent)
   const { data: price } = useQuery({
     queryKey: ["price", server, connector, pair],
     queryFn: () => api.getPrice(server, connector, pair),
     enabled: !!server && !!connector && !!pair,
-    refetchInterval: 5000,
+    refetchInterval: 15_000,
   });
 
+  // Use candle close as primary price, fall back to REST mid_price
+  const displayPrice = candlePrice > 0 ? candlePrice : (price?.mid_price ?? 0);
+
   const direction =
-    price && prevPriceRef.current
-      ? price.mid_price > prevPriceRef.current
+    displayPrice && prevPriceRef.current
+      ? displayPrice > prevPriceRef.current
         ? "up"
-        : price.mid_price < prevPriceRef.current
+        : displayPrice < prevPriceRef.current
           ? "down"
           : "flat"
       : "flat";
 
   useEffect(() => {
-    if (price?.mid_price) prevPriceRef.current = price.mid_price;
-  }, [price?.mid_price]);
+    if (displayPrice > 0) prevPriceRef.current = displayPrice;
+  }, [displayPrice]);
 
-  if (!price || !pair) return null;
+  if (!displayPrice || !pair) return null;
 
-  const spread = price.best_ask && price.best_bid
+  const spread = price?.best_ask && price?.best_bid
     ? price.best_ask - price.best_bid
     : 0;
-  const mid = (price.best_ask + price.best_bid) / 2;
+  const mid = price ? (price.best_ask + price.best_bid) / 2 : 0;
   const spreadPct = mid > 0 ? (spread / mid) * 100 : 0;
 
   const dirColor =
@@ -52,11 +87,11 @@ export function PriceTicker({ server, connector, pair }: PriceTickerProps) {
       {/* Mark price */}
       <div>
         <p className={`text-lg font-bold tabular-nums leading-tight ${dirColor}`}>
-          {price.mid_price.toLocaleString("en-US", { maximumFractionDigits: 8 })}
+          {displayPrice.toLocaleString("en-US", { maximumFractionDigits: 8 })}
         </p>
       </div>
 
-      {price.best_bid > 0 && (
+      {price && price.best_bid > 0 && (
         <>
           {/* Bid */}
           <div className="hidden sm:block">
