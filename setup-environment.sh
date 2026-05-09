@@ -105,6 +105,22 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# On WSL2, systemd doesn't manage tailscaled — we must start the daemon manually
+# before calling `tailscale up`, otherwise the call silently fails.
+tailscale_up() {
+    if grep -qi microsoft /proc/version 2>/dev/null; then
+        if ! pgrep -x tailscaled >/dev/null 2>&1; then
+            msg_info "Starting Tailscale daemon (WSL2)..."
+            sudo mkdir -p /var/run/tailscale /var/lib/tailscale
+            sudo tailscaled --state=/var/lib/tailscale/tailscaled.state \
+                            --socket=/var/run/tailscale/tailscaled.sock \
+                            >/dev/null 2>&1 &
+            sleep 2
+        fi
+    fi
+    sudo tailscale up "$@"
+}
+
 # ── Banner ───────────────────────────────────────────
 
 echo ""
@@ -389,12 +405,19 @@ else
     done
     ADMIN_USER_ID="$admin_id"
 
-    # Prompt for Server IP (optional - for VPS deployments without Tailscale)
+    # Determine web dashboard access
     echo ""
-    msg_info "If running on a VPS without Tailscale, enter the server's public IP."
-    msg_info "Skip this (press Enter) if you're using Tailscale — it will set the web URL automatically."
-    prompt_visible "Server IP address (or press Enter for localhost/Tailscale)" "" "server_ip"
-    SERVER_IP="$server_ip"
+    prompt_visible "Will you use Tailscale to secure the connection to hummingbot-api? [y/N]" "N" "use_tailscale_early"
+    SERVER_IP=""
+    if ! [[ "${use_tailscale_early:-}" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo -e "  The /web Telegram command sends you a login link for the web dashboard."
+        echo -e "  So we need to know where Condor is running:"
+        echo -e "    ${BOLD}Local machine${RESET} (Mac / Linux / WSL2) — press Enter"
+        echo -e "    ${BOLD}Remote VPS${RESET}                         — enter the server's public IP"
+        prompt_visible "Public IP or hostname (press Enter for localhost)" "" "server_ip"
+        SERVER_IP="${server_ip:-}"
+    fi
 
     # Write .env (preserve extra vars if file exists)
     if [ -f "$ENV_FILE" ]; then
@@ -471,19 +494,24 @@ else
         msg_ok "Skipped Hummingbot API deployment"
         echo ""
         msg_info "Enter the Hummingbot API connection details."
-        prompt_visible "API URL + port (e.g. http://your-server:8000)" "http://localhost:8000" "hb_api_url_raw"
-        hb_api_url_raw="${hb_api_url_raw:-http://localhost:8000}"
+        if [[ "${use_tailscale_early:-}" =~ ^[Yy]$ ]]; then
+            # Tailscale: host is resolved via MagicDNS after joining the tailnet — no URL needed
+            HB_API_PROTOCOL="http"
+            HB_API_HOST="hummingbot-api"
+            HB_API_PORT="8000"
+        else
+            prompt_visible "API URL + port (e.g. http://your-server:8000)" "http://localhost:8000" "hb_api_url_raw"
+            hb_api_url_raw="${hb_api_url_raw:-http://localhost:8000}"
+            HB_API_PROTOCOL=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.scheme or 'http')" 2>/dev/null || echo "http")
+            HB_API_HOST=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.hostname or 'localhost')" 2>/dev/null || echo "localhost")
+            _def_port=$([ "$HB_API_PROTOCOL" = "https" ] && echo "443" || echo "8000")
+            HB_API_PORT=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.port or ${_def_port})" 2>/dev/null || echo "$_def_port")
+        fi
         prompt_visible "API admin username" "admin" "hb_username"
         prompt_secret "API admin password" "admin" "hb_password"
 
-        HB_API_PROTOCOL=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.scheme or 'http')" 2>/dev/null || echo "http")
-        HB_API_HOST=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.hostname or 'localhost')" 2>/dev/null || echo "localhost")
-        _def_port=$([ "$HB_API_PROTOCOL" = "https" ] && echo "443" || echo "8000")
-        HB_API_PORT=$(python3 -c "from urllib.parse import urlparse; p=urlparse('${hb_api_url_raw}'); print(p.port or ${_def_port})" 2>/dev/null || echo "$_def_port")
-
         # ── Tailscale option for external API ──────────────
-        echo ""
-        prompt_visible "Is this hummingbot-api accessible via Tailscale? [y/N]" "N" "use_tailscale_remote"
+        use_tailscale_remote="${use_tailscale_early:-N}"
         if [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
             echo ""
             echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -512,19 +540,23 @@ else
             msg_info "Installing Tailscale on this machine..."
             curl -fsSL https://tailscale.com/install.sh | sh
             msg_info "Connecting to Tailscale network..."
-            sudo tailscale up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
 
             # Use the Tailscale MagicDNS hostname to reach hummingbot-api (plain HTTP — WireGuard encrypts in transit)
             HB_API_HOST="$ts_hostname"
             HB_API_PORT="8000"
             HB_API_PROTOCOL="http"
             msg_ok "Tailscale connected — server URL: http://$ts_hostname:8000"
-            if grep -q "^WEB_URL=" "$ENV_FILE"; then
-                sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://condor:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-            else
-                echo "WEB_URL=http://condor:8088" >> "$ENV_FILE"
+            # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
+            if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
+                if grep -q "^WEB_URL=" "$ENV_FILE"; then
+                    sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$ts_condor_ip:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+                else
+                    echo "WEB_URL=http://$ts_condor_ip:8088" >> "$ENV_FILE"
+                fi
+                msg_ok "Web dashboard: http://$ts_condor_ip:8088 (Tailscale access)"
             fi
-            msg_ok "Web dashboard will be reachable at http://condor:8088"
         fi
 
         hb_api_configured=true
@@ -545,8 +577,7 @@ else
         TS_DEPLOY=false
         ts_auth_key=""
         ts_hb_hostname="hummingbot-api"
-        echo ""
-        prompt_visible "Use Tailscale for secure private access? [y/N]" "N" "use_tailscale"
+        use_tailscale="${use_tailscale_early:-N}"
         if [[ "${use_tailscale:-}" =~ ^[Yy]$ ]]; then
             echo ""
             echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -573,15 +604,19 @@ else
             msg_info "Installing Tailscale on this machine..."
             curl -fsSL https://tailscale.com/install.sh | sh
             msg_info "Connecting to Tailscale network..."
-            sudo tailscale up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
             TS_DEPLOY=true
-            if grep -q "^WEB_URL=" "$ENV_FILE"; then
-                sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://condor:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-            else
-                echo "WEB_URL=http://condor:8088" >> "$ENV_FILE"
-            fi
             msg_ok "Tailscale connected — hummingbot-api will be reachable at http://$ts_hb_hostname:8000"
-            msg_ok "Web dashboard will be reachable at http://condor:8088"
+            # On a VPS (SERVER_IP set), point the web dashboard at the Tailscale IP so the /web link works remotely
+            if [ -n "${SERVER_IP:-}" ] && [ -n "${ts_condor_ip:-}" ]; then
+                if grep -q "^WEB_URL=" "$ENV_FILE"; then
+                    sed -i.bak "s|^WEB_URL=.*|WEB_URL=http://$ts_condor_ip:8088|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+                else
+                    echo "WEB_URL=http://$ts_condor_ip:8088" >> "$ENV_FILE"
+                fi
+                msg_ok "Web dashboard: http://$ts_condor_ip:8088 (Tailscale access)"
+            fi
         fi
 
         echo ""
@@ -880,14 +915,29 @@ if [ "${TS_DEPLOY:-false}" = true ]; then
 echo ""
 echo -e "  ${BOLD}Tailscale:${RESET}"
 echo -e "    hummingbot-api URL:  http://${ts_hb_hostname}:8000"
-echo -e "    Web dashboard URL:   http://condor:8088"
+if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
+else
+echo -e "    Web dashboard URL:   http://localhost:8088"
+fi
 echo -e "    Tailscale status:    tailscale status"
 elif [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
 echo ""
 echo -e "  ${BOLD}Tailscale:${RESET}"
 echo -e "    hummingbot-api URL:  http://${ts_hostname:-hummingbot-api}:8000"
-echo -e "    Web dashboard URL:   http://condor:8088"
+if [ -n "${ts_condor_ip:-}" ] && [ -n "${SERVER_IP:-}" ]; then
+echo -e "    Web dashboard URL:   http://${ts_condor_ip}:8088  ${CYAN}(Tailscale only)${RESET}"
+else
+echo -e "    Web dashboard URL:   http://localhost:8088"
+fi
 echo -e "    Tailscale status:    tailscale status"
+fi
+if [ "${TS_DEPLOY:-false}" = true ] || [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
+echo ""
+echo -e "  ${BOLD}Accessing the web dashboard from another device:${RESET}"
+echo -e "  ${CYAN}  Install Tailscale on that device first, then connect with the same key:${RESET}"
+echo -e "    Linux / WSL:   curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up --authkey=${ts_auth_key}"
+echo -e "    macOS / Win:   https://tailscale.com/download — then run: sudo tailscale up --authkey=${ts_auth_key}"
 fi
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo ""
