@@ -133,6 +133,9 @@ async def handle_rpc_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action_data.startswith("url_edit_"):
         network_id = action_data.replace("url_edit_", "")
         await prompt_node_url_input(query, context, network_id)
+    elif action_data.startswith("url_activate_"):
+        network_id = action_data.replace("url_activate_", "")
+        await activate_custom_url(query, context, network_id)
     elif action_data == "providers":
         await show_rpc_providers_menu(query, context)
     else:
@@ -178,8 +181,8 @@ async def show_provider_details(
 
         # API key status
         if has_key:
-            # Mask the API key for display
-            masked_key = current_key[:8] + "..." + current_key[-4:] if len(current_key) > 12 else "***"
+            # Mask the API key for display (show first 4 chars)
+            masked_key = current_key[:4] + "..." if len(current_key) > 4 else current_key
             key_status = f"🔑 API Key: `{escape_markdown_v2(masked_key)}`"
         else:
             key_status = "⬜ No API key configured"
@@ -475,27 +478,51 @@ async def _handle_url_input(
             preferred_server=get_active_server(context.user_data)
         )
 
-        # Update node_url and set rpc_provider to "url"
+        # Get current rpc_provider before updating
+        try:
+            config = await client.gateway.get_network_config(network_id)
+            current_rpc = config.get("rpc_provider", "url")
+        except Exception:
+            current_rpc = "url"
+
+        # Update only node_url (not rpc_provider yet)
         logger.info(f"Updating node_url for {network_id}")
         result = await client.gateway.update_network_config(
             network_id,
-            {
-                "node_url": node_url,
-                "rpc_provider": "url"
-            }
+            {"node_url": node_url}
         )
         logger.info(f"Network config update result: {result}")
 
         network_escaped = escape_markdown_v2(network_id)
-        success_text = (
-            f"✅ Node URL updated for `{network_escaped}`\\!\n\n"
-            f"_Restart Gateway for changes to take effect\\._"
-        )
 
-        keyboard = [
-            [InlineKeyboardButton("🔄 Restart Gateway", callback_data="gateway_restart")],
-            [InlineKeyboardButton("« Back", callback_data="gateway_rpc_url_menu")]
-        ]
+        # If rpc_provider is not "url", ask user if they want to activate the custom URL
+        if current_rpc != "url":
+            current_rpc_escaped = escape_markdown_v2(current_rpc)
+            success_text = (
+                f"✅ Node URL saved for `{network_escaped}`\\!\n\n"
+                f"Current RPC provider: `{current_rpc_escaped}`\n\n"
+                f"_Do you want to use the new nodeURL for this network?_"
+            )
+            keyboard = [
+                [InlineKeyboardButton(
+                    "✅ Yes, use new URL",
+                    callback_data=f"gateway_rpc_url_activate_{network_id}"
+                )],
+                [InlineKeyboardButton(
+                    f"Keep using {current_rpc}",
+                    callback_data="gateway_rpc_url_menu"
+                )],
+            ]
+        else:
+            success_text = (
+                f"✅ Node URL updated for `{network_escaped}`\\!\n\n"
+                f"_Restart Gateway for changes to take effect\\._"
+            )
+            keyboard = [
+                [InlineKeyboardButton("🔄 Restart Gateway", callback_data="gateway_restart")],
+                [InlineKeyboardButton("« Back", callback_data="gateway_rpc_url_menu")]
+            ]
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         if message_id and chat_id:
@@ -605,6 +632,47 @@ async def deactivate_provider(
 
     except Exception as e:
         logger.error(f"Error deactivating provider: {e}", exc_info=True)
+        await query.answer(f"❌ Error: {str(e)[:100]}")
+
+
+async def activate_custom_url(
+    query, context: ContextTypes.DEFAULT_TYPE, network_id: str
+) -> None:
+    """Activate custom URL as the RPC provider for a network"""
+    try:
+        from config_manager import get_config_manager
+
+        await query.answer("Activating custom URL...")
+
+        chat_id = query.message.chat_id
+        client = await get_config_manager().get_client_for_chat(
+            chat_id, preferred_server=get_active_server(context.user_data)
+        )
+
+        # Set rpcProvider to "url"
+        await client.gateway.update_network_config(
+            network_id,
+            {"rpc_provider": "url"}
+        )
+
+        network_escaped = escape_markdown_v2(network_id)
+        success_text = (
+            f"✅ Custom URL activated for `{network_escaped}`\\!\n\n"
+            f"_Restart Gateway for changes to take effect\\._"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("🔄 Restart Gateway", callback_data="gateway_restart")],
+            [InlineKeyboardButton("« Back", callback_data="gateway_rpc_url_menu")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.message.edit_text(
+            success_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error activating custom URL: {e}", exc_info=True)
         await query.answer(f"❌ Error: {str(e)[:100]}")
 
 
