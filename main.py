@@ -614,8 +614,14 @@ async def _run_dual(application: Application) -> None:
     from condor.web.app import create_app
     from condor.web.ws_manager import get_ws_manager
 
-    # Initialize and start the Telegram application
+    # Initialize and start the Telegram application.
+    # NOTE: Application.initialize() does *not* call post_init (only run_polling/run_webhook do).
+    # We drive startup manually because uvicorn runs alongside polling, so we must invoke
+    # post_init ourselves — that is where BotCommand menu sync and other boot hooks run.
     await application.initialize()
+    if application.post_init:
+        await application.post_init(application)
+
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     await application.start()
 
@@ -635,6 +641,7 @@ async def _run_dual(application: Application) -> None:
 
     # Notify admin that Condor has started
     from utils.config import ADMIN_USER_ID
+
     if ADMIN_USER_ID:
         try:
             await application.bot.send_message(
@@ -666,10 +673,15 @@ async def _run_dual(application: Application) -> None:
     server.should_exit = True
     await web_task
 
-    # Graceful Telegram shutdown
+    # Graceful Telegram shutdown (mirror run_polling order: updater → stop → post_stop → shutdown
+    # → post_shutdown — those hooks are not wired when not using run_polling).
     await application.updater.stop()
     await application.stop()
+    if application.post_stop:
+        await application.post_stop(application)
     await application.shutdown()
+    if application.post_shutdown:
+        await application.post_shutdown(application)
 
 
 if __name__ == "__main__":
