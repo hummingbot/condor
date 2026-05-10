@@ -20,8 +20,8 @@ log = logging.getLogger(__name__)
 
 ACP_COMMANDS: dict[str, str] = {
     "claude-code": "claude-agent-acp",
-    "gemini": "gemini --experimental-acp",
-    "copilot": "copilot --acp",
+    "gemini": "npx @google/gemini-cli --acp",
+    "copilot": "npx @github/copilot --acp --stdio",
     "codex": "npx @zed-industries/codex-acp"
 }
 
