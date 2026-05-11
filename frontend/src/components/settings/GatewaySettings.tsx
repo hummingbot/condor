@@ -440,9 +440,12 @@ export function GatewaySettings() {
                 <Loader2 className="h-3 w-3 animate-spin" /> Loading logs...
               </div>
             ) : (
-              <pre className="max-h-64 overflow-auto rounded bg-[var(--color-bg)] p-3 text-xs text-[var(--color-text-muted)] font-mono leading-relaxed">
+              <pre className="max-h-64 overflow-auto rounded bg-[var(--color-bg)] p-3 text-xs text-[var(--color-text-muted)] font-mono leading-relaxed whitespace-pre-wrap break-all">
                 {typeof logsData?.logs === "string"
-                  ? logsData.logs || "No logs available"
+                  ? (logsData.logs || "No logs available")
+                      .split("\n")
+                      .map((line) => line.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*/, ""))
+                      .join("\n")
                   : JSON.stringify(logsData?.logs, null, 2) || "No logs available"}
               </pre>
             )}

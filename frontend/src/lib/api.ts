@@ -536,6 +536,26 @@ export interface VoiceSettingsResponse {
   available_languages: Record<string, string>;
 }
 
+// ── Chat ──
+
+export interface ChatAgentOption {
+  key: string;
+  label: string;
+}
+
+export interface ChatModeOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface ChatOptionsResponse {
+  agents: ChatAgentOption[];
+  modes: ChatModeOption[];
+  default_agent: string;
+  default_mode: string;
+}
+
 // ── Backtesting ──
 
 export interface BacktestTask {
@@ -1080,4 +1100,9 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+
+  // ── Chat ──
+
+  getChatOptions: () =>
+    apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
 };

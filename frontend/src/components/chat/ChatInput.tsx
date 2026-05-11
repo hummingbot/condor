@@ -151,10 +151,10 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     voiceSettingsRef.current = voiceSettings;
   }, [voiceSettings]);
 
-  // Global keyboard shortcut: ⌘M to toggle recording
+  // Global keyboard shortcut: ⌘⇧M to toggle recording
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "m") {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "m") {
         e.preventDefault();
         if (recordingState === "recording") {
           stopRecording();

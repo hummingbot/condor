@@ -274,9 +274,32 @@ export function useChatSocket() {
           setStreamingSlotId(null);
           break;
 
-        case "error":
+        case "error": {
+          const errSlotId = slotId || null;
+          // Reset current assistant message so next response creates a new bubble
+          if (errSlotId) {
+            currentAssistantMsg.current[errSlotId] = null;
+          }
+          // Show error as a system message in the chat
+          const errMsg = (data.message as string) || "Unknown error";
+          if (errSlotId) {
+            setSlots((prev) =>
+              prev.map((s) => {
+                if (s.info.slot_id !== errSlotId) return s;
+                const id = nextMsgId();
+                return {
+                  ...s,
+                  messages: [
+                    ...s.messages,
+                    { id, role: "assistant" as const, text: `⚠️ ${errMsg}`, toolCalls: [] },
+                  ],
+                };
+              }),
+            );
+          }
           setStreamingSlotId(null);
           break;
+        }
 
         case "heartbeat":
           break;
