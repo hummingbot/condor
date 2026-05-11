@@ -259,7 +259,13 @@ async def _handle_send_message(
     session = get_session(session_key)
 
     if not session or not session.client.alive:
-        await _send(ws, {"event": "error", "message": "Session not found. Create a new one."})
+        # Session died — clean up and notify frontend
+        await destroy_session(session_key)
+        slots = _user_slots.get(user_id, [])
+        if slot_id in slots:
+            slots.remove(slot_id)
+        await _send(ws, {"event": "error", "slot_id": slot_id, "message": "Session ended. Start a new one."})
+        await _send(ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": True})
         return
 
     if session.is_busy:
@@ -301,9 +307,11 @@ async def _handle_send_message(
                 })
     except RuntimeError as e:
         await _send(ws, {"event": "error", "slot_id": slot_id, "message": str(e)})
+        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"})
     except Exception:
         log.exception("Error streaming prompt for user %d", user_id)
         await _send(ws, {"event": "error", "slot_id": slot_id, "message": "Stream error"})
+        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"})
 
 
 async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> None:
