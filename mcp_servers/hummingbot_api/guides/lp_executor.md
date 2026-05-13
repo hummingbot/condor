@@ -42,23 +42,25 @@ and auto-closes when price crosses configurable limit prices.
 
 5. **Create executor**:
    - Use `manage_executors` with `action="create"`, `executor_type="lp_executor"`
-   - Include all required params: `connector_name` (network), `lp_provider` (DEX), `trading_pair`, `pool_address`, `lower_price`, `upper_price`, amounts
+   - Required params: `connector_name` (network), `lp_provider` (DEX), `trading_pair`, `pool_address`, `lower_price`, `upper_price`, `side`, plus at least one of `base_amount` / `quote_amount`
 
 #### State Machine
 
 ```
-NOT_ACTIVE → OPENING → IN_RANGE ↔ OUT_OF_RANGE → CLOSING → (SWAPPING) → COMPLETE
-                                                                       ↘ FAILED
+NOT_ACTIVE → OPENING → IN_RANGE ↔ OUT_OF_RANGE → CLOSING → COMPLETE
+                                                       ↘ SWAPPING → COMPLETE
 ```
+
+Any state may transition to `FAILED` if max retries are exhausted (open / close / swap) or if `early_stop` is called while still `OPENING`.
 
 - **NOT_ACTIVE**: Initial state, no position yet
 - **OPENING**: `add_liquidity` submitted, waiting for confirmation
 - **IN_RANGE**: Position active, current price within bounds
 - **OUT_OF_RANGE**: Position active but price outside bounds (no fees earned)
 - **CLOSING**: `remove_liquidity` submitted, waiting for confirmation
-- **SWAPPING**: Close-out swap in progress (only when `keep_position=False`, to return to original quote asset)
+- **SWAPPING**: Close-out swap in progress (only when `keep_position=False`, to return to the original quote asset)
 - **COMPLETE**: Position closed permanently
-- **FAILED**: Max retries reached, manual intervention required
+- **FAILED**: Max retries reached or invalid config; manual intervention required
 
 #### Key Parameters
 
@@ -166,6 +168,7 @@ manage_executors(
 **Always use the executor tool (`manage_executors`) to open and close LP positions.**
 
 - Use `manage_executors` with `action="stop"` to properly close positions and update executor status
+- `manage_executors(action="stop")` accepts its own `keep_position` flag (separate from the config field) — MCP default is `False`, which closes the on-chain position and swaps back to the original quote asset. Pass `keep_position=True` to close the LP position but retain the net token change as a held spot position.
 - If a position is closed externally (via DEX UI), manually mark the executor as `TERMINATED` in the database
 
 **Verifying position status:**
