@@ -14,6 +14,7 @@ import logging
 import os
 import time
 import uuid
+from collections import defaultdict, deque
 from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
@@ -30,6 +31,37 @@ from .client import (
 )
 
 log = logging.getLogger(__name__)
+
+OPENROUTER_FREE_REQUESTS_PER_MINUTE = 20
+RATE_WINDOW_SECONDS = 60.0
+OPENROUTER_WARN_RATIO = 0.8
+
+
+class _ModelRequestRateTracker:
+    """Process-local rolling counter for model requests."""
+
+    def __init__(self, window_seconds: float):
+        self._window_seconds = window_seconds
+        self._timestamps_by_model: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = asyncio.Lock()
+
+    async def record_and_get_count(self, model_name: str) -> int:
+        now = time.monotonic()
+        window_start = now - self._window_seconds
+
+        async with self._lock:
+            timestamps = self._timestamps_by_model[model_name]
+            while timestamps and timestamps[0] < window_start:
+                timestamps.popleft()
+            timestamps.append(now)
+            return len(timestamps)
+
+
+_REQUEST_RATE_TRACKER = _ModelRequestRateTracker(window_seconds=RATE_WINDOW_SECONDS)
+
+
+def _is_openrouter_free_model(model_name: str) -> bool:
+    return model_name.startswith("openrouter:") and model_name.endswith(":free")
 
 
 def _infer_tool_filter_mode(model_name: str) -> str:
@@ -403,6 +435,37 @@ class PydanticAIClient:
                                     )
 
                     elif isinstance(node, CallToolsNode):
+                        rolling_request_count = await _REQUEST_RATE_TRACKER.record_and_get_count(
+                            self.model_name
+                        )
+                        log.info(
+                            "Model request debug: model=%s requests_last_60s=%d",
+                            self.model_name,
+                            rolling_request_count,
+                        )
+                        if _is_openrouter_free_model(self.model_name):
+                            remaining_before_rpm_limit = max(
+                                OPENROUTER_FREE_REQUESTS_PER_MINUTE - rolling_request_count,
+                                0,
+                            )
+                            warn_threshold = int(
+                                OPENROUTER_FREE_REQUESTS_PER_MINUTE * OPENROUTER_WARN_RATIO
+                            )
+                            if rolling_request_count >= OPENROUTER_FREE_REQUESTS_PER_MINUTE:
+                                log.warning(
+                                    "OpenRouter free-model rate limit pressure: model=%s requests_last_60s=%d (limit=%d)",
+                                    self.model_name,
+                                    rolling_request_count,
+                                    OPENROUTER_FREE_REQUESTS_PER_MINUTE,
+                                )
+                            elif rolling_request_count >= warn_threshold:
+                                log.warning(
+                                    "OpenRouter free-model nearing limit: model=%s requests_last_60s=%d remaining_estimate=%d",
+                                    self.model_name,
+                                    rolling_request_count,
+                                    remaining_before_rpm_limit,
+                                )
+
                         # Emit text and tool-call events from model response
                         for part in node.model_response.parts:
                             if isinstance(part, TextPart) and part.content:

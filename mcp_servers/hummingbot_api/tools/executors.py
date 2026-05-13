@@ -7,6 +7,7 @@ creation, viewing, stopping, and position management with progressive disclosure
 import logging
 from typing import Any
 
+from handlers.cex._shared import validate_trading_pair
 from mcp_servers.hummingbot_api.executor_preferences import executor_preferences
 from mcp_servers.hummingbot_api.formatters.executors import (
     format_executor_detail,
@@ -162,6 +163,42 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
         except Exception:
             pass  # If schema fetch fails, skip validation
 
+        # Validate and normalize trading pair format before creating executor.
+        # This is especially important for Hyperliquid HIP3 symbols (issuer:symbol-QUOTE).
+        pair_normalization_note = ""
+        connector_name = merged_config.get("connector_name")
+        trading_pair = merged_config.get("trading_pair")
+        if connector_name and trading_pair:
+            try:
+                validation_cache: dict[str, Any] = {}
+                is_valid, error_msg, suggestions, correct_pair = await validate_trading_pair(
+                    validation_cache, client, connector_name, trading_pair
+                )
+                if not is_valid:
+                    suggestions_text = f" Suggestions: {', '.join(suggestions)}" if suggestions else ""
+                    return {
+                        "action": "create",
+                        "error": f"Invalid trading pair '{trading_pair}' for {connector_name}. {error_msg}.{suggestions_text}",
+                        "formatted_output": (
+                            f"Error: Invalid trading pair '{trading_pair}' for {connector_name}.\n"
+                            f"{error_msg or 'Pair validation failed.'}\n"
+                            f"{suggestions_text}".strip()
+                        ),
+                    }
+
+                if correct_pair and correct_pair != trading_pair:
+                    merged_config["trading_pair"] = correct_pair
+                    pair_normalization_note = (
+                        f"\nTrading pair normalized: {trading_pair} -> {correct_pair}\n"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Trading pair validation failed for %s on %s, continuing with original pair: %s",
+                    trading_pair,
+                    connector_name,
+                    e,
+                )
+
         account = request.account_name or "master_account"
         # Check both top-level param and executor_config (agents sometimes put it in the wrong place)
         controller_id = request.controller_id or merged_config.pop("controller_id", None) or "main"
@@ -191,6 +228,8 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
             formatted += f"Executor ID: {executor_id or 'N/A'}\n"
             formatted += f"Type: {executor_type}\n"
             formatted += f"Account: {account}\n"
+            if pair_normalization_note:
+                formatted += pair_normalization_note
 
             if request.save_as_default:
                 formatted += f"\nConfiguration saved as default for {executor_type}"

@@ -370,7 +370,7 @@ class TickEngine:
         else:
             # Sessions: full journal tracking
             tick_num = self.journal.record_tick(
-                response_summary=response_text[:500],
+                response_summary=response_text,
             )
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)

@@ -1,9 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Loader2, Mic, Volume2 } from "lucide-react";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 import { api } from "@/lib/api";
 import type { VoicePrefs } from "@/lib/api";
+
+const DEFAULT_VOICE_PREFS: VoicePrefs = {
+  whisper_model: "base",
+  language: null,
+  auto_send: true,
+};
 
 export function VoiceSettings() {
   const qc = useQueryClient();
@@ -12,18 +18,24 @@ export function VoiceSettings() {
     queryFn: () => api.getVoiceSettings(),
   });
 
-  const [form, setForm] = useState<VoicePrefs>({
-    whisper_model: "base",
-    language: null,
-    auto_send: true,
-  });
+  const [form, setForm] = useState<VoicePrefs>(DEFAULT_VOICE_PREFS);
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => {
-    if (data?.voice) {
-      setForm(data.voice);
+  const serverVoice =
+    !isLoading && data?.voice ? data.voice : null;
+  const serverVoiceSnapshot = serverVoice
+    ? `${serverVoice.whisper_model}|${String(serverVoice.language)}|${serverVoice.auto_send}`
+    : "";
+  const [appliedServerSnapshot, setAppliedServerSnapshot] = useState<
+    string | null
+  >(null);
+
+  if (serverVoiceSnapshot !== appliedServerSnapshot) {
+    setAppliedServerSnapshot(serverVoiceSnapshot);
+    if (serverVoice) {
+      setForm(serverVoice);
     }
-  }, [data]);
+  }
 
   const mutation = useMutation({
     mutationFn: (prefs: Partial<VoicePrefs>) => api.updateVoiceSettings(prefs),
