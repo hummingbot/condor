@@ -395,7 +395,7 @@ class TickEngine:
                 duration=tick_duration,
             )
 
-            action_brief = response_text[:100].replace("\n", " ") if response_text else "No response"
+            action_brief = response_text.replace("\n", " ") if response_text else "No response"
             self.journal.write_summary(
                 tick=tick_num,
                 status="Running",

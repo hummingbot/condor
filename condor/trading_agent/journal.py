@@ -29,7 +29,6 @@ log = logging.getLogger(__name__)
 _DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
 
 MAX_LEARNINGS = 20
-MAX_TICK_SUMMARY_CHARS = 280
 
 
 def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
@@ -641,7 +640,7 @@ class JournalManager:
         summary = (
             f"Last tick: #{tick} at {now}\n"
             f"Status: {status} | PnL: ${pnl:+.2f} | Open: {open_count} executors\n"
-            f"Last action: {last_action[:100]}"
+            f"Last action: {last_action}"
         )
         self._replace_section("Summary", summary)
 
@@ -711,11 +710,7 @@ class JournalManager:
         """Record a tick entry. Returns the new tick number."""
         self._tick_count += 1
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        summary_text = " ".join(response_summary.split())
-        if len(summary_text) > MAX_TICK_SUMMARY_CHARS:
-            summary = summary_text[: MAX_TICK_SUMMARY_CHARS - 3].rstrip() + "..."
-        else:
-            summary = summary_text
+        summary = " ".join(response_summary.split())
         entry = f"- tick#{self._tick_count} | {now} | actions={actions} | {summary}"
         self._append_to_section("Ticks", entry)
         return self._tick_count
