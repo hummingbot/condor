@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -191,6 +193,25 @@ async def get_field_options(
             log.warning(f"Failed to fetch controller configs: {e}")
             return {"options": []}
     return {"options": []}
+
+
+@router.get("/{routine_name:path}/source")
+async def get_routine_source(
+    routine_name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Return the source code of a routine."""
+    store = get_routine_store()
+    all_routines = store._discover_all()
+    routine = all_routines.get(routine_name)
+    if not routine:
+        raise HTTPException(404, "Routine not found")
+    try:
+        source_file = inspect.getfile(routine.run_fn)
+        source = Path(source_file).read_text()
+        return {"filename": Path(source_file).name, "source": source}
+    except (TypeError, OSError) as e:
+        raise HTTPException(404, f"Source not available: {e}")
 
 
 @router.get("/{routine_name:path}/reports")

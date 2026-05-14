@@ -994,6 +994,11 @@ export const api = {
       method: "POST",
     }),
 
+  getRoutineSource: (name: string) =>
+    apiFetch<{ filename: string; source: string }>(
+      `/api/v1/routines/${encodeURIComponent(name)}/source`,
+    ),
+
   getRoutineReports: (name: string) =>
     apiFetch<ReportsListResponse>(
       `/api/v1/routines/${encodeURIComponent(name)}/reports`,
