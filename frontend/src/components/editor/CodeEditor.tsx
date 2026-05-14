@@ -39,7 +39,7 @@ export function CodeEditor({
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
   const { theme } = useTheme();
-  const isDark = theme === "dark";
+  const isDark = theme !== "light";
 
   // Create editor on mount (and recreate on theme change)
   useEffect(() => {

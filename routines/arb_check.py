@@ -4,6 +4,7 @@ CATEGORY = "Arbitrage"
 
 import asyncio
 import logging
+from itertools import combinations
 
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
@@ -14,15 +15,22 @@ logger = logging.getLogger(__name__)
 
 
 class Config(BaseModel):
-    """Compare order books between two CEX exchanges to find arbitrage opportunities."""
+    """Compare order books across multiple CEX exchanges to find arbitrage opportunities."""
 
     trading_pair: str = Field(
         default="SOL-USDC", description="Trading pair (e.g. SOL-USDC)"
     )
+    exchanges: str = Field(
+        default="binance,kucoin",
+        description="Comma-separated exchanges (e.g. binance,kucoin,htx,gate_io)",
+    )
     amount: float = Field(default=1.0, description="Amount to quote (in base asset)")
-    cex_connector: str = Field(default="binance", description="First CEX exchange")
-    cex_connector_2: str = Field(default="kucoin", description="Second CEX exchange")
     ob_depth: int = Field(default=20, description="Order book depth (levels)")
+
+
+def _parse_exchanges(raw: str) -> list[str]:
+    """Parse comma-separated exchange list, stripping whitespace."""
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
 
 
 async def _get_order_book(client, connector: str, trading_pair: str, depth: int) -> dict | None:
@@ -63,6 +71,15 @@ async def _get_fill_price(client, connector: str, trading_pair: str, amount: flo
         return None
 
 
+def _parse_level(level) -> tuple[float, float]:
+    """Parse a single OB level from list [price, size] or dict {price, quantity}."""
+    if isinstance(level, dict):
+        price = float(level.get("price", level.get("Price", 0)))
+        size = float(level.get("quantity", level.get("size", level.get("amount", level.get("Quantity", 0)))))
+        return price, size
+    return float(level[0]), float(level[1])
+
+
 def _parse_ob_levels(ob: dict) -> tuple[list, list]:
     """Parse order book into [(price, size, cumulative)] for bids and asks."""
     bids_raw = ob.get("bids", [])
@@ -71,14 +88,14 @@ def _parse_ob_levels(ob: dict) -> tuple[list, list]:
     bids = []
     cum = 0.0
     for level in bids_raw:
-        price, size = float(level[0]), float(level[1])
+        price, size = _parse_level(level)
         cum += size
         bids.append((price, size, cum))
 
     asks = []
     cum = 0.0
     for level in asks_raw:
-        price, size = float(level[0]), float(level[1])
+        price, size = _parse_level(level)
         cum += size
         asks.append((price, size, cum))
 
@@ -111,21 +128,20 @@ def _spread_pct(buy_price: float, sell_price: float) -> float:
     return ((sell_price - buy_price) / buy_price) * 100
 
 
-def _build_ob_chart(bids1, asks1, bids2, asks2, cex1: str, cex2: str, pair: str):
-    """Build a Plotly figure with two order books stacked vertically."""
+def _build_ob_chart(exchange_data: list[tuple[str, list, list]], pair: str):
+    """Build a Plotly figure with N order books stacked vertically (one per exchange)."""
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
+    n = len(exchange_data)
     fig = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=[f"{cex1.upper()} Order Book", f"{cex2.upper()} Order Book"],
-        vertical_spacing=0.12,
+        rows=n, cols=1,
+        subplot_titles=[f"{name.upper()} Order Book" for name, _, _ in exchange_data],
+        vertical_spacing=0.08 if n <= 4 else 0.05,
         shared_xaxes=True,
     )
 
-    for row, (bids, asks, name) in enumerate(
-        [(bids1, asks1, cex1), (bids2, asks2, cex2)], start=1
-    ):
+    for row, (name, bids, asks) in enumerate(exchange_data, start=1):
         if bids:
             bid_prices = [b[0] for b in bids]
             bid_cum = [b[2] for b in bids]
@@ -135,7 +151,7 @@ def _build_ob_chart(bids1, asks1, bids2, asks2, cex1: str, cex2: str, pair: str)
                     fill="tozeroy",
                     fillcolor="rgba(0, 200, 83, 0.15)",
                     line=dict(color="rgba(0, 200, 83, 0.8)", width=2, shape="hv"),
-                    name=f"Bids",
+                    name="Bids",
                     hovertemplate="Price: %{x:.4f}<br>Cumul. Size: %{y:.4f}<extra></extra>",
                     showlegend=(row == 1),
                     legendgroup="bids",
@@ -152,7 +168,7 @@ def _build_ob_chart(bids1, asks1, bids2, asks2, cex1: str, cex2: str, pair: str)
                     fill="tozeroy",
                     fillcolor="rgba(255, 82, 82, 0.15)",
                     line=dict(color="rgba(255, 82, 82, 0.8)", width=2, shape="hv"),
-                    name=f"Asks",
+                    name="Asks",
                     hovertemplate="Price: %{x:.4f}<br>Cumul. Size: %{y:.4f}<extra></extra>",
                     showlegend=(row == 1),
                     legendgroup="asks",
@@ -172,168 +188,228 @@ def _build_ob_chart(bids1, asks1, bids2, asks2, cex1: str, cex2: str, pair: str)
             )
 
     # Shared x-axis range
-    all_prices = (
-        [b[0] for b in bids1] + [a[0] for a in asks1]
-        + [b[0] for b in bids2] + [a[0] for a in asks2]
-    )
+    all_prices = []
+    for _, bids, asks in exchange_data:
+        all_prices.extend(b[0] for b in bids)
+        all_prices.extend(a[0] for a in asks)
     if all_prices:
         price_min, price_max = min(all_prices), max(all_prices)
         margin = (price_max - price_min) * 0.02
         fig.update_xaxes(range=[price_min - margin, price_max + margin])
 
+    row_height = 250
     fig.update_layout(
-        height=600,
+        height=max(400, row_height * n),
         template="plotly_dark",
         paper_bgcolor="#1a1a2e",
         plot_bgcolor="#16213e",
         font=dict(color="#e0e0e0"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5),
         margin=dict(t=80, b=40, l=60, r=30),
     )
-    fig.update_xaxes(title_text="Price", row=2, col=1)
-    fig.update_yaxes(title_text="Cumulative Size", row=1, col=1)
-    fig.update_yaxes(title_text="Cumulative Size", row=2, col=1)
+    fig.update_xaxes(title_text="Price", row=n, col=1)
+    for row in range(1, n + 1):
+        fig.update_yaxes(title_text="Cumul. Size", row=row, col=1)
 
     return fig
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Compare order books between two CEX exchanges."""
+    """Compare order books across multiple CEX exchanges."""
     chat_id = context._chat_id if hasattr(context, "_chat_id") else None
     client = await get_client(chat_id, context=context)
 
     if not client:
         return "No server available. Configure servers in /config."
 
-    cex1 = config.cex_connector
-    cex2 = config.cex_connector_2
+    exchanges = _parse_exchanges(config.exchanges)
+    if len(exchanges) < 2:
+        return "Need at least 2 exchanges (comma-separated). Example: binance,kucoin,htx"
+
     pair = config.trading_pair
 
-    # Fetch everything in parallel
-    ob1, ob2, fill_buy1, fill_sell1, fill_buy2, fill_sell2 = await asyncio.gather(
-        _get_order_book(client, cex1, pair, config.ob_depth),
-        _get_order_book(client, cex2, pair, config.ob_depth),
-        _get_fill_price(client, cex1, pair, config.amount, True),
-        _get_fill_price(client, cex1, pair, config.amount, False),
-        _get_fill_price(client, cex2, pair, config.amount, True),
-        _get_fill_price(client, cex2, pair, config.amount, False),
-    )
+    # Fetch all order books and fill prices in parallel
+    tasks = []
+    for ex in exchanges:
+        tasks.append(_get_order_book(client, ex, pair, config.ob_depth))
+        tasks.append(_get_fill_price(client, ex, pair, config.amount, True))   # buy
+        tasks.append(_get_fill_price(client, ex, pair, config.amount, False))  # sell
 
-    if not ob1 and not ob2:
-        return f"Could not fetch order books from either {cex1} or {cex2}."
+    results = await asyncio.gather(*tasks)
 
-    # Parse order books
-    bids1, asks1 = _parse_ob_levels(ob1) if ob1 else ([], [])
-    bids2, asks2 = _parse_ob_levels(ob2) if ob2 else ([], [])
-    stats1 = _ob_stats(bids1, asks1) if ob1 else {}
-    stats2 = _ob_stats(bids2, asks2) if ob2 else {}
+    # Unpack: every 3 results = (ob, fill_buy, fill_sell) per exchange
+    ex_data = {}
+    for i, ex in enumerate(exchanges):
+        ob = results[i * 3]
+        fill_buy = results[i * 3 + 1]
+        fill_sell = results[i * 3 + 2]
+        bids, asks = _parse_ob_levels(ob) if ob else ([], [])
+        stats = _ob_stats(bids, asks) if ob else {}
+        ex_data[ex] = {
+            "ob": ob, "bids": bids, "asks": asks, "stats": stats,
+            "fill_buy": fill_buy, "fill_sell": fill_sell,
+        }
+
+    # Check at least some data came back
+    if not any(d["ob"] for d in ex_data.values()):
+        return f"Could not fetch order books from any exchange: {', '.join(exchanges)}"
 
     # Build text output
     lines = [
-        f"CEX-CEX Order Book Comparison: {pair}",
-        f"{cex1.upper()} vs {cex2.upper()} | Quote: {config.amount} {pair.split('-')[0]}",
+        f"CEX Order Book Comparison: {pair}",
+        f"Exchanges: {', '.join(e.upper() for e in exchanges)} | Quote: {config.amount} {pair.split('-')[0]}",
         "",
     ]
 
-    for name, stats, fill_buy, fill_sell in [
-        (cex1, stats1, fill_buy1, fill_sell1),
-        (cex2, stats2, fill_buy2, fill_sell2),
-    ]:
-        lines.append(f"--- {name.upper()} ---")
-        if stats:
-            lines.append(f"  Best Bid: {stats['best_bid']:.6f} | Best Ask: {stats['best_ask']:.6f}")
-            lines.append(f"  Mid: {stats['mid']:.6f} | Spread: {stats['spread_pct']:.4f}%")
-            lines.append(f"  Depth: Bid ${stats['bid_depth_usd']:,.0f} | Ask ${stats['ask_depth_usd']:,.0f} ({stats['n_bid_levels']}/{stats['n_ask_levels']} levels)")
-        if fill_buy:
-            lines.append(f"  Fill BUY  {config.amount} @ {fill_buy:.6f}")
-        if fill_sell:
-            lines.append(f"  Fill SELL {config.amount} @ {fill_sell:.6f}")
-        if not stats and not fill_buy:
+    for ex in exchanges:
+        d = ex_data[ex]
+        lines.append(f"--- {ex.upper()} ---")
+        if d["stats"]:
+            s = d["stats"]
+            lines.append(f"  Best Bid: {s['best_bid']:.6f} | Best Ask: {s['best_ask']:.6f}")
+            lines.append(f"  Mid: {s['mid']:.6f} | Spread: {s['spread_pct']:.4f}%")
+            lines.append(f"  Depth: Bid ${s['bid_depth_usd']:,.0f} | Ask ${s['ask_depth_usd']:,.0f} ({s['n_bid_levels']}/{s['n_ask_levels']} levels)")
+        if d["fill_buy"]:
+            lines.append(f"  Fill BUY  {config.amount} @ {d['fill_buy']:.6f}")
+        if d["fill_sell"]:
+            lines.append(f"  Fill SELL {config.amount} @ {d['fill_sell']:.6f}")
+        if not d["stats"] and not d["fill_buy"]:
             lines.append("  No data available")
         lines.append("")
 
-    # Arb analysis
-    lines.append("--- Arbitrage ---")
+    # Arb analysis across all pairs
+    lines.append("--- Arbitrage Matrix ---")
     opportunities = []
 
-    if fill_buy1 and fill_sell2:
-        s = _spread_pct(fill_buy1, fill_sell2)
-        profit = (fill_sell2 - fill_buy1) * config.amount
-        label = f"BUY {cex1} -> SELL {cex2}: {s:+.4f}% (${profit:.4f})"
-        (opportunities if s > 0 else lines).append(label)
+    for ex_a, ex_b in combinations(exchanges, 2):
+        da, db = ex_data[ex_a], ex_data[ex_b]
 
-    if fill_buy2 and fill_sell1:
-        s = _spread_pct(fill_buy2, fill_sell1)
-        profit = (fill_sell1 - fill_buy2) * config.amount
-        label = f"BUY {cex2} -> SELL {cex1}: {s:+.4f}% (${profit:.4f})"
-        (opportunities if s > 0 else lines).append(label)
+        # Buy on A, sell on B
+        if da["fill_buy"] and db["fill_sell"]:
+            s = _spread_pct(da["fill_buy"], db["fill_sell"])
+            profit = (db["fill_sell"] - da["fill_buy"]) * config.amount
+            label = f"BUY {ex_a.upper()} -> SELL {ex_b.upper()}: {s:+.4f}% (${profit:.4f})"
+            (opportunities if s > 0 else lines).append(label)
 
-    if stats1.get("mid") and stats2.get("mid"):
-        mid_diff = _spread_pct(stats1["mid"], stats2["mid"])
-        lines.append(f"Mid-price diff: {mid_diff:+.4f}% ({cex1}: {stats1['mid']:.6f}, {cex2}: {stats2['mid']:.6f})")
+        # Buy on B, sell on A
+        if db["fill_buy"] and da["fill_sell"]:
+            s = _spread_pct(db["fill_buy"], da["fill_sell"])
+            profit = (da["fill_sell"] - db["fill_buy"]) * config.amount
+            label = f"BUY {ex_b.upper()} -> SELL {ex_a.upper()}: {s:+.4f}% (${profit:.4f})"
+            (opportunities if s > 0 else lines).append(label)
+
+    # Mid-price diffs
+    mids = {ex: d["stats"]["mid"] for ex, d in ex_data.items() if d["stats"].get("mid")}
+    if len(mids) >= 2:
+        lines.append("")
+        for ex_a, ex_b in combinations(mids.keys(), 2):
+            diff = _spread_pct(mids[ex_a], mids[ex_b])
+            lines.append(f"Mid diff {ex_a.upper()} vs {ex_b.upper()}: {diff:+.4f}%")
 
     if opportunities:
         lines.append("")
         lines.append("OPPORTUNITIES FOUND:")
         lines.extend(opportunities)
     else:
+        lines.append("")
         lines.append("No profitable arbitrage at current depth.")
 
     # Generate report
     try:
         from condor.reports import ReportBuilder
 
-        builder = ReportBuilder(f"CEX Arb: {pair} ({cex1} vs {cex2})")
-        builder.source("routine", "arb_check").tags(["arbitrage", "cex-cex", pair, cex1, cex2])
+        ex_label = " vs ".join(e.upper() for e in exchanges)
+        builder = ReportBuilder(f"CEX Arb: {pair} ({ex_label})")
+        builder.source("routine", "arb_check").tags(["arbitrage", "cex-cex", pair] + exchanges)
         builder.manual_order()
 
-        # KPIs
-        if stats1.get("spread_pct") is not None:
-            builder.kpi(f"{cex1} Spread", f"{stats1['spread_pct']:.4f}%")
-        if stats2.get("spread_pct") is not None:
-            builder.kpi(f"{cex2} Spread", f"{stats2['spread_pct']:.4f}%")
-        if stats1.get("mid") and stats2.get("mid"):
-            md = _spread_pct(stats1["mid"], stats2["mid"])
-            builder.kpi("Mid-Price Diff", f"{md:+.4f}%", trend="up" if abs(md) > 0.05 else "neutral")
-        if fill_buy1 and fill_sell2:
-            s = _spread_pct(fill_buy1, fill_sell2)
-            builder.kpi(f"BUY {cex1} -> SELL {cex2}", f"{s:+.4f}%", trend="up" if s > 0 else "down")
-        if fill_buy2 and fill_sell1:
-            s = _spread_pct(fill_buy2, fill_sell1)
-            builder.kpi(f"BUY {cex2} -> SELL {cex1}", f"{s:+.4f}%", trend="up" if s > 0 else "down")
+        # KPIs - spreads per exchange
+        for ex in exchanges:
+            s = ex_data[ex]["stats"]
+            if s.get("spread_pct") is not None:
+                builder.kpi(f"{ex.upper()} Spread", f"{s['spread_pct']:.4f}%")
 
-        # Order book depth chart
-        if (bids1 or asks1) and (bids2 or asks2):
-            fig = _build_ob_chart(bids1, asks1, bids2, asks2, cex1, cex2, pair)
+        # KPIs - mid diffs
+        if len(mids) >= 2:
+            mid_vals = list(mids.values())
+            max_diff = max(mid_vals) - min(mid_vals)
+            max_diff_pct = (max_diff / min(mid_vals)) * 100
+            builder.kpi("Max Mid-Price Diff", f"{max_diff_pct:+.4f}%",
+                        trend="up" if max_diff_pct > 0.05 else "neutral")
+
+        # KPIs - arb opportunities
+        for ex_a, ex_b in combinations(exchanges, 2):
+            da, db = ex_data[ex_a], ex_data[ex_b]
+            if da["fill_buy"] and db["fill_sell"]:
+                s = _spread_pct(da["fill_buy"], db["fill_sell"])
+                builder.kpi(f"BUY {ex_a.upper()} -> SELL {ex_b.upper()}", f"{s:+.4f}%",
+                            trend="up" if s > 0 else "down")
+            if db["fill_buy"] and da["fill_sell"]:
+                s = _spread_pct(db["fill_buy"], da["fill_sell"])
+                builder.kpi(f"BUY {ex_b.upper()} -> SELL {ex_a.upper()}", f"{s:+.4f}%",
+                            trend="up" if s > 0 else "down")
+
+        # Order book depth chart (all exchanges stacked)
+        chart_data = [
+            (ex, ex_data[ex]["bids"], ex_data[ex]["asks"])
+            for ex in exchanges if ex_data[ex]["ob"]
+        ]
+        if len(chart_data) >= 2:
+            fig = _build_ob_chart(chart_data, pair)
             builder.plotly(fig)
 
         # Comparison table
         builder.markdown(f"## Order Book Comparison ({config.ob_depth} levels)")
         table_rows = []
-        for name, stats, fb, fs in [
-            (cex1, stats1, fill_buy1, fill_sell1),
-            (cex2, stats2, fill_buy2, fill_sell2),
-        ]:
-            row = {"Exchange": name.upper()}
-            if stats:
-                row["Best Bid"] = f"{stats['best_bid']:.6f}"
-                row["Best Ask"] = f"{stats['best_ask']:.6f}"
-                row["Mid Price"] = f"{stats['mid']:.6f}"
-                row["Spread"] = f"{stats['spread_pct']:.4f}%"
-                row["Bid Depth (USD)"] = f"${stats['bid_depth_usd']:,.0f}"
-                row["Ask Depth (USD)"] = f"${stats['ask_depth_usd']:,.0f}"
+        for ex in exchanges:
+            d = ex_data[ex]
+            row = {"Exchange": ex.upper()}
+            if d["stats"]:
+                s = d["stats"]
+                row["Best Bid"] = f"{s['best_bid']:.6f}"
+                row["Best Ask"] = f"{s['best_ask']:.6f}"
+                row["Mid Price"] = f"{s['mid']:.6f}"
+                row["Spread"] = f"{s['spread_pct']:.4f}%"
+                row["Bid Depth (USD)"] = f"${s['bid_depth_usd']:,.0f}"
+                row["Ask Depth (USD)"] = f"${s['ask_depth_usd']:,.0f}"
             else:
                 row["Best Bid"] = "N/A"
                 row["Best Ask"] = "N/A"
-            row[f"Fill BUY {config.amount}"] = f"{fb:.6f}" if fb else "N/A"
-            row[f"Fill SELL {config.amount}"] = f"{fs:.6f}" if fs else "N/A"
+            row[f"Fill BUY {config.amount}"] = f"{d['fill_buy']:.6f}" if d["fill_buy"] else "N/A"
+            row[f"Fill SELL {config.amount}"] = f"{d['fill_sell']:.6f}" if d["fill_sell"] else "N/A"
             table_rows.append(row)
         builder.table(table_rows)
 
+        # Arb matrix table
+        arb_rows = []
+        for ex_a, ex_b in combinations(exchanges, 2):
+            da, db = ex_data[ex_a], ex_data[ex_b]
+            row = {"Route": f"{ex_a.upper()} <-> {ex_b.upper()}"}
+            if da["fill_buy"] and db["fill_sell"]:
+                s = _spread_pct(da["fill_buy"], db["fill_sell"])
+                row[f"BUY {ex_a.upper()} SELL {ex_b.upper()}"] = f"{s:+.4f}%"
+            else:
+                row[f"BUY {ex_a.upper()} SELL {ex_b.upper()}"] = "N/A"
+            if db["fill_buy"] and da["fill_sell"]:
+                s = _spread_pct(db["fill_buy"], da["fill_sell"])
+                row[f"BUY {ex_b.upper()} SELL {ex_a.upper()}"] = f"{s:+.4f}%"
+            else:
+                row[f"BUY {ex_b.upper()} SELL {ex_a.upper()}"] = "N/A"
+            if da["stats"].get("mid") and db["stats"].get("mid"):
+                row["Mid Diff"] = f"{_spread_pct(da['stats']['mid'], db['stats']['mid']):+.4f}%"
+            arb_rows.append(row)
+        if arb_rows:
+            builder.markdown("## Arbitrage Matrix")
+            builder.table(arb_rows)
+
         # Top levels detail per exchange
-        for name, bids, asks in [(cex1, bids1, asks1), (cex2, bids2, asks2)]:
+        for ex in exchanges:
+            d = ex_data[ex]
+            bids, asks = d["bids"], d["asks"]
             n = min(10, max(len(bids), len(asks)))
-            builder.markdown(f"### {name.upper()} - Top {n} Levels")
+            if n == 0:
+                continue
+            builder.markdown(f"### {ex.upper()} - Top {n} Levels")
             levels = []
             for i in range(n):
                 row = {"#": i + 1}

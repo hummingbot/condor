@@ -5,6 +5,7 @@ import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
+import { getThemeColors, pnlColor, sideColor } from "@/lib/theme-colors";
 
 type PickField = "start" | "end" | "limit" | null;
 
@@ -224,19 +225,19 @@ export function GridChart({
         }
 
         const o = bestOverlay;
-        const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
+        const pnlClr = pnlColor(o.pnl);
         const pnlSign = o.pnl >= 0 ? "+" : "";
         const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
         const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
         const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
 
-        const sideClr = o.side === "buy" ? "#22c55e" : "#ef4444";
+        const sideClr = sideColor(o.side);
         const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
         const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
           ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
         const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? "#22c55e" : "#9ca3af";
+          ? getThemeColors().green : "#9ca3af";
 
         // Build config detail rows
         const cfg = o.config || {};
@@ -281,9 +282,9 @@ export function GridChart({
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, "#22c55e");
+        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
         const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, "#ef4444");
+        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
         if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
 
         tooltip.innerHTML = `
@@ -433,7 +434,7 @@ export function GridChart({
     if (startPrice > 0) {
       startLineRef.current = series.createPriceLine({
         price: startPrice,
-        color: activePickField === "start" ? "#22c55e" : "#16a34a",
+        color: getThemeColors().green,
         lineWidth: 2,
         lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
@@ -444,7 +445,7 @@ export function GridChart({
     if (endPrice > 0) {
       endLineRef.current = series.createPriceLine({
         price: endPrice,
-        color: activePickField === "end" ? "#22c55e" : "#16a34a",
+        color: getThemeColors().green,
         lineWidth: 2,
         lineStyle: mod.LineStyle.Dashed,
         axisLabelVisible: true,
@@ -453,7 +454,7 @@ export function GridChart({
     }
 
     if (limitPrice > 0) {
-      const limitColor = side === 1 ? "#ef4444" : "#f97316";
+      const limitColor = side === 1 ? getThemeColors().red : "#f97316";
       limitLineRef.current = series.createPriceLine({
         price: limitPrice,
         color: activePickField === "limit" ? "#fbbf24" : limitColor,
@@ -625,7 +626,7 @@ export function GridChart({
 
           if (box.limitPrice) {
             const limit = chart.addSeries(mod.LineSeries, {
-              color: applyDim("#ef4444"), lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
+              color: applyDim(getThemeColors().red), lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
               priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
             });
             limit.setData([
@@ -741,7 +742,7 @@ export function GridChart({
         ? `${pnlSign}$${(pnl / 1000).toFixed(1)}K`
         : `${pnlSign}$${pnl.toFixed(2)}`;
       const amt = Math.abs(pos.amount);
-      const color = pnl >= 0 ? "#22c55e" : "#ef4444";
+      const color = pnlColor(pnl);
       const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
       const pl = series.createPriceLine({
         price: pos.entry_price,

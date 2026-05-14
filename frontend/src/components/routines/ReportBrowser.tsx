@@ -506,11 +506,6 @@ export function ReportBrowser({
                 <span className="text-[var(--color-text-muted)]/40">|</span>
                 <span className="truncate text-[10px] text-[var(--color-text-muted)]">{selectedReport.title}</span>
                 <span className="text-[10px] text-[var(--color-text-muted)]/60">{new Date(selectedReport.created_at).toLocaleString()}</span>
-                {selectedReport.tags.map((tag) => (
-                  <span key={tag} className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-muted)]">
-                    #{tag}
-                  </span>
-                ))}
               </>
             )}
             {sourceInstances.length > 0 && (

@@ -4,6 +4,7 @@ import {
   Bot,
   Brain,
   MessageSquare,
+  Eye,
   Moon,
   Settings,
   Sun,
@@ -100,9 +101,15 @@ export function AppShell() {
             <button
               onClick={toggleTheme}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              title={
+                theme === "dark" ? "Switch to light mode" :
+                theme === "light" ? "Switch to color-blind mode" :
+                "Switch to dark mode"
+              }
             >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              {theme === "dark" ? <Sun className="h-4 w-4" /> :
+               theme === "light" ? <Eye className="h-4 w-4" /> :
+               <Moon className="h-4 w-4" />}
             </button>
 
           </div>

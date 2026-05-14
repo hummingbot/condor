@@ -26,6 +26,7 @@ import {
   type PortfolioHistoryResponse,
 } from "@/lib/api";
 import { formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
 
@@ -62,18 +63,21 @@ function formatPnl(val: number) {
 
 // ── Chart Colors ──
 
-const CHART_COLORS = [
-  "#d4a845", // gold
-  "#22c55e", // green
-  "#6366f1", // indigo
-  "#ef4444", // red
-  "#06b6d4", // cyan
-  "#8b5cf6", // violet
-  "#ec4899", // pink
-  "#14b8a6", // teal
-  "#f97316", // orange
-  "#a78bfa", // light violet
-];
+function getChartColors() {
+  const tc = getThemeColors();
+  return [
+    "#d4a845", // gold
+    tc.green,   // green (theme-aware)
+    "#6366f1", // indigo
+    tc.red,     // red (theme-aware)
+    "#06b6d4", // cyan
+    "#8b5cf6", // violet
+    "#ec4899", // pink
+    "#14b8a6", // teal
+    "#f97316", // orange
+    "#a78bfa", // light violet
+  ];
+}
 
 // ── KPI helpers ──
 
@@ -271,7 +275,7 @@ function TokenBarChart({
               <div className="flex items-center gap-1.5 w-16 justify-end shrink-0">
                 <div
                   className="h-2.5 w-2.5 rounded-sm shrink-0"
-                  style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
+                  style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
                 />
                 <span className="text-xs font-medium truncate">{t.token}</span>
               </div>
@@ -280,7 +284,7 @@ function TokenBarChart({
                   className="h-full rounded transition-all duration-500"
                   style={{
                     width: `${Math.max(barPct, 2)}%`,
-                    backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
+                    backgroundColor: getChartColors()[i % getChartColors().length],
                     opacity: 0.8,
                   }}
                 />
@@ -459,7 +463,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
     const tokenOrder = topTokens;
     for (let ti = 0; ti < tokenOrder.length; ti++) {
       const token = tokenOrder[ti];
-      const color = CHART_COLORS[ti % CHART_COLORS.length];
+      const color = getChartColors()[ti % getChartColors().length];
 
       // Upper line (cumulative up to and including this token)
       const upperPoints = points.map((p) => {
@@ -529,7 +533,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
   // Tooltip dimensions for stacked mode
   const hoverTokens = hover?.point.tokens ?? {};
   const hoverTokenEntries = stacked && topTokens.length > 0
-    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: CHART_COLORS[topTokens.indexOf(t) % CHART_COLORS.length] }))
+    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: getChartColors()[topTokens.indexOf(t) % getChartColors().length] }))
     : [];
   const tooltipH = stacked && hoverTokenEntries.length > 0 ? 28 + hoverTokenEntries.length * 16 : 40;
   const tooltipW = stacked && hoverTokenEntries.length > 0 ? 150 : 108;
@@ -708,7 +712,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
                 <div key={token} className="flex items-center gap-1.5">
                   <div
                     className="h-2.5 w-2.5 rounded-sm"
-                    style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
+                    style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
                   />
                   <span className="text-xs text-[var(--color-text-muted)]">{token}</span>
                 </div>

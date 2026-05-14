@@ -84,14 +84,6 @@ export function RoutineReports({ routineName }: RoutineReportsProps) {
               <span className="text-[10px] text-[var(--color-text-muted)]">
                 {formatAgo(r.created_at)}
               </span>
-              {r.tags.slice(0, 2).map((tag) => (
-                <span
-                  key={tag}
-                  className="rounded bg-[var(--color-surface-hover)] px-1 py-0.5 text-[9px] text-[var(--color-text-muted)]"
-                >
-                  #{tag}
-                </span>
-              ))}
             </div>
           </button>
         ))}

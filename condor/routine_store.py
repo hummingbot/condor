@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import logging
 import time
+import traceback
 from typing import Any
 
 from pathlib import Path
@@ -202,10 +203,13 @@ class RoutineStore:
             raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except Exception as e:
-            logger.error(f"Web routine {routine.name}[{instance_id}] failed: {e}")
-            result = RoutineResult(text=f"Error: {e}")
+            tb = traceback.format_exc()
+            logger.error(f"Web routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}")
+            error_msg = f"{type(e).__name__}: {e}"
+            result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
             failed = True
         else:
+            error_msg = None
             failed = False
 
         duration = time.time() - start
@@ -218,7 +222,7 @@ class RoutineStore:
                 "last_result": result.text[:500],
                 "last_duration": duration,
                 "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                "error": str(e) if failed else None,
+                "error": error_msg,
             })
 
     async def schedule(
@@ -268,10 +272,13 @@ class RoutineStore:
                     raw = await routine.run_fn(cfg, ctx)
                     result = normalize_result(raw)
                 except Exception as e:
-                    logger.error(f"Scheduled routine {routine.name}[{instance_id}] error: {e}")
-                    result = RoutineResult(text=f"Error: {e}")
+                    tb = traceback.format_exc()
+                    logger.error(f"Scheduled routine {routine.name}[{instance_id}] error: {type(e).__name__}: {e}\n{tb}")
+                    error_msg = f"{type(e).__name__}: {e}"
+                    result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
                     run_failed = True
                 else:
+                    error_msg = None
                     run_failed = False
 
                 duration = time.time() - start
@@ -284,7 +291,7 @@ class RoutineStore:
                         "last_result": result.text[:500],
                         "last_duration": duration,
                         "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                        "error": str(e) if run_failed else None,
+                        "error": error_msg,
                     })
 
                 await asyncio.sleep(interval_sec)

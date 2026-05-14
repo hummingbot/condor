@@ -9,6 +9,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { getThemeColors, pnlColor, sideColor } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
   tick: number;
@@ -215,17 +216,17 @@ export function ExecutorChart({
         const textColor = cs.getPropertyValue("--color-text").trim() || "#e2e8f0";
         const borderColor = cs.getPropertyValue("--color-border").trim() || "#1c2541";
 
-        const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
+        const pnlClr = pnlColor(o.pnl);
         const pnlSign = o.pnl >= 0 ? "+" : "";
         const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
         const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
         const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
 
-        const sideClr = o.side === "buy" ? "#22c55e" : "#ef4444";
+        const sideClr = sideColor(o.side);
         const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
         const statusBg = isActive(o.status) ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
-        const statusClr = isActive(o.status) ? "#22c55e" : textMuted;
+        const statusClr = isActive(o.status) ? getThemeColors().green : textMuted;
 
         // Build config detail rows
         const cfg = o.config || {};
@@ -269,9 +270,9 @@ export function ExecutorChart({
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, "#22c55e");
+        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
         const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, "#ef4444");
+        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
 
         tooltip.innerHTML = `
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
@@ -440,7 +441,7 @@ export function ExecutorChart({
           // Limit price line (if present) — dotted red
           if (box.limitPrice) {
             const limit = chart.addSeries(mod.LineSeries, {
-              color: "#ef4444", lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
+              color: getThemeColors().red, lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
               priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
             });
             limit.setData([

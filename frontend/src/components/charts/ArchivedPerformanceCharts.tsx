@@ -8,6 +8,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { getThemeColors } from "@/lib/theme-colors";
 
 interface Props {
   server: string;
@@ -331,8 +332,9 @@ export function ArchivedPerformanceCharts({
         // HIGH-FREQUENCY MODE: Show buy/sell volume histogram on candle pane
         // Buy volume (green bars)
         if (volumeBuckets.length > 0) {
+          const tc = getThemeColors();
           const buyVolSeries = chart.addSeries(mod.HistogramSeries, {
-            color: "#22c55e60",
+            color: tc.green + "60",
             priceLineVisible: false,
             lastValueVisible: false,
             priceScaleId: "vol",
@@ -347,13 +349,13 @@ export function ArchivedPerformanceCharts({
               .map((b) => ({
                 time: b.time as UTCTimestamp,
                 value: b.buyVol,
-                color: "#22c55e60",
+                color: tc.green + "60",
               })),
           );
 
           // Sell volume (red bars, shown as negative direction via separate series)
           const sellVolSeries = chart.addSeries(mod.HistogramSeries, {
-            color: "#ef444460",
+            color: tc.red + "60",
             priceLineVisible: false,
             lastValueVisible: false,
             priceScaleId: "vol",
@@ -364,7 +366,7 @@ export function ArchivedPerformanceCharts({
               .map((b) => ({
                 time: b.time as UTCTimestamp,
                 value: -b.sellVol,
-                color: "#ef444460",
+                color: tc.red + "60",
               })),
           );
 
@@ -465,14 +467,15 @@ export function ArchivedPerformanceCharts({
       if (hasPnl) {
         const pnlPane = 1;
 
+        const pnlTc = getThemeColors();
         const netPnlSeries = chart.addSeries(mod.BaselineSeries, {
           baseValue: { type: "price" as const, price: 0 },
-          topLineColor: "#22c55e",
-          topFillColor1: "#22c55e22",
-          topFillColor2: "#22c55e08",
-          bottomLineColor: "#ef4444",
-          bottomFillColor1: "#ef444408",
-          bottomFillColor2: "#ef444422",
+          topLineColor: pnlTc.green,
+          topFillColor1: pnlTc.green + "22",
+          topFillColor2: pnlTc.green + "08",
+          bottomLineColor: pnlTc.red,
+          bottomFillColor1: pnlTc.red + "08",
+          bottomFillColor2: pnlTc.red + "22",
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: true,
@@ -538,14 +541,15 @@ export function ArchivedPerformanceCharts({
         const posPane = hasPnl ? 2 : 1;
 
         // Baseline series: green above 0, red below 0
+        const posTc = getThemeColors();
         const posSeries = chart.addSeries(mod.BaselineSeries, {
           baseValue: { type: "price" as const, price: 0 },
-          topLineColor: "#22c55e",
-          topFillColor1: "#22c55e33",
-          topFillColor2: "#22c55e08",
-          bottomLineColor: "#ef4444",
-          bottomFillColor1: "#ef444408",
-          bottomFillColor2: "#ef444433",
+          topLineColor: posTc.green,
+          topFillColor1: posTc.green + "33",
+          topFillColor2: posTc.green + "08",
+          bottomLineColor: posTc.red,
+          bottomFillColor1: posTc.red + "08",
+          bottomFillColor2: posTc.red + "33",
           lineWidth: 1,
           priceLineVisible: false,
           lastValueVisible: true,

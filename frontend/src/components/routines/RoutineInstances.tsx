@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Clock, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Clock, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { type RoutineInstance } from "@/lib/api";
@@ -107,6 +107,16 @@ function InstanceCard({
           </button>
         </div>
       </div>
+      {inst.error && (
+        <div className="border-t border-[var(--color-red)]/20 px-3 py-2">
+          <div className="flex items-start gap-1.5">
+            <AlertTriangle className="h-3 w-3 text-[var(--color-red)] shrink-0 mt-0.5" />
+            <pre className="text-[10px] text-[var(--color-red)]/80 whitespace-pre-wrap break-words font-mono leading-relaxed">
+              {inst.error}
+            </pre>
+          </div>
+        </div>
+      )}
       {showConfig && configEntries.length > 0 && (
         <div className="border-t border-[var(--color-border)]/50 px-3 py-2">
           <div className="grid grid-cols-2 gap-x-4 gap-y-1">
