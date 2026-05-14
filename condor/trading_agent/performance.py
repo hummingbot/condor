@@ -55,23 +55,16 @@ def _executor_row(ex: dict) -> dict[str, Any]:
     if not isinstance(custom_info, dict):
         custom_info = {}
 
-    # entry_price: prefer custom_info (position executors store it there)
-    entry_price = (
-        float(cfg.get("entry_price") or 0)
-        or float(ex.get("entry_price") or 0)
-        or float(custom_info.get("current_position_average_price") or 0)
-    )
-    # current_price / close_price
-    current_price = (
-        float(ex.get("current_price") or 0)
-        or float(custom_info.get("close_price") or 0)
-    )
+    # entry_price: config > top-level > custom_info (position executors store it there)
+    _cfg_entry = float(cfg.get("entry_price") or 0)
+    _top_entry = float(ex.get("entry_price") or 0)
+    _ci_entry = float(custom_info.get("current_position_average_price") or 0)
+    entry_price = _cfg_entry if _cfg_entry > 0 else (_top_entry if _top_entry > 0 else (_ci_entry if _ci_entry > 0 else 0.0))
 
-    ex_id = ex.get("id") or ex.get("executor_id") or "unknown"
-    if entry_price == 0.0:
-        log.warning("Executor %s: entry_price fell back to 0.0 — PnL may be misleading", ex_id)
-    if current_price == 0.0:
-        log.warning("Executor %s: current_price fell back to 0.0 — PnL may be misleading", ex_id)
+    # current_price / close_price: top-level > custom_info
+    _top_cur = float(ex.get("current_price") or 0)
+    _ci_close = float(custom_info.get("close_price") or 0)
+    current_price = _top_cur if _top_cur > 0 else (_ci_close if _ci_close > 0 else 0.0)
 
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
