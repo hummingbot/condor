@@ -7,6 +7,7 @@ import {
   MessageSquare,
   Minus,
   Plus,
+  Server,
   X,
   Zap,
 } from "lucide-react";
@@ -14,6 +15,7 @@ import { useChatSocket, type ChatSlot } from "@/hooks/useChatSocket";
 import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { api, type ChatAgentOption, type ChatModeOption } from "@/lib/api";
+import { useServer } from "@/hooks/useServer";
 
 const MIN_WIDTH = 360;
 const MAX_WIDTH = 1200;
@@ -31,6 +33,7 @@ interface ChatPanelProps {
 
 export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const chat = useChatSocket();
+  const { server } = useServer();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -123,7 +126,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const handleNewSession = (agentKey: string, mode: string) => {
     setPendingSession(true);
     onToggle(true);
-    chat.startSession(agentKey, mode);
+    chat.startSession(agentKey, mode, server || undefined);
     setShowNewMenu(false);
     setSelectedAgent(null);
     setSelectedMode(null);
@@ -173,6 +176,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
             )}
           </div>
+          {/* Active session server indicator */}
+          {activeSlot?.info.server_name && (
+            <div className="flex items-center gap-1 rounded bg-[var(--color-surface-hover)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)]">
+              <Server className="h-2.5 w-2.5" />
+              <span className="truncate max-w-[80px]">{activeSlot.info.server_name}</span>
+            </div>
+          )}
           <div className="flex items-center gap-1">
             {/* New session button */}
             <div className="relative">
@@ -314,6 +324,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           <ChatInput
             onSend={(text) => chat.sendMessage(activeSlot.info.slot_id, text)}
             disabled={isActiveStreaming}
+            isStreaming={isActiveStreaming}
+            onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
           />
         )}
       </div>
@@ -457,13 +469,12 @@ function EmptyState({
   agents,
   modes,
   defaultAgent,
-  defaultMode,
   onStart,
 }: {
   agents: ChatAgentOption[];
   modes: ChatModeOption[];
   defaultAgent: string;
-  defaultMode: string;
+  defaultMode?: string;
   onStart: (agent: string, mode: string) => void;
 }) {
   const [selectedAgent, setSelectedAgent] = useState(defaultAgent);
@@ -569,9 +580,12 @@ function SessionTab({
         <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--color-primary)]" />
       )}
       <ModeIcon className="h-3 w-3 shrink-0" />
-      <span className="max-w-[100px] truncate">
+      <span className="max-w-[140px] truncate">
         {modeLabel}
         <span className="text-[var(--color-text-muted)]"> · {agentShort}</span>
+        {slot.info.server_name && (
+          <span className="text-[var(--color-text-muted)]"> · {slot.info.server_name}</span>
+        )}
       </span>
       {isStreaming && (
         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--color-primary)]" />

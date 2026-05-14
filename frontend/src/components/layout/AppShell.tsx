@@ -20,6 +20,7 @@ import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
+import { CurrencySelector } from "./CurrencySelector";
 import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
@@ -79,6 +80,7 @@ export function AppShell() {
         {/* Right: server selector + controls */}
         <div className="ml-auto flex items-center gap-3">
           <ServerSelector />
+          <CurrencySelector />
 
           <div className="flex items-center gap-1">
             <NavLink

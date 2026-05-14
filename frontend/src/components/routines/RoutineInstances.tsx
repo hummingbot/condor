@@ -62,9 +62,11 @@ function InstanceCard({
             className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
               inst.status === "running" || inst.status === "scheduled"
                 ? "bg-emerald-500/10 text-emerald-400"
-                : inst.status === "completed"
-                  ? "bg-blue-500/10 text-blue-400"
-                  : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+                : inst.status === "failed"
+                  ? "bg-red-500/10 text-red-400"
+                  : inst.status === "completed"
+                    ? "bg-blue-500/10 text-blue-400"
+                    : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
             }`}
           >
             {inst.status}

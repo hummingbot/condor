@@ -18,36 +18,11 @@ import { useMemo, useState } from "react";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 
+import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type BotLogEntry, type BotSummary, type ControllerInfo } from "@/lib/api";
-
-// ── Formatters ──
-
-function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-}
-
-function formatVolume(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(val) >= 1_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return "$" + val.toFixed(0);
-}
-
-function formatPnl(val: number) {
-  const prefix = val >= 0 ? "+" : "";
-  return prefix + formatUsd(val);
-}
-
-function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
+import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
 
 function formatUptime(deployedAt: string | null): string {
   if (!deployedAt) return "—";
@@ -270,11 +245,15 @@ function ControllerRow({
   server,
   isSelected,
   onSelect,
+  formatPnlValue,
+  formatValue,
 }: {
   ctrl: ControllerInfo;
   server: string;
   isSelected: boolean;
   onSelect: () => void;
+  formatPnlValue: (val: number, quote: string) => string;
+  formatValue: (val: number, quote: string) => string;
 }) {
   const queryClient = useQueryClient();
   const isKilled = ctrl.config?.manual_kill_switch === true;
@@ -310,27 +289,34 @@ function ControllerRow({
         {ctrl.connector || "—"}
       </td>
       <td className="px-4 py-2.5 text-sm">{ctrl.trading_pair || "—"}</td>
-      <td
-        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-        style={{ color: pnlColor(ctrl.realized_pnl_quote) }}
-      >
-        {formatPnl(ctrl.realized_pnl_quote)}
-      </td>
-      <td
-        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-        style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}
-      >
-        {formatPnl(ctrl.unrealized_pnl_quote)}
-      </td>
-      <td
-        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-        style={{ color: pnlColor(ctrl.global_pnl_quote) }}
-      >
-        {formatPnl(ctrl.global_pnl_quote)}
-      </td>
-      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-        {formatVolume(ctrl.volume_traded)}
-      </td>
+      {(() => {
+        const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+        return (
+          <>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.realized_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.realized_pnl_quote, quote)}
+            </td>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.unrealized_pnl_quote, quote)}
+            </td>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.global_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.global_pnl_quote, quote)}
+            </td>
+            <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+              {formatValue(ctrl.volume_traded, quote)}
+            </td>
+          </>
+        );
+      })()}
       <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
         {formatUptime(ctrl.deployed_at)}
       </td>
@@ -534,6 +520,13 @@ export function ActiveBotsTab() {
     [controllers, sortKey, sortDir],
   );
 
+  // Currency conversion
+  const quoteCurrencies = useMemo(
+    () => controllers.map((c) => c.trading_pair?.split("-")[1] || "USDT"),
+    [controllers],
+  );
+  const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
+
   if (!server) {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
   }
@@ -547,9 +540,16 @@ export function ActiveBotsTab() {
 
   const serverOnline = data?.server_online !== false;
   const errorHint = data?.error_hint;
-  const totalPnl = data?.total_pnl ?? 0;
-  const totalVolume = data?.total_volume ?? 0;
   const activeBots = bots.filter((b) => b.status === "running").length;
+
+  // Compute totals with currency conversion
+  let totalPnl = 0;
+  let totalVolume = 0;
+  for (const ctrl of controllers) {
+    const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+    totalPnl += convert(ctrl.global_pnl_quote, quote).value;
+    totalVolume += convert(ctrl.volume_traded, quote).value;
+  }
 
   const isEmpty = controllers.length === 0 && bots.length === 0;
 
@@ -574,11 +574,11 @@ export function ActiveBotsTab() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]">
         <StatCard
           label="Total PnL"
-          value={formatPnl(totalPnl)}
+          value={(totalPnl >= 0 ? "+" : "") + formatCurrencyVolume(totalPnl, currencySymbol)}
           icon={TrendingUp}
           valueColor={pnlColor(totalPnl)}
         />
-        <StatCard label="Volume" value={formatVolume(totalVolume)} icon={Volume2} />
+        <StatCard label="Volume" value={formatCurrencyVolume(totalVolume, currencySymbol)} icon={Volume2} />
         <StatCard label="Active Bots" value={String(activeBots)} icon={Bot} />
         <StatCard label="Controllers" value={String(controllers.length)} icon={Layers} />
         <button
@@ -626,6 +626,8 @@ export function ActiveBotsTab() {
                         server={server!}
                         isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_name}`}
                         onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_name}`)}
+                        formatPnlValue={formatPnlValue}
+                        formatValue={formatValue}
                       />
                     ))}
                   </tbody>

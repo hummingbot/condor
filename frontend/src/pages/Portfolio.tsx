@@ -14,15 +14,18 @@ import {
 import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import {
   api,
   type AgentSummary,
   type BalanceItem,
   type ConnectorBalance,
+  type ExecutorInfo,
   type PortfolioHistoryPoint,
   type PortfolioHistoryResponse,
 } from "@/lib/api";
+import { formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
 
 // ── Formatters ──
 
@@ -80,7 +83,11 @@ function isExecutorActive(status: string) {
   return status === "active" || status === "running";
 }
 
-function computeExecutorStats(executors: import("@/lib/api").ExecutorInfo[], period: string) {
+function computeExecutorStats(
+  executors: ExecutorInfo[],
+  period: string,
+  convert: (value: number, quote: string) => { value: number; converted: boolean },
+) {
   const now = Date.now() / 1000;
   const cutoff =
     period === "1D" ? now - 86400 :
@@ -88,10 +95,14 @@ function computeExecutorStats(executors: import("@/lib/api").ExecutorInfo[], per
     now - 30 * 86400;
 
   const filtered = executors.filter((e) => e.timestamp >= cutoff);
-  const pnl = filtered.reduce((s, e) => s + e.pnl, 0);
-  const volume = filtered.reduce((s, e) => s + e.volume, 0);
-  const count = filtered.length;
-  return { pnl, volume, count };
+  let pnl = 0;
+  let volume = 0;
+  for (const e of filtered) {
+    const quote = e.trading_pair?.split("-")[1] || "USDT";
+    pnl += convert(e.pnl, quote).value;
+    volume += convert(e.volume, quote).value;
+  }
+  return { pnl, volume, count: filtered.length };
 }
 
 // ── Unified Dashboard Strip ──
@@ -101,11 +112,13 @@ function KpiCell({
   mainValue,
   pnl,
   details,
+  currencySymbol,
 }: {
   label: string;
   mainValue: string | number;
   pnl?: number;
   details: string;
+  currencySymbol?: string;
 }) {
   return (
     <div className="flex-1 px-5 py-3 min-w-0">
@@ -116,7 +129,7 @@ function KpiCell({
           <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold"
             style={{ color: pnl >= 0 ? "var(--color-green)" : "var(--color-red)" }}>
             {pnl >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
-            {formatPnl(pnl)}
+            {currencySymbol ? formatCurrencyPnl(pnl, currencySymbol) : formatPnl(pnl)}
           </span>
         )}
       </div>
@@ -140,6 +153,8 @@ function DashboardStrip({
   period,
   onPeriodChange,
   onNavigate,
+  convert,
+  currencySymbol,
 }: {
   totalUsd: number;
   totalTokens: number;
@@ -150,13 +165,15 @@ function DashboardStrip({
   botPnl: number;
   botVolume: number;
   activeExecutorCount: number;
-  allExecutors: import("@/lib/api").ExecutorInfo[];
+  allExecutors: ExecutorInfo[];
   agents: AgentSummary[];
   period: string;
   onPeriodChange: (p: string) => void;
   onNavigate: (path: string) => void;
+  convert: (value: number, quote: string) => { value: number; converted: boolean };
+  currencySymbol: string;
 }) {
-  const execStats = useMemo(() => computeExecutorStats(allExecutors, period), [allExecutors, period]);
+  const execStats = useMemo(() => computeExecutorStats(allExecutors, period, convert), [allExecutors, period, convert]);
 
   const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
   const agentPnl = agents.reduce((s, a) => s + a.daily_pnl, 0);
@@ -178,14 +195,16 @@ function DashboardStrip({
           label="Bots"
           mainValue={botCount}
           pnl={botPnl}
-          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatUsd(botVolume)}`}
+          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatCurrencyVolume(botVolume, currencySymbol)}`}
+          currencySymbol={currencySymbol}
         />
 
         <KpiCell
           label="Executors"
           mainValue={`${activeExecutorCount} active`}
           pnl={execStats.pnl}
-          details={`${execStats.count} in ${period} · vol ${formatUsd(execStats.volume)}`}
+          details={`${execStats.count} in ${period} · vol ${formatCurrencyVolume(execStats.volume, currencySymbol)}`}
+          currencySymbol={currencySymbol}
         />
 
         <KpiCell
@@ -747,6 +766,21 @@ export function Portfolio() {
     refetchInterval: 60000,
   });
 
+  // Currency conversion for bots + executors (must be before early returns)
+  const controllers = bots?.controllers ?? [];
+  const executorsList = allExecutors ?? [];
+  const quoteCurrencies = useMemo(() => {
+    const quotes = new Set<string>();
+    for (const c of controllers) {
+      quotes.add(c.trading_pair?.split("-")[1] || "USDT");
+    }
+    for (const e of executorsList) {
+      quotes.add(e.trading_pair?.split("-")[1] || "USDT");
+    }
+    return Array.from(quotes);
+  }, [controllers, executorsList]);
+  const { convert, currencySymbol } = useRates(quoteCurrencies);
+
   if (!server) {
     return (
       <div className="flex items-center justify-center min-h-[60vh]">
@@ -815,10 +849,17 @@ export function Portfolio() {
   // Compute aggregate stats
   const totalTokens = connectors.reduce((s, c) => s + c.balances.length, 0);
   const botsList = bots?.bots ?? [];
-  const controllerCount = bots?.controllers?.length ?? 0;
-  const botPnl = bots?.total_pnl ?? 0;
-  const botVolume = bots?.total_volume ?? 0;
-  const activeExecutorCount = (allExecutors ?? []).filter((e) => isExecutorActive(e.status)).length;
+  const controllerCount = controllers.length;
+  const activeExecutorCount = executorsList.filter((e) => isExecutorActive(e.status)).length;
+
+  // Convert bot PnL and volume per-controller
+  let botPnl = 0;
+  let botVolume = 0;
+  for (const ctrl of controllers) {
+    const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+    botPnl += convert(ctrl.global_pnl_quote, quote).value;
+    botVolume += convert(ctrl.volume_traded, quote).value;
+  }
 
   // Flatten all tokens for top holdings
   const allTokens = connectors.flatMap((c) =>
@@ -840,11 +881,13 @@ export function Portfolio() {
         botPnl={botPnl}
         botVolume={botVolume}
         activeExecutorCount={activeExecutorCount}
-        allExecutors={allExecutors ?? []}
+        allExecutors={executorsList}
         agents={agents ?? []}
         period={period}
         onPeriodChange={setPeriod}
         onNavigate={navigate}
+        convert={convert}
+        currencySymbol={currencySymbol}
       />
 
       {/* Portfolio Evolution + Top Holdings side by side */}

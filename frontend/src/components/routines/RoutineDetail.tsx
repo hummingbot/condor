@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, ExternalLink, FileText, Loader2, Play } from "lucide-react";
+import { AlertTriangle, Brain, ExternalLink, FileText, Loader2, Play } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { type RoutineInfo, type RoutineInstance, api } from "@/lib/api";
@@ -158,13 +158,27 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
         </div>
       )}
 
-      {/* Result - show link to report instead of raw text */}
-      {activeInstance && activeInstance.status !== "running" && (activeInstance.result_text || activeInstance.has_result) && (
+      {/* Result - show error or link to report */}
+      {activeInstance && activeInstance.status !== "running" && (activeInstance.result_text || activeInstance.has_result || activeInstance.error) && (
         <div>
           <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
             Last Result
           </h3>
-          {onOpenReport ? (
+          {activeInstance.status === "failed" || activeInstance.error ? (
+            <div className="rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/5 px-4 py-3">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 text-[var(--color-red)] shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-[var(--color-red)]">
+                    Routine failed
+                  </p>
+                  <pre className="mt-1.5 text-[11px] text-[var(--color-text-muted)] whitespace-pre-wrap break-words font-mono">
+                    {activeInstance.error || activeInstance.result_text}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          ) : onOpenReport ? (
             <button
               onClick={() => onOpenReport(routine.name)}
               className="flex items-center gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 px-4 py-3 text-left transition-all hover:border-[var(--color-primary)]/50 hover:bg-[var(--color-primary)]/10 w-full"

@@ -422,6 +422,7 @@ export interface RoutineInstance {
   table_data?: Record<string, unknown>[] | null;
   table_columns?: string[] | null;
   sections?: Record<string, unknown>[] | null;
+  error?: string | null;
 }
 
 // ── Archived Bots ──
@@ -748,6 +749,12 @@ export const api = {
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
       `/api/v1/servers/${server}/market/prices?connector=${connector}&trading_pair=${pair}`,
+    ),
+
+  getRateOracleRates: (server: string, tradingPairs: string[]) =>
+    apiFetch<{ rates: Record<string, number> }>(
+      `/api/v1/servers/${server}/rate-oracle/rates`,
+      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
     ),
 
   getTradingRules: (server: string, connector: string) =>

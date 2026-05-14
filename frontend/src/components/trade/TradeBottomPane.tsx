@@ -12,7 +12,7 @@ import {
   formatUsd,
   pnlColor,
   isExecutorActive,
-} from "@/pages/Executors";
+} from "@/lib/formatters";
 
 interface TradeBottomPaneProps {
   executors: ExecutorInfo[];

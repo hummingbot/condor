@@ -21,6 +21,7 @@ export interface SlotInfo {
   agent_key: string;
   mode: string;
   is_busy?: boolean;
+  server_name?: string;
 }
 
 export interface ChatSlot {
@@ -31,6 +32,37 @@ export interface ChatSlot {
 let msgIdCounter = 0;
 function nextMsgId(): string {
   return `msg_${++msgIdCounter}`;
+}
+
+// ── localStorage persistence for chat messages ──
+const STORAGE_KEY = "condor_chat_messages";
+
+function saveSlotMessages(slots: ChatSlot[]) {
+  try {
+    const data: Record<string, ChatMessage[]> = {};
+    for (const s of slots) {
+      if (s.messages.length > 0) {
+        data[s.info.slot_id] = s.messages;
+      }
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch { /* quota exceeded or private mode */ }
+}
+
+function loadSlotMessages(): Record<string, ChatMessage[]> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /* corrupted */ }
+  return {};
+}
+
+function clearStoredSlot(slotId: string) {
+  try {
+    const data = loadSlotMessages();
+    delete data[slotId];
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch { /* ignore */ }
 }
 
 export function useChatSocket() {
@@ -104,12 +136,15 @@ export function useChatSocket() {
         case "sessions_list": {
           const sessions = data.sessions as SlotInfo[];
           if (sessions.length > 0) {
+            const stored = loadSlotMessages();
             setSlots((prev) => {
-              // Merge: keep existing messages for known slots, add new ones
+              // Merge: keep existing messages for known slots, restore from localStorage, or start empty
               const existing = new Map(prev.map((s) => [s.info.slot_id, s]));
               const merged = sessions.map((info) => {
                 const ex = existing.get(info.slot_id);
-                return ex ? { ...ex, info } : { info, messages: [] };
+                if (ex) return { ...ex, info };
+                const restored = stored[info.slot_id];
+                return { info, messages: restored || [] };
               });
               return merged;
             });
@@ -126,6 +161,7 @@ export function useChatSocket() {
             slot_id: data.slot_id as string,
             agent_key: data.agent_key as string,
             mode: data.mode as string,
+            server_name: (data.server_name as string) || undefined,
           };
           setSlots((prev) => [...prev, { info: newSlot, messages: [] }]);
           setActiveSlotId(newSlot.slot_id);
@@ -134,6 +170,7 @@ export function useChatSocket() {
 
         case "session_destroyed": {
           const destroyedId = data.slot_id as string;
+          clearStoredSlot(destroyedId);
           setSlots((prev) => prev.filter((s) => s.info.slot_id !== destroyedId));
           setActiveSlotId((prev) => {
             if (prev === destroyedId) return null;
@@ -334,8 +371,8 @@ export function useChatSocket() {
   );
 
   const startSession = useCallback(
-    (agentKey: string, mode: string) => {
-      send({ action: "start_session", agent_key: agentKey, mode });
+    (agentKey: string, mode: string, serverName?: string) => {
+      send({ action: "start_session", agent_key: agentKey, mode, server_name: serverName });
     },
     [send],
   );
@@ -343,7 +380,15 @@ export function useChatSocket() {
   const destroySession = useCallback(
     (slotId: string) => {
       currentAssistantMsg.current[slotId] = null;
+      clearStoredSlot(slotId);
       send({ action: "destroy_session", slot_id: slotId });
+    },
+    [send],
+  );
+
+  const abortPrompt = useCallback(
+    (slotId: string) => {
+      send({ action: "abort_prompt", slot_id: slotId });
     },
     [send],
   );
@@ -363,6 +408,11 @@ export function useChatSocket() {
     };
   }, []);
 
+  // Persist messages to localStorage on every change
+  useEffect(() => {
+    saveSlotMessages(slots);
+  }, [slots]);
+
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;
   const isStreaming = streamingSlotId !== null;
 
@@ -380,6 +430,7 @@ export function useChatSocket() {
     sendMessage,
     startSession,
     destroySession,
+    abortPrompt,
     resolvePermission,
   };
 }
