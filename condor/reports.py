@@ -14,6 +14,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Module-level variable to capture the last saved report ID.
+# Safe in asyncio (single-threaded); reset before each routine execution.
+_last_report_id: str | None = None
+
 CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
@@ -341,6 +345,9 @@ class ReportBuilder:
         entries.append(entry)
         _write_index(entries)
         _cleanup()
+
+        global _last_report_id
+        _last_report_id = report_id
 
         logger.info(f"Report saved: {filename}")
         return report_id

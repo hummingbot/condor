@@ -123,6 +123,8 @@ class RoutineStore:
             entry["table_data"] = result.table_data
             entry["table_columns"] = result.table_columns
             entry["sections"] = result.sections
+        # Ensure error is always present in response
+        entry.setdefault("error", None)
         return entry
 
     def add_instance(self, instance_id: str, metadata: dict) -> None:
@@ -202,17 +204,21 @@ class RoutineStore:
         except Exception as e:
             logger.error(f"Web routine {routine.name}[{instance_id}] failed: {e}")
             result = RoutineResult(text=f"Error: {e}")
+            failed = True
+        else:
+            failed = False
 
         duration = time.time() - start
         self._results[instance_id] = result
 
         if instance_id in self._instances:
             self._instances[instance_id].update({
-                "status": "completed",
+                "status": "failed" if failed else "completed",
                 "last_run_at": time.time(),
                 "last_result": result.text[:500],
                 "last_duration": duration,
                 "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                "error": str(e) if failed else None,
             })
 
     async def schedule(
@@ -264,6 +270,9 @@ class RoutineStore:
                 except Exception as e:
                     logger.error(f"Scheduled routine {routine.name}[{instance_id}] error: {e}")
                     result = RoutineResult(text=f"Error: {e}")
+                    run_failed = True
+                else:
+                    run_failed = False
 
                 duration = time.time() - start
                 self._results[instance_id] = result
@@ -275,6 +284,7 @@ class RoutineStore:
                         "last_result": result.text[:500],
                         "last_duration": duration,
                         "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                        "error": str(e) if run_failed else None,
                     })
 
                 await asyncio.sleep(interval_sec)
