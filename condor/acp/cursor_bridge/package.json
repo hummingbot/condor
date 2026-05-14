@@ -1,0 +1,17 @@
+{
+  "name": "cursor_bridge",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "list-models": "node list_models.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@cursor/sdk": "^1.0.13"
+  }
+}

@@ -162,12 +162,28 @@ TELEGRAM_TOKEN=your_bot_token
 ADMIN_USER_ID=123456789
 OPENAI_API_KEY=sk-...                    # Optional, for AI features
 OPENROUTER_API_KEY=sk-or-...             # Optional, unlocks the OpenRouter LLM picker
+CURSOR_API_KEY=crsr_...                  # Optional, Cursor Composer via local Node bridge
+# CONDOR_CURSOR_CWD=/path/to/checkout    # Optional; defaults to repo root — Cursor local.cwd
+# CONDOR_NODE_BIN=node                   # Optional if Node is not named `node` on PATH
 ```
 
 > **OpenRouter:** Add `OPENROUTER_API_KEY` to `.env`, then in `/agent → Change LLM`
 > select **OpenRouter — Pick Model**. The picker fetches the live catalog and shows
 > only models that support tool-calling. Get a key at
 > [openrouter.ai/keys](https://openrouter.ai/keys).
+
+> **Cursor Composer:** Requires Node 18+, `CURSOR_API_KEY`, and bridge dependencies:
+>
+> ```bash
+> cd condor/acp/cursor_bridge && npm install
+> ```
+>
+> Then pick **Cursor — Auto model** or **Cursor — Composer 2** in `/agent → Change LLM`.
+> The integration runs Cursor's **local** agent against `CONDOR_CURSOR_CWD`
+> (defaults to repository root). Condor MCP attachments are **not** translated into
+> Cursor `mcpServers` yet — use Composer's default tools only. Run
+> `CURSOR_API_KEY=... npm run list-models` in `condor/acp/cursor_bridge/` to print model IDs
+> (one per line); append `--full` for the verbose JSON catalog.
 
 ### `config.yml` (auto-created on first run)
 ```yaml
@@ -195,6 +211,7 @@ audit_log: []
 | Connection refused | Check server host:port in `/config` |
 | Auth error | Verify server credentials |
 | DEX features unavailable | Ensure Gateway is configured and running |
+| Cursor `/agent` fails | Set `CURSOR_API_KEY`, Node 18+, and run `npm install` in `condor/acp/cursor_bridge/` |
 
 ## Development
 

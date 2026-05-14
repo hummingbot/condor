@@ -23,6 +23,7 @@ from ._shared import (
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from condor.acp import ACP_COMMANDS, PromptDone
+from condor.acp.cursor_sdk_client import is_cursor_sdk_model
 from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
@@ -39,7 +40,13 @@ def _is_agent_available(agent_key: str) -> bool:
     For ACP agents (claude-code, gemini): checks if the CLI binary is in PATH.
     For pydantic-ai agents (ollama:*, openai:*, etc.): always available
     (pydantic-ai handles connection errors at runtime).
+    For Cursor-backed agents (cursor:*): Node 18+ and bridge `npm install` required.
     """
+    if is_cursor_sdk_model(agent_key):
+        from condor.acp.cursor_sdk_client import cursor_runtime_ready
+
+        return cursor_runtime_ready()
+
     # Pydantic-ai models don't need a CLI binary
     if is_pydantic_ai_model(agent_key):
         return True
@@ -81,11 +88,15 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         available = [k for k in AGENT_OPTIONS if _is_agent_available(k)]
         if not available:
             await update.message.reply_text(
-                "No agent CLI found.\n\n"
-                "Install one of:\n"
-                "• claude-agent-acp (Claude Agent)\n"
-                "• gemini (Gemini CLI)\n"
-                "• npx @zed-industries/codex-acp (ChatGPT Codex ACP bridge)\n\n"
+                "No agent backend is usable from this installation.\n\n"
+                "Install **one** of:\n"
+                "• Cursor: Node 18+, then run `npm install` in `condor/acp/cursor_bridge/`, "
+                "and set `CURSOR_API_KEY` in `.env`\n"
+                "• Claude Code ACP CLI (`claude-agent-acp`)\n"
+                "• Gemini CLI (`gemini`)\n"
+                "• ChatGPT Codex ACP bridge (`npx @zed-industries/codex-acp`)\n\n"
+                "For local open-source models via OpenRouter/Ollama, install nothing extra "
+                "beyond Python deps.\n\n"
                 "Then restart the bot."
             )
             return
@@ -261,8 +272,14 @@ async def _handle_settings(
 
     query = update.callback_query
     current_llm = context.user_data.get("agent_llm", DEFAULT_AGENT)
+    suffix = ""
+    if current_llm.startswith("cursor:") and current_llm not in AGENT_OPTIONS:
+        suffix = (
+            f"\n\nCustom Cursor model is active ({current_llm}); "
+            "it is not listed as a button."
+        )
     await query.message.edit_text(
-        "Select the LLM for new sessions:",
+        "Select the LLM for new sessions:" + suffix,
         reply_markup=_settings_keyboard(current_llm),
     )
 
@@ -271,9 +288,19 @@ async def _handle_set_llm(
     update: Update, context: ContextTypes.DEFAULT_TYPE, llm_key: str
 ) -> None:
     """Update the preferred LLM."""
+    import os
+
     query = update.callback_query
     if llm_key not in AGENT_OPTIONS:
         await query.message.edit_text("Unknown LLM option.")
+        return
+
+    if is_cursor_sdk_model(llm_key) and not os.environ.get("CURSOR_API_KEY"):
+        await query.message.edit_text(
+            "CURSOR_API_KEY is not set. Add it to your .env to use Cursor Composer, "
+            "then restart the bot.\n\n"
+            "Mint a key at https://cursor.com/dashboard/cloud-agents"
+        )
         return
 
     context.user_data["agent_llm"] = llm_key

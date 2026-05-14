@@ -173,3 +173,10 @@ data/
 
 # Node
 node_modules/
+
+# Reports
+reports/
+
+# Trading agents
+trading_agents/*/sessions/*
+trading_agents/*/dry_runs/*

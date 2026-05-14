@@ -128,19 +128,28 @@ def build_tick_prompt(
     cached_routines_section: str | None = None,
 ) -> str:
     """Build the full prompt for one agent tick."""
+    from condor.acp.cursor_sdk_client import is_cursor_sdk_model
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
     agent_key = config.get("agent_key") or strategy.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
+    use_cursor = is_cursor_sdk_model(agent_key)
 
     # Select base prompt and tool preload based on mode
     base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
     sections: list[str] = [base_prompt, BASE_PROMPT_COMMON]
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
-    if not use_pydantic_ai:
+    if use_cursor:
+        sections.append(
+            "TOOLS:\n"
+            "Cursor Composer session: Condor MCP (Hummingbot) is not wired to Cursor in this build. "
+            "You only have Cursor's configured tool surface (see Cursor docs). "
+            "Do not assume mcp-hummingbot or condor MCP tools exist."
+        )
+    elif not use_pydantic_ai:
         tool_preload = TOOL_PRELOAD_DRY_RUN if is_dry_run else TOOL_PRELOAD_LIVE
         sections.append(tool_preload)
     else:

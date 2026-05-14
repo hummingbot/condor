@@ -87,6 +87,8 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
     # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
     "openrouter:": {"label": "OpenRouter — Pick Model"},
+    "cursor:auto": {"label": "Cursor — Auto model"},
+    "cursor:composer-2": {"label": "Cursor — Composer 2"},
 }
 
 DEFAULT_AGENT = "claude-code"
@@ -400,6 +402,7 @@ def build_mcp_servers_for_agent(
 def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram") -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from config_manager import ServerPermission, get_config_manager, get_effective_server
+    from condor.acp.cursor_sdk_client import is_cursor_sdk_model
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     cm = get_config_manager()
@@ -433,7 +436,7 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
         # For ACP agents (Claude Code): instruct them to preload MCP tools via ToolSearch
         # Pydantic-ai agents get tools directly, no preload needed
         tool_preload_hint = ""
-        if agent_key and not is_pydantic_ai_model(agent_key):
+        if agent_key and not is_pydantic_ai_model(agent_key) and not is_cursor_sdk_model(agent_key):
             mcp_tools = [
                 "mcp__mcp-hummingbot__get_market_data",
                 "mcp__mcp-hummingbot__get_portfolio_overview",

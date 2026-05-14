@@ -25,6 +25,7 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
+from condor.acp.cursor_sdk_client import CursorSdkClient, is_cursor_sdk_model
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
 from .journal import JournalManager, next_experiment_number, next_session_number
@@ -409,7 +410,11 @@ class TickEngine:
                 self.agent_id, tick_num, len(tool_calls), len(response_text),
             )
 
-    async def _collect_stream(self, acp_client: ACPClient, prompt: str):
+    async def _collect_stream(
+        self,
+        acp_client: ACPClient | PydanticAIClient | CursorSdkClient,
+        prompt: str,
+    ):
         """Wrapper to make prompt_stream compatible with wait_for."""
         async for event in acp_client.prompt_stream(prompt):
             yield event
@@ -420,7 +425,7 @@ class TickEngine:
     # Client factory
     # ------------------------------------------------------------------
 
-    async def _create_client(self) -> "ACPClient | PydanticAIClient":
+    async def _create_client(self) -> "ACPClient | PydanticAIClient | CursorSdkClient":
         """Build an ACP or PydanticAI client (does NOT start it)."""
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
@@ -446,6 +451,19 @@ class TickEngine:
         permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
 
         agent_key = self.config.get("agent_key") or self.strategy.agent_key
+
+        if is_cursor_sdk_model(agent_key):
+            log.warning(
+                "TickEngine agent_key=%s uses Cursor SDK without Condor MCP attachments; "
+                "trading ticks will not reach Hummingbot tools unless Composer can access them indirectly.",
+                agent_key,
+            )
+            return CursorSdkClient(
+                model=agent_key,
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+            )
+
         use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
         if use_pydantic_ai:
