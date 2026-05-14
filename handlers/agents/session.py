@@ -38,6 +38,7 @@ class AgentSession:
     agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
     client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
+    server_name: str | None = None  # Which Condor server this session uses
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -95,6 +96,7 @@ async def get_or_create_session(
     mode: str = "condor",
     platform: str = "telegram",
     lazy_context: bool = False,
+    server_name: str | None = None,
 ) -> AgentSession:
     """Get existing session or create a new one.
 
@@ -120,7 +122,7 @@ async def get_or_create_session(
     # Build dynamic MCP servers from user's Condor permissions
     mcp_servers: list[dict] = []
     if user_id:
-        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, user_data)
+        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, user_data, server_name=server_name)
 
     # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
@@ -162,7 +164,16 @@ async def get_or_create_session(
         # Build initial context about server and permissions
         initial_context = ""
         if user_id:
-            initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key, platform=platform)
+            initial_context = build_initial_context(user_id, chat_id, user_data, agent_key=agent_key, platform=platform, server_name=server_name)
+        # Resolve the server name that was actually used for this session
+        resolved_server = server_name
+        if not resolved_server and user_id:
+            from config_manager import get_config_manager, get_effective_server
+            resolved_server = get_effective_server(chat_id, user_data)
+            if not resolved_server:
+                cm = get_config_manager()
+                accessible = cm.get_accessible_servers(user_id)
+                resolved_server = accessible[0] if accessible else None
 
         if initial_context and not lazy_context:
             # Eager: send context now (blocks until agent processes it)
@@ -177,6 +188,7 @@ async def get_or_create_session(
             agent_key=agent_key,
             client=client,
             mode=mode,
+            server_name=resolved_server,
             pending_context=initial_context or None,
         )
     except Exception:
