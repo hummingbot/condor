@@ -161,6 +161,10 @@ async def fetch(p):
 results = await asyncio.gather(*[fetch(p) for p in pairs], return_exceptions=True)
 ```
 
+## Plotly Chart Rules
+
+- **Legend always at the bottom:** Every Plotly figure must set `fig.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5))` so the legend appears horizontally below the chart, never on top or to the side.
+
 ## Common Mistakes
 
 - `get_order_book()` NOT ~~`get_order_book_snapshot`~~
