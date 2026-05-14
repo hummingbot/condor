@@ -4,6 +4,7 @@
  * Protocol from Python (stdin):
  *   {"op":"init","cwd":"<abs path>","modelId":"<cursor model id>"}
  *       optional: "apiKey" (otherwise CURSOR_API_KEY env)
+ *       optional: "mcpServers": { "<name>": { "type":"stdio", "command", "args", "env?", "cwd" }, ... }
  *   {"op":"prompt","id":"<uuid>","text":"<user message>"}
  *   {"op":"shutdown"}
  *
@@ -160,12 +161,20 @@ async function handleLine(line) {
       });
       process.exit(2);
     }
+    const mcpServers =
+      parsed.mcpServers && typeof parsed.mcpServers === "object"
+        ? parsed.mcpServers
+        : undefined;
+    const createOpts = {
+      apiKey,
+      model: { id: modelId },
+      local: { cwd, settingSources: [] },
+    };
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
+      createOpts.mcpServers = mcpServers;
+    }
     try {
-      agent = await Agent.create({
-        apiKey,
-        model: { id: modelId },
-        local: { cwd, settingSources: [] },
-      });
+      agent = await Agent.create(createOpts);
     } catch (err) {
       let message = err?.message ?? String(err);
       if (err instanceof CursorAgentError) {

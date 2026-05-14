@@ -1,8 +1,12 @@
 """Cursor Agent backend: Node subprocess + official `@cursor/sdk` (local runtime).
 
-Default integration uses Cursor's **local** agent (`local.cwd`); Condor MCP tool
-configs are ignored in v1 (see README). Requires Node 18+, `npm install` under
-`cursor_bridge/`, and `CURSOR_API_KEY`.
+Passes Condor MCP stdio servers through to Composer as `AgentOptions.mcpServers`
+(local Cursor only).
+
+Note: Composer does not invoke Condor's Telegram `PermissionCallback`; risky tool
+handlers may behave differently vs ACP / pydantic-ai sessions.
+
+Requires Node 18+, `npm install` under `cursor_bridge/`, and `CURSOR_API_KEY`.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ import shutil
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
+
+from condor.acp.mcp_stdio import acp_mcp_list_to_cursor_mcp_servers
 
 from condor.acp.client import (
     ACPEvent,
@@ -72,23 +78,19 @@ class CursorSdkClient:
         self._model_tag = model
         self._cwd = cwd
         self._api_key = api_key if api_key is not None else os.environ.get("CURSOR_API_KEY")
-        self._permission_callback = permission_callback  #reserved — Cursor handles tools natively v1
+        # Composer MCP runs without Condor Telegram approval flow (see module docstring).
+        self._permission_callback = permission_callback
         self._extra_env = extra_env or {}
+        self._acp_mcp_servers: list[dict[str, Any]] = list(mcp_servers or [])
         self._process: asyncio.subprocess.Process | None = None
         self._read_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
-        if mcp_servers:
-            log.warning(
-                "CursorSdkClient ignores %d Condor MCP server config(s) in this build "
-                "(no translation to Cursor mcpServers yet).",
-                len(mcp_servers),
-            )
-
         if self._permission_callback is not None:
             log.debug(
-                "CursorSdkClient ignores permission_callback; Cursor Composer applies its own approvals."
+                "CursorSdkClient receives permission_callback for API parity; Composer "
+                "does not delegate MCP tool approvals to Condor Telegram."
             )
 
     async def start(self) -> None:
@@ -110,6 +112,11 @@ class CursorSdkClient:
 
         cwd = self._cwd or os.environ.get("CONDOR_CURSOR_CWD") or str(PROJECT_ROOT)
         mid = cursor_model_id(self._model_tag)
+        cursor_mcp = acp_mcp_list_to_cursor_mcp_servers(
+            self._acp_mcp_servers,
+            cwd,
+            extra_env=self._extra_env,
+        )
 
         env = dict(os.environ)
         env.update(self._extra_env)
@@ -132,7 +139,9 @@ class CursorSdkClient:
         self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         self._drain_queue()
-        init_msg = {"op": "init", "cwd": cwd, "modelId": mid}
+        init_msg: dict[str, Any] = {"op": "init", "cwd": cwd, "modelId": mid}
+        if cursor_mcp:
+            init_msg["mcpServers"] = cursor_mcp
         await self._write_line(init_msg)
 
         deadline = asyncio.get_event_loop().time() + 120.0
@@ -150,9 +159,10 @@ class CursorSdkClient:
             kind = pkt.get("kind")
             if kind == "ready":
                 log.info(
-                    "Cursor SDK bridge ready (model_id=%s, cwd=%s)",
+                    "Cursor SDK bridge ready (model_id=%s, cwd=%s, mcp_servers=%d)",
                     mid,
                     cwd,
+                    len(cursor_mcp),
                 )
                 return
             if kind == "error" and pkt.get("stage") == "init":
@@ -271,7 +281,6 @@ class CursorSdkClient:
 
         loop = asyncio.get_event_loop()
         start_t = loop.time()
-        notified_tools: set[str] = set()
 
         while True:
             try:
@@ -301,8 +310,6 @@ class CursorSdkClient:
             elif kind == "tool":
                 cid = str(pkt.get("call_id", ""))
                 name = str(pkt.get("name", "tool"))
-                if cid:
-                    notified_tools.add(cid)
                 yield ToolCallEvent(
                     tool_call_id=cid or name,
                     title=name,

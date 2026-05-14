@@ -453,9 +453,9 @@ class TickEngine:
         agent_key = self.config.get("agent_key") or self.strategy.agent_key
 
         if is_cursor_sdk_model(agent_key):
-            log.warning(
-                "TickEngine agent_key=%s uses Cursor SDK without Condor MCP attachments; "
-                "trading ticks will not reach Hummingbot tools unless Composer can access them indirectly.",
+            log.info(
+                "TickEngine agent_key=%s uses Cursor SDK — MCP stdio configs are forwarded; "
+                "Composer does not use Condor Telegram permission_callback for MCP tools.",
                 agent_key,
             )
             return CursorSdkClient(

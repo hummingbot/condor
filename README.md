@@ -179,11 +179,16 @@ CURSOR_API_KEY=crsr_...                  # Optional, Cursor Composer via local N
 > ```
 >
 > Then pick **Cursor — Auto model** or **Cursor — Composer 2** in `/agent → Change LLM`.
-> The integration runs Cursor's **local** agent against `CONDOR_CURSOR_CWD`
-> (defaults to repository root). Condor MCP attachments are **not** translated into
-> Cursor `mcpServers` yet — use Composer's default tools only. Run
-> `CURSOR_API_KEY=... npm run list-models` in `condor/acp/cursor_bridge/` to print model IDs
-> (one per line); append `--full` for the verbose JSON catalog.
+> The integration runs Cursor's **local** agent against `CONDOR_CURSOR_CWD` (defaults to repository root).
+> The same **stdio MCP configs** Condor uses for pydantic-ai/ACP (`mcp-hummingbot`, `condor`) are passed to
+> Composer as Cursor `mcpServers`. Cloud Cursor agents are unsupported for this bridge.
+>
+> Trade-off: Composer does **not** route MCP tool confirmations through Condor's Telegram
+> approval flow (`PermissionCallback`). Treat risky executor/bot actions accordingly.
+> List model IDs with
+> `CURSOR_API_KEY=... npm run list-models` in `condor/acp/cursor_bridge/` (one ID per line;
+> `--full` dumps the verbose JSON catalog).
+
 
 ### `config.yml` (auto-created on first run)
 ```yaml

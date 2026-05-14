@@ -29,6 +29,7 @@ from .client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
+from .mcp_stdio import stdio_env_for_server
 
 log = logging.getLogger(__name__)
 
@@ -329,12 +330,7 @@ class PydanticAIClient:
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
             args = srv_config.get("args", [])
-
-            # Build env dict: merge extra_env + per-server env vars
-            env = dict(self.extra_env or {})
-            for env_entry in srv_config.get("env", []):
-                if isinstance(env_entry, dict):
-                    env[env_entry["name"]] = env_entry["value"]
+            env = stdio_env_for_server(srv_config, self.extra_env)
 
             mcp_server = MCPServerStdio(
                 command,
