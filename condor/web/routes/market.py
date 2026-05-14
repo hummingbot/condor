@@ -93,6 +93,29 @@ async def get_price(
     raise HTTPException(status_code=502, detail="Unexpected response format")
 
 
+@router.post("/servers/{name}/rate-oracle/rates")
+async def get_rate_oracle_rates(
+    name: str,
+    body: dict,
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    trading_pairs = body.get("trading_pairs", [])
+    if not trading_pairs:
+        return {"rates": {}}
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.rate_oracle.get_rates(trading_pairs=trading_pairs)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return result
+
+
 @router.get("/servers/{name}/market/trading-rules", response_model=TradingRulesResponse)
 async def get_trading_rules(
     name: str,
