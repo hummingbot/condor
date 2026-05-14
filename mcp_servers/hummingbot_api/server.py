@@ -128,31 +128,28 @@ async def configure_server(
         username: API username
         password: API password
     """
-    from mcp_servers.hummingbot_api.settings import ServerConfig, _load_server_config, save_server_config
+    from mcp_servers.hummingbot_api.settings import ServerConfig, save_server_config
 
-    # No params → show active server
+    # No params → show active server (use in-memory settings which include CLI overrides)
     if name is None and host is None and port is None and username is None and password is None:
-        current = _load_server_config()
         return (
             f"Active Server:\n\n"
-            f"  Name: {current.name}\n"
-            f"  URL: {current.url}\n"
-            f"  Username: {current.username}\n"
+            f"  Name: {settings.server_name}\n"
+            f"  URL: {settings.api_url}\n"
+            f"  Username: {settings.api_username}\n"
         )
 
-    # Build new config with partial updates
-    current = _load_server_config()
-
+    # Build new config with partial updates (use in-memory settings, not disk)
     from urllib.parse import urlparse
-    parsed = urlparse(current.url)
+    parsed = urlparse(settings.api_url)
     current_host = parsed.hostname or "localhost"
     current_port = parsed.port or 8000
 
-    final_name = name if name is not None else current.name
+    final_name = name if name is not None else settings.server_name
     final_host = host if host is not None else current_host
     final_port = port if port is not None else current_port
-    final_username = username if username is not None else current.username
-    final_password = password if password is not None else current.password
+    final_username = username if username is not None else settings.api_username
+    final_password = password if password is not None else settings.api_password
 
     new_config = ServerConfig(
         name=final_name,
