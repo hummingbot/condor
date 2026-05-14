@@ -1272,12 +1272,13 @@ class WebSocketManager:
                 async with client.ws.executors() as ws:
                     await ws.subscribe_executors(update_interval=2.0)
                     logger.info("Executor WS subscribed: %s", channel)
-                    backoff = 5  # Reset on successful connection
+                    got_message = False
                     async for msg in ws:
                         if not any(channel in c.channels for c in self._connections):
                             logger.info("No subscribers for %s, closing executor stream", channel)
                             return
 
+                        got_message = True
                         msg_type = msg.get("type")
                         if msg_type == "executors":
                             raw_data = msg.get("data", [])
@@ -1289,6 +1290,14 @@ class WebSocketManager:
                             error_msg = msg.get("message", "unknown error")
                             logger.warning("Executor stream error for %s: %s", channel, error_msg)
                             break
+
+                    # Connection closed cleanly — apply backoff if it was short-lived
+                    if got_message:
+                        backoff = 5
+                    else:
+                        logger.warning("Executor stream closed immediately for %s, reconnecting in %ds...", channel, backoff)
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 60)
 
             except asyncio.CancelledError:
                 return
