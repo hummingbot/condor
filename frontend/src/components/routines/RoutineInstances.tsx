@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Clock, Square } from "lucide-react";
+import { ChevronDown, ChevronRight, Clock, Trash2 } from "lucide-react";
 import { useState } from "react";
 
 import { type RoutineInstance } from "@/lib/api";
@@ -103,7 +103,7 @@ function InstanceCard({
             className="rounded p-1 text-[var(--color-red)] hover:bg-[var(--color-red)]/10"
             title="Stop"
           >
-            <Square className="h-3.5 w-3.5" />
+            <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>

@@ -12,11 +12,12 @@ import {
   Play,
   PlayCircle,
   Settings2,
-  Square,
   Sun,
   Trash2,
   X,
   Zap,
+  AlertTriangle,
+  Code,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -44,6 +45,7 @@ export function ReportBrowser({
   const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
   const [isCompact, setIsCompact] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
+  const [showSourceModal, setShowSourceModal] = useState(false);
   const [reportTheme, setReportTheme] = useState<"dark" | "light">("dark");
   const sidebarRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -101,6 +103,13 @@ export function ReportBrowser({
   });
   const reports = reportsData?.reports ?? [];
 
+  // Source code query (lazy)
+  const { data: sourceData } = useQuery({
+    queryKey: ["routine-source", activeSource],
+    queryFn: () => api.getRoutineSource(activeSource),
+    enabled: showSourceModal && !!activeSource,
+  });
+
   const [selectedReportIdx, setSelectedReportIdx] = useState(0);
   const selectedReport = reports[selectedReportIdx] ?? null;
 
@@ -112,6 +121,12 @@ export function ReportBrowser({
   // Active instances for current source
   const sourceInstances = useMemo(
     () => instances.filter((i) => i.routine_name === activeSource && (i.status === "running" || i.status === "scheduled")),
+    [instances, activeSource],
+  );
+
+  // Latest failed instance for error display
+  const latestFailedInstance = useMemo(
+    () => instances.find((i) => i.routine_name === activeSource && i.status === "failed"),
     [instances, activeSource],
   );
 
@@ -262,14 +277,15 @@ export function ReportBrowser({
       else if (e.key === "ArrowLeft") { goPrevReport(); e.preventDefault(); }
       else if (e.key === "ArrowRight") { goNextReport(); e.preventDefault(); }
       else if (e.key === "Escape") {
-        if (showConfigPanel) setShowConfigPanel(false);
+        if (showSourceModal) setShowSourceModal(false);
+        else if (showConfigPanel) setShowConfigPanel(false);
         else onClose();
         e.preventDefault();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel]);
+  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showSourceModal]);
 
   // Scroll active source into view
   useEffect(() => {
@@ -485,6 +501,18 @@ export function ReportBrowser({
                 {activeRoutine?.source.replace("agent:", "")}
               </span>
             )}
+            {selectedReport && (
+              <>
+                <span className="text-[var(--color-text-muted)]/40">|</span>
+                <span className="truncate text-[10px] text-[var(--color-text-muted)]">{selectedReport.title}</span>
+                <span className="text-[10px] text-[var(--color-text-muted)]/60">{new Date(selectedReport.created_at).toLocaleString()}</span>
+                {selectedReport.tags.map((tag) => (
+                  <span key={tag} className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-muted)]">
+                    #{tag}
+                  </span>
+                ))}
+              </>
+            )}
             {sourceInstances.length > 0 && (
               <div className="flex items-center gap-2">
                 {sourceInstances.map((inst) => (
@@ -503,7 +531,7 @@ export function ReportBrowser({
                       className="ml-0.5 rounded p-0.5 text-[var(--color-red)] hover:bg-[var(--color-red)]/10"
                       title="Stop"
                     >
-                      <Square className="h-2.5 w-2.5" />
+                      <Trash2 className="h-2.5 w-2.5" />
                     </button>
                   </div>
                 ))}
@@ -515,15 +543,24 @@ export function ReportBrowser({
             {activeRoutine && server && (
               <div className="flex items-center gap-1 mr-2">
                 <button
+                  onClick={() => setShowSourceModal(true)}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  title="View source code"
+                >
+                  <Code className="h-3.5 w-3.5" />
+                  Source
+                </button>
+                <button
                   onClick={() => setShowConfigPanel(!showConfigPanel)}
-                  className={`rounded p-1.5 transition-colors ${
+                  className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
                     showConfigPanel
                       ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
                   }`}
                   title="Configure & Run"
                 >
-                  <Settings2 className="h-4 w-4" />
+                  <Settings2 className="h-3.5 w-3.5" />
+                  Config
                 </button>
                 <button
                   onClick={() => runMutation.mutate()}
@@ -648,19 +685,6 @@ export function ReportBrowser({
           </div>
         </div>
 
-        {/* Report meta bar */}
-        {selectedReport && (
-          <div className="flex items-center gap-3 border-b border-[var(--color-border)]/50 px-4 py-1.5 text-[10px] text-[var(--color-text-muted)]">
-            <span>{selectedReport.title}</span>
-            <span>{new Date(selectedReport.created_at).toLocaleString()}</span>
-            {selectedReport.tags.map((tag) => (
-              <span key={tag} className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[9px]">
-                #{tag}
-              </span>
-            ))}
-          </div>
-        )}
-
         {/* Config panel (collapsible) */}
         {showConfigPanel && activeRoutine && (
           <div className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
@@ -724,33 +748,63 @@ export function ReportBrowser({
               <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
             </div>
           ) : !selectedReport ? (
-            // No reports — prompt to run for the first time
+            // No reports — show error if failed, otherwise prompt to run
             <div className="flex h-full flex-col items-center justify-center text-center px-8">
-              <Zap className="mb-3 h-10 w-10 text-[var(--color-text-muted)]/20" />
-              <p className="text-sm font-medium text-[var(--color-text)]">
-                No reports yet
-              </p>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                {activeRoutine?.description ?? "Run this routine to generate your first report."}
-              </p>
-              {activeRoutine && server && (
-                <button
-                  onClick={() => runMutation.mutate()}
-                  disabled={runMutation.isPending}
-                  className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
-                >
-                  {runMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Play className="h-4 w-4" />
+              {(polledInstance?.status === "failed" || latestFailedInstance) ? (
+                <>
+                  <div className="w-full max-w-lg rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/5 p-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <AlertTriangle className="h-5 w-5 text-[var(--color-red)]" />
+                      <span className="text-sm font-semibold text-[var(--color-red)]">Routine Failed</span>
+                    </div>
+                    <pre className="whitespace-pre-wrap break-words text-left font-mono text-xs text-[var(--color-text-muted)] bg-[var(--color-surface)] rounded p-3 max-h-60 overflow-y-auto">
+                      {(polledInstance?.status === "failed" ? polledInstance.error : latestFailedInstance?.error) || "Unknown error"}
+                    </pre>
+                    {activeRoutine && server && (
+                      <button
+                        onClick={() => runMutation.mutate()}
+                        disabled={runMutation.isPending}
+                        className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                      >
+                        {runMutation.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Play className="h-3.5 w-3.5" />
+                        )}
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Zap className="mb-3 h-10 w-10 text-[var(--color-text-muted)]/20" />
+                  <p className="text-sm font-medium text-[var(--color-text)]">
+                    No reports yet
+                  </p>
+                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                    {activeRoutine?.description ?? "Run this routine to generate your first report."}
+                  </p>
+                  {activeRoutine && server && (
+                    <button
+                      onClick={() => runMutation.mutate()}
+                      disabled={runMutation.isPending}
+                      className="mt-4 flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                    >
+                      {runMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Play className="h-4 w-4" />
+                      )}
+                      Run for the first time
+                    </button>
                   )}
-                  Run for the first time
-                </button>
-              )}
-              {runMutation.isError && (
-                <p className="mt-2 text-xs text-[var(--color-red)]">
-                  {(runMutation.error as Error).message}
-                </p>
+                  {runMutation.isError && (
+                    <p className="mt-2 text-xs text-[var(--color-red)]">
+                      {(runMutation.error as Error).message}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           ) : (
@@ -781,6 +835,45 @@ export function ReportBrowser({
           )}
         </div>
       </div>
+
+      {/* Source code modal */}
+      {showSourceModal && (
+        <div className="fixed inset-0 z-[60] flex flex-col bg-[var(--color-bg)]">
+          <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
+            <div className="flex items-center gap-3 min-w-0">
+              <Code className="h-4 w-4 text-[var(--color-text-muted)]" />
+              <span className="text-sm font-semibold text-[var(--color-text)]">
+                {sourceData?.filename ?? activeSource}
+              </span>
+            </div>
+            <button
+              onClick={() => setShowSourceModal(false)}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Close (Esc)"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-auto bg-[var(--color-surface)]">
+            {sourceData ? (
+              <pre className="p-0 m-0 text-xs leading-relaxed">
+                {sourceData.source.split("\n").map((line, i) => (
+                  <div key={i} className="flex hover:bg-[var(--color-surface-hover)]">
+                    <span className="sticky left-0 w-12 shrink-0 select-none bg-[var(--color-surface)] pr-3 text-right font-mono text-[var(--color-text-muted)]/40 border-r border-[var(--color-border)]/30">
+                      {i + 1}
+                    </span>
+                    <code className="pl-4 font-mono text-[var(--color-text)] whitespace-pre">{line}</code>
+                  </div>
+                ))}
+              </pre>
+            ) : (
+              <div className="flex h-full items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
