@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from condor.reports import delete_report, get_report, list_reports
+from condor.reports import delete_report, get_report, list_reports, list_reports_grouped
 from condor.web.auth import get_current_user
 from condor.web.models import ReportSummary, ReportsListResponse, WebUser
 
@@ -25,6 +25,11 @@ async def get_reports(
         reports=[ReportSummary(**e) for e in entries],
         total=total,
     )
+
+
+@router.get("/latest-by-source")
+async def get_reports_grouped(user: WebUser = Depends(get_current_user)):
+    return list_reports_grouped()
 
 
 @router.get("/{report_id}", response_model=ReportSummary)

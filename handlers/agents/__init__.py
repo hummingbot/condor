@@ -17,7 +17,7 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     DEFAULT_MODE,
-    build_trading_context,
+    load_assistant,
     get_project_dir,
 )
 from .confirmation import resolve_confirmation
@@ -220,10 +220,8 @@ async def _handle_mode_start(
             mode=mode,
         )
 
-        # Inject mode-specific context
-        extra_context = None
-        if mode == "agent_builder":
-            extra_context = build_trading_context()
+        # Inject mode-specific context (auto-loaded from assistants/*.md)
+        extra_context = load_assistant(mode)
 
         if extra_context:
             try:
@@ -719,9 +717,18 @@ async def agent_voice_handler(
         tg_file = await voice.get_file()
         file_bytes = await tg_file.download_as_bytearray()
 
+        # Resolve user voice preferences (language, model)
+        from condor.preferences import get_voice_prefs
+
+        voice_prefs = get_voice_prefs(context.user_data)
+        voice_lang = voice_prefs.get("language")  # None = auto-detect
+        voice_model = voice_prefs.get("whisper_model", "base")
+
         from utils.transcribe import transcribe_voice
 
-        text = await transcribe_voice(bytes(file_bytes))
+        text = await transcribe_voice(
+            bytes(file_bytes), language=voice_lang, model_size=voice_model
+        )
     except Exception as e:
         log.exception("Voice transcription failed")
         await status_msg.edit_text(f"Transcription failed: {e}")
@@ -832,10 +839,8 @@ async def agent_message_handler(
                 mode=mode,
             )
 
-            # Inject mode-specific context for non-condor modes
-            extra_context = None
-            if mode == "agent_builder":
-                extra_context = build_trading_context()
+            # Inject mode-specific context (auto-loaded from assistants/*.md)
+            extra_context = load_assistant(mode)
 
             if extra_context:
                 try:

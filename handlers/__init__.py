@@ -118,6 +118,14 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("awaiting_token_input", None)
     context.user_data.pop("token_network", None)
 
+    # Gateway - RPC provider states
+    context.user_data.pop("awaiting_rpc_input", None)
+    context.user_data.pop("rpc_message_id", None)
+    context.user_data.pop("rpc_chat_id", None)
+    context.user_data.pop("rpc_url_network_list", None)
+    context.user_data.pop("rpc_edit_network_id", None)
+    context.user_data.pop("rpc_edit_network_idx", None)
+
     # Bots - controller config states
     context.user_data.pop("bots_state", None)
     context.user_data.pop("controller_config_params", None)

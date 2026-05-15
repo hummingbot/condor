@@ -666,6 +666,7 @@ async def show_liquidity_menu(
         help_text += r"🦎 Gecko \- Trending, top, new pools" + "\n"
         help_text += r"🔍 Pool Info \- Look up pool by address" + "\n"
         help_text += r"📋 Meteora \- Search Meteora DLMM pools" + "\n"
+        help_text += r"🌀 Orca \- Search Orca Whirlpools" + "\n"
 
     except Exception as e:
         logger.warning(f"Could not fetch data: {e}")
@@ -736,7 +737,12 @@ async def show_liquidity_menu(
         [
             InlineKeyboardButton("🦎 Gecko", callback_data="dex:gecko_explore"),
             InlineKeyboardButton("🔍 Pool Info", callback_data="dex:pool_info"),
+        ]
+    )
+    keyboard.append(
+        [
             InlineKeyboardButton("📋 Meteora", callback_data="dex:pool_list"),
+            InlineKeyboardButton("🌀 Orca", callback_data="dex:pool_list_orca"),
         ]
     )
 

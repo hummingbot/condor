@@ -2314,6 +2314,7 @@ async def show_gecko_liquidity(
             connector=connector,
             user_data=context.user_data,
             chat_id=chat_id,
+            context=context,
         )
 
         if error or not bins:
@@ -2465,6 +2466,7 @@ async def show_gecko_combined(
             connector=connector,
             user_data=context.user_data,
             chat_id=chat_id,
+            context=context,
         )
 
         if not ohlcv_data and not bins:
@@ -3156,7 +3158,7 @@ async def handle_gecko_token_add(
     try:
         from config_manager import get_config_manager
 
-        client = await get_config_manager().get_default_client()
+        client = await get_config_manager().get_client()
         await client.gateway.add_token(
             network_id=gateway_network,
             address=address,
@@ -3707,7 +3709,7 @@ async def handle_gecko_add_tokens(
             name = token_data.get("name")
 
             # Add to gateway
-            client = await get_config_manager().get_default_client()
+            client = await get_config_manager().get_client()
             await client.gateway.add_token(
                 network_id=gateway_network,
                 address=token_address,
@@ -3800,7 +3802,7 @@ async def handle_gecko_restart_gateway(
     )
 
     try:
-        client = await get_config_manager().get_default_client()
+        client = await get_config_manager().get_client()
         await client.gateway.restart()
 
         # Wait a moment for restart

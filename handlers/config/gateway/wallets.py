@@ -93,8 +93,11 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             for wallet_group in wallets_data:
                 chain = wallet_group.get("chain", "unknown")
                 addresses = wallet_group.get("walletAddresses", [])
+                # Check if this wallet group has a default address
+                default_address = wallet_group.get("default_address", "")
                 for address in addresses:
-                    wallet_list.append({"chain": chain, "address": address})
+                    is_default = address == default_address
+                    wallet_list.append({"chain": chain, "address": address, "is_default": is_default})
 
             context.user_data["wallet_list"] = wallet_list
             total_wallets = len(wallet_list)
@@ -110,6 +113,7 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             for idx, wallet in enumerate(wallet_list):
                 chain = wallet["chain"]
                 address = wallet["address"]
+                is_default = wallet.get("is_default", False)
                 # Truncate address for display
                 display_addr = (
                     address[:6] + "..." + address[-4:] if len(address) > 14 else address
@@ -117,7 +121,8 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 chain_icon = (
                     "🟣" if chain == "solana" else "🔵"
                 )  # Solana purple, Ethereum blue
-                button_text = f"{chain_icon} {chain.title()}: {display_addr}"
+                default_indicator = " ⭐️" if is_default else ""
+                button_text = f"{chain_icon} {chain.title()}: {display_addr}{default_indicator}"
                 wallet_buttons.append(
                     [
                         InlineKeyboardButton(
@@ -226,6 +231,19 @@ async def handle_wallet_action(query, context: ContextTypes.DEFAULT_TYPE) -> Non
             if 0 <= idx < len(wallet_list):
                 wallet = wallet_list[idx]
                 await remove_wallet(query, context, wallet["chain"], wallet["address"])
+            else:
+                await query.answer("❌ Wallet not found")
+        except ValueError:
+            await query.answer("❌ Invalid wallet index")
+    elif action_data.startswith("setdefault_"):
+        # Set wallet as default: setdefault_{idx}
+        idx_str = action_data.replace("setdefault_", "")
+        try:
+            idx = int(idx_str)
+            wallet_list = context.user_data.get("wallet_list", [])
+            if 0 <= idx < len(wallet_list):
+                wallet = wallet_list[idx]
+                await set_default_wallet(query, context, wallet["chain"], wallet["address"])
             else:
                 await query.answer("❌ Wallet not found")
         except ValueError:
@@ -482,6 +500,8 @@ async def show_wallet_details(
 ) -> None:
     """Show details for a specific wallet with edit options"""
     try:
+        from config_manager import get_config_manager
+
         chat_id = query.message.chat_id
         header, server_online, gateway_running = await build_config_message_header(
             "🔑 Wallet Details",
@@ -493,36 +513,32 @@ async def show_wallet_details(
         chain_escaped = escape_markdown_v2(chain.title())
         chain_icon = "🟣" if chain == "solana" else "🔵"
 
-        # Get configured networks for this wallet
-        enabled_networks = get_wallet_networks(context.user_data, address)
-        if enabled_networks is None:
-            # Not configured yet - use defaults
-            enabled_networks = get_default_networks_for_chain(chain)
-
         # Format address display
         addr_escaped = escape_markdown_v2(address)
 
-        # Build networks list
-        all_networks = get_all_networks_for_chain(chain)
-        networks_display = []
-        for net in all_networks:
-            is_enabled = net in enabled_networks
-            status = "✅" if is_enabled else "❌"
-            net_escaped = escape_markdown_v2(net)
-            networks_display.append(f"  {status} `{net_escaped}`")
-
-        networks_text = (
-            "\n".join(networks_display)
-            if networks_display
-            else "_No networks available_"
-        )
+        # Check if this is the default wallet for the chain
+        is_default = False
+        try:
+            client = await get_config_manager().get_client_for_chat(
+                chat_id, preferred_server=get_active_server(context.user_data)
+            )
+            wallets = await client.accounts.list_gateway_wallets()
+            for wallet_group in wallets:
+                if wallet_group.get("chain") == chain:
+                    default_address = wallet_group.get("default_address", "")
+                    if address == default_address:
+                        is_default = True
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to check default wallet status: {e}")
 
         message_text = (
             header + f"{chain_icon} *Chain:* {chain_escaped}\n\n"
-            f"*Address:*\n`{addr_escaped}`\n\n"
-            f"*Enabled Networks:*\n{networks_text}\n\n"
-            "_Only enabled networks will be queried for balances\\._"
+            f"*Address:*\n`{addr_escaped}`"
         )
+
+        if is_default:
+            message_text += "\n\n⭐️ _Default wallet for this chain_"
 
         # Find wallet index in the list
         wallet_list = context.user_data.get("wallet_list", [])
@@ -532,34 +548,35 @@ async def show_wallet_details(
                 wallet_idx = idx
                 break
 
+        keyboard = []
+
         if wallet_idx is not None:
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🌐 Edit Networks",
-                        callback_data=f"gateway_wallet_networks_{wallet_idx}",
-                    )
-                ],
+            # Show "Set as Default" button only if not already default
+            if not is_default:
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "⭐️ Set as Default",
+                            callback_data=f"gateway_wallet_setdefault_{wallet_idx}",
+                        )
+                    ]
+                )
+            keyboard.append(
                 [
                     InlineKeyboardButton(
                         "🗑️ Delete Wallet",
                         callback_data=f"gateway_wallet_delete_{wallet_idx}",
                     )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "« Back to Wallets", callback_data="gateway_wallets"
-                    )
-                ],
-            ]
-        else:
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "« Back to Wallets", callback_data="gateway_wallets"
-                    )
                 ]
+            )
+
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "« Back to Wallets", callback_data="gateway_wallets"
+                )
             ]
+        )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -937,6 +954,55 @@ async def remove_wallet(
     except Exception as e:
         logger.error(f"Error removing wallet: {e}", exc_info=True)
         error_text = f"❌ Error removing wallet: {escape_markdown_v2(str(e))}"
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_wallets")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.message.edit_text(
+            error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+
+
+async def set_default_wallet(
+    query, context: ContextTypes.DEFAULT_TYPE, chain: str, address: str
+) -> None:
+    """Set a wallet as the default for a chain"""
+    try:
+        from config_manager import get_config_manager
+
+        await query.answer("Setting as default...")
+
+        chat_id = query.message.chat_id
+        client = await get_config_manager().get_client_for_chat(
+            chat_id, preferred_server=get_active_server(context.user_data)
+        )
+
+        # Set the wallet as default via API
+        await client.accounts.set_default_gateway_wallet(chain=chain, address=address)
+
+        # Show success and refresh wallet details
+        chain_escaped = escape_markdown_v2(chain.replace("-", " ").title())
+        display_addr = (
+            address[:10] + "..." + address[-8:] if len(address) > 20 else address
+        )
+        addr_escaped = escape_markdown_v2(display_addr)
+
+        success_text = (
+            f"✅ *Default Wallet Set*\n\n"
+            f"`{addr_escaped}`\n\n"
+            f"Now the default for {chain_escaped}"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("« Back to Wallets", callback_data="gateway_wallets")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.message.edit_text(
+            success_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error setting default wallet: {e}", exc_info=True)
+        error_text = f"❌ Error setting default: {escape_markdown_v2(str(e))}"
         keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_wallets")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(

@@ -6,44 +6,37 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import resolve_token_address
-
 from ..user_preferences import get_active_server
 from ._shared import (
     escape_markdown_v2,
     extract_network_id,
-    filter_pool_connectors,
+    get_default_networks,
     logger,
 )
 
 
-async def show_pools_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show liquidity pools menu - select connector first"""
+async def show_pools_menu(
+    query, context: ContextTypes.DEFAULT_TYPE, show_all: bool = False
+) -> None:
+    """Show pools menu - select network to view pools (like tokens)"""
     try:
         from config_manager import get_config_manager
 
-        await query.answer("Loading connectors...")
+        await query.answer("Loading networks...")
 
         chat_id = query.message.chat_id
         client = await get_config_manager().get_client_for_chat(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
-        response = await client.gateway.list_connectors()
-        connectors = response.get("connectors", [])
+        response = await client.gateway.list_networks()
 
-        # Filter connectors that support liquidity pools (AMM or CLMM trading types)
-        pool_connectors = filter_pool_connectors(connectors)
+        all_networks = response.get("networks", [])
 
-        # Store full connector data in context for later use
-        context.user_data["pool_connectors_data"] = {
-            c.get("name"): c for c in pool_connectors
-        }
-
-        if not pool_connectors:
+        if not all_networks:
             message_text = (
                 "💧 *Liquidity Pools*\n\n"
-                "No pool\\-enabled connectors available\\.\n\n"
-                "_Ensure Gateway is running with DEX connectors\\._"
+                "No networks available\\.\n\n"
+                "_Ensure Gateway is running\\._"
             )
             keyboard = [
                 [
@@ -53,34 +46,71 @@ async def show_pools_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ]
             ]
         else:
-            message_text = (
-                "💧 *Liquidity Pools*\n\n"
-                "_Select a connector to view and manage pools:_"
-            )
+            # Get default networks from config
+            default_network_ids = await get_default_networks(client)
 
-            # Create connector buttons
-            connector_buttons = []
-            for connector in pool_connectors[
-                :15
-            ]:  # Limit to 15 to avoid message size issues
-                connector_name = connector.get("name", "unknown")
-                trading_types = ", ".join(connector.get("trading_types", []))
-                connector_buttons.append(
+            # Decide which networks to show
+            if show_all or not default_network_ids:
+                # Show all networks
+                networks_to_show = all_networks[:20]
+                showing_defaults = False
+            else:
+                # Filter to only default networks
+                networks_to_show = [
+                    n for n in all_networks
+                    if extract_network_id(n) in default_network_ids
+                ][:20]
+                showing_defaults = True
+
+            # Store networks in context
+            context.user_data["pool_network_list"] = networks_to_show
+            context.user_data["pool_all_networks"] = all_networks[:20]
+
+            # Create network buttons
+            network_buttons = []
+            for idx, network_item in enumerate(networks_to_show):
+                network_id = extract_network_id(network_item)
+                network_buttons.append(
                     [
                         InlineKeyboardButton(
-                            f"{connector_name} ({trading_types})",
-                            callback_data=f"gateway_pool_connector_{connector_name}",
+                            network_id, callback_data=f"gateway_pool_network_{idx}"
                         )
                     ]
                 )
 
-            keyboard = connector_buttons + [
-                [
-                    InlineKeyboardButton(
-                        "« Back to Gateway", callback_data="config_gateway"
-                    )
+            if showing_defaults:
+                count_escaped = escape_markdown_v2(str(len(networks_to_show)))
+                message_text = (
+                    f"💧 *Liquidity Pools* \\({count_escaped} default\\)\n\n"
+                    "_Select a network to view and manage pools:_"
+                )
+                # Add "All Networks" button
+                keyboard = network_buttons + [
+                    [
+                        InlineKeyboardButton(
+                            f"🌐 All Networks ({len(all_networks)})",
+                            callback_data="gateway_pool_all_networks"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "« Back to Gateway", callback_data="config_gateway"
+                        )
+                    ]
                 ]
-            ]
+            else:
+                count_escaped = escape_markdown_v2(str(len(all_networks)))
+                message_text = (
+                    f"💧 *Liquidity Pools* \\({count_escaped} networks\\)\n\n"
+                    "_Select a network to view and manage pools:_"
+                )
+                keyboard = network_buttons + [
+                    [
+                        InlineKeyboardButton(
+                            "« Back to Gateway", callback_data="config_gateway"
+                        )
+                    ]
+                ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -89,8 +119,12 @@ async def show_pools_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     except Exception as e:
+        # Ignore "message not modified" errors - they're harmless
+        if "not modified" in str(e).lower():
+            logger.debug(f"Message not modified (ignored): {e}")
+            return
         logger.error(f"Error showing pools menu: {e}", exc_info=True)
-        error_text = f"❌ Error loading connectors: {escape_markdown_v2(str(e))}"
+        error_text = f"❌ Error loading networks: {escape_markdown_v2(str(e))}"
         keyboard = [
             [InlineKeyboardButton("« Back to Gateway", callback_data="config_gateway")]
         ]
@@ -104,192 +138,94 @@ async def handle_pool_action(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle pool-specific actions"""
     action_data = query.data.replace("gateway_pool_", "")
 
-    if action_data.startswith("connector_"):
-        # Show networks for selected connector
-        connector_name = action_data.replace("connector_", "")
-        await show_pool_networks(query, context, connector_name)
-    elif action_data.startswith("network_"):
-        # Show pools for selected network using index
-        # Format: network_{idx}
+    if action_data == "all_networks":
+        # Show all networks instead of just defaults
+        await show_pools_menu(query, context, show_all=True)
+        return
+
+    if action_data.startswith("network_"):
+        # Show pools for selected network
         network_idx_str = action_data.replace("network_", "")
         try:
             network_idx = int(network_idx_str)
             network_list = context.user_data.get("pool_network_list", [])
-            connector_name = context.user_data.get("pool_connector_name")
-
-            if connector_name and 0 <= network_idx < len(network_list):
+            if 0 <= network_idx < len(network_list):
                 network_item = network_list[network_idx]
                 network_id = extract_network_id(network_item)
-
-                # Store current network for later operations
-                context.user_data["pool_current_network"] = network_id
-                await show_connector_pools(query, context, connector_name, network_id)
+                await show_network_pools(query, context, network_id)
             else:
                 await query.answer("❌ Network not found")
         except ValueError:
             await query.answer("❌ Invalid network")
-    elif action_data == "add":
-        # Add pool to connector/network
-        # Using stored context data
-        connector_name = context.user_data.get("pool_connector_name")
-        network_id = context.user_data.get("pool_current_network")
-        if connector_name and network_id:
-            await prompt_add_pool(query, context, connector_name, network_id)
-        else:
-            await query.answer("❌ Session expired, please start over")
-    elif action_data == "remove":
-        # Remove pool from connector/network
-        # Using stored context data
-        connector_name = context.user_data.get("pool_connector_name")
-        network_id = context.user_data.get("pool_current_network")
-        if connector_name and network_id:
-            await prompt_remove_pool(query, context, connector_name, network_id)
-        else:
-            await query.answer("❌ Session expired, please start over")
-    elif action_data.startswith("select_remove_"):
-        # User selected a pool to remove from the list
-        pool_idx_str = action_data.replace("select_remove_", "")
+    elif action_data.startswith("add_"):
+        # Add pool to network
+        network_id = action_data.replace("add_", "")
+        await prompt_add_pool(query, context, network_id)
+    elif action_data.startswith("remove_"):
+        # Show pool list to manage (remove)
+        network_id = action_data.replace("remove_", "")
+        await prompt_remove_pool(query, context, network_id)
+    elif action_data.startswith("select_"):
+        # Show options for selected pool
         try:
-            pool_idx = int(pool_idx_str)
-            pool_list = context.user_data.get("pool_list", [])
-            connector_name = context.user_data.get("pool_connector_name")
-            network_id = context.user_data.get("pool_current_network")
-
-            if connector_name and network_id and 0 <= pool_idx < len(pool_list):
-                pool = pool_list[pool_idx]
+            pool_idx = int(action_data.replace("select_", ""))
+            await show_pool_options(query, context, pool_idx)
+        except ValueError:
+            await query.answer("❌ Invalid pool")
+    elif action_data.startswith("del_"):
+        # Delete selected pool (show confirmation)
+        try:
+            pool_idx = int(action_data.replace("del_", ""))
+            pools = context.user_data.get("pool_manage_list", [])
+            network_id = context.user_data.get("pool_manage_network")
+            if pools and pool_idx < len(pools) and network_id:
+                pool = pools[pool_idx]
                 pool_address = pool.get("address", pool.get("pool_id", ""))
                 pool_type = pool.get("type", "")
-                # Store for confirmation
-                context.user_data["pool_remove_address"] = pool_address
-                context.user_data["pool_remove_type"] = pool_type
                 await show_delete_pool_confirmation(
-                    query, context, connector_name, network_id, pool_address, pool_type
+                    query, context, network_id, pool_address, pool_type, pool_idx
                 )
             else:
                 await query.answer("❌ Pool not found")
         except ValueError:
-            await query.answer("❌ Invalid pool selection")
+            await query.answer("❌ Invalid pool")
     elif action_data == "confirm_remove":
-        # Full pool address and type stored in context
-        pool_address = context.user_data.get("pool_remove_address")
-        pool_type = context.user_data.get("pool_remove_type")
-        connector_name = context.user_data.get("pool_connector_name")
-        network_id = context.user_data.get("pool_current_network")
-        if pool_address and pool_type and connector_name and network_id:
-            await remove_pool(
-                query, context, connector_name, network_id, pool_address, pool_type
-            )
+        # Get pool info from user_data (stored to avoid 64-byte callback limit)
+        pending_delete = context.user_data.get("pending_pool_delete")
+        if pending_delete:
+            network_id = pending_delete["network_id"]
+            pool_address = pending_delete["pool_address"]
+            pool_type = pending_delete.get("pool_type")
+            context.user_data.pop("pending_pool_delete", None)  # Clean up
+            await remove_pool(query, context, network_id, pool_address, pool_type)
         else:
-            await query.answer("❌ Session expired, please start over")
-    elif action_data == "view":
-        # Back to viewing pools
-        connector_name = context.user_data.get("pool_connector_name")
-        network_id = context.user_data.get("pool_current_network")
-        if connector_name and network_id:
-            await show_connector_pools(query, context, connector_name, network_id)
-        else:
-            await query.answer("❌ Session expired, please start over")
+            await query.answer("❌ Pool deletion expired. Please try again.")
+    elif action_data.startswith("view_"):
+        # Back to viewing pools for network
+        network_id = action_data.replace("view_", "")
+        await show_network_pools(query, context, network_id)
+    elif action_data.startswith("page_"):
+        # Handle pagination
+        try:
+            page = int(action_data.replace("page_", ""))
+            network_id = context.user_data.get("pool_view_network")
+            if network_id:
+                await show_network_pools(query, context, network_id, page=page)
+            else:
+                await query.answer("❌ Network not found")
+        except ValueError:
+            await query.answer("❌ Invalid page")
     else:
         await query.answer("Unknown action")
 
 
-async def show_pool_networks(
-    query, context: ContextTypes.DEFAULT_TYPE, connector_name: str
+async def show_network_pools(
+    query, context: ContextTypes.DEFAULT_TYPE, network_id: str, page: int = 0
 ) -> None:
-    """Show network selection for viewing pools - only connector-specific networks"""
-    try:
-        from config_manager import get_config_manager
+    """Show pools for a specific network with button grid and pagination"""
+    POOLS_PER_PAGE = 16
+    COLUMNS = 4
 
-        await query.answer("Loading networks...")
-
-        # Get connector data from context
-        connectors_data = context.user_data.get("pool_connectors_data", {})
-        connector_info = connectors_data.get(connector_name)
-
-        if not connector_info:
-            # Fallback: fetch connector info again if not in context
-            chat_id = query.message.chat_id
-            client = await get_config_manager().get_client_for_chat(
-                chat_id, preferred_server=get_active_server(context.user_data)
-            )
-            response = await client.gateway.list_connectors()
-            connectors = response.get("connectors", [])
-            connector_info = next(
-                (c for c in connectors if c.get("name") == connector_name), None
-            )
-
-        if not connector_info:
-            message_text = (
-                "💧 *Liquidity Pools*\n\n"
-                "Connector not found\\.\n\n"
-                "_Please go back and try again\\._"
-            )
-            keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_pools")]]
-        else:
-            # Get networks specific to this connector
-            connector_networks = connector_info.get("networks", [])
-
-            if not connector_networks:
-                connector_escaped = escape_markdown_v2(connector_name)
-                message_text = (
-                    f"💧 *{connector_escaped} Pools*\n\n"
-                    "No networks available for this connector\\.\n\n"
-                    "_Ensure Gateway is properly configured\\._"
-                )
-                keyboard = [
-                    [InlineKeyboardButton("« Back", callback_data="gateway_pools")]
-                ]
-            else:
-                connector_escaped = escape_markdown_v2(connector_name)
-                chain = connector_info.get("chain", "unknown")
-                chain_escaped = escape_markdown_v2(chain)
-
-                message_text = (
-                    f"💧 *{connector_escaped} Pools*\n"
-                    f"Chain: `{chain_escaped}`\n\n"
-                    "_Select a network to view pools:_"
-                )
-
-                # Store network list in user_data to avoid long callback_data
-                context.user_data["pool_network_list"] = connector_networks[:15]
-                context.user_data["pool_connector_name"] = connector_name
-
-                # Create network buttons using indices to avoid Button_data_invalid
-                network_buttons = []
-                for idx, network_item in enumerate(connector_networks[:15]):
-                    network_str = extract_network_id(network_item)
-                    network_buttons.append(
-                        [
-                            InlineKeyboardButton(
-                                network_str, callback_data=f"gateway_pool_network_{idx}"
-                            )
-                        ]
-                    )
-
-                keyboard = network_buttons + [
-                    [InlineKeyboardButton("« Back", callback_data="gateway_pools")]
-                ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.edit_text(
-            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
-
-    except Exception as e:
-        logger.error(f"Error showing pool networks: {e}", exc_info=True)
-        error_text = f"❌ Error loading networks: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_pools")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(
-            error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
-
-
-async def show_connector_pools(
-    query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str
-) -> None:
-    """Show pools for a specific connector and network"""
     try:
         from config_manager import get_config_manager
 
@@ -299,71 +235,114 @@ async def show_connector_pools(
         client = await get_config_manager().get_client_for_chat(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
-        pools = await client.gateway.list_pools(
-            connector_name=connector_name, network=network
-        )
 
-        connector_escaped = escape_markdown_v2(connector_name)
-        network_escaped = escape_markdown_v2(network)
+        # Get pools for the network
+        try:
+            result = await client.gateway.get_network_pools(network_id)
+            pools = result.get("pools", []) if isinstance(result, dict) else result
+        except Exception as e:
+            logger.warning(f"Failed to get pools for {network_id}: {e}")
+            pools = []
+
+        network_escaped = escape_markdown_v2(network_id)
 
         if not pools:
             message_text = (
-                f"💧 *{connector_escaped}*\n"
-                f"Network: `{network_escaped}`\n\n"
+                f"💧 *{network_escaped}*\n\n"
                 "_No pools found\\._\n\n"
-                "Add a custom pool to get started\\."
+                "Add custom pools to get started\\."
             )
             keyboard = [
-                [InlineKeyboardButton("➕ Add Pool", callback_data="gateway_pool_add")],
                 [
                     InlineKeyboardButton(
-                        "« Back",
-                        callback_data=f"gateway_pool_connector_{connector_name}",
+                        "➕ Add Pool", callback_data=f"gateway_pool_add_{network_id}"
                     )
                 ],
+                [InlineKeyboardButton("« Back", callback_data="gateway_pools")],
             ]
         else:
-            # Display first 10 pools
-            pool_lines = []
-            for idx, pool in enumerate(pools[:10], 1):
-                trading_pair = pool.get("trading_pair", pool.get("tradingPair", "N/A"))
-                pool_type = pool.get("type", "N/A")
-                trading_pair_escaped = escape_markdown_v2(str(trading_pair))
-                pool_type_escaped = escape_markdown_v2(str(pool_type))
-                pool_lines.append(
-                    f"{idx}\\. `{trading_pair_escaped}` \\({pool_type_escaped}\\)"
-                )
+            # Store all pools for selection
+            context.user_data["pool_manage_list"] = pools
+            context.user_data["pool_manage_network"] = network_id
+            context.user_data["pool_view_network"] = network_id
+            context.user_data["pool_view_page"] = page
 
-            pools_text = "\n".join(pool_lines)
-            pool_count = escape_markdown_v2(str(len(pools)))
+            # Calculate pagination
+            total_pools = len(pools)
+            total_pages = (total_pools + POOLS_PER_PAGE - 1) // POOLS_PER_PAGE
+            page = max(0, min(page, total_pages - 1))  # Clamp page to valid range
 
+            start_idx = page * POOLS_PER_PAGE
+            end_idx = min(start_idx + POOLS_PER_PAGE, total_pools)
+            page_pools = pools[start_idx:end_idx]
+
+            # Build page indicator
+            if total_pages > 1:
+                page_indicator = f" \\[{page + 1}/{total_pages}\\]"
+            else:
+                page_indicator = ""
+
+            pool_count = escape_markdown_v2(str(total_pools))
             message_text = (
-                f"💧 *{connector_escaped}*\n"
-                f"Network: `{network_escaped}`\n\n"
-                f"*Pools* \\({pool_count} total\\):\n"
-                f"{pools_text}\n\n"
-                "_Add or remove custom pools as needed\\._"
+                f"💧 *{network_escaped}*{page_indicator}\n\n"
+                f"*Pools* \\({pool_count} total\\)\n"
+                "_Select a pool to view or remove:_"
             )
 
-            keyboard = [
+            # Build pool buttons in grid (4 columns)
+            keyboard = []
+            row = []
+            for idx, pool in enumerate(page_pools):
+                global_idx = start_idx + idx
+                # Use trading pair as button text, truncate if needed
+                trading_pair = pool.get("trading_pair", pool.get("tradingPair", "?/?"))
+                label = trading_pair[:10]  # Truncate long pairs
+                row.append(
+                    InlineKeyboardButton(
+                        label, callback_data=f"gateway_pool_select_{global_idx}"
+                    )
+                )
+
+                if len(row) == COLUMNS:
+                    keyboard.append(row)
+                    row = []
+
+            # Add remaining buttons if any
+            if row:
+                keyboard.append(row)
+
+            # Add pagination buttons if needed
+            if total_pages > 1:
+                nav_buttons = []
+                if page > 0:
+                    nav_buttons.append(
+                        InlineKeyboardButton(
+                            "« Prev", callback_data=f"gateway_pool_page_{page - 1}"
+                        )
+                    )
+                if page < total_pages - 1:
+                    nav_buttons.append(
+                        InlineKeyboardButton(
+                            "Next »", callback_data=f"gateway_pool_page_{page + 1}"
+                        )
+                    )
+                if nav_buttons:
+                    keyboard.append(nav_buttons)
+
+            # Action buttons
+            keyboard.append(
                 [
                     InlineKeyboardButton(
-                        "➕ Add Pool", callback_data="gateway_pool_add"
+                        "➕ Add Pool", callback_data=f"gateway_pool_add_{network_id}"
                     ),
                     InlineKeyboardButton(
-                        "➖ Remove Pool", callback_data="gateway_pool_remove"
+                        "🔄 Refresh", callback_data=f"gateway_pool_view_{network_id}"
                     ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "🔄 Refresh", callback_data="gateway_pool_view"
-                    ),
-                    InlineKeyboardButton(
-                        "« Back",
-                        callback_data=f"gateway_pool_connector_{connector_name}",
-                    ),
-                ],
-            ]
+                ]
+            )
+            keyboard.append(
+                [InlineKeyboardButton("« Back", callback_data="gateway_pools")]
+            )
 
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -373,64 +352,119 @@ async def show_connector_pools(
 
     except BadRequest as e:
         if "Message is not modified" in str(e):
-            # Ignore - message content is the same (e.g., on refresh with no changes)
-            pass
+            pass  # Ignore - message content is the same
         else:
-            logger.error(f"Error showing connector pools: {e}", exc_info=True)
-            error_text = f"❌ Error loading pools: {escape_markdown_v2(str(e))}"
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "« Back",
-                        callback_data=f"gateway_pool_connector_{connector_name}",
-                    )
-                ]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.message.edit_text(
-                error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-            )
+            raise
     except Exception as e:
-        logger.error(f"Error showing connector pools: {e}", exc_info=True)
+        # Ignore "message not modified" errors - they're harmless
+        if "not modified" in str(e).lower():
+            logger.debug(f"Message not modified (ignored): {e}")
+            return
+        logger.error(f"Error showing network pools: {e}", exc_info=True)
         error_text = f"❌ Error loading pools: {escape_markdown_v2(str(e))}"
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "« Back", callback_data=f"gateway_pool_connector_{connector_name}"
-                )
-            ]
-        ]
+        keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_pools")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(
             error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
         )
 
 
+async def show_pool_options(
+    query, context: ContextTypes.DEFAULT_TYPE, pool_idx: int
+) -> None:
+    """Show details and options for a selected pool"""
+    try:
+        pools = context.user_data.get("pool_manage_list", [])
+        network_id = context.user_data.get("pool_manage_network")
+
+        if not pools or pool_idx >= len(pools) or not network_id:
+            await query.answer("❌ Pool not found")
+            return
+
+        pool = pools[pool_idx]
+        trading_pair = pool.get("trading_pair", pool.get("tradingPair", "N/A"))
+        pool_type = pool.get("type", "N/A")
+        connector = pool.get("connector_name", pool.get("connector", "N/A"))
+        address = pool.get("address", pool.get("pool_id", "N/A"))
+        fee_pct = pool.get("fee_pct", pool.get("feePct"))
+
+        network_escaped = escape_markdown_v2(network_id)
+        pair_escaped = escape_markdown_v2(str(trading_pair))
+        type_escaped = escape_markdown_v2(str(pool_type))
+        connector_escaped = escape_markdown_v2(str(connector))
+
+        message_text = (
+            f"💧 *{pair_escaped}* on {network_escaped}\n\n"
+            f"*Type:* {type_escaped}\n"
+            f"*Connector:* {connector_escaped}\n"
+        )
+        if fee_pct is not None:
+            fee_escaped = escape_markdown_v2(f"{fee_pct}%")
+            message_text += f"*Fee:* {fee_escaped}\n"
+        message_text += f"*Address:*\n`{escape_markdown_v2(address)}`\n\n"
+        message_text += "_Choose an action:_"
+
+        # Store selected pool info
+        context.user_data["selected_pool_idx"] = pool_idx
+
+        # Get current page to return to correct page
+        current_page = context.user_data.get("pool_view_page", 0)
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🗑 Remove", callback_data=f"gateway_pool_del_{pool_idx}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "« Back", callback_data=f"gateway_pool_page_{current_page}"
+                )
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.message.edit_text(
+            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+        await query.answer()
+
+    except Exception as e:
+        logger.error(f"Error showing pool options: {e}", exc_info=True)
+        await query.answer(f"❌ Error: {str(e)[:100]}")
+
+
 async def prompt_add_pool(
-    query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str
+    query, context: ContextTypes.DEFAULT_TYPE, network_id: str
 ) -> None:
     """Prompt user to enter pool details"""
     try:
-        connector_escaped = escape_markdown_v2(connector_name)
-        network_escaped = escape_markdown_v2(network)
+        network_escaped = escape_markdown_v2(network_id)
+
+        # Clear any lingering states from previous operations
+        context.user_data.pop("dex_state", None)
+        context.user_data.pop("cex_state", None)
 
         context.user_data["awaiting_pool_input"] = "pool_details"
-        context.user_data["pool_connector"] = connector_name
-        context.user_data["pool_network"] = network
+        context.user_data["pool_network"] = network_id
         context.user_data["pool_message_id"] = query.message.message_id
         context.user_data["pool_chat_id"] = query.message.chat_id
 
         message_text = (
-            f"➕ *Add Pool to {connector_escaped}*\n"
-            f"Network: `{network_escaped}`\n\n"
+            f"➕ *Add Pool to {network_escaped}*\n\n"
             "*Enter pool details in this format:*\n"
-            "`pool_type,base,quote,address`\n\n"
+            "`connector,pool_type,address`\n\n"
             "*Example:*\n"
-            "`CLMM,SOL,USDC,8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj`"
+            "`raydium,clmm,8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj`\n\n"
+            "_Pool info \\(tokens, fees\\) will be fetched automatically\\._"
         )
 
         keyboard = [
-            [InlineKeyboardButton("« Cancel", callback_data="gateway_pool_view")]
+            [
+                InlineKeyboardButton(
+                    "« Cancel", callback_data=f"gateway_pool_view_{network_id}"
+                )
+            ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -445,71 +479,148 @@ async def prompt_add_pool(
 
 
 async def prompt_remove_pool(
-    query, context: ContextTypes.DEFAULT_TYPE, connector_name: str, network: str
+    query, context: ContextTypes.DEFAULT_TYPE, network_id: str
 ) -> None:
-    """Show list of pools to remove with numbered buttons"""
+    """Show list of pools to select for removal"""
     try:
         from config_manager import get_config_manager
 
-        connector_escaped = escape_markdown_v2(connector_name)
-        network_escaped = escape_markdown_v2(network)
+        await query.answer("Loading pools...")
 
         chat_id = query.message.chat_id
-
-        # Fetch pools to display as options
         client = await get_config_manager().get_client_for_chat(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
-        pools = await client.gateway.list_pools(
-            connector_name=connector_name, network=network
-        )
+
+        # Get pools for the network
+        try:
+            result = await client.gateway.get_network_pools(network_id)
+            pools = result.get("pools", []) if isinstance(result, dict) else result
+        except Exception as e:
+            logger.warning(f"Failed to get pools for {network_id}: {e}")
+            pools = []
+
+        network_escaped = escape_markdown_v2(network_id)
 
         if not pools:
             message_text = (
-                f"➖ *Remove Pool from {connector_escaped}*\n"
-                f"Network: `{network_escaped}`\n\n"
-                "_No pools found to remove\\._"
+                f"💧 *Manage Pools \\- {network_escaped}*\n\n"
+                "_No pools found to manage\\._"
             )
             keyboard = [
-                [InlineKeyboardButton("« Back", callback_data="gateway_pool_view")]
+                [
+                    InlineKeyboardButton(
+                        "« Back", callback_data=f"gateway_pool_view_{network_id}"
+                    )
+                ]
             ]
         else:
-            # Store pools in context for later retrieval
-            context.user_data["pool_list"] = pools
+            # Store pools in user_data for later retrieval
+            context.user_data["pool_manage_list"] = pools[:20]
+            context.user_data["pool_manage_network"] = network_id
 
-            pool_lines = []
-            keyboard = []
-            for idx, pool in enumerate(pools[:10], 1):
-                trading_pair = pool.get("trading_pair", pool.get("tradingPair", "N/A"))
-                pool_type = pool.get("type", "N/A")
-                trading_pair_escaped = escape_markdown_v2(str(trading_pair))
-                pool_type_escaped = escape_markdown_v2(str(pool_type))
-                pool_lines.append(
-                    f"{idx}\\. `{trading_pair_escaped}` \\({pool_type_escaped}\\)"
-                )
-                # Add button for each pool
-                keyboard.append(
+            # Create buttons for each pool (limit to 20)
+            pool_buttons = []
+            for idx, pool in enumerate(pools[:20]):
+                trading_pair = pool.get("trading_pair", pool.get("tradingPair", "?/?"))
+                pool_type = pool.get("type", "")
+                label = f"{trading_pair} ({pool_type})"
+                pool_buttons.append(
                     [
                         InlineKeyboardButton(
-                            f"{idx}. {trading_pair} ({pool_type})",
-                            callback_data=f"gateway_pool_select_remove_{idx-1}",
+                            label, callback_data=f"gateway_pool_select_{idx}"
                         )
                     ]
                 )
 
-            pools_text = "\n".join(pool_lines)
-
+            count_escaped = escape_markdown_v2(str(len(pools)))
             message_text = (
-                f"➖ *Remove Pool from {connector_escaped}*\n"
-                f"Network: `{network_escaped}`\n\n"
-                "*Select a pool to remove:*\n\n"
-                f"{pools_text}\n\n"
-                "⚠️ _Restart Gateway after removing for changes to take effect\\._"
-            )
-            keyboard.append(
-                [InlineKeyboardButton("« Cancel", callback_data="gateway_pool_view")]
+                f"💧 *Manage Pools \\- {network_escaped}*\n\n"
+                f"_Select a pool to view or remove \\({count_escaped} total\\):_"
             )
 
+            keyboard = pool_buttons + [
+                [
+                    InlineKeyboardButton(
+                        "« Back", callback_data=f"gateway_pool_view_{network_id}"
+                    )
+                ]
+            ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.message.edit_text(
+            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        )
+
+    except Exception as e:
+        logger.error(f"Error showing pool list: {e}", exc_info=True)
+        await query.answer(f"❌ Error: {str(e)[:100]}")
+
+
+async def show_delete_pool_confirmation(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    network_id: str,
+    pool_address: str,
+    pool_type: str,
+    pool_idx: int,
+) -> None:
+    """Show confirmation dialog before deleting a pool"""
+    try:
+        from config_manager import get_config_manager
+
+        chat_id = query.message.chat_id
+
+        # Get pool details from stored list
+        pools = context.user_data.get("pool_manage_list", [])
+        pool_info = pools[pool_idx] if pool_idx < len(pools) else None
+
+        network_escaped = escape_markdown_v2(network_id)
+        addr_display = (
+            pool_address[:10] + "..." + pool_address[-8:]
+            if len(pool_address) > 20
+            else pool_address
+        )
+        addr_escaped = escape_markdown_v2(addr_display)
+
+        message_text = f"🗑 *Delete Pool*\n\nNetwork: *{network_escaped}*\n"
+
+        if pool_info:
+            trading_pair = pool_info.get("trading_pair", pool_info.get("tradingPair"))
+            if trading_pair:
+                pair_escaped = escape_markdown_v2(trading_pair)
+                message_text += f"Pool: *{pair_escaped}*\n"
+
+        if pool_type:
+            type_escaped = escape_markdown_v2(pool_type)
+            message_text += f"Type: *{type_escaped}*\n"
+
+        message_text += (
+            f"Address: `{addr_escaped}`\n\n"
+            f"⚠️ This will remove the pool from *{network_escaped}*\\.\n\n"
+            "Are you sure you want to delete this pool?"
+        )
+
+        # Store pool info in user_data to avoid exceeding Telegram's 64-byte callback limit
+        context.user_data["pending_pool_delete"] = {
+            "network_id": network_id,
+            "pool_address": pool_address,
+            "pool_type": pool_type,
+        }
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "✅ Yes, Delete", callback_data="gateway_pool_confirm_remove"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel", callback_data=f"gateway_pool_view_{network_id}"
+                )
+            ],
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.message.edit_text(
@@ -518,76 +629,14 @@ async def prompt_remove_pool(
         await query.answer()
 
     except Exception as e:
-        logger.error(f"Error prompting remove pool: {e}", exc_info=True)
+        logger.error(f"Error showing delete confirmation: {e}", exc_info=True)
         await query.answer(f"❌ Error: {str(e)[:100]}")
-
-
-async def show_delete_pool_confirmation(
-    query,
-    context: ContextTypes.DEFAULT_TYPE,
-    connector_name: str,
-    network: str,
-    pool_address: str,
-    pool_type: str,
-) -> None:
-    """Show confirmation dialog before deleting a pool"""
-    try:
-        connector_escaped = escape_markdown_v2(connector_name)
-        network_escaped = escape_markdown_v2(network)
-        pool_type_escaped = escape_markdown_v2(pool_type)
-        addr_display = (
-            pool_address[:10] + "..." + pool_address[-8:]
-            if len(pool_address) > 20
-            else pool_address
-        )
-        addr_escaped = escape_markdown_v2(addr_display)
-
-        message_text = (
-            f"🗑 *Delete Pool*\n\n"
-            f"Connector: *{connector_escaped}*\n"
-            f"Network: *{network_escaped}*\n"
-            f"Type: *{pool_type_escaped}*\n"
-            f"Address: `{addr_escaped}`\n\n"
-            f"⚠️ This will remove the pool from *{connector_escaped}* on *{network_escaped}*\\.\n"
-            "You will need to restart the Gateway for changes to take effect\\.\n\n"
-            "Are you sure you want to delete this pool?"
-        )
-
-        # Store pool address and type in context
-        context.user_data["pool_remove_address"] = pool_address
-        context.user_data["pool_remove_type"] = pool_type
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "✅ Yes, Delete", callback_data="gateway_pool_confirm_remove"
-                )
-            ],
-            [InlineKeyboardButton("❌ Cancel", callback_data="gateway_pool_view")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.edit_text(
-            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
-        try:
-            await query.answer()
-        except TypeError:
-            pass  # Mock query doesn't support answer
-
-    except Exception as e:
-        logger.error(f"Error showing delete pool confirmation: {e}", exc_info=True)
-        try:
-            await query.answer(f"❌ Error: {str(e)[:100]}")
-        except TypeError:
-            pass  # Mock query doesn't support answer
 
 
 async def remove_pool(
     query,
     context: ContextTypes.DEFAULT_TYPE,
-    connector_name: str,
-    network: str,
+    network_id: str,
     pool_address: str,
     pool_type: str,
 ) -> None:
@@ -595,24 +644,19 @@ async def remove_pool(
     try:
         from config_manager import get_config_manager
 
-        try:
-            await query.answer("Removing pool...")
-        except TypeError:
-            pass  # Mock query doesn't support answer
+        await query.answer("Removing pool...")
 
         chat_id = query.message.chat_id
         client = await get_config_manager().get_client_for_chat(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
-        await client.gateway.delete_pool(
-            connector=connector_name,
-            network=network,
-            pool_type=pool_type,
+        await client.gateway.delete_network_pool(
+            network_id=network_id,
             address=pool_address,
+            pool_type=pool_type
         )
 
-        connector_escaped = escape_markdown_v2(connector_name)
-        network_escaped = escape_markdown_v2(network)
+        network_escaped = escape_markdown_v2(network_id)
         addr_display = (
             pool_address[:10] + "..." + pool_address[-8:]
             if len(pool_address) > 20
@@ -623,12 +667,15 @@ async def remove_pool(
         success_text = (
             f"✅ *Pool Removed*\n\n"
             f"`{addr_escaped}`\n\n"
-            f"Removed from {connector_escaped} on {network_escaped}\n\n"
-            "⚠️ _Restart Gateway for changes to take effect\\._"
+            f"Removed from {network_escaped}"
         )
 
         keyboard = [
-            [InlineKeyboardButton("« Back to Pools", callback_data="gateway_pool_view")]
+            [
+                InlineKeyboardButton(
+                    "« Back to Pools", callback_data=f"gateway_pool_view_{network_id}"
+                )
+            ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -639,12 +686,18 @@ async def remove_pool(
         import asyncio
 
         await asyncio.sleep(2)
-        await show_connector_pools(query, context, connector_name, network)
+        await show_network_pools(query, context, network_id)
 
     except Exception as e:
         logger.error(f"Error removing pool: {e}", exc_info=True)
         error_text = f"❌ Error removing pool: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_pool_view")]]
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "« Back", callback_data=f"gateway_pool_view_{network_id}"
+                )
+            ]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await query.message.edit_text(
             error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
@@ -652,9 +705,14 @@ async def remove_pool(
 
 
 async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle text input during pool addition/removal flow"""
+    """Handle text input during pool addition flow"""
     awaiting_field = context.user_data.get("awaiting_pool_input")
+    logger.info(
+        f"handle_pool_input called. awaiting_field={awaiting_field}, user_data keys={list(context.user_data.keys())}"
+    )
+
     if not awaiting_field:
+        logger.info("No awaiting_pool_input, returning")
         return
 
     # Delete user's input message
@@ -668,55 +726,44 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
         from config_manager import get_config_manager
 
-        connector_name = context.user_data.get("pool_connector")
-        network = context.user_data.get("pool_network")
+        network_id = context.user_data.get("pool_network")
         message_id = context.user_data.get("pool_message_id")
         chat_id = context.user_data.get("pool_chat_id")
+        logger.info(
+            f"Pool input: network_id={network_id}, message_id={message_id}, chat_id={chat_id}"
+        )
 
         if awaiting_field == "pool_details":
-            # Parse pool details: pool_type,base,quote,address
+            # Parse pool details: connector,pool_type,address
             pool_input = update.message.text.strip()
             parts = [p.strip() for p in pool_input.split(",")]
 
-            if len(parts) != 4:
-                await update.message.reply_text(
-                    "❌ Invalid format. Use: pool_type,base,quote,address"
+            if len(parts) != 3:
+                await update.get_bot().send_message(
+                    chat_id=chat_id,
+                    text="❌ Invalid format. Use: connector,pool_type,address\n\nExample: raydium,clmm,8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj",
                 )
                 return
 
-            pool_type, base, quote, address = parts
+            connector_name, pool_type, address = parts
 
-            # Resolve token addresses from symbols
-            base_address = resolve_token_address(base)
-            quote_address = resolve_token_address(quote)
-
-            if not base_address:
-                await update.message.reply_text(
-                    f"❌ Unknown token symbol: {base}\nPlease use known tokens (SOL, USDC, USDT, etc.)"
-                )
-                return
-            if not quote_address:
-                await update.message.reply_text(
-                    f"❌ Unknown token symbol: {quote}\nPlease use known tokens (SOL, USDC, USDT, etc.)"
-                )
-                return
-
-            # Clear context
+            # Clear context (including any lingering states from previous operations)
             context.user_data.pop("awaiting_pool_input", None)
-            context.user_data.pop("pool_connector", None)
             context.user_data.pop("pool_network", None)
             context.user_data.pop("pool_message_id", None)
             context.user_data.pop("pool_chat_id", None)
+            context.user_data.pop("dex_state", None)
 
             # Show adding message
+            network_escaped = escape_markdown_v2(network_id)
             connector_escaped = escape_markdown_v2(connector_name)
-            pair_escaped = escape_markdown_v2(f"{base}/{quote}")
+            type_escaped = escape_markdown_v2(pool_type)
 
             if message_id and chat_id:
                 await update.get_bot().edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
-                    text=f"⏳ *Adding Pool {pair_escaped}*\n\nTo {connector_escaped}\n\n_Please wait\\.\\.\\._",
+                    text=f"⏳ *Adding Pool*\n\nConnector: {connector_escaped}\nType: {type_escaped}\nNetwork: {network_escaped}\n\n_Fetching pool info\\.\\.\\._",
                     parse_mode="MarkdownV2",
                 )
 
@@ -726,25 +773,21 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 )
 
                 logger.info(
-                    f"Adding pool: connector={connector_name}, network={network}, "
-                    f"pool_type={pool_type}, base={base}, quote={quote}, address={address}, "
-                    f"base_address={base_address}, quote_address={quote_address}"
+                    f"Adding pool: network_id={network_id}, connector={connector_name}, "
+                    f"pool_type={pool_type}, address={address}"
                 )
 
-                await client.gateway.add_pool(
+                # Use new network-based endpoint
+                await client.gateway.add_network_pool(
+                    network_id=network_id,
                     connector_name=connector_name,
                     pool_type=pool_type,
-                    network=network,
-                    base=base,
-                    quote=quote,
                     address=address,
-                    base_address=base_address,
-                    quote_address=quote_address,
                 )
 
                 success_text = (
                     f"✅ *Pool Added Successfully*\n\n"
-                    f"{pair_escaped} added to {connector_escaped}"
+                    f"Added to {connector_escaped} on {network_escaped}"
                 )
 
                 if message_id and chat_id:
@@ -760,6 +803,10 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
                 await asyncio.sleep(2)
 
+                async def mock_answer(text=""):
+                    """Mock async answer method"""
+                    pass
+
                 mock_message = SimpleNamespace(
                     edit_text=lambda text, parse_mode=None, reply_markup=None: update.get_bot().edit_message_text(
                         chat_id=chat_id,
@@ -771,12 +818,8 @@ async def handle_pool_input(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     chat_id=chat_id,
                     message_id=message_id,
                 )
-
-                async def noop_answer(text=""):
-                    pass
-
-                mock_query = SimpleNamespace(message=mock_message, answer=noop_answer)
-                await show_connector_pools(mock_query, context, connector_name, network)
+                mock_query = SimpleNamespace(message=mock_message, answer=mock_answer)
+                await show_network_pools(mock_query, context, network_id)
 
             except Exception as e:
                 logger.error(f"Error adding pool: {e}", exc_info=True)

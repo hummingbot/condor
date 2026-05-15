@@ -205,7 +205,7 @@ export function Reports() {
 
               {/* Report iframe */}
               <iframe
-                src={`/charts/${selected.filename}`}
+                src={`/reports/${selected.filename}`}
                 className="flex-1 w-full border-0"
                 title={selected.title}
               />

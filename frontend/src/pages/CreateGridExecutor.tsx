@@ -385,6 +385,8 @@ export function CreateGridExecutor() {
               limitPrice={state.limit_price}
               side={state.side}
               minSpread={state.min_spread_between_orders}
+              totalAmountQuote={state.total_amount_quote}
+              minOrderAmountQuote={state.min_order_amount_quote}
               activePickField={state.activePickField}
               onPriceSet={handlePriceSet}
               pricePrecision={pricePrecision}

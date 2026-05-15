@@ -102,13 +102,19 @@ order_executor:
 ```yaml
 lp_executor:
   # Set your preferred defaults here (all optional, ask user if not set):
-  # connector_name: meteora/clmm  # Must include /clmm suffix
+  # connector_name: solana-mainnet-beta  # chain-network identifier (NOT the DEX)
+  #   Solana: solana-mainnet-beta
+  #   EVM: ethereum-mainnet, arbitrum-one, base-mainnet, binance-smart-chain
+  # lp_provider: meteora/clmm  # DEX + trading type (required)
+  #   Solana: meteora/clmm, raydium/clmm, orca/clmm
+  #   EVM: uniswap/clmm, pancakeswap/clmm
+  # swap_provider: jupiter/router  # optional — defaults to network's default swap provider
   # trading_pair: SOL-USDC
   # extra_params:
   #   strategyType: 0  # Meteora only: 0=Spot, 1=Curve, 2=Bid-Ask
   #
   # Note: base_token/quote_token are inferred from trading_pair
-  # Note: side is determined by amounts at creation time, not defaulted
+  # Note: side is TradeType enum (1=BUY/quote-only, 2=SELL/base-only, 3=RANGE/both)
 ```
 
 ---

@@ -801,7 +801,7 @@ async def explore_dex_pools(
 
     Args:
         action: Action to perform on CLMM pools.
-        connector: CLMM connector name (e.g., 'meteora', 'raydium', 'uniswap'). Required.
+        connector: CLMM connector name (e.g., 'meteora', 'raydium', 'orca', 'uniswap', 'pancakeswap'). Required.
         network: Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta'). Required for get_pool_info.
         pool_address: Pool contract address (required for get_pool_info).
         page: Page number for list_pools (default: 0).
