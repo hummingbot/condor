@@ -730,6 +730,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
 export function Portfolio() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [period, setPeriod] = useState<string>("1W");
 
   const { data, isLoading, error, isPlaceholderData } = useQuery({
@@ -739,6 +740,20 @@ export function Portfolio() {
     refetchInterval: 15000,
     placeholderData: keepPreviousData,
   });
+
+  // One-time background refresh on mount / server change
+  useEffect(() => {
+    if (!server) return;
+    const timer = setTimeout(() => {
+      api
+        .getPortfolio(server, true)
+        .then((fresh) => {
+          queryClient.setQueryData(["portfolio", server], fresh);
+        })
+        .catch(() => {}); // silent fail, cached data still shown
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [server, queryClient]);
 
   const { data: bots } = useQuery({
     queryKey: ["bots", server],

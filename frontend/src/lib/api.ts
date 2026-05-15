@@ -579,8 +579,10 @@ export const api = {
       `/api/v1/servers/${name}/status`,
     ),
 
-  getPortfolio: (server: string) =>
-    apiFetch<PortfolioResponse>(`/api/v1/servers/${server}/portfolio`),
+  getPortfolio: (server: string, refresh = false) =>
+    apiFetch<PortfolioResponse>(
+      `/api/v1/servers/${server}/portfolio${refresh ? "?refresh=true" : ""}`,
+    ),
 
   getPortfolioHistory: (server: string, range = "1D", breakdown = false) =>
     apiFetch<PortfolioHistoryResponse>(
