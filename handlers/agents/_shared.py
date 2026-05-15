@@ -99,9 +99,9 @@ DEFAULT_MODE = "condor"
 
 def reload_assistants() -> None:
     """Re-scan assistants/ folder. Call after adding/removing .md files."""
-    global AGENT_MODES
     _assistant_cache.clear()
-    AGENT_MODES = discover_assistants()
+    AGENT_MODES.clear()
+    AGENT_MODES.update(discover_assistants())
 
 
 # -- Mode context builders --

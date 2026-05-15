@@ -86,6 +86,24 @@ class AgentSession:
             self.is_busy = False
             self._lock.release()
 
+    def abort(self) -> None:
+        """Abort the current in-flight prompt.
+
+        Cancels the ACP-level request future and drains the event queue so
+        the next prompt_stream call starts clean. Also resets is_busy and
+        releases the lock if held.
+        """
+        if isinstance(self.client, ACPClient):
+            self.client.abort_prompt()
+        if self.is_busy:
+            self.is_busy = False
+            if self._lock.locked():
+                try:
+                    self._lock.release()
+                except RuntimeError:
+                    pass  # lock not held by this task
+        log.info("Session %s: prompt aborted", self.chat_id)
+
 
 async def get_or_create_session(
     chat_id: int | str,
