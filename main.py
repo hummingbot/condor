@@ -223,6 +223,7 @@ def reload_handlers():
         "handlers.config.api_keys",
         "handlers.config.gateway",
         "handlers.config.user_preferences",
+        "routines.base",
         "handlers.routines",
         "handlers.agents",
         "handlers.agents.menu",
@@ -232,7 +233,6 @@ def reload_handlers():
         "handlers.agents._shared",
         "handlers.admin",
         "handlers.admin.update",
-        "routines.base",
         "utils.auth",
         "utils.telegram_formatters",
         "config_manager",
@@ -488,11 +488,20 @@ async def watch_and_reload(application: Application) -> None:
 
     handlers_path = Path(__file__).parent / "handlers"
     routines_path = Path(__file__).parent / "routines"
-    logger.info(f"👀 Watching for changes in: {handlers_path}, {routines_path}")
+    assistants_path = Path(__file__).parent / "assistants"
+    watch_paths = [handlers_path, routines_path]
+    if assistants_path.exists():
+        watch_paths.append(assistants_path)
+    logger.info(f"👀 Watching for changes in: {', '.join(str(p) for p in watch_paths)}")
 
-    async for changes in awatch(handlers_path, routines_path):
+    async for changes in awatch(*watch_paths):
         logger.info(f"📝 Detected changes: {changes}")
         try:
+            # Reload assistants if any .md file in assistants/ changed
+            if any(str(assistants_path) in str(path) for _, path in changes):
+                from handlers.agents._shared import reload_assistants
+                reload_assistants()
+                logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
             logger.info("✅ Auto-reloaded handlers successfully")
