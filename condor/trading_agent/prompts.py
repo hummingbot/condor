@@ -148,7 +148,9 @@ def build_tick_prompt(
             "Condor MCP stdio servers (mcp-hummingbot, condor) are attached to Composer for this "
             "local Cursor session—call MCP tools directly by name. Tool names may differ from ACP-style "
             "mcp__prefixed identifiers; rely on Composer's exposed tool list. "
-            "Note: MCP tool approvals are handled by Composer, not Telegram confirmation."
+            "Note: MCP tool approvals are handled by Composer, not Telegram confirmation.\n"
+            "EXECUTORS: Before manage_executors(action=\"create\"), invoke manage_executors(executor_type=\"...\") "
+            "without action once so hummingbot-api returns the live schema and guide."
         )
     elif not use_pydantic_ai:
         tool_preload = TOOL_PRELOAD_DRY_RUN if is_dry_run else TOOL_PRELOAD_LIVE

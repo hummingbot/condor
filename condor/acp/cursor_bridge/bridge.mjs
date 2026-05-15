@@ -176,7 +176,7 @@ async function handleLine(line) {
     try {
       agent = await Agent.create(createOpts);
       console.error(
-        "[condor-bridge] Agent.create ok (stderr smoke; MCP child stdio often does not arrive here)",
+        "[condor-bridge] Agent.create OK (MCP subprocess logs rarely use this stderr)",
       );
     } catch (err) {
       let message = err?.message ?? String(err);

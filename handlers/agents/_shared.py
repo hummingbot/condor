@@ -495,4 +495,16 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
 
         sections.append("\n".join(server_info))
 
+    if agent_key and is_cursor_sdk_model(agent_key):
+        sections.append(
+            "[CURSOR / COMPOSER — HUMMINGBOT MCP]\n"
+            "- Before manage_executors(action=\"create\", ...), call manage_executors(executor_type=\"position_executor\") "
+            "(or the relevant type) with NO action argument. That tool step calls hummingbot-api and returns the live "
+            "schema, parameter table, and markdown guide—do not skip it when building a new executor config.\n"
+            "- Put connector_name, trading_pair, amount, and leverage as top-level keys inside executor_config (siblings "
+            "to triple_barrier_config, not tucked only inside nested objects).\n"
+            "- position_executor amounts are in the BASE asset (e.g. BTC for BTC-USD). Use get_market_data for prices "
+            "first; use data_type / implied prices flow — do not set query_type unless you intend order_book.\n"
+        )
+
     return "\n\n".join(sections)

@@ -40,7 +40,8 @@ position_executor:
   # Example:
   # connector_name: binance_perpetual
   # trading_pair: BTC-USDT
-  # side: BUY
+  # side: 1  # 1 = LONG/BUY, 2 = SHORT/SELL
+  # amount: 0.0002  # BASE size (BTC), NOT USD — compute from notional / price
   # leverage: 10
 ```
 

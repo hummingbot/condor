@@ -1164,9 +1164,10 @@ def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
 
 @mcp.tool()
 async def manage_skills(
-    action: str,
+    action: str | None = None,
     name: str | None = None,
     params: dict | None = None,
+    pattern: str | None = None,
 ) -> dict:
     """(Deprecated) Use manage_routines instead.
 
@@ -1178,22 +1179,42 @@ async def manage_skills(
     - "test": Test a skill with given params (requires name)
 
     Args:
-        action: The action to perform (list, test).
+        action: The action to perform (list, test). Defaults to list if omitted.
         name: Skill name (for test).
         params: Skill parameters (for test, e.g. {"connector_name": "binance", "trading_pair": "BTC-USDT"}).
+        pattern: Optional regex filter on names when listing (e.g. executor|position).
 
     Returns:
         Action-specific result dict.
     """
-    if action == "list":
-        return _local_manage_skills_list()
+    import re
 
-    if action == "test":
+    act_raw = (action or "").strip().lower()
+    if not act_raw:
+        act_raw = "list"
+    if act_raw not in ("list", "test") and pattern and str(pattern).strip():
+        act_raw = "list"
+
+    if act_raw == "list":
+        result = _local_manage_skills_list()
+        pat = (pattern or "").strip()
+        if pat:
+            try:
+                rx = re.compile(pat, re.I | re.MULTILINE)
+            except re.error:
+                result["pattern_error"] = f"invalid regex: {pat!r}"
+                return result
+            items = result.get("skills") or []
+            result["skills"] = [s for s in items if rx.search(str(s.get("name", "")))]
+            result["pattern"] = pat
+        return result
+
+    if act_raw == "test":
         if not name:
             return {"error": "name is required"}
         return _local_skill_test(name, params or {})
 
-    return {"error": f"Unknown action: {action}"}
+    return {"error": f"Unknown action: {act_raw}"}
 
 
 def _local_manage_skills_list() -> dict:

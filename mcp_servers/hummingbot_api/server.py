@@ -61,6 +61,107 @@ logger = logging.getLogger("hummingbot-mcp")
 # Initialize FastMCP server
 mcp = FastMCP("hummingbot-mcp")
 
+# Aliases → canonical kinds for get_market_data()
+_MARKET_DATA_KIND_ALIASES: dict[str, str] = {
+    "ticker": "prices",
+    "tickers": "prices",
+    "spot": "prices",
+    "latest": "prices",
+    "price": "prices",
+    "prices": "prices",
+    "quote": "prices",
+    "market": "prices",
+    "ohlcv": "candles",
+    "candle": "candles",
+    "candles": "candles",
+    "funding": "funding_rate",
+    "funding_rates": "funding_rate",
+    "orderbook": "order_book",
+    "book": "order_book",
+}
+_MARKET_DATA_KINDS = frozenset({"prices", "candles", "funding_rate", "order_book"})
+
+
+def _canonical_market_data_kind(data_type: str | None) -> str | None:
+    if data_type is None or not str(data_type).strip():
+        return None
+    key = str(data_type).strip().lower()
+    return _MARKET_DATA_KIND_ALIASES.get(key, key)
+
+
+def _resolve_market_data_type_input(
+    data_type: str | None,
+    data_types: list[str] | None,
+    market_type: str | None = None,
+    kind: str | None = None,
+) -> str | None:
+    """Resolve data kind from several LLM spellings (data_type, data_types, market_type, kind)."""
+    for candidate in (data_type, market_type, kind):
+        if candidate is not None and str(candidate).strip():
+            return str(candidate).strip()
+    if data_types:
+        for item in data_types:
+            if item is not None and str(item).strip():
+                return str(item).strip()
+    return None
+
+
+def _has_price_side_inputs(
+    trading_pairs: list[str] | None,
+    trading_pair: str | None,
+) -> bool:
+    if trading_pairs:
+        for p in trading_pairs:
+            if p is not None and str(p).strip():
+                return True
+    return bool(trading_pair and str(trading_pair).strip())
+
+
+def _normalize_hl_perp_price_pair(connector_name: str, pair: str) -> str:
+    """Map *-USDC to *-USD on Hyperliquid perpetual when the venue lists USD-quoted perps."""
+    if not pair or "hyperliquid" not in connector_name.lower():
+        return pair
+    if "perpetual" not in connector_name.lower():
+        return pair
+    raw = pair.strip().replace("_", "-")
+    if ":" in raw.upper():
+        return pair
+    parts = raw.rsplit("-", 1)
+    if len(parts) != 2 or parts[1].upper() != "USDC":
+        return pair
+    return f"{parts[0]}-USD"
+
+
+_ORDER_BOOK_QUERY_CANONICAL = frozenset(
+    {
+        "snapshot",
+        "volume_for_price",
+        "price_for_volume",
+        "quote_volume_for_price",
+        "price_for_quote_volume",
+    },
+)
+_ORDER_BOOK_QUERY_ALIASES: dict[str, str] = {
+    "price": "snapshot",
+    "prices": "snapshot",
+    "ticker": "snapshot",
+    "spot": "snapshot",
+    "market": "snapshot",
+    "quote": "snapshot",
+    "full": "snapshot",
+    "depth": "snapshot",
+}
+
+
+def _coerce_order_book_query_type(raw: str | None) -> str:
+    """LLMs often pass query_type='price' when they mean a market snapshot or mid price."""
+    if raw is None or not str(raw).strip():
+        return "snapshot"
+    key = str(raw).strip().lower()
+    if key in _ORDER_BOOK_QUERY_CANONICAL:
+        return key
+    return _ORDER_BOOK_QUERY_ALIASES.get(key, "snapshot")
+
 
 # Account Management Tools
 
@@ -360,44 +461,78 @@ async def search_history(
 @mcp.tool()
 @handle_errors("get market data")
 async def get_market_data(
-        data_type: Literal["prices", "candles", "funding_rate", "order_book"],
-        connector_name: str,
+        data_type: str | None = None,
+        data_types: list[str] | None = None,
+        market_type: str | None = None,
+        kind: str | None = None,
+        connector_name: str | None = None,
+        connector: str | None = None,
         trading_pairs: list[str] | None = None,
         trading_pair: str | None = None,
         interval: str = "1h",
         days: int = 30,
-        query_type: Literal[
-            "snapshot", "volume_for_price", "price_for_volume", "quote_volume_for_price", "price_for_quote_volume"] | None = None,
+        query_type: str | None = None,
         query_value: float | None = None,
         is_buy: bool = True,
 ) -> str:
     """Get market data: prices, candles, funding rates, or order book data.
 
     Data Types:
-    - prices: Get latest prices for multiple trading pairs
+    - prices: Get latest prices for one or more trading pairs
     - candles: Get OHLCV candle data for a trading pair
     - funding_rate: Get perpetual funding rate (connector must have _perpetual)
     - order_book: Get order book snapshot or queries
 
+    Common aliases for prices: ticker, tickers, spot, latest, price, quote (LLM-friendly).
+
     Args:
-        data_type: Type of market data to retrieve ('prices', 'candles', 'funding_rate', 'order_book')
+        data_type: prices / candles / funding_rate / order_book (or price aliases above)
+        data_types: Optional list; first entry used if data_type is omitted (LLM typo tolerance).
+        market_type / kind: Aliases for data_type (models use varying names).
         connector_name: Exchange connector name (e.g., 'binance', 'binance_perpetual')
-        trading_pairs: List of trading pairs (required for 'prices', e.g., ['BTC-USDT', 'ETH-USD'])
-        trading_pair: Single trading pair (required for 'candles', 'funding_rate', 'order_book')
+        connector: Alias for connector_name
+        trading_pairs: List of pairs for prices (e.g. ['BTC-USD']). If omitted, trading_pair is used as a single pair.
+        trading_pair: Single pair for candles, funding_rate, order_book; also used for prices if trading_pairs is empty
         interval: Candle interval for 'candles' (default: '1h'). Options: '1m', '5m', '15m', '30m', '1h', '4h', '1d'.
         days: Number of days of historical data for 'candles' (default: 30).
-        query_type: Order book query type for 'order_book' (default: 'snapshot'). Options: 'snapshot',
-            'volume_for_price', 'price_for_volume', 'quote_volume_for_price', 'price_for_quote_volume'.
+        query_type: Only for order_book. Default snapshot. Values: snapshot, volume_for_price, ...
+            Common mistaken values (price/ticker/market) are treated as snapshot.
         query_value: Value for order book queries (required if query_type is not 'snapshot').
         is_buy: Side for order book queries (default: True for buy side).
     """
     client = await hummingbot_client.get_client()
 
-    if data_type == "prices":
-        if not trading_pairs:
-            return "Error: 'trading_pairs' is required for data_type='prices'"
+    connector_resolved = ((connector_name or connector) or "").strip()
+    raw_dt = _resolve_market_data_type_input(data_type, data_types, market_type, kind)
+    kind = _canonical_market_data_kind(raw_dt) if raw_dt else None
+    if (kind is None or kind not in _MARKET_DATA_KINDS) and connector_resolved and _has_price_side_inputs(
+        trading_pairs, trading_pair
+    ):
+        kind = "prices"
+    if kind is None or kind not in _MARKET_DATA_KINDS:
+        return (
+            "Error: invalid or missing data_type. Use data_type, market_type, kind, or data_types "
+            "(e.g. 'prices', 'ticker', ['price']). With connector + trading_pair, prices is assumed."
+        )
+
+    if not connector_resolved:
+        return (
+            "Error: connector_name is required (alias: connector), "
+            'e.g. "hyperliquid_perpetual".'
+        )
+
+    if kind == "prices":
+        pairs: list[str] = list(trading_pairs) if trading_pairs else []
+        if not pairs and trading_pair and str(trading_pair).strip():
+            pairs = [str(trading_pair).strip()]
+        if not pairs:
+            return (
+                "Error: for prices (or ticker) provide trading_pairs (e.g. ['BTC-USD']) "
+                "or a single trading_pair."
+            )
+        pairs = [_normalize_hl_perp_price_pair(connector_resolved, p) for p in pairs]
         result = await market_data_tools.get_prices(
-            client=client, connector_name=connector_name, trading_pairs=trading_pairs,
+            client=client, connector_name=connector_resolved, trading_pairs=pairs,
         )
         return (
             f"Latest Prices for {result['connector_name']}:\n"
@@ -405,12 +540,13 @@ async def get_market_data(
             f"{result['prices_table']}"
         )
 
-    elif data_type == "candles":
+    elif kind == "candles":
         if not trading_pair:
             return "Error: 'trading_pair' is required for data_type='candles'"
+        tp_eff = _normalize_hl_perp_price_pair(connector_resolved, str(trading_pair))
         result = await market_data_tools.get_candles(
-            client=client, connector_name=connector_name,
-            trading_pair=trading_pair, interval=interval, days=days,
+            client=client, connector_name=connector_resolved,
+            trading_pair=tp_eff, interval=interval, days=days,
         )
         return (
             f"Candles for {result['trading_pair']} on {result['connector_name']}:\n"
@@ -419,11 +555,12 @@ async def get_market_data(
             f"{result['candles_table']}"
         )
 
-    elif data_type == "funding_rate":
+    elif kind == "funding_rate":
         if not trading_pair:
             return "Error: 'trading_pair' is required for data_type='funding_rate'"
+        tp_eff = _normalize_hl_perp_price_pair(connector_resolved, str(trading_pair))
         result = await market_data_tools.get_funding_rate(
-            client=client, connector_name=connector_name, trading_pair=trading_pair,
+            client=client, connector_name=connector_resolved, trading_pair=tp_eff,
         )
         return (
             f"Funding Rate for {result['trading_pair']} on {result['connector_name']}:\n\n"
@@ -433,12 +570,14 @@ async def get_market_data(
             f"Next Funding Time: {result['next_funding_time']}"
         )
 
-    elif data_type == "order_book":
+    elif kind == "order_book":
         if not trading_pair:
             return "Error: 'trading_pair' is required for data_type='order_book'"
+        tp_eff = _normalize_hl_perp_price_pair(connector_resolved, str(trading_pair))
         result = await market_data_tools.get_order_book(
-            client=client, connector_name=connector_name, trading_pair=trading_pair,
-            query_type=query_type or "snapshot", query_value=query_value, is_buy=is_buy,
+            client=client, connector_name=connector_resolved, trading_pair=tp_eff,
+            query_type=_coerce_order_book_query_type(query_type),
+            query_value=query_value, is_buy=is_buy,
         )
         if result["query_type"] == "snapshot":
             return (
@@ -447,17 +586,18 @@ async def get_market_data(
                 f"Top 10 Levels:\n\n"
                 f"{result['order_book_table']}"
             )
-        else:
-            return (
-                f"Order Book Query for {result['trading_pair']} on {result['connector_name']}:\n\n"
-                f"Query Type: {result['query_type']}\n"
-                f"Query Value: {result['query_value']}\n"
-                f"Side: {result['side']}\n"
-                f"Result: {result['result']}"
-            )
+        return (
+            f"Order Book Query for {result['trading_pair']} on {result['connector_name']}:\n\n"
+            f"Query Type: {result['query_type']}\n"
+            f"Query Value: {result['query_value']}\n"
+            f"Side: {result['side']}\n"
+            f"Result: {result['result']}"
+        )
 
-    else:
-        return f"Error: Invalid data_type '{data_type}'. Use 'prices', 'candles', 'funding_rate', or 'order_book'"
+    return (
+        "Error: invalid data_type. Use: prices (aliases: ticker, spot, latest, price), "
+        "candles, funding_rate, or order_book."
+    )
 
 
 @mcp.tool()
@@ -712,8 +852,8 @@ async def manage_executors(
     - lp_executor: CLMM LP positions on Meteora/Raydium (use explore_dex_pools first)
 
     Actions:
-    - (none) + executor_type → Show full guide, config schema, and saved defaults
-    - create + executor_config → Create executor (merged with saved defaults)
+    - (none) + executor_type → **Call this FIRST before create**: fetches live schema + guide from hummingbot-api (progressive disclosure)
+    - create + executor_config → Create executor (merged with saved defaults); put connector_name, trading_pair, amount at top level of executor_config (for **position_executor**, base `amount` is auto-adjusted to **trading-rules** step **min_base_amount_increment** and min **min_order_size** / quote **min_notional_size** via live rules + mid price when available)
     - search → List/filter executors (add executor_id for detail)
     - stop + executor_id → Stop executor (with keep_position option)
     - get_logs + executor_id → Get logs (active executors only)
@@ -739,8 +879,8 @@ async def manage_executors(
         save_as_default: Save executor_config as default for this executor_type (default: False).
         preferences_content: Complete markdown content for the preferences file. Required for 'save_preferences'.
         account_name: Account name for creating executors (default: 'master_account').
-        connector_name: Connector name for position filtering or clearing.
-        trading_pair: Trading pair for position filtering or clearing.
+        connector_name: For create: merged into executor_config if missing. Also used for positions_summary / clear_position.
+        trading_pair: For create: merged into executor_config if missing. Also used for positions_summary / clear_position.
         controller_id: Controller ID that owns the executor. Used for create, positions_summary, clear_position, and performance_report.
         controller_ids: Filter by controller IDs (for search).
     """

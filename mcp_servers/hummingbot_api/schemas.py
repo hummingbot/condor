@@ -244,15 +244,15 @@ class ManageExecutorsRequest(BaseModel):
         description="Account name for creating executors. Defaults to 'master_account'.",
     )
 
-    # Position management fields (for positions_summary, get_position, clear_position)
+    # Position management fields (for positions_summary, get_position, clear_position, and create hoisting)
     connector_name: str | None = Field(
         default=None,
-        description="Connector name for position filtering or clearing.",
+        description="Connector name (e.g. hyperliquid_perpetual). For create: merged into executor_config if omitted there.",
     )
 
     trading_pair: str | None = Field(
         default=None,
-        description="Trading pair for position filtering or clearing.",
+        description="Trading pair (e.g. BTC-USD). For create: merged into executor_config if omitted there.",
     )
 
     controller_id: str | None = Field(
