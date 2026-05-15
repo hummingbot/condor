@@ -11,6 +11,11 @@ async def fetch_portfolio(client, **_kw) -> Any:
     return await client.portfolio.get_state()
 
 
+async def fetch_portfolio_refreshed(client, **_kw) -> Any:
+    """Fetch portfolio state with refresh=True to force exchange re-fetch."""
+    return await client.portfolio.get_state(refresh=True)
+
+
 async def fetch_cex_balances(
     client, account_name: str, refresh: bool = False
 ) -> Dict[str, List[Dict[str, Any]]]:

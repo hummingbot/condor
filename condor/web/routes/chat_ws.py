@@ -338,13 +338,20 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
 
+    # Abort the ACP-level prompt so stale events don't leak into the next message
+    session_key = _session_key(user_id, slot_id)
+    session = get_session(session_key)
+    if session:
+        session.abort()
+
     task_key = f"{user_id}:{slot_id}"
     task = _active_prompt_tasks.get(task_key)
     if task and not task.done():
         task.cancel()
-    else:
-        # No active task — send prompt_done anyway so frontend resets
-        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
+
+    # Always send prompt_done so the frontend resets (the task's CancelledError
+    # handler also sends one, but this guarantees it even if the send fails)
+    await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
 
 
 async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> None:

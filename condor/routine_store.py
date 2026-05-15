@@ -52,7 +52,7 @@ class RoutineStore:
 
     def _discover_all(self) -> dict[str, "RoutineInfo"]:
         """Discover global routines + agent routines, merged into one dict."""
-        all_routines = dict(discover_routines())
+        all_routines = dict(discover_routines(force_reload=True))
 
         # Scan trading_agents/*/routines/
         agents_dir = Path(__file__).resolve().parent.parent / "trading_agents"
@@ -223,6 +223,67 @@ class RoutineStore:
                 "last_duration": duration,
                 "run_count": self._instances[instance_id].get("run_count", 0) + 1,
                 "error": error_msg,
+            })
+
+    async def start_continuous(
+        self,
+        routine_name: str,
+        config: dict,
+        server_name: str,
+        user_id: int = 0,
+    ) -> str:
+        """Start a continuous routine as a background task. Returns instance_id."""
+        routine = self._resolve_routine(routine_name)
+        if not routine:
+            raise ValueError(f"Routine '{routine_name}' not found")
+        if not routine.is_continuous:
+            raise ValueError(f"Routine '{routine_name}' is not continuous — use execute() instead")
+
+        instance_id = self._gen_id()
+        self._instances[instance_id] = {
+            "routine_name": routine_name,
+            "config": config,
+            "status": "running",
+            "source": "mcp",
+            "server_name": server_name,
+            "user_id": user_id,
+            "created_at": time.time(),
+            "last_run_at": None,
+            "last_result": None,
+            "last_duration": None,
+            "run_count": 0,
+        }
+
+        task = asyncio.create_task(
+            self._run_continuous(instance_id, routine, config, server_name, user_id)
+        )
+        self._tasks[instance_id] = task
+        return instance_id
+
+    async def _run_continuous(self, instance_id: str, routine, config: dict, server_name: str, user_id: int = 0) -> None:
+        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
+        start = time.time()
+        try:
+            cfg = routine.config_class(**config)
+            raw = await routine.run_fn(cfg, ctx)
+            result = normalize_result(raw)
+        except asyncio.CancelledError:
+            result = RoutineResult(text="Stopped by user")
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(f"Continuous routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}")
+            result = RoutineResult(text=f"Error: {type(e).__name__}: {e}\n\n{tb}")
+
+        duration = time.time() - start
+        self._results[instance_id] = result
+
+        if instance_id in self._instances:
+            self._instances[instance_id].update({
+                "status": "stopped",
+                "last_run_at": time.time(),
+                "last_result": result.text[:500],
+                "last_duration": duration,
+                "run_count": self._instances[instance_id].get("run_count", 0) + 1,
             })
 
     async def schedule(

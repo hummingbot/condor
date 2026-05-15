@@ -53,7 +53,11 @@ _last_request_time: dict[str, float] = {}  # server -> last request ts
 
 
 @router.get("/servers/{name}/portfolio", response_model=PortfolioResponse)
-async def get_portfolio(name: str, user: WebUser = Depends(get_current_user)):
+async def get_portfolio(
+    name: str,
+    refresh: bool = Query(False),
+    user: WebUser = Depends(get_current_user),
+):
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access to this server")
@@ -61,7 +65,16 @@ async def get_portfolio(name: str, user: WebUser = Depends(get_current_user)):
     from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
-        state = await get_server_data_service().get_or_fetch(name, ServerDataType.PORTFOLIO)
+        if refresh:
+            # Bypass SDS cache — force exchange re-fetch via Hummingbot
+            from condor.fetchers.portfolio import fetch_portfolio_refreshed
+
+            client = await cm.get_client(name)
+            state = await fetch_portfolio_refreshed(client)
+            # Update SDS cache so subsequent non-refresh reads get fresh data
+            get_server_data_service().put(name, ServerDataType.PORTFOLIO, state)
+        else:
+            state = await get_server_data_service().get_or_fetch(name, ServerDataType.PORTFOLIO)
     except Exception as e:
         logger.warning("Portfolio fetch exception for %s: %s", name, e)
         raise HTTPException(status_code=502, detail=f"Failed to get portfolio: {e}")
