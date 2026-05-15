@@ -246,6 +246,46 @@ async def _local_manage_routines_run(name: str, config: dict | None, strategy_id
         return {"error": f"Routine '{name}' failed: {e}"}
 
 
+async def _local_manage_routines_start(name: str, config: dict | None) -> dict:
+    """Start a continuous routine as a background task."""
+    routine = _resolve_routine(name)
+    if not routine:
+        return {"error": f"Routine '{name}' not found"}
+    if not routine.is_continuous:
+        return {"error": f"Routine '{name}' is not continuous — use action='run' instead"}
+
+    from condor.routine_store import get_routine_store
+    store = get_routine_store()
+    try:
+        instance_id = await store.start_continuous(
+            routine_name=name,
+            config=config or {},
+            server_name=ACTIVE_SERVER,
+            user_id=CHAT_ID,
+        )
+        return {"started": True, "instance_id": instance_id, "routine": name}
+    except Exception as e:
+        return {"error": f"Failed to start: {e}"}
+
+
+def _local_manage_routines_stop(instance_id: str) -> dict:
+    """Stop a running routine instance."""
+    from condor.routine_store import get_routine_store
+    store = get_routine_store()
+    stopped = store.stop(instance_id)
+    if stopped:
+        return {"stopped": True, "instance_id": instance_id}
+    return {"error": f"Instance '{instance_id}' not found or already stopped"}
+
+
+def _local_manage_routines_list_instances() -> dict:
+    """List all running/scheduled routine instances."""
+    from condor.routine_store import get_routine_store
+    store = get_routine_store()
+    instances = store.list_instances()
+    return {"instances": instances}
+
+
 def _get_agent_routines_dir(strategy_id: str | None) -> "Path | None":
     """Resolve the routines directory for a strategy."""
     from pathlib import Path
@@ -390,6 +430,9 @@ async def manage_routines(
     - "list": List all available routines with name, description, type, and scope
     - "describe": Show config schema for a routine (requires name)
     - "run": Execute a one-shot routine and return its result (requires name, optional config)
+    - "start": Start a continuous routine as a background task (requires name, optional config)
+    - "stop": Stop a running routine instance (requires name=instance_id)
+    - "list_instances": List all running/scheduled routine instances
 
     Actions -- Agent-Local Routine CRUD (requires strategy_id or CONDOR_AGENT_SLUG):
     - "create_routine": Create a new agent-local routine (requires name, code)
@@ -403,8 +446,8 @@ async def manage_routines(
 
     Args:
         action: The action to perform.
-        name: Routine name (required for all except list).
-        config: Config overrides for run (optional, merged with defaults).
+        name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
+        config: Config overrides for run/start (optional, merged with defaults).
         strategy_id: Strategy ID for agent-local routine CRUD operations.
         code: Python source code for create_routine / edit_routine.
 
@@ -443,6 +486,19 @@ async def manage_routines(
         if not name:
             return {"error": "name is required"}
         return _local_manage_routines_delete(name, strategy_id)
+
+    if action == "start":
+        if not name:
+            return {"error": "name is required"}
+        return await _local_manage_routines_start(name, config)
+
+    if action == "stop":
+        if not name:
+            return {"error": "instance_id is required (pass as name)"}
+        return _local_manage_routines_stop(name)
+
+    if action == "list_instances":
+        return _local_manage_routines_list_instances()
 
     return {"error": f"Unknown action: {action}"}
 
