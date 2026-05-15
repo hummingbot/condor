@@ -95,6 +95,7 @@ class ACPClient:
         self._read_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
+        self._current_req_id: int | None = None  # tracks in-flight prompt request
         self._peer.register_handler("session/update", self._on_session_update)
         self._peer.register_handler("session/request_permission", self._on_request_permission)
 
@@ -217,6 +218,25 @@ class ACPClient:
 
     # --- Prompt ---
 
+    def abort_prompt(self) -> None:
+        """Cancel the in-flight prompt request and drain the event queue.
+
+        The ACP subprocess will keep running (there's no protocol-level cancel),
+        but the next prompt_stream call will start clean.
+        """
+        if self._current_req_id is not None:
+            future = self._peer._pending.pop(self._current_req_id, None)
+            if future and not future.done():
+                future.cancel()
+            self._current_req_id = None
+        # Drain the queue so stale events don't leak into the next prompt
+        while not self._event_queue.empty():
+            try:
+                self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        log.debug("ACP prompt aborted, queue drained")
+
     async def prompt(self, text: str) -> str:
         """One-shot prompt: send text, collect all agent message chunks, return joined."""
         chunks: list[str] = []
@@ -229,13 +249,21 @@ class ACPClient:
         """Send a prompt and yield ACP events as they arrive."""
         assert self._process and self._session_id
 
-        # Clear the event queue
+        # Cancel any previous in-flight prompt (e.g. after abort)
+        if self._current_req_id is not None:
+            old_future = self._peer._pending.pop(self._current_req_id, None)
+            if old_future and not old_future.done():
+                old_future.cancel()
+            self._current_req_id = None
+
+        # Clear the event queue (stale events from a previous prompt)
         while not self._event_queue.empty():
             self._event_queue.get_nowait()
 
         # Send request without awaiting so read loop can dispatch notifications
         req_id = self._peer._next_id
         self._peer._next_id += 1
+        self._current_req_id = req_id
         msg = {
             "jsonrpc": "2.0",
             "method": "session/prompt",
@@ -252,6 +280,9 @@ class ACPClient:
         self._peer._pending[req_id] = future
 
         def _on_response(fut: asyncio.Future) -> None:
+            # Only enqueue PromptDone if this is still the current prompt
+            if self._current_req_id != req_id:
+                return  # stale response from an aborted prompt — ignore
             if fut.cancelled():
                 self._event_queue.put_nowait(PromptDone(stop_reason="cancelled"))
             elif fut.exception():
@@ -290,6 +321,10 @@ class ACPClient:
             yield event
             if isinstance(event, PromptDone):
                 break
+
+        # Clear current request tracking when prompt completes normally
+        if self._current_req_id == req_id:
+            self._current_req_id = None
 
     # --- Reverse-RPC handlers ---
 
