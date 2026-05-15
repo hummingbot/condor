@@ -22,6 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInstance, api } from "@/lib/api";
+import { buildConfigValues, formatAgo, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
 import { useServer } from "@/hooks/useServer";
 import { RoutineConfigForm } from "./RoutineConfigForm";
@@ -139,16 +140,7 @@ export function ReportBrowser({
 
   useEffect(() => {
     if (!activeRoutine) return;
-    let saved: Record<string, unknown> | null = null;
-    try {
-      const raw = localStorage.getItem(`routine_config:${activeSource}`);
-      saved = raw ? JSON.parse(raw) : null;
-    } catch { /* ignore */ }
-    const values: Record<string, unknown> = {};
-    for (const [key, field] of Object.entries(activeRoutine.fields)) {
-      values[key] = saved && key in saved ? saved[key] : field.default;
-    }
-    setConfigValues(values);
+    setConfigValues(buildConfigValues(activeRoutine));
     setShowConfigPanel(false);
   }, [activeSource, activeRoutine]);
 
@@ -166,10 +158,7 @@ export function ReportBrowser({
   useEffect(() => {
     if (polledInstance && polledInstance.status !== "running") {
       setPollingInstanceId(null);
-      qc.invalidateQueries({ queryKey: ["routine-reports", activeSource] });
-      qc.invalidateQueries({ queryKey: ["reports-grouped"] });
-      qc.invalidateQueries({ queryKey: ["routines"] });
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      invalidateRoutineQueries(qc, activeSource);
     }
   }, [polledInstance, activeSource, qc]);
 
@@ -220,12 +209,7 @@ export function ReportBrowser({
     for (let i = 0; i < toRun.length; i++) {
       setRunAllProgress({ current: i + 1, total: toRun.length });
       const routine = toRun[i];
-      let saved: Record<string, unknown> | null = null;
-      try { const raw = localStorage.getItem(`routine_config:${routine.name}`); saved = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
-      const cfg: Record<string, unknown> = {};
-      for (const [key, field] of Object.entries(routine.fields)) {
-        cfg[key] = saved && key in saved ? saved[key] : field.default;
-      }
+      const cfg = buildConfigValues(routine);
       try {
         await api.runRoutine(server, routine.name, cfg);
       } catch {
@@ -233,10 +217,8 @@ export function ReportBrowser({
       }
     }
     setRunAllProgress(null);
+    invalidateRoutineQueries(qc);
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
-    qc.invalidateQueries({ queryKey: ["reports-grouped"] });
-    qc.invalidateQueries({ queryKey: ["routines"] });
-    qc.invalidateQueries({ queryKey: ["routine-instances"] });
   }, [server, filteredRoutines, qc]);
 
   // Sync theme to iframe when it changes or report changes
@@ -708,7 +690,7 @@ export function ReportBrowser({
                 onChange={(key, value) => {
                   setConfigValues((prev) => {
                     const next = { ...prev, [key]: value };
-                    try { localStorage.setItem(`routine_config:${activeSource}`, JSON.stringify(next)); } catch { /* ignore */ }
+                    saveConfig(activeSource, next);
                     return next;
                   });
                 }}
@@ -884,12 +866,4 @@ export function ReportBrowser({
       )}
     </div>
   );
-}
-
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
 }

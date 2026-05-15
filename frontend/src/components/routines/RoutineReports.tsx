@@ -5,20 +5,14 @@ import { useSearchParams } from "react-router-dom";
 
 import { ReportViewer } from "@/components/routines/ReportViewer";
 import { type ReportSummary, api } from "@/lib/api";
+import { formatAgo } from "@/lib/routineUtils";
 
 interface RoutineReportsProps {
   routineName: string;
+  hasScheduledInstance?: boolean;
 }
 
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
-
-export function RoutineReports({ routineName }: RoutineReportsProps) {
+export function RoutineReports({ routineName, hasScheduledInstance }: RoutineReportsProps) {
   const [viewReport, setViewReport] = useState<ReportSummary | null>(null);
   const [, setSearchParams] = useSearchParams();
 
@@ -26,6 +20,7 @@ export function RoutineReports({ routineName }: RoutineReportsProps) {
     queryKey: ["routine-reports", routineName],
     queryFn: () => api.getRoutineReports(routineName),
     enabled: !!routineName,
+    refetchInterval: hasScheduledInstance ? 10_000 : false,
   });
 
   const reports = data?.reports ?? [];
