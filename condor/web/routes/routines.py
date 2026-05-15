@@ -208,8 +208,12 @@ async def get_routine_source(
         raise HTTPException(404, "Routine not found")
     try:
         source_file = inspect.getfile(routine.run_fn)
-        source = Path(source_file).read_text()
-        return {"filename": Path(source_file).name, "source": source}
+        source_path = Path(source_file).resolve()
+        routines_dir = Path("routines").resolve()
+        if not str(source_path).startswith(str(routines_dir)):
+            raise HTTPException(403, "Source not available")
+        source = source_path.read_text()
+        return {"filename": source_path.name, "source": source}
     except (TypeError, OSError) as e:
         raise HTTPException(404, f"Source not available: {e}")
 

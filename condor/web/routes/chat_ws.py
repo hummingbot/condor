@@ -348,10 +348,11 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
     task = _active_prompt_tasks.get(task_key)
     if task and not task.done():
         task.cancel()
-
-    # Always send prompt_done so the frontend resets (the task's CancelledError
-    # handler also sends one, but this guarantees it even if the send fails)
-    await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
+        # Don't send prompt_done here — the CancelledError handler in
+        # _handle_send_message already sends it when the task is cancelled.
+    else:
+        # No active task to cancel — send prompt_done directly so the frontend resets
+        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
 
 
 async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> None:
@@ -362,6 +363,10 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
 
     session_key = _session_key(user_id, slot_id)
     destroyed = await destroy_session(session_key)
+
+    # Clean up active prompt task to prevent memory leaks
+    task_key = f"{user_id}:{slot_id}"
+    _active_prompt_tasks.pop(task_key, None)
 
     # Remove from user slots
     slots = _user_slots.get(user_id, [])

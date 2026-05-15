@@ -60,6 +60,9 @@ def _executor_row(ex: dict) -> dict[str, Any]:
     _top_entry = float(ex.get("entry_price") or 0)
     _ci_entry = float(custom_info.get("current_position_average_price") or 0)
     entry_price = _cfg_entry if _cfg_entry > 0 else (_top_entry if _top_entry > 0 else (_ci_entry if _ci_entry > 0 else 0.0))
+    if entry_price == 0.0:
+        log.warning("entry_price fell back to 0.0 for executor %s — PnL may be wrong",
+                     ex.get("id") or ex.get("executor_id") or "?")
 
     # current_price / close_price: top-level > custom_info
     _top_cur = float(ex.get("current_price") or 0)

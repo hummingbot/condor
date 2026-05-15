@@ -230,7 +230,7 @@ class ACPClient:
                 future.cancel()
             self._current_req_id = None
         # Drain the queue so stale events don't leak into the next prompt
-        while not self._event_queue.empty():
+        while True:
             try:
                 self._event_queue.get_nowait()
             except asyncio.QueueEmpty:
