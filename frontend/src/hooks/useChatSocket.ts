@@ -75,6 +75,9 @@ export function useChatSocket() {
   const [isConnected, setIsConnected] = useState(false);
   const [slots, setSlots] = useState<ChatSlot[]>([]);
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
+  // Track whether we've received the initial sessions_list from the backend.
+  // Prevents the empty initial slots from overwriting localStorage.
+  const hydrated = useRef(false);
   const [streamingSlotId, setStreamingSlotId] = useState<string | null>(null);
   const [permissionRequest, setPermissionRequest] = useState<{
     request_id: string;
@@ -135,6 +138,7 @@ export function useChatSocket() {
       switch (event) {
         case "sessions_list": {
           const sessions = data.sessions as SlotInfo[];
+          hydrated.current = true;
           if (sessions.length > 0) {
             const stored = loadSlotMessages();
             setSlots((prev) => {
@@ -456,9 +460,12 @@ export function useChatSocket() {
     };
   }, []);
 
-  // Persist messages to localStorage on every change
+  // Persist messages to localStorage on every change (but only after initial hydration
+  // to avoid the empty initial state wiping saved messages before WS reconnects)
   useEffect(() => {
-    saveSlotMessages(slots);
+    if (hydrated.current) {
+      saveSlotMessages(slots);
+    }
   }, [slots]);
 
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;

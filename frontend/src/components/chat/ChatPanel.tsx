@@ -224,6 +224,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 key={slot.info.slot_id}
                 slot={slot}
                 agents={agents}
+                modes={modes}
                 isActive={slot.info.slot_id === chat.activeSlotId}
                 isStreaming={slot.info.slot_id === chat.streamingSlotId}
                 onClick={() => chat.setActiveSlotId(slot.info.slot_id)}
@@ -292,20 +293,16 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             />
           ) : activeSlot.messages.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center">
-              {activeSlot.info.mode === "agent_builder" ? (
-                <Brain className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
-              ) : (
-                <MessageSquare className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
-              )}
+              {(() => {
+                const ModeIcon = MODE_ICONS[activeSlot.info.mode] || MessageSquare;
+                return <ModeIcon className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />;
+              })()}
               <p className="text-sm font-medium text-[var(--color-text)]">
-                {activeSlot.info.mode === "agent_builder"
-                  ? "Agent Builder"
-                  : "Condor Assistant"}
+                {modes.find((m) => m.key === activeSlot.info.mode)?.label || "Assistant"}
               </p>
               <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                {activeSlot.info.mode === "agent_builder"
-                  ? "Create and manage autonomous trading strategies."
-                  : "Ask about your portfolio, prices, trades, or bot status."}
+                {modes.find((m) => m.key === activeSlot.info.mode)?.description ||
+                  "Ask about your portfolio, prices, trades, or bot status."}
               </p>
               <p className="mt-2 text-[10px] text-[var(--color-text-muted)] opacity-60">
                 {resolveAgentLabel(activeSlot.info.agent_key, agents)}
@@ -550,6 +547,7 @@ function EmptyState({
 function SessionTab({
   slot,
   agents,
+  modes,
   isActive,
   isStreaming,
   onClick,
@@ -557,13 +555,14 @@ function SessionTab({
 }: {
   slot: ChatSlot;
   agents: ChatAgentOption[];
+  modes: ChatModeOption[];
   isActive: boolean;
   isStreaming: boolean;
   onClick: () => void;
   onClose: () => void;
 }) {
   const modeLabel =
-    slot.info.mode === "agent_builder" ? "Builder" : "Condor";
+    modes.find((m) => m.key === slot.info.mode)?.label || slot.info.mode;
   const agentShort = shortAgentLabel(slot.info.agent_key, agents);
   const ModeIcon = MODE_ICONS[slot.info.mode] || Zap;
 
