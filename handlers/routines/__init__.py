@@ -103,6 +103,19 @@ def _generate_instance_id() -> str:
     return hashlib.md5(f"{time.time()}{id(object())}".encode()).hexdigest()[:6]
 
 
+def _sync_instance_to_store(instance_id: str, inst_meta: dict) -> None:
+    """Sync a Telegram instance's state to the shared RoutineStore."""
+    try:
+        store = get_routine_store()
+        existing = store._instances.get(instance_id)
+        if existing:
+            existing.update(inst_meta)
+        else:
+            store.add_instance(instance_id, inst_meta.copy())
+    except Exception:
+        pass
+
+
 # =============================================================================
 # Formatting Helpers
 # =============================================================================
@@ -330,6 +343,10 @@ async def _run_continuous_routine(
     instances = application.user_data.get(chat_id, {}).get("routine_instances", {})
     if instance_id in instances:
         del instances[instance_id]
+    try:
+        get_routine_store().remove_instance(instance_id)
+    except Exception:
+        pass
 
 
 async def _interval_job_callback(context: CallbackContext) -> None:
@@ -366,6 +383,9 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     instances[instance_id]["last_duration"] = duration
     run_count = instances[instance_id].get("run_count", 0) + 1
     instances[instance_id]["run_count"] = run_count
+
+    # Sync to shared store
+    _sync_instance_to_store(instance_id, instances[instance_id])
 
     # Send result message for scheduled one-shot routines
     schedule = instances[instance_id].get("schedule", {})
@@ -415,6 +435,10 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     )
     if instance_id in instances:
         del instances[instance_id]
+        try:
+            get_routine_store().remove_instance(instance_id)
+        except Exception:
+            pass
 
     if background:
         # Send result as new message
@@ -467,6 +491,8 @@ async def _daily_job_callback(context: CallbackContext) -> None:
         instances[instance_id]["run_count"] = (
             instances[instance_id].get("run_count", 0) + 1
         )
+        # Sync to shared store
+        _sync_instance_to_store(instance_id, instances[instance_id])
 
     # Send notification
     icon = "✅" if not result.startswith("Error") else "❌"
@@ -596,17 +622,25 @@ def _create_continuous_instance(
 
     # Store instance
     instances = _get_instances(context)
-    instances[instance_id] = {
+    inst_meta = {
         "routine_name": routine_name,
         "config": config_dict.copy(),
         "schedule": {"type": "continuous"},
         "status": "running",
+        "source": "telegram",
         "created_at": time.time(),
         "last_run_at": None,
         "last_result": None,
         "last_duration": None,
         "run_count": 0,
     }
+    instances[instance_id] = inst_meta
+
+    # Sync to shared store for web/MCP visibility
+    try:
+        get_routine_store().add_instance(instance_id, inst_meta.copy())
+    except Exception:
+        pass
 
     # Create and store asyncio task (copy config to isolate from draft changes)
     frozen_config = config_dict.copy()
@@ -1686,6 +1720,7 @@ async def restore_scheduled_jobs(application) -> int:
                         )
                     )
                     _continuous_tasks[instance_id] = task
+                    _sync_instance_to_store(instance_id, inst)
                     restored += 1
                     logger.info(
                         f"Restored continuous routine {instance_id}: {routine_name}"
@@ -1718,6 +1753,7 @@ async def restore_scheduled_jobs(application) -> int:
                         name=job_name_str,
                         chat_id=chat_id,
                     )
+                    _sync_instance_to_store(instance_id, inst)
                     restored += 1
                     logger.info(
                         f"Restored interval job {instance_id} for {routine_name} (every {interval}s)"
@@ -1733,6 +1769,7 @@ async def restore_scheduled_jobs(application) -> int:
                         name=job_name_str,
                         chat_id=chat_id,
                     )
+                    _sync_instance_to_store(instance_id, inst)
                     restored += 1
                     logger.info(
                         f"Restored daily job {instance_id} for {routine_name} (at {time_str})"

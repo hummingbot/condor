@@ -46,28 +46,93 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 **Config docstring** = routine description in UI
 **CATEGORY** = groups it in the catalog
 
+## Execution Contexts
+
+Routines run in **3 different contexts**. `context.bot` is **always available** — never `None`:
+
+| Context | `context.bot` | `context._chat_id` | Trigger |
+|---------|---------------|---------------------|---------|
+| **Telegram** | Real bot (python-telegram-bot) | User's chat ID | `/routines` command |
+| **Web Dashboard** | `_HttpBot` (HTTP fallback) | User ID or 0 | Web API |
+| **MCP** | `_HttpBot` (HTTP fallback) | `settings.chat_id` or 0 | `manage_routines` tool |
+
+In non-Telegram contexts, `_HttpBot` (`condor/routine_store.py`) sends messages via the Telegram HTTP API using `TELEGRAM_TOKEN` from the environment. If the token isn't set, calls are silently ignored.
+
+**`_HttpBot` supports:** `send_message`, `send_photo`, `send_document`, `edit_message_text` — all with keyword args (`chat_id=`, `text=`, `parse_mode=`, `caption=`, `photo=`).
+
+**Always use keyword arguments** when calling `context.bot` methods:
+```python
+# CORRECT — works in all contexts
+await context.bot.send_message(chat_id=chat_id, text="Hello", parse_mode="MarkdownV2")
+await context.bot.send_photo(chat_id=chat_id, photo=buf, caption="Chart")
+
+# WRONG — positional args may not map correctly in _HttpBot
+await context.bot.send_message(chat_id, "Hello")
+```
+
 ## Continuous Routines
 
-Set `CONTINUOUS = True` for routines with internal loops:
+Set `CONTINUOUS = True` for routines with internal loops. They run as asyncio tasks until cancelled.
 
 ```python
 import asyncio
+from pydantic import BaseModel, Field
+from telegram.ext import ContextTypes
+from config_manager import get_client
+
 CONTINUOUS = True
 
 class Config(BaseModel):
-    """Live monitor"""
-    interval_sec: int = Field(default=10, description="Check interval")
+    """Live price monitor with alerts."""
+    connector: str = Field(default="binance", description="Exchange connector")
+    trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
+    threshold_pct: float = Field(default=1.0, description="Alert threshold %")
+    interval_sec: int = Field(default=10, description="Check interval in seconds")
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+    chat_id = context._chat_id
+    client = await get_client(chat_id, context=context)
+    if not client:
+        return "No server available"
+
+    # Works in all contexts (Telegram, Web, MCP)
+    await context.bot.send_message(chat_id=chat_id, text=f"Started monitoring {config.trading_pair}")
+
+    last_price = None
+    updates = 0
     try:
         while True:
-            await context.bot.send_message(context._chat_id, "Update...")
+            try:
+                prices = await client.market_data.get_prices(
+                    connector_name=config.connector,
+                    trading_pairs=config.trading_pair,
+                )
+                current = prices["prices"].get(config.trading_pair)
+                if current and last_price:
+                    change = abs((current - last_price) / last_price) * 100
+                    if change >= config.threshold_pct:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"Alert: {config.trading_pair} moved {change:.2f}%",
+                        )
+                last_price = current or last_price
+                updates += 1
+            except asyncio.CancelledError:
+                raise  # Always re-raise CancelledError
+            except Exception as e:
+                logger.error(f"Monitor error: {e}")
+
             await asyncio.sleep(config.interval_sec)
+
     except asyncio.CancelledError:
-        return "Stopped"
+        return f"Stopped after {updates} updates"
 ```
 
-**Critical:** Always catch `asyncio.CancelledError` — without it, stopping the routine silently fails.
+**Critical rules for continuous routines:**
+- Always catch `asyncio.CancelledError` at the outer `try` — without it, stopping silently fails
+- Inner exceptions should be caught and logged, NOT re-raised (except `CancelledError`)
+- Use `context.bot.send_message(chat_id=..., text=...)` for real-time notifications
+- Return a summary string when cancelled
 
 ## Rich Output (RoutineResult)
 
@@ -111,6 +176,34 @@ except Exception as e:
 
 **Only these methods exist:** `source`, `tags`, `kpi`, `markdown`, `table`, `plotly`, `manual_order`, `save`
 
+## Live Reports for Continuous Routines
+
+Use `LiveReport` for continuous routines that accumulate data over time. It creates a single report on first call, then overwrites it each tick.
+
+```python
+from condor.reports import LiveReport
+
+report = LiveReport("Monitor Title", source_name="routine_name", tags=["live"])
+history = []
+
+try:
+    while True:
+        # ... fetch data ...
+        history.append({"Time": now, "Price": price})
+
+        report.clear()  # reset builder for fresh render
+        report.builder.manual_order()
+        report.builder.kpi("Price", f"${price:,.2f}")
+        report.builder.table(history[-50:])
+        report.update()  # creates on first call, updates thereafter
+
+        await asyncio.sleep(interval)
+except asyncio.CancelledError:
+    return "Stopped"
+```
+
+**LiveReport API:** `clear()`, `update()`, `report_id` (property), `builder` (property — access the underlying `ReportBuilder`)
+
 **Methods that DO NOT exist** (never use these):
 - ~~`heading()`~~ — use `markdown("## Title")`
 - ~~`text()`~~ — use `markdown("content")`
@@ -150,9 +243,13 @@ import io
 buf = io.BytesIO()
 fig.write_image(buf, format="png", scale=2)  # plotly
 buf.seek(0)
-if context.bot:
-    await context.bot.send_photo(chat_id=context._chat_id, photo=buf, caption="Title")
-return RoutineResult(text=summary, chart_image=buf.getvalue())
+
+# Works in all contexts — context.bot is never None
+await context.bot.send_photo(chat_id=context._chat_id, photo=buf, caption="Title")
+
+# Also return as RoutineResult for web dashboard
+buf.seek(0)
+return RoutineResult(text=summary, chart_image=buf.read())
 ```
 
 ## Plotly Rules

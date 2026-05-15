@@ -84,6 +84,34 @@ except Exception as e:
 
 **Only these methods exist:** `source`, `tags`, `kpi`, `markdown`, `table`, `plotly`, `manual_order`, `save`. No `heading()`, `text()`, `section()`, or `html()`.
 
+### Live Reports for Continuous Routines
+
+Use `LiveReport` for continuous routines that produce a living report updated each tick:
+
+```python
+from condor.reports import LiveReport
+
+report = LiveReport("Monitor Title", source_name="routine_name", tags=["live"])
+history = []
+
+try:
+    while True:
+        # ... fetch data ...
+        history.append({"Time": now, "Price": price})
+
+        report.clear()  # reset builder for fresh render
+        report.builder.manual_order()
+        report.builder.kpi("Price", f"${price:,.2f}")
+        report.builder.table(history[-50:])
+        report.update()  # creates on first call, updates thereafter
+
+        await asyncio.sleep(interval)
+except asyncio.CancelledError:
+    return "Stopped"
+```
+
+**LiveReport API:** `clear()`, `update()`, `report_id` (property), `builder` (property — the underlying `ReportBuilder`)
+
 ## Execution Contexts
 
 Routines run in **3 different contexts** — your code must work in all of them:

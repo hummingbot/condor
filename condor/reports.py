@@ -307,13 +307,15 @@ class ReportBuilder:
         self._sections.append({"type": "table", "columns": columns or [], "rows": rows})
         return self
 
-    def save(self) -> str:
+    def save(self, report_id: str | None = None) -> str:
+        """Save the report as an HTML file.
+
+        Args:
+            report_id: If provided, update an existing report in place.
+                       If None (default), create a new report.
+        """
         CHARTS_DIR.mkdir(exist_ok=True)
-        report_id = uuid.uuid4().hex[:6]
         now = datetime.now(timezone.utc)
-        ts_str = now.strftime("%Y%m%d_%H%M%S")
-        slug = _slugify(self._title)
-        filename = f"{ts_str}_{slug}_{report_id}.html"
 
         sections_html = self._render_sections()
         meta_badges = ""
@@ -321,6 +323,37 @@ class ReportBuilder:
             meta_badges += f"<span>{self._source_type}: {self._source_name}</span>"
         for tag in self._tags:
             meta_badges += f"<span>#{tag}</span>"
+
+        if report_id is not None:
+            # Update existing report
+            entries = _read_index()
+            entry = next((e for e in entries if e["id"] == report_id), None)
+            if entry is None:
+                raise ValueError(f"Report '{report_id}' not found in index")
+
+            html = _HTML_TEMPLATE.format(
+                title=self._title,
+                created_at=now.strftime("%Y-%m-%d %H:%M UTC"),
+                meta_badges=meta_badges,
+                sections_html=sections_html,
+            )
+            (CHARTS_DIR / entry["filename"]).write_text(html)
+
+            entry["updated_at"] = now.isoformat()
+            entry["title"] = self._title
+            entry["tags"] = self._tags
+            _write_index(entries)
+
+            global _last_report_id
+            _last_report_id = report_id
+            logger.info(f"Report updated: {entry['filename']}")
+            return report_id
+
+        # New report
+        new_id = uuid.uuid4().hex[:6]
+        ts_str = now.strftime("%Y%m%d_%H%M%S")
+        slug = _slugify(self._title)
+        filename = f"{ts_str}_{slug}_{new_id}.html"
 
         html = _HTML_TEMPLATE.format(
             title=self._title,
@@ -332,7 +365,7 @@ class ReportBuilder:
         (CHARTS_DIR / filename).write_text(html)
 
         entry = {
-            "id": report_id,
+            "id": new_id,
             "title": self._title,
             "filename": filename,
             "created_at": now.isoformat(),
@@ -346,11 +379,9 @@ class ReportBuilder:
         _write_index(entries)
         _cleanup()
 
-        global _last_report_id
-        _last_report_id = report_id
-
+        _last_report_id = new_id
         logger.info(f"Report saved: {filename}")
-        return report_id
+        return new_id
 
     def _render_sections(self) -> str:
         sections = list(self._sections)
@@ -403,3 +434,41 @@ class ReportBuilder:
             body_rows.append(f"<tr>{cells}</tr>")
         body = "\n".join(body_rows)
         return f'<div class="section section-table"><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
+# ── LiveReport ──
+
+
+class LiveReport:
+    """Updatable report for continuous routines.
+
+    Creates a single report on first update, then overwrites it on each
+    subsequent call. Ideal for continuous routines that accumulate data.
+    """
+
+    def __init__(self, title: str, source_name: str = "", tags: list[str] | None = None):
+        self._title = title
+        self._source_name = source_name
+        self._tags = tags or []
+        self._report_id: str | None = None
+        self._builder: ReportBuilder | None = None
+        self.clear()
+
+    @property
+    def report_id(self) -> str | None:
+        return self._report_id
+
+    @property
+    def builder(self) -> ReportBuilder:
+        return self._builder
+
+    def clear(self) -> None:
+        """Reset builder for a fresh render cycle."""
+        self._builder = ReportBuilder(self._title)
+        self._builder.source("routine", self._source_name)
+        self._builder.tags(self._tags)
+
+    def update(self) -> str:
+        """Save or update the report. Returns report_id."""
+        self._report_id = self._builder.save(report_id=self._report_id)
+        return self._report_id
