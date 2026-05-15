@@ -768,6 +768,24 @@ export function ReportBrowser({
                   <p className="mt-1 text-xs text-[var(--color-text-muted)]">
                     {activeRoutine?.description ?? "Run this routine to generate your first report."}
                   </p>
+                  {activeRoutine && Object.keys(activeRoutine.fields).length > 0 && (
+                    <div className="mt-4 w-full max-w-md rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                      <h3 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                        Configuration
+                      </h3>
+                      <RoutineConfigForm
+                        fields={activeRoutine.fields}
+                        values={configValues}
+                        onChange={(key, value) => {
+                          setConfigValues((prev) => {
+                            const next = { ...prev, [key]: value };
+                            saveConfig(activeSource, next);
+                            return next;
+                          });
+                        }}
+                      />
+                    </div>
+                  )}
                   {activeRoutine && server && (
                     <button
                       onClick={() => runMutation.mutate()}

@@ -84,25 +84,85 @@ except Exception as e:
 
 **Only these methods exist:** `source`, `tags`, `kpi`, `markdown`, `table`, `plotly`, `manual_order`, `save`. No `heading()`, `text()`, `section()`, or `html()`.
 
+## Execution Contexts
+
+Routines run in **3 different contexts** — your code must work in all of them:
+
+| Context | `context.bot` | `context._chat_id` | Trigger |
+|---------|---------------|---------------------|---------|
+| **Telegram** | Real bot (python-telegram-bot) | User's chat ID | `/routines` command |
+| **Web Dashboard** | `_HttpBot` (HTTP fallback) | User ID or 0 | Web API |
+| **MCP** | `_HttpBot` (HTTP fallback) | `settings.chat_id` or 0 | `manage_routines` tool |
+
+**Key point:** `context.bot` is **always available** — never `None`. In non-Telegram contexts, it's an `_HttpBot` that sends messages via the Telegram HTTP API using `TELEGRAM_TOKEN`. You can always call `context.bot.send_message(...)` safely.
+
+### What `_HttpBot` supports
+- `send_message(chat_id=..., text=..., parse_mode=...)`
+- `send_photo(chat_id=..., photo=..., caption=...)`
+- `send_document(chat_id=..., document=..., caption=...)`
+- `edit_message_text(chat_id=..., message_id=..., text=...)`
+
+If `TELEGRAM_TOKEN` is not set, calls are silently ignored (no crash).
+
 ## Continuous Routines
 
-Set `CONTINUOUS = True` for routines with internal loops:
+Set `CONTINUOUS = True` for routines with internal loops. These run as asyncio tasks until cancelled.
 
 ```python
+import asyncio
+from pydantic import BaseModel, Field
+from telegram.ext import ContextTypes
+from config_manager import get_client
+
 CONTINUOUS = True
 
 class Config(BaseModel):
-    """Live monitor"""
-    interval_sec: int = Field(default=10, description="Check interval")
+    """Live price monitor with alerts."""
+    connector: str = Field(default="binance", description="Exchange connector")
+    trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
+    threshold_pct: float = Field(default=1.0, description="Alert threshold %")
+    interval_sec: int = Field(default=10, description="Check interval in seconds")
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+    chat_id = context._chat_id
+    client = await get_client(chat_id, context=context)
+    if not client:
+        return "No server available"
+
+    # Send start notification (works in all contexts)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"Started monitoring {config.trading_pair}",
+    )
+
+    last_price = None
     try:
         while True:
-            await context.bot.send_message(context._chat_id, "Update...")
+            prices = await client.market_data.get_prices(
+                connector_name=config.connector,
+                trading_pairs=config.trading_pair,
+            )
+            current = prices["prices"].get(config.trading_pair)
+
+            if current and last_price:
+                change = abs((current - last_price) / last_price) * 100
+                if change >= config.threshold_pct:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"Alert: {config.trading_pair} moved {change:.2f}%",
+                    )
+            last_price = current or last_price
             await asyncio.sleep(config.interval_sec)
+
     except asyncio.CancelledError:
         return "Stopped"
 ```
+
+### Continuous routine rules:
+- Always catch `asyncio.CancelledError` at the outer loop — re-raise or return
+- Use `context.bot.send_message()` for real-time notifications (works in all contexts)
+- Inner loop exceptions should be caught and logged, NOT re-raised
+- Return a summary string when cancelled
 
 ## Sending Charts to Telegram
 
@@ -111,8 +171,11 @@ buf = io.BytesIO()
 fig.savefig(buf, format="png", dpi=150)  # matplotlib
 # OR: fig.write_image(buf, format="png", scale=2)  # plotly
 buf.seek(0)
-if context.bot:
-    await context.bot.send_photo(chat_id=context._chat_id, photo=buf, caption="Title")
+
+# Works in all contexts (Telegram, Web, MCP)
+await context.bot.send_photo(chat_id=context._chat_id, photo=buf, caption="Title")
+
+# Also return as RoutineResult for web dashboard
 return RoutineResult(text=summary, chart_image=buf.getvalue())
 ```
 

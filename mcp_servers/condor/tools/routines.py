@@ -115,7 +115,9 @@ class MCPContext:
         self._chat_id = settings.chat_id
         self._user_id = settings.user_id
         self._user_data: dict = {}
-        self.bot = None
+        # Use the HTTP fallback bot from routine_store so messages are delivered
+        from condor.routine_store import _http_bot
+        self.bot = _http_bot
         self.application = None
 
     @property

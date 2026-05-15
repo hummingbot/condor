@@ -20,12 +20,67 @@ from routines.base import RoutineResult, discover_routines, discover_routines_fr
 logger = logging.getLogger(__name__)
 
 
+class _HttpBot:
+    """Fallback bot that sends Telegram messages via HTTP when no real bot is available."""
+
+    def __init__(self):
+        import os
+        self._token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN", "")
+
+    async def _post(self, method: str, data: dict, files: dict | None = None):
+        if not self._token:
+            return None
+        import httpx
+        url = f"https://api.telegram.org/bot{self._token}/{method}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            if files:
+                resp = await client.post(url, data=data, files=files)
+            else:
+                resp = await client.post(url, json=data)
+            result = resp.json()
+            if not result.get("ok"):
+                logger.warning(f"Telegram {method} failed: {resp.text}")
+            return result
+
+    async def send_message(self, *a, **kw):
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        text = kw.get("text") or (a[1] if len(a) > 1 else "")
+        data = {"chat_id": chat_id, "text": text}
+        if kw.get("parse_mode"):
+            data["parse_mode"] = kw["parse_mode"]
+        return await self._post("sendMessage", data)
+
+    async def send_photo(self, *a, **kw):
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        photo = kw.get("photo") or (a[1] if len(a) > 1 else None)
+        data = {"chat_id": chat_id}
+        if kw.get("caption"):
+            data["caption"] = kw["caption"]
+        files = {"photo": ("chart.png", photo, "image/png")} if photo else None
+        return await self._post("sendPhoto", data, files=files)
+
+    async def send_document(self, *a, **kw):
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        document = kw.get("document") or (a[1] if len(a) > 1 else None)
+        data = {"chat_id": chat_id}
+        if kw.get("caption"):
+            data["caption"] = kw["caption"]
+        files = {"document": ("file", document, "application/octet-stream")} if document else None
+        return await self._post("sendDocument", data, files=files)
+
+    async def edit_message_text(self, *a, **kw):
+        data = {k: v for k, v in kw.items() if v is not None}
+        return await self._post("editMessageText", data)
+
+_http_bot = _HttpBot()
+
+
 class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
     def __init__(self, server_name: str, bot=None, chat_id: int = 0):
         self._chat_id = chat_id
-        self.bot = bot
+        self.bot = bot if bot is not None else _http_bot
         self._user_data: dict[str, Any] = {
             "preferences": {"general": {"active_server": server_name}},
         }
