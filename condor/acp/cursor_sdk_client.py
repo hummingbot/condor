@@ -35,6 +35,36 @@ from condor.acp.client import (
 
 log = logging.getLogger(__name__)
 
+
+def _cursor_bridge_stderr_to_info() -> bool:
+    """When true, forward Node bridge stderr lines at INFO (see also CONDOR_LOG_CURSOR_AGENT_TOOLS).
+
+    MCP server processes are usually spawned by Cursor's local runtime, not Node's stderr
+    stream; their Python log lines often never reach Condor via this pipe even when forwarding
+    is enabled. Prefer CONDOR_LOG_CURSOR_AGENT_TOOLS (tool payloads on stdout bridge) or
+    CONDOR_MCP_AUDIT_LOG on create_executor failures.
+    """
+    return os.environ.get("CONDOR_LOG_CURSOR_BRIDGE_STDERR", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _cursor_agent_tool_logging() -> bool:
+    """Log Composer tool_use / tool results at INFO from the Cursor SDK JSON stdout stream."""
+    return os.environ.get("CONDOR_LOG_CURSOR_AGENT_TOOLS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _truncate_log_text(text: str, max_chars: int = 8000) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"...(+{len(text) - max_chars} chars)"
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _BRIDGE_DIR = Path(__file__).resolve().parent / "cursor_bridge"
 BRIDGE_SCRIPT = _BRIDGE_DIR / "bridge.mjs"
@@ -216,7 +246,10 @@ class CursorSdkClient:
                     break
                 txt = line.decode(errors="replace").rstrip()
                 if txt:
-                    log.debug("Cursor bridge stderr: %s", txt)
+                    if _cursor_bridge_stderr_to_info():
+                        log.info("cursor-bridge: %s", txt)
+                    else:
+                        log.debug("Cursor bridge stderr: %s", txt)
         except asyncio.CancelledError:
             return
         except Exception:
@@ -308,6 +341,18 @@ class CursorSdkClient:
             elif kind == "thinking" and pkt.get("text"):
                 yield ThoughtChunk(text=str(pkt["text"]))
             elif kind == "tool":
+                if _cursor_agent_tool_logging():
+                    raw_in = pkt.get("input")
+                    try:
+                        in_txt = json.dumps(raw_in, default=str, ensure_ascii=False)
+                    except TypeError:
+                        in_txt = str(raw_in)
+                    log.info(
+                        "cursor-sdk tool_use: %s call_id=%s input=%s",
+                        pkt.get("name"),
+                        pkt.get("call_id"),
+                        _truncate_log_text(in_txt),
+                    )
                 cid = str(pkt.get("call_id", ""))
                 name = str(pkt.get("name", "tool"))
                 yield ToolCallEvent(
@@ -318,6 +363,23 @@ class CursorSdkClient:
                     input=pkt.get("input") if isinstance(pkt.get("input"), dict) else {"raw": pkt.get("input")},
                 )
             elif kind == "tool_status":
+                if _cursor_agent_tool_logging():
+                    out_txt = pkt.get("result")
+                    try:
+                        out_s = (
+                            json.dumps(out_txt, default=str, ensure_ascii=False)
+                            if out_txt is not None
+                            else ""
+                        )
+                    except TypeError:
+                        out_s = str(out_txt)
+                    log.info(
+                        "cursor-sdk tool_status: %s status=%s call_id=%s result=%s",
+                        pkt.get("name"),
+                        pkt.get("status"),
+                        pkt.get("call_id"),
+                        _truncate_log_text(out_s),
+                    )
                 cid = str(pkt.get("call_id", ""))
                 st = pkt.get("status", "completed")
                 out_txt = pkt.get("result")

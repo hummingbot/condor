@@ -175,6 +175,9 @@ async function handleLine(line) {
     }
     try {
       agent = await Agent.create(createOpts);
+      console.error(
+        "[condor-bridge] Agent.create ok (stderr smoke; MCP child stdio often does not arrive here)",
+      );
     } catch (err) {
       let message = err?.message ?? String(err);
       if (err instanceof CursorAgentError) {

@@ -188,7 +188,14 @@ CURSOR_API_KEY=crsr_...                  # Optional, Cursor Composer via local N
 > List model IDs with
 > `CURSOR_API_KEY=... npm run list-models` in `condor/acp/cursor_bridge/` (one ID per line;
 > `--full` dumps the verbose JSON catalog).
-
+>
+> Debugging: MCP servers attached to Composer are usually **not** wired to the Node bridge stderr that
+> Condor drains, so **`CONDOR_LOG_CURSOR_BRIDGE_STDERR=1`** may stay quiet aside from `[condor-bridge] …`
+> lines from `bridge.mjs`. To log **tool inputs and MCP tool results** in Condor, set **`CONDOR_LOG_CURSOR_AGENT_TOOLS=1`**
+> (these flow on the Cursor SDK **stdout** JSON stream). To capture **executor create** payloads and HTTP error
+> bodies when debugging 400 responses, set **`CONDOR_MCP_AUDIT_LOG=/path/to/lines.ndjson`** (append-only JSON per line).
+> You can still forward any real bridge stderr at INFO with **`CONDOR_LOG_CURSOR_BRIDGE_STDERR=1`**, or set
+> **`condor.acp.cursor_sdk_client`** / root to **DEBUG**.
 
 ### `config.yml` (auto-created on first run)
 ```yaml

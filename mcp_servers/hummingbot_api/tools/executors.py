@@ -4,7 +4,10 @@ Executor management tools for Hummingbot MCP Server.
 This module provides business logic for managing trading executors including
 creation, viewing, stopping, and position management with progressive disclosure.
 """
+import json
 import logging
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 from handlers.cex._shared import validate_trading_pair
@@ -22,6 +25,43 @@ logger = logging.getLogger("hummingbot-mcp")
 
 # Internal fields injected by the MCP layer, not user-supplied
 _INTERNAL_FIELDS = {"type", "executor_type", "id"}
+
+
+def _truncate_audit_text(text: str, max_len: int = 12000) -> str:
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}…(+{len(text) - max_len} chars)"
+
+
+def _condor_mcp_audit(event: dict[str, Any]) -> None:
+    """Append one JSON line to CONDOR_MCP_AUDIT_LOG when set (e.g. MCP stdio detached from Condor logs)."""
+    path = os.environ.get("CONDOR_MCP_AUDIT_LOG", "").strip()
+    if not path:
+        return
+    payload = dict(event)
+    payload["ts"] = datetime.now(timezone.utc).isoformat()
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, default=str, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning("CONDOR_MCP_AUDIT_LOG write failed (%s): %s", path, exc)
+
+
+def _exception_audit_detail(exc: BaseException) -> str:
+    detail = repr(exc)
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return detail
+    txt = getattr(resp, "text", None)
+    if txt is None:
+        raw = getattr(resp, "content", None)
+        if isinstance(raw, (bytes, bytearray)):
+            txt = raw.decode(errors="replace")
+        elif raw is not None:
+            txt = str(raw)
+    if txt:
+        detail = f"{detail} | http_body={_truncate_audit_text(txt)}"
+    return detail
 
 
 def validate_executor_config(config: dict[str, Any], schema: dict[str, Any]) -> list[str]:
@@ -203,12 +243,22 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
         # Check both top-level param and executor_config (agents sometimes put it in the wrong place)
         controller_id = request.controller_id or merged_config.pop("controller_id", None) or "main"
 
-        import logging as _logging
-        _logging.getLogger(__name__).info(
+        logger.info(
             "create_executor: controller_id=%r (request=%r, config_had=%r), type=%s, account=%s",
-            controller_id, request.controller_id,
+            controller_id,
+            request.controller_id,
             "controller_id" in (request.executor_config or {}),
-            executor_type, account,
+            executor_type,
+            account,
+        )
+        _condor_mcp_audit(
+            {
+                "event": "executor_create_request",
+                "executor_type": executor_type,
+                "account": account,
+                "controller_id": controller_id,
+                "merged_config": merged_config,
+            }
         )
 
         try:
@@ -223,6 +273,17 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
                 executor_preferences.update_defaults(executor_type, request.executor_config)
 
             executor_id = result.get("executor_id") or result.get("id")
+
+            _condor_mcp_audit(
+                {
+                    "event": "executor_create_ok",
+                    "executor_type": executor_type,
+                    "account": account,
+                    "controller_id": controller_id,
+                    "executor_id": executor_id,
+                    "result_keys": sorted(result.keys()) if isinstance(result, dict) else None,
+                }
+            )
 
             formatted = f"Executor created successfully!\n\n"
             formatted += f"Executor ID: {executor_id or 'N/A'}\n"
@@ -246,6 +307,15 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
             }
 
         except Exception as e:
+            _condor_mcp_audit(
+                {
+                    "event": "executor_create_failed",
+                    "executor_type": executor_type,
+                    "account": account,
+                    "controller_id": controller_id,
+                    "error": _exception_audit_detail(e),
+                }
+            )
             return {
                 "action": "create",
                 "error": str(e),
