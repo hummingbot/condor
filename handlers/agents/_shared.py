@@ -458,7 +458,6 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
                 "mcp__condor__trading_agent_journal_write",
                 "mcp__condor__send_notification",
                 "mcp__condor__manage_notes",
-                "mcp__condor__manage_skills",
             ]
             tool_preload_hint = (
                 "IMPORTANT: At the very start of the session (before your first response), "
