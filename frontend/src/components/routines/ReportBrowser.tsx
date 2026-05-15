@@ -95,11 +95,15 @@ export function ReportBrowser({
   );
   const isAgent = activeRoutine?.source.startsWith("agent:") ?? false;
 
-  // Reports for active source
+  // Reports for active source — poll when a scheduled instance is active
+  const hasScheduledInstance = instances.some(
+    (i) => i.routine_name === activeSource && (i.status === "running" || i.status === "scheduled"),
+  );
   const { data: reportsData, isLoading: loadingReports } = useQuery({
     queryKey: ["routine-reports", activeSource],
     queryFn: () => api.getRoutineReports(activeSource),
     enabled: !!activeSource,
+    refetchInterval: hasScheduledInstance ? 10_000 : false,
   });
   const reports = reportsData?.reports ?? [];
 
@@ -130,22 +134,23 @@ export function ReportBrowser({
     [instances, activeSource],
   );
 
-  // Config state: prefer last-used config from instances, then defaults from routine fields
+  // Config state: merge routine fields with saved localStorage values
   const [configValues, setConfigValues] = useState<Record<string, unknown>>({});
 
   useEffect(() => {
-    const lastInstance = instances.find((i) => i.routine_name === activeSource);
-    if (lastInstance && Object.keys(lastInstance.config || {}).length > 0) {
-      setConfigValues({ ...lastInstance.config });
-    } else if (activeRoutine) {
-      const defaults: Record<string, unknown> = {};
-      for (const [key, field] of Object.entries(activeRoutine.fields)) {
-        defaults[key] = field.default;
-      }
-      setConfigValues(defaults);
+    if (!activeRoutine) return;
+    let saved: Record<string, unknown> | null = null;
+    try {
+      const raw = localStorage.getItem(`routine_config:${activeSource}`);
+      saved = raw ? JSON.parse(raw) : null;
+    } catch { /* ignore */ }
+    const values: Record<string, unknown> = {};
+    for (const [key, field] of Object.entries(activeRoutine.fields)) {
+      values[key] = saved && key in saved ? saved[key] : field.default;
     }
+    setConfigValues(values);
     setShowConfigPanel(false);
-  }, [activeSource, activeRoutine, instances]);
+  }, [activeSource, activeRoutine]);
 
   // Track running instance to poll for completion
   const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
@@ -215,12 +220,14 @@ export function ReportBrowser({
     for (let i = 0; i < toRun.length; i++) {
       setRunAllProgress({ current: i + 1, total: toRun.length });
       const routine = toRun[i];
-      const defaults: Record<string, unknown> = {};
+      let saved: Record<string, unknown> | null = null;
+      try { const raw = localStorage.getItem(`routine_config:${routine.name}`); saved = raw ? JSON.parse(raw) : null; } catch { /* ignore */ }
+      const cfg: Record<string, unknown> = {};
       for (const [key, field] of Object.entries(routine.fields)) {
-        defaults[key] = field.default;
+        cfg[key] = saved && key in saved ? saved[key] : field.default;
       }
       try {
-        await api.runRoutine(server, routine.name, defaults);
+        await api.runRoutine(server, routine.name, cfg);
       } catch {
         // continue with remaining routines
       }
@@ -698,7 +705,13 @@ export function ReportBrowser({
               <RoutineConfigForm
                 fields={activeRoutine.fields}
                 values={configValues}
-                onChange={(key, value) => setConfigValues((prev) => ({ ...prev, [key]: value }))}
+                onChange={(key, value) => {
+                  setConfigValues((prev) => {
+                    const next = { ...prev, [key]: value };
+                    try { localStorage.setItem(`routine_config:${activeSource}`, JSON.stringify(next)); } catch { /* ignore */ }
+                    return next;
+                  });
+                }}
               />
             ) : (
               <p className="text-xs text-[var(--color-text-muted)]">No configurable fields</p>

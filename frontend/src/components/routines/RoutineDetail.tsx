@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Brain, ExternalLink, FileText, Loader2, Play } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type RoutineInfo, type RoutineInstance, api } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -10,6 +10,46 @@ import { RoutineInstances } from "./RoutineInstances";
 import { RoutineReports } from "./RoutineReports";
 import { RoutineResultView } from "./RoutineResultView";
 import { ScheduleDropdown } from "./ScheduleDropdown";
+
+// ── Config persistence helpers ──
+
+const STORAGE_KEY_PREFIX = "routine_config:";
+
+function loadSavedConfig(routineName: string): Record<string, unknown> | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + routineName);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveConfig(routineName: string, values: Record<string, unknown>) {
+  try {
+    localStorage.setItem(STORAGE_KEY_PREFIX + routineName, JSON.stringify(values));
+  } catch {
+    // storage full or unavailable — ignore
+  }
+}
+
+/**
+ * Build config values for a routine:
+ * 1. Start from the routine's Python Config fields (source of truth for which keys exist)
+ * 2. For each field, check localStorage for a saved value
+ * 3. If saved value exists for a field that still exists, use it; otherwise use the default
+ */
+function buildConfigValues(routine: RoutineInfo): Record<string, unknown> {
+  const saved = loadSavedConfig(routine.name);
+  const values: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(routine.fields)) {
+    if (saved && key in saved) {
+      values[key] = saved[key];
+    } else {
+      values[key] = field.default;
+    }
+  }
+  return values;
+}
 
 interface RoutineDetailProps {
   routine: RoutineInfo;
@@ -21,20 +61,30 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
   const { server } = useServer();
   const qc = useQueryClient();
 
-  const [configValues, setConfigValues] = useState<Record<string, unknown>>({});
+  const [configValues, setConfigValues] = useState<Record<string, unknown>>(() =>
+    buildConfigValues(routine),
+  );
   const [activeInstanceId, setActiveInstanceId] = useState<string | null>(null);
   const isPolling = useRef(false);
 
-  // Reset config when routine changes
+  // Rebuild config when routine changes — merge saved values with current fields
   useEffect(() => {
-    const defaults: Record<string, unknown> = {};
-    for (const [key, field] of Object.entries(routine.fields)) {
-      defaults[key] = field.default;
-    }
-    setConfigValues(defaults);
+    setConfigValues(buildConfigValues(routine));
     setActiveInstanceId(null);
     isPolling.current = false;
   }, [routine.name]);
+
+  // Persist config to localStorage whenever it changes
+  const handleConfigChange = useCallback(
+    (key: string, value: unknown) => {
+      setConfigValues((prev) => {
+        const next = { ...prev, [key]: value };
+        saveConfig(routine.name, next);
+        return next;
+      });
+    },
+    [routine.name],
+  );
 
   // Poll active instance
   const { data: activeInstance } = useQuery({
@@ -116,7 +166,7 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
           <RoutineConfigForm
             fields={routine.fields}
             values={configValues}
-            onChange={(key, value) => setConfigValues((prev) => ({ ...prev, [key]: value }))}
+            onChange={handleConfigChange}
           />
         </div>
       )}

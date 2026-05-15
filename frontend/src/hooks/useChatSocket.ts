@@ -306,6 +306,29 @@ export function useChatSocket() {
 
         case "prompt_done":
           if (slotId) {
+            // Mark any in-flight tool calls as completed so the spinner stops
+            setSlots((prev) =>
+              prev.map((s) => {
+                if (s.info.slot_id !== slotId) return s;
+                const curId = currentAssistantMsg.current[slotId];
+                if (!curId) return s;
+                return {
+                  ...s,
+                  messages: s.messages.map((m) =>
+                    m.id === curId && m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
+                      ? {
+                          ...m,
+                          toolCalls: m.toolCalls.map((tc) =>
+                            tc.status === "completed" || tc.status === "failed"
+                              ? tc
+                              : { ...tc, status: "completed" },
+                          ),
+                        }
+                      : m,
+                  ),
+                };
+              }),
+            );
             currentAssistantMsg.current[slotId] = null;
           }
           setStreamingSlotId(null);
@@ -389,6 +412,31 @@ export function useChatSocket() {
   const abortPrompt = useCallback(
     (slotId: string) => {
       send({ action: "abort_prompt", slot_id: slotId });
+      // Immediately reset streaming state so the UI doesn't get stuck
+      // if the backend's prompt_done event is lost or delayed
+      setStreamingSlotId(null);
+      currentAssistantMsg.current[slotId] = null;
+      // Mark any in-flight tool calls as completed
+      setSlots((prev) =>
+        prev.map((s) => {
+          if (s.info.slot_id !== slotId) return s;
+          return {
+            ...s,
+            messages: s.messages.map((m) =>
+              m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
+                ? {
+                    ...m,
+                    toolCalls: m.toolCalls.map((tc) =>
+                      tc.status === "completed" || tc.status === "failed"
+                        ? tc
+                        : { ...tc, status: "completed" },
+                    ),
+                  }
+                : m,
+            ),
+          };
+        }),
+      );
     },
     [send],
   );

@@ -6,7 +6,7 @@ import {
   Minimize2,
   Play,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type ReportSummary, type RoutineInfo, api } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -30,22 +30,57 @@ function formatAgo(iso: string): string {
 
 // ── Routine Card ──
 
+const STORAGE_KEY_PREFIX = "routine_config:";
+
+function loadSavedConfig(routineName: string): Record<string, unknown> | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + routineName);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveConfig(routineName: string, values: Record<string, unknown>) {
+  try {
+    localStorage.setItem(STORAGE_KEY_PREFIX + routineName, JSON.stringify(values));
+  } catch { /* ignore */ }
+}
+
+function buildConfigValues(routine: RoutineInfo): Record<string, unknown> {
+  const saved = loadSavedConfig(routine.name);
+  const values: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(routine.fields)) {
+    values[key] = saved && key in saved ? saved[key] : field.default;
+  }
+  return values;
+}
+
 function RoutineCard({ routine }: { routine: RoutineInfo }) {
   const { server } = useServer();
   const qc = useQueryClient();
-  const [configValues, setConfigValues] = useState<Record<string, unknown>>({});
+  const [configValues, setConfigValues] = useState<Record<string, unknown>>(() =>
+    buildConfigValues(routine),
+  );
   const [expanded, setExpanded] = useState(false);
   const [activeInstanceId, setActiveInstanceId] = useState<string | null>(null);
   const isPolling = useRef(false);
 
-  // Reset config when routine changes
+  // Rebuild config when routine changes — merge saved values with current fields
   useEffect(() => {
-    const defaults: Record<string, unknown> = {};
-    for (const [key, field] of Object.entries(routine.fields)) {
-      defaults[key] = field.default;
-    }
-    setConfigValues(defaults);
+    setConfigValues(buildConfigValues(routine));
   }, [routine.name]);
+
+  const handleConfigChange = useCallback(
+    (key: string, value: unknown) => {
+      setConfigValues((prev) => {
+        const next = { ...prev, [key]: value };
+        saveConfig(routine.name, next);
+        return next;
+      });
+    },
+    [routine.name],
+  );
 
   // Poll active instance
   const { data: activeInstance } = useQuery({
@@ -118,9 +153,7 @@ function RoutineCard({ routine }: { routine: RoutineInfo }) {
           <RoutineConfigForm
             fields={routine.fields}
             values={configValues}
-            onChange={(key, value) =>
-              setConfigValues((prev) => ({ ...prev, [key]: value }))
-            }
+            onChange={handleConfigChange}
           />
         </div>
       )}
