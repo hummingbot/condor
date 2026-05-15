@@ -39,21 +39,6 @@ import {
   formatCurrencyVolume,
 } from "@/lib/formatters";
 
-// Re-export formatters for backward compatibility (TradeBottomPane, AgentSessionContent)
-export {
-  formatUsd,
-  formatVolume,
-  formatPnl,
-  pnlColor,
-  formatAge,
-  formatPrice,
-  formatPct,
-  isExecutorActive,
-  formatCurrency,
-  formatCurrencyPnl,
-  formatCurrencyVolume,
-} from "@/lib/formatters";
-
 // ── Multi-select dropdown ──
 
 function MultiSelect({

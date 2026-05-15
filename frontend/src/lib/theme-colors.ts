@@ -10,8 +10,8 @@ export function getThemeColors() {
   };
 }
 
-/** Return the up or down color based on a numeric value. */
-export function pnlColor(value: number): string {
+/** Return the up or down hex color based on a numeric value (for canvas/charts). */
+export function pnlHexColor(value: number): string {
   const { up, down } = getThemeColors();
   return value >= 0 ? up : down;
 }

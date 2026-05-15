@@ -9,7 +9,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
-import { getThemeColors, pnlColor, sideColor } from "@/lib/theme-colors";
+import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
   tick: number;
@@ -216,7 +216,7 @@ export function ExecutorChart({
         const textColor = cs.getPropertyValue("--color-text").trim() || "#e2e8f0";
         const borderColor = cs.getPropertyValue("--color-border").trim() || "#1c2541";
 
-        const pnlClr = pnlColor(o.pnl);
+        const pnlClr = pnlHexColor(o.pnl);
         const pnlSign = o.pnl >= 0 ? "+" : "";
         const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";

@@ -490,13 +490,6 @@ export function ReportBrowser({
                 {activeRoutine?.source.replace("agent:", "")}
               </span>
             )}
-            {selectedReport && (
-              <>
-                <span className="text-[var(--color-text-muted)]/40">|</span>
-                <span className="truncate text-[10px] text-[var(--color-text-muted)]">{selectedReport.title}</span>
-                <span className="text-[10px] text-[var(--color-text-muted)]/60">{new Date(selectedReport.created_at).toLocaleString()}</span>
-              </>
-            )}
             {sourceInstances.length > 0 && (
               <div className="flex items-center gap-2">
                 {sourceInstances.map((inst) => (

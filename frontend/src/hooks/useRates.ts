@@ -32,7 +32,7 @@ export function useRates(quoteCurrencies: string[]) {
   }, [quoteCurrencies, currency]);
 
   const { data: rates, isLoading } = useQuery({
-    queryKey: ["rates", server, currency, needed],
+    queryKey: ["rates", server, currency, needed.join(",")],
     queryFn: async () => {
       const results: Record<string, number | null> = {};
       // Stablecoin-to-stablecoin: use 1:1 rate (no API call needed)

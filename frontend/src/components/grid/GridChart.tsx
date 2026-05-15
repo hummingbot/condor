@@ -5,7 +5,7 @@ import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
-import { getThemeColors, pnlColor, sideColor } from "@/lib/theme-colors";
+import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 type PickField = "start" | "end" | "limit" | null;
 
@@ -225,7 +225,7 @@ export function GridChart({
         }
 
         const o = bestOverlay;
-        const pnlClr = pnlColor(o.pnl);
+        const pnlClr = pnlHexColor(o.pnl);
         const pnlSign = o.pnl >= 0 ? "+" : "";
         const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
@@ -742,7 +742,7 @@ export function GridChart({
         ? `${pnlSign}$${(pnl / 1000).toFixed(1)}K`
         : `${pnlSign}$${pnl.toFixed(2)}`;
       const amt = Math.abs(pos.amount);
-      const color = pnlColor(pnl);
+      const color = pnlHexColor(pnl);
       const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
       const pl = series.createPriceLine({
         price: pos.entry_price,
