@@ -273,7 +273,11 @@ def _condor_mcp_args(
 
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
-    effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
+    # Web UI sends chat_id=0 — treat as unset so send_notification targets the Telegram user id.
+    if isinstance(chat_id, int):
+        effective_chat_id = chat_id if chat_id != 0 else user_id
+    else:
+        effective_chat_id = user_id
     args = [
         "--chat-id", str(effective_chat_id),
         "--user-id", str(user_id),

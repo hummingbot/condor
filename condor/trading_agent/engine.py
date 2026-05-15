@@ -36,6 +36,32 @@ from .providers import ProviderRegistry
 
 log = logging.getLogger(__name__)
 
+
+async def _notify_via_telegram_bot_api(chat_id: int, text: str) -> None:
+    """Send plain text using TELEGRAM_TOKEN when no python-telegram-bot handle exists."""
+    from utils.config import TELEGRAM_TOKEN
+
+    if not TELEGRAM_TOKEN or not chat_id:
+        return
+    payload_text = (text or "")[:4096]
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": payload_text}
+    try:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                if not data.get("ok"):
+                    log.warning(
+                        "Telegram notify failed for chat_id=%s: %s",
+                        chat_id,
+                        data.get("description", data),
+                    )
+    except Exception:
+        log.exception("Telegram notify HTTP failed for chat_id=%s", chat_id)
+
+
 # Module-level registry of running engines
 _engines: dict[str, "TickEngine"] = {}
 
@@ -530,11 +556,16 @@ class TickEngine:
 
     async def _notify(self, message: str) -> None:
         """Send a notification to the user via Telegram."""
-        if hasattr(self, "_bot") and self._bot:
+        chat_id = self.chat_id
+        text = (message or "")[:4096]
+        bot = getattr(self, "_bot", None)
+        if bot:
             try:
-                await self._bot.send_message(chat_id=self.chat_id, text=message)
+                await bot.send_message(chat_id=chat_id, text=text)
+                return
             except Exception:
-                log.exception("Failed to send notification to chat %s", self.chat_id)
+                log.exception("Failed to send notification to chat %s", chat_id)
+        await _notify_via_telegram_bot_api(chat_id, text)
 
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""
