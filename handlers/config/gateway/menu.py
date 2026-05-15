@@ -62,13 +62,18 @@ async def show_gateway_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                                 "🪙 Tokens", callback_data="gateway_tokens"
                             ),
                             InlineKeyboardButton(
-                                "📋 Logs", callback_data="gateway_logs"
+                                "📡 RPC Providers", callback_data="gateway_rpc_providers"
                             ),
                         ],
                         [
                             InlineKeyboardButton(
+                                "📋 Logs", callback_data="gateway_logs"
+                            ),
+                            InlineKeyboardButton(
                                 "🔄 Restart", callback_data="gateway_restart"
                             ),
+                        ],
+                        [
                             InlineKeyboardButton(
                                 "⏹ Stop", callback_data="gateway_stop"
                             ),
