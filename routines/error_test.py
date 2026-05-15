@@ -1,7 +1,5 @@
 """Routine that intentionally fails — for testing error display in the dashboard."""
 
-import random
-
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 

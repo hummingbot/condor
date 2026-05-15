@@ -103,6 +103,22 @@ def _spread_pct(buy_price: float, sell_price: float) -> float:
     return ((sell_price - buy_price) / buy_price) * 100
 
 
+def _compute_arb_routes(valid_exchanges: list[str], ex_data: dict, amount: float) -> list[dict]:
+    """Compute all arb routes across exchange pairs. Returns list of dicts with route/spread/profit."""
+    routes = []
+    for ex_a, ex_b in combinations(valid_exchanges, 2):
+        da, db = ex_data[ex_a], ex_data[ex_b]
+        if da["fill_buy"] and db["fill_sell"]:
+            s = _spread_pct(da["fill_buy"], db["fill_sell"])
+            profit = (db["fill_sell"] - da["fill_buy"]) * amount
+            routes.append({"route": f"BUY {ex_a.upper()} → SELL {ex_b.upper()}", "spread": s, "profit": profit})
+        if db["fill_buy"] and da["fill_sell"]:
+            s = _spread_pct(db["fill_buy"], da["fill_sell"])
+            profit = (da["fill_sell"] - db["fill_buy"]) * amount
+            routes.append({"route": f"BUY {ex_b.upper()} → SELL {ex_a.upper()}", "spread": s, "profit": profit})
+    return routes
+
+
 def _filter_and_sort_exchanges(exchanges: list[str], ex_data: dict) -> tuple[list[str], list[tuple[str, str]]]:
     """Filter out exchanges with invalid data and sort by spread (smallest first).
 
@@ -389,23 +405,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         lines.append("")
 
     # Arb analysis across valid pairs
+    all_arb_routes = _compute_arb_routes(valid_exchanges, ex_data, config.amount)
+
     lines.append("--- Arbitrage Matrix ---")
     opportunities = []
-
-    for ex_a, ex_b in combinations(valid_exchanges, 2):
-        da, db = ex_data[ex_a], ex_data[ex_b]
-
-        if da["fill_buy"] and db["fill_sell"]:
-            s = _spread_pct(da["fill_buy"], db["fill_sell"])
-            profit = (db["fill_sell"] - da["fill_buy"]) * config.amount
-            label = f"BUY {ex_a.upper()} -> SELL {ex_b.upper()}: {s:+.4f}% (${profit:.4f})"
-            (opportunities if s > 0 else lines).append(label)
-
-        if db["fill_buy"] and da["fill_sell"]:
-            s = _spread_pct(db["fill_buy"], da["fill_sell"])
-            profit = (da["fill_sell"] - db["fill_buy"]) * config.amount
-            label = f"BUY {ex_b.upper()} -> SELL {ex_a.upper()}: {s:+.4f}% (${profit:.4f})"
-            (opportunities if s > 0 else lines).append(label)
+    for r in all_arb_routes:
+        label = f"{r['route']}: {r['spread']:+.4f}% (${r['profit']:.4f})"
+        (opportunities if r["spread"] > 0 else lines).append(label)
 
     mids = {ex: d["stats"]["mid"] for ex, d in ex_data.items()
             if ex in valid_exchanges and d["stats"].get("mid")}
@@ -442,25 +448,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             builder.kpi("Max Mid Diff", f"{max_diff_pct:+.4f}%",
                         trend="up" if max_diff_pct > 0.05 else "neutral")
 
-        # Find best arb opportunity for KPI
-        best_arb = None
-        all_arb_routes = []
-        for ex_a, ex_b in combinations(valid_exchanges, 2):
-            da, db = ex_data[ex_a], ex_data[ex_b]
-            if da["fill_buy"] and db["fill_sell"]:
-                s = _spread_pct(da["fill_buy"], db["fill_sell"])
-                profit = (db["fill_sell"] - da["fill_buy"]) * config.amount
-                route = {"route": f"BUY {ex_a.upper()} → SELL {ex_b.upper()}", "spread": s, "profit": profit}
-                all_arb_routes.append(route)
-                if best_arb is None or s > best_arb["spread"]:
-                    best_arb = route
-            if db["fill_buy"] and da["fill_sell"]:
-                s = _spread_pct(db["fill_buy"], da["fill_sell"])
-                profit = (da["fill_sell"] - db["fill_buy"]) * config.amount
-                route = {"route": f"BUY {ex_b.upper()} → SELL {ex_a.upper()}", "spread": s, "profit": profit}
-                all_arb_routes.append(route)
-                if best_arb is None or s > best_arb["spread"]:
-                    best_arb = route
+        # Find best arb opportunity for KPI (all_arb_routes computed above)
+        best_arb = max(all_arb_routes, key=lambda r: r["spread"]) if all_arb_routes else None
 
         if best_arb:
             builder.kpi("Best Route", f"{best_arb['route']}  {best_arb['spread']:+.4f}%",
@@ -518,8 +507,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                     "Mid Diff": f"{diff:+.4f}%",
                     f"{ex_a.upper()} Mid": f"{mids[ex_a]:.6f}",
                     f"{ex_b.upper()} Mid": f"{mids[ex_b]:.6f}",
+                    "_diff_abs": abs(diff),
                 })
-            mid_rows.sort(key=lambda r: abs(float(r["Mid Diff"].replace("%", "").replace("+", ""))), reverse=True)
+            mid_rows.sort(key=lambda r: r["_diff_abs"], reverse=True)
+            for r in mid_rows:
+                del r["_diff_abs"]
             builder.markdown("## Mid-Price Differences")
             builder.table(mid_rows)
 
