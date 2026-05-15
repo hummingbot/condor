@@ -634,7 +634,7 @@ export function CreateExecutor() {
               {/* Config Panel */}
               <div className="flex-1 overflow-y-auto">
                 {executorType === "grid" && (
-                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
+                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
                 )}
                 {executorType === "position" && (
                   <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
