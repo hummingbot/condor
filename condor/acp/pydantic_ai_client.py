@@ -197,7 +197,7 @@ class PydanticAIClient:
 
         # OpenAI with custom base_url (vLLM, TGI, etc.)
         if prefix == "openai" and base_url:
-            provider = OpenAIProvider(base_url=base_url, api_key="not-needed")
+            provider = OpenAIProvider(base_url=base_url, api_key=os.environ.get("OPENAI_API_KEY") or "not-needed")
             return OpenAIModel(model_id, provider=provider)
 
         # Standard pydantic-ai resolution (openai, groq, anthropic, google)
