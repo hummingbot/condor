@@ -346,6 +346,38 @@ def _exception_audit_detail(exc: BaseException) -> str:
     return detail
 
 
+def _normalize_executor_search_status(raw: str | None) -> str | None:
+    """Map LLM-/UI-friendly aliases to hummingbot-api executor status tokens."""
+    if raw is None:
+        return None
+    s = str(raw).strip().upper()
+    if not s:
+        return None
+    synonyms = {
+        "ACTIVE": "RUNNING",
+        "OPEN": "RUNNING",
+        "LIVE": "RUNNING",
+        "ENABLED": "RUNNING",
+        "CLOSED": "TERMINATED",
+        "DONE": "TERMINATED",
+        "STOPPED": "TERMINATED",
+    }
+    return synonyms.get(s, s)
+
+
+def _merged_controller_ids_for_search(req: ManageExecutorsRequest) -> list[str] | None:
+    """Apply singular controller_id as a search filter when controller_ids is omitted."""
+    ordered: list[str] = []
+    if req.controller_ids:
+        ordered.extend(str(x).strip() for x in req.controller_ids if str(x).strip())
+    lone = getattr(req, "controller_id", None)
+    if lone and str(lone).strip():
+        cid = str(lone).strip()
+        if cid not in ordered:
+            ordered.append(cid)
+    return ordered if ordered else None
+
+
 def validate_executor_config(config: dict[str, Any], schema: dict[str, Any]) -> list[str]:
     """Validate config keys against the backend schema properties.
 
@@ -683,15 +715,29 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
                     "formatted_output": formatted,
                 }
 
+            search_status = _normalize_executor_search_status(request.status)
+            if (
+                search_status != (request.status or "").strip().upper()
+                and request.status is not None
+                and str(request.status).strip()
+            ):
+                logger.info(
+                    "manage_executors search: normalized status filter %r -> %r for hummingbot-api",
+                    request.status,
+                    search_status,
+                )
+
+            controller_ids_kw = _merged_controller_ids_for_search(request)
+
             result = await client.executors.search_executors(
                 account_names=request.account_names,
                 connector_names=request.connector_names,
                 trading_pairs=request.trading_pairs,
                 executor_types=request.executor_types,
-                status=request.status,
+                status=search_status,
                 cursor=request.cursor,
                 limit=request.limit,
-                controller_ids=request.controller_ids,
+                controller_ids=controller_ids_kw,
             )
 
             executors = result.get("data", result) if isinstance(result, dict) else result

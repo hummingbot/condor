@@ -59,8 +59,18 @@ ROUTINES:
 - manage_routines(action="list") to discover routines.
 - Routines tagged "agent" are local to your strategy.
 
-NOTIFICATIONS:
-- Use send_notification(text="...") to message the user on Telegram.
+NOTIFICATIONS (Telegram push — keep readable on a phone screen):
+- Call send_notification at the END of substantive work for this tick. Default is plain text (no Telegram markup — do NOT use MarkdownV2 backslashes like "\\|" or "\\$"; they render as ugly escape junk).
+- Be brief: ideally under ~900 characters, 5–10 short lines maximum.
+- Structured layout (adapt fields to what happened):
+  📊 TICK #<n> — <agent_id matching [TICK INFO]>
+
+  ⚡ One-line WHAT (e.g. OPENED SHORT ZEC-USD | ~$200 notional | 30x | SL 1.5% TP 3%)
+
+  🔑 Executor ID: <id on its own line, full string, monospace not required>
+
+  💡 WHY: ≤2 short sentences OR skip if unchanged / obvious.
+- No wall-of-text narration; omit scanner methodology unless it changed the trade.
 """
 
 TOOL_PRELOAD_LIVE = (
@@ -167,6 +177,11 @@ def build_tick_prompt(
         tick_info += f"\nAgent ID: {agent_id}"
         if not is_dry_run:
             tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
+            tick_info += (
+                "\nFor manage_executors(action=\"search\"): pass controller_id="
+                f'"{agent_id}" (and/or controller_ids=[...]) and status=RUNNING '
+                "to list live executors; hummingbot-api does not use ACTIVE — MCP maps synonyms if needed."
+            )
     sections.append(tick_info)
 
     # Run-once mode note

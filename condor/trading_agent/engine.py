@@ -39,11 +39,12 @@ log = logging.getLogger(__name__)
 
 async def _notify_via_telegram_bot_api(chat_id: int, text: str) -> None:
     """Send plain text using TELEGRAM_TOKEN when no python-telegram-bot handle exists."""
+    from condor.telegram_notify import prepare_agent_notification_text
     from utils.config import TELEGRAM_TOKEN
 
     if not TELEGRAM_TOKEN or not chat_id:
         return
-    payload_text = (text or "")[:4096]
+    payload_text = prepare_agent_notification_text(text or "", max_chars=4090)
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": payload_text}
     try:

@@ -39,13 +39,17 @@ ACTIVE_SERVER = _args.server_name or os.environ.get("CONDOR_SERVER_NAME", "")
 @mcp.tool()
 async def send_notification(
     text: str,
-    parse_mode: str = "Markdown",
+    parse_mode: str = "plain",
 ) -> dict:
     """Send a Telegram message to the user.
 
+    Prefer plain (default): no Telegram markup so messages read cleanly on mobile.
+    Agents should not emit MarkdownV2 backslash escapes; those appear as stray backslashes.
+
     Args:
-        text: Message text to send.
-        parse_mode: Telegram parse mode ("Markdown" or "HTML"). Default: "Markdown".
+        text: Message body. Long text is softly truncated.
+        parse_mode: "plain" / "" / "none" (default — no Telegram parse_mode; recommended),
+          or "Markdown", "MarkdownV2", "HTML" (Telegram semantics). Case-insensitive.
 
     Returns:
         {"sent": true} on success, {"error": "..."} on failure.
@@ -55,14 +59,41 @@ async def send_notification(
     if not CHAT_ID:
         return {"error": "CONDOR_CHAT_ID not configured"}
 
+    from condor.telegram_notify import prepare_agent_notification_text, strip_telegram_markdown_v2_escapes
+
     import httpx
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": parse_mode,
+    pm_raw = (parse_mode or "").strip().lower()
+    if pm_raw in ("plain", "none", "off"):
+        pm_raw = ""
+
+    pmap = {
+        "markdown": "Markdown",
+        "md": "Markdown",
+        "html": "HTML",
+        "markdownv2": "MarkdownV2",
+        "mv2": "MarkdownV2",
     }
+    use_parse_mode_key: str | None = None
+    if not pm_raw:
+        payload_text = prepare_agent_notification_text(text)
+    elif pm_raw in pmap:
+        use_parse_mode_key = pmap[pm_raw]
+        unstripped = strip_telegram_markdown_v2_escapes(text.strip())
+        if len(unstripped) > 4096:
+            unstripped = unstripped[:4095].rstrip() + "…"
+        payload_text = unstripped
+    else:
+        # Unknown parse_mode — send readable plain text
+        payload_text = prepare_agent_notification_text(text)
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload: dict = {
+        "chat_id": CHAT_ID,
+        "text": payload_text,
+    }
+    if use_parse_mode_key:
+        payload["parse_mode"] = use_parse_mode_key
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, json=payload)
@@ -71,8 +102,8 @@ async def send_notification(
                 return {"sent": True}
             # Retry without parse_mode if formatting fails
             if "can't parse" in data.get("description", "").lower():
-                payload.pop("parse_mode")
-                resp = await client.post(url, json=payload)
+                payload_fallback = {"chat_id": CHAT_ID, "text": prepare_agent_notification_text(text)}
+                resp = await client.post(url, json=payload_fallback)
                 data = resp.json()
                 if data.get("ok"):
                     return {"sent": True}
