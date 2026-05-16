@@ -6,7 +6,14 @@ from dataclasses import dataclass, field
 
 from telegram import Bot
 
-from condor.acp import ACP_COMMANDS, ACPClient, PermissionCallback, PromptDone
+from condor.acp import (
+    ACP_COMMANDS,
+    ACPClient,
+    CursorSdkClient,
+    PermissionCallback,
+    PromptDone,
+)
+from condor.acp.cursor_sdk_client import is_cursor_sdk_model
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from handlers.agents._shared import (
     build_initial_context,
@@ -36,7 +43,7 @@ _health_bot: Bot | None = None
 class AgentSession:
     chat_id: int | str
     agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
-    client: ACPClient | PydanticAIClient
+    client: ACPClient | PydanticAIClient | CursorSdkClient
     mode: str = "condor"  # "condor", "agent_builder"
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
@@ -125,7 +132,15 @@ async def get_or_create_session(
     # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
-    if use_pydantic_ai:
+    if is_cursor_sdk_model(agent_key):
+        client = CursorSdkClient(
+            model=agent_key,
+            mcp_servers=mcp_servers,
+            permission_callback=permission_callback,
+            extra_env=extra_env,
+            cwd=get_project_dir(),
+        )
+    elif use_pydantic_ai:
         # For Pydantic AI models: auto-detect or use configured filter mode
         import os
         from condor.preferences import get_agent_prefs

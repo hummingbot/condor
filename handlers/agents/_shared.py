@@ -87,6 +87,8 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
     # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
     "openrouter:": {"label": "OpenRouter — Pick Model"},
+    "cursor:auto": {"label": "Cursor — Auto model"},
+    "cursor:composer-2": {"label": "Cursor — Composer 2"},
 }
 
 DEFAULT_AGENT = "claude-code"
@@ -271,7 +273,11 @@ def _condor_mcp_args(
 
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
-    effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
+    # Web UI sends chat_id=0 — treat as unset so send_notification targets the Telegram user id.
+    if isinstance(chat_id, int):
+        effective_chat_id = chat_id if chat_id != 0 else user_id
+    else:
+        effective_chat_id = user_id
     args = [
         "--chat-id", str(effective_chat_id),
         "--user-id", str(user_id),
@@ -400,6 +406,7 @@ def build_mcp_servers_for_agent(
 def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram") -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from config_manager import ServerPermission, get_config_manager, get_effective_server
+    from condor.acp.cursor_sdk_client import is_cursor_sdk_model
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     cm = get_config_manager()
@@ -433,7 +440,7 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
         # For ACP agents (Claude Code): instruct them to preload MCP tools via ToolSearch
         # Pydantic-ai agents get tools directly, no preload needed
         tool_preload_hint = ""
-        if agent_key and not is_pydantic_ai_model(agent_key):
+        if agent_key and not is_pydantic_ai_model(agent_key) and not is_cursor_sdk_model(agent_key):
             mcp_tools = [
                 "mcp__mcp-hummingbot__get_market_data",
                 "mcp__mcp-hummingbot__get_portfolio_overview",
@@ -491,5 +498,17 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
         ])
 
         sections.append("\n".join(server_info))
+
+    if agent_key and is_cursor_sdk_model(agent_key):
+        sections.append(
+            "[CURSOR / COMPOSER — HUMMINGBOT MCP]\n"
+            "- Before manage_executors(action=\"create\", ...), call manage_executors(executor_type=\"position_executor\") "
+            "(or the relevant type) with NO action argument. That tool step calls hummingbot-api and returns the live "
+            "schema, parameter table, and markdown guide—do not skip it when building a new executor config.\n"
+            "- Put connector_name, trading_pair, amount, and leverage as top-level keys inside executor_config (siblings "
+            "to triple_barrier_config, not tucked only inside nested objects).\n"
+            "- position_executor amounts are in the BASE asset (e.g. BTC for BTC-USD). Use get_market_data for prices "
+            "first; use data_type / implied prices flow — do not set query_type unless you intend order_book.\n"
+        )
 
     return "\n\n".join(sections)

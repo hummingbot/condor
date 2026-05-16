@@ -640,7 +640,7 @@ class JournalManager:
         summary = (
             f"Last tick: #{tick} at {now}\n"
             f"Status: {status} | PnL: ${pnl:+.2f} | Open: {open_count} executors\n"
-            f"Last action: {last_action[:100]}"
+            f"Last action: {last_action}"
         )
         self._replace_section("Summary", summary)
 
@@ -710,7 +710,7 @@ class JournalManager:
         """Record a tick entry. Returns the new tick number."""
         self._tick_count += 1
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-        summary = response_summary[:200].replace("\n", " ")
+        summary = " ".join(response_summary.split())
         entry = f"- tick#{self._tick_count} | {now} | actions={actions} | {summary}"
         self._append_to_section("Ticks", entry)
         return self._tick_count

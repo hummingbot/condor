@@ -25,6 +25,7 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
+from condor.acp.cursor_sdk_client import CursorSdkClient, is_cursor_sdk_model
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
 from .journal import JournalManager, next_experiment_number, next_session_number
@@ -34,6 +35,32 @@ from .strategy import Strategy
 from .providers import ProviderRegistry
 
 log = logging.getLogger(__name__)
+
+
+async def _notify_via_telegram_bot_api(chat_id: int, text: str) -> None:
+    """Send plain text using TELEGRAM_TOKEN when no python-telegram-bot handle exists."""
+    from utils.config import TELEGRAM_TOKEN
+
+    if not TELEGRAM_TOKEN or not chat_id:
+        return
+    payload_text = (text or "")[:4096]
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": payload_text}
+    try:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                if not data.get("ok"):
+                    log.warning(
+                        "Telegram notify failed for chat_id=%s: %s",
+                        chat_id,
+                        data.get("description", data),
+                    )
+    except Exception:
+        log.exception("Telegram notify HTTP failed for chat_id=%s", chat_id)
+
 
 # Module-level registry of running engines
 _engines: dict[str, "TickEngine"] = {}
@@ -370,7 +397,7 @@ class TickEngine:
         else:
             # Sessions: full journal tracking
             tick_num = self.journal.record_tick(
-                response_summary=response_text[:500],
+                response_summary=response_text,
             )
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
@@ -395,7 +422,7 @@ class TickEngine:
                 duration=tick_duration,
             )
 
-            action_brief = response_text[:100].replace("\n", " ") if response_text else "No response"
+            action_brief = response_text.replace("\n", " ") if response_text else "No response"
             self.journal.write_summary(
                 tick=tick_num,
                 status="Running",
@@ -409,7 +436,11 @@ class TickEngine:
                 self.agent_id, tick_num, len(tool_calls), len(response_text),
             )
 
-    async def _collect_stream(self, acp_client: ACPClient, prompt: str):
+    async def _collect_stream(
+        self,
+        acp_client: ACPClient | PydanticAIClient | CursorSdkClient,
+        prompt: str,
+    ):
         """Wrapper to make prompt_stream compatible with wait_for."""
         async for event in acp_client.prompt_stream(prompt):
             yield event
@@ -420,7 +451,7 @@ class TickEngine:
     # Client factory
     # ------------------------------------------------------------------
 
-    async def _create_client(self) -> "ACPClient | PydanticAIClient":
+    async def _create_client(self) -> "ACPClient | PydanticAIClient | CursorSdkClient":
         """Build an ACP or PydanticAI client (does NOT start it)."""
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
@@ -446,6 +477,19 @@ class TickEngine:
         permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
 
         agent_key = self.config.get("agent_key") or self.strategy.agent_key
+
+        if is_cursor_sdk_model(agent_key):
+            log.info(
+                "TickEngine agent_key=%s uses Cursor SDK — MCP stdio configs are forwarded; "
+                "Composer does not use Condor Telegram permission_callback for MCP tools.",
+                agent_key,
+            )
+            return CursorSdkClient(
+                model=agent_key,
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+            )
+
         use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
         if use_pydantic_ai:
@@ -512,11 +556,16 @@ class TickEngine:
 
     async def _notify(self, message: str) -> None:
         """Send a notification to the user via Telegram."""
-        if hasattr(self, "_bot") and self._bot:
+        chat_id = self.chat_id
+        text = (message or "")[:4096]
+        bot = getattr(self, "_bot", None)
+        if bot:
             try:
-                await self._bot.send_message(chat_id=self.chat_id, text=message)
+                await bot.send_message(chat_id=chat_id, text=text)
+                return
             except Exception:
-                log.exception("Failed to send notification to chat %s", self.chat_id)
+                log.exception("Failed to send notification to chat %s", chat_id)
+        await _notify_via_telegram_bot_api(chat_id, text)
 
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""

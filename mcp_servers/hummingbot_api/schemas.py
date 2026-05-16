@@ -244,15 +244,15 @@ class ManageExecutorsRequest(BaseModel):
         description="Account name for creating executors. Defaults to 'master_account'.",
     )
 
-    # Position management fields (for positions_summary, get_position, clear_position)
+    # Position management fields (for positions_summary, get_position, clear_position, and create hoisting)
     connector_name: str | None = Field(
         default=None,
-        description="Connector name for position filtering or clearing.",
+        description="Connector name (e.g. hyperliquid_perpetual). For create: merged into executor_config if omitted there.",
     )
 
     trading_pair: str | None = Field(
         default=None,
-        description="Trading pair for position filtering or clearing.",
+        description="Trading pair (e.g. BTC-USD). For create: merged into executor_config if omitted there.",
     )
 
     controller_id: str | None = Field(
@@ -354,24 +354,25 @@ class GatewayConfigRequest(BaseModel):
     Resource Types:
     - chains: Blockchain chains (get all chains)
     - networks: Network configurations (list, get, update) - format: 'chain-network'
-    - tokens: Token configurations (list, add, delete) per network
+    - tokens: Token configurations (list, add, delete, save) per network
     - connectors: DEX connector configurations (list, get, update)
-    - pools: Liquidity pools (list, add) per connector/network
+    - pools: Liquidity pools (list, add, delete, save) per connector/network
     - wallets: Wallet management (add, delete) for blockchain chains
 
     Actions:
     - list: List available resources
     - get: Get specific resource configuration
     - update: Update resource configuration
-    - add: Add new resource (tokens, pools, wallets)
-    - delete: Delete resource (tokens, wallets)
+    - add: Add new resource (tokens, pools, wallets) - requires full details
+    - delete: Delete resource (tokens, pools, wallets)
+    - save: Save resource by address only (tokens, pools) - auto-fetches details
     """
 
     resource_type: Literal["chains", "networks", "tokens", "connectors", "pools", "wallets"] = Field(
         description="Type of resource to manage"
     )
 
-    action: Literal["list", "get", "update", "add", "delete"] = Field(
+    action: Literal["list", "get", "update", "add", "delete", "save"] = Field(
         description="Action to perform on the resource"
     )
 
@@ -385,9 +386,9 @@ class GatewayConfigRequest(BaseModel):
 
     connector_name: str | None = Field(
         default=None,
-        description="DEX connector name (e.g., 'meteora', 'raydium', 'uniswap'). "
+        description="DEX connector name (e.g., 'meteora', 'raydium', 'orca', 'uniswap'). "
                     "Required for connector operations and pool list operations",
-        examples=["meteora", "raydium", "uniswap", "pancakeswap"]
+        examples=["meteora", "raydium", "orca", "uniswap", "pancakeswap"]
     )
 
     # Configuration data
@@ -634,7 +635,7 @@ class GatewayCLMMRequest(BaseModel):
     # Common parameters
     connector: str | None = Field(
         default=None,
-        description="CLMM connector name (required). Examples: 'meteora', 'raydium', 'uniswap'"
+        description="CLMM connector name (required). Examples: 'meteora', 'raydium', 'orca', 'uniswap', 'pancakeswap'"
     )
 
     network: str | None = Field(
