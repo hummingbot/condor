@@ -206,7 +206,10 @@ class ManageExecutorsRequest(BaseModel):
 
     status: str | None = Field(
         default=None,
-        description="Filter by status (e.g., 'RUNNING', 'TERMINATED').",
+        description=(
+            "hummingbot-api status: RUNNING or TERMINATED. "
+            "MCP normalizes synonyms: ACTIVE/OPEN/LIVE/ENABLED→RUNNING; CLOSED/DONE/STOPPED→TERMINATED."
+        ),
     )
 
     # Pagination
@@ -257,12 +260,15 @@ class ManageExecutorsRequest(BaseModel):
 
     controller_id: str | None = Field(
         default=None,
-        description="Controller ID that owns this executor. Used for create, positions_summary, get_position, clear_position, and performance_report.",
+        description=(
+            "Controller ID (hummingbot) for create, positions_summary, clear_position, performance_report. "
+            "For action=search this is also merged into the controller_ids filter if controller_ids is omitted."
+        ),
     )
 
     controller_ids: list[str] | None = Field(
         default=None,
-        description="Filter by controller IDs (for search).",
+        description="Filter search by one or more controller_ids (use the trading agent's Agent ID from [TICK INFO]).",
     )
 
     @field_validator("executor_type")

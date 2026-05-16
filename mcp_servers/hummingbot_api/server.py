@@ -872,7 +872,7 @@ async def manage_executors(
         connector_names: Filter by connector names (for search).
         trading_pairs: Filter by trading pairs (for search).
         executor_types: Filter by executor types (for search).
-        status: Filter by status - 'RUNNING', 'TERMINATED' (for search).
+        status: Filter hummingbot status — RUNNING (live) / TERMINATED; ACTIVE and similar map to RUNNING in MCP.
         cursor: Pagination cursor for search results.
         limit: Maximum results to return (default: 50, max: 1000).
         keep_position: When stopping, keep the position open instead of closing it (default: False).
@@ -881,8 +881,8 @@ async def manage_executors(
         account_name: Account name for creating executors (default: 'master_account').
         connector_name: For create: merged into executor_config if missing. Also used for positions_summary / clear_position.
         trading_pair: For create: merged into executor_config if missing. Also used for positions_summary / clear_position.
-        controller_id: Controller ID that owns the executor. Used for create, positions_summary, clear_position, and performance_report.
-        controller_ids: Filter by controller IDs (for search).
+        controller_id: Controller ID for create/search filter (merged into controller_ids for search).
+        controller_ids: controller_id filter(s) for search — prefer hummingbot RUNNING status (not ACTIVE; MCP maps synonyms).
     """
     # Create and validate request using Pydantic model
     request = ManageExecutorsRequest(
