@@ -28,6 +28,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress httpx INFO-level request logging — python-telegram-bot embeds the
+# bot token in the request path (api.telegram.org/bot<TOKEN>/getUpdates), and
+# httpx's default INFO logs the full URL on every call. With long-poll firing
+# every ~10s, the token ends up in every log handler (journald, files, etc.),
+# which makes safe log sharing impossible. Suppressing to WARNING preserves
+# real HTTP errors while removing the token leak.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
     """Build the start menu inline keyboard."""
