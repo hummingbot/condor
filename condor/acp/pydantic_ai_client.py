@@ -92,13 +92,14 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Model prefix → pydantic-ai model string mapping
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
-PYDANTIC_AI_PREFIXES = frozenset({"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"})
+PYDANTIC_AI_PREFIXES = frozenset({"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter", "venice"})
 
-# Default base URLs for local model providers and OpenRouter
+# Default base URLs for local model providers and OpenAI-compatible cloud gateways
 DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "venice": "https://api.venice.ai/api/v1",
 }
 
 
@@ -122,6 +123,7 @@ class PydanticAIClient:
       - "groq:llama-3.3-70b-versatile" → uses Groq cloud
       - "anthropic:claude-sonnet-4-6" → uses Anthropic API
       - "openrouter:anthropic/claude-sonnet-4-5" → uses OpenRouter (requires OPENROUTER_API_KEY)
+      - "venice:llama-3.3-70b" → uses Venice AI (requires VENICE_API_KEY)
     """
 
     def __init__(
@@ -183,6 +185,27 @@ class PydanticAIClient:
                 )
             provider = OpenAIProvider(
                 base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
+                api_key=api_key,
+            )
+            return OpenAIModel(model_id, provider=provider)
+
+        # Venice AI: OpenAI-compatible cloud gateway, requires API key.
+        # Same shape as OpenRouter — handled before the generic DEFAULT_BASE_URLS
+        # branch because Venice rejects the api_key="not-needed" placeholder.
+        if prefix == "venice":
+            if not model_id:
+                raise RuntimeError(
+                    "Venice requires an explicit model id, e.g. "
+                    "'venice:llama-3.3-70b' or 'venice:venice-uncensored'. "
+                    "See https://docs.venice.ai for available models."
+                )
+            api_key = os.environ.get("VENICE_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "VENICE_API_KEY is not set. Add it to your .env to use venice:* models."
+                )
+            provider = OpenAIProvider(
+                base_url=base_url or DEFAULT_BASE_URLS["venice"],
                 api_key=api_key,
             )
             return OpenAIModel(model_id, provider=provider)
