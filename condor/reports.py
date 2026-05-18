@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -21,6 +22,7 @@ _last_report_id: str | None = None
 CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
+_index_lock = asyncio.Lock()
 
 # ── HTML Template ──
 
@@ -229,24 +231,26 @@ def get_report(report_id: str) -> dict | None:
     return None
 
 
-def delete_report(report_id: str) -> bool:
-    entries = _read_index()
-    new_entries = []
-    deleted = False
-    for e in entries:
-        if e["id"] == report_id:
-            fpath = CHARTS_DIR / e["filename"]
-            if fpath.exists():
-                fpath.unlink()
-            deleted = True
-        else:
-            new_entries.append(e)
-    if deleted:
-        _write_index(new_entries)
+async def delete_report(report_id: str) -> bool:
+    async with _index_lock:
+        entries = _read_index()
+        new_entries = []
+        deleted = False
+        for e in entries:
+            if e["id"] == report_id:
+                fpath = CHARTS_DIR / e["filename"]
+                if fpath.exists():
+                    fpath.unlink()
+                deleted = True
+            else:
+                new_entries.append(e)
+        if deleted:
+            _write_index(new_entries)
     return deleted
 
 
-def _cleanup(max_reports: int = MAX_REPORTS) -> None:
+def _cleanup_locked(max_reports: int = MAX_REPORTS) -> None:
+    """Run cleanup while caller already holds _index_lock."""
     entries = _read_index()
     if len(entries) <= max_reports:
         return
@@ -307,7 +311,7 @@ class ReportBuilder:
         self._sections.append({"type": "table", "columns": columns or [], "rows": rows})
         return self
 
-    def save(self, report_id: str | None = None) -> str:
+    async def save(self, report_id: str | None = None) -> str:
         """Save the report as an HTML file.
 
         Args:
@@ -324,60 +328,56 @@ class ReportBuilder:
         for tag in self._tags:
             meta_badges += f"<span>#{tag}</span>"
 
-        if report_id is not None:
-            # Update existing report
-            entries = _read_index()
-            entry = next((e for e in entries if e["id"] == report_id), None)
-            if entry is None:
-                raise ValueError(f"Report '{report_id}' not found in index")
-
-            html = _HTML_TEMPLATE.format(
-                title=self._title,
-                created_at=now.strftime("%Y-%m-%d %H:%M UTC"),
-                meta_badges=meta_badges,
-                sections_html=sections_html,
-            )
-            (CHARTS_DIR / entry["filename"]).write_text(html)
-
-            entry["updated_at"] = now.isoformat()
-            entry["title"] = self._title
-            entry["tags"] = self._tags
-            _write_index(entries)
-
-            global _last_report_id
-            _last_report_id = report_id
-            logger.info(f"Report updated: {entry['filename']}")
-            return report_id
-
-        # New report
-        new_id = uuid.uuid4().hex[:6]
-        ts_str = now.strftime("%Y%m%d_%H%M%S")
-        slug = _slugify(self._title)
-        filename = f"{ts_str}_{slug}_{new_id}.html"
-
-        html = _HTML_TEMPLATE.format(
+        html_content = _HTML_TEMPLATE.format(
             title=self._title,
             created_at=now.strftime("%Y-%m-%d %H:%M UTC"),
             meta_badges=meta_badges,
             sections_html=sections_html,
         )
 
-        (CHARTS_DIR / filename).write_text(html)
+        global _last_report_id
 
-        entry = {
-            "id": new_id,
-            "title": self._title,
-            "filename": filename,
-            "created_at": now.isoformat(),
-            "source_type": self._source_type,
-            "source_name": self._source_name,
-            "tags": self._tags,
-        }
+        async with _index_lock:
+            if report_id is not None:
+                # Update existing report
+                entries = _read_index()
+                entry = next((e for e in entries if e["id"] == report_id), None)
+                if entry is None:
+                    raise ValueError(f"Report '{report_id}' not found in index")
 
-        entries = _read_index()
-        entries.append(entry)
-        _write_index(entries)
-        _cleanup()
+                (CHARTS_DIR / entry["filename"]).write_text(html_content)
+
+                entry["updated_at"] = now.isoformat()
+                entry["title"] = self._title
+                entry["tags"] = self._tags
+                _write_index(entries)
+
+                _last_report_id = report_id
+                logger.info(f"Report updated: {entry['filename']}")
+                return report_id
+
+            # New report
+            new_id = uuid.uuid4().hex[:6]
+            ts_str = now.strftime("%Y%m%d_%H%M%S")
+            slug = _slugify(self._title)
+            filename = f"{ts_str}_{slug}_{new_id}.html"
+
+            (CHARTS_DIR / filename).write_text(html_content)
+
+            entry = {
+                "id": new_id,
+                "title": self._title,
+                "filename": filename,
+                "created_at": now.isoformat(),
+                "source_type": self._source_type,
+                "source_name": self._source_name,
+                "tags": self._tags,
+            }
+
+            entries = _read_index()
+            entries.append(entry)
+            _write_index(entries)
+            _cleanup_locked()
 
         _last_report_id = new_id
         logger.info(f"Report saved: {filename}")
@@ -468,7 +468,7 @@ class LiveReport:
         self._builder.source("routine", self._source_name)
         self._builder.tags(self._tags)
 
-    def update(self) -> str:
+    async def update(self) -> str:
         """Save or update the report. Returns report_id."""
-        self._report_id = self._builder.save(report_id=self._report_id)
+        self._report_id = await self._builder.save(report_id=self._report_id)
         return self._report_id
