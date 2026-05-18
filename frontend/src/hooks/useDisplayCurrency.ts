@@ -1,15 +1,12 @@
 import { useCallback, useSyncExternalStore } from "react";
 
-export type DisplayCurrency = "USDT" | "USD" | "USDC" | "BTC" | "ETH" | "BRL" | "EUR";
+export type DisplayCurrency = "USDT" | "BTC" | "BRL" | "EUR";
 
-export const CURRENCY_OPTIONS: DisplayCurrency[] = ["USDT", "USD", "USDC", "BTC", "ETH", "BRL", "EUR"];
+export const CURRENCY_OPTIONS: DisplayCurrency[] = ["USDT", "BTC", "BRL", "EUR"];
 
 export const CURRENCY_SYMBOLS: Record<DisplayCurrency, string> = {
   USDT: "$",
-  USD: "$",
-  USDC: "$",
   BTC: "\u20BF",
-  ETH: "\u039E",
   BRL: "R$",
   EUR: "\u20AC",
 };

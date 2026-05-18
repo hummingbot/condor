@@ -11,7 +11,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
 } from "lucide-react";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { useRates } from "@/hooks/useRates";
@@ -25,28 +25,10 @@ import {
   type PortfolioHistoryPoint,
   type PortfolioHistoryResponse,
 } from "@/lib/api";
-import { formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
-
-function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-}
-
-function formatPrice(val: number) {
-  if (val === 0) return "-";
-  if (val >= 1000) return "$" + val.toLocaleString("en-US", { maximumFractionDigits: 0 });
-  if (val >= 1) return "$" + val.toFixed(2);
-  if (val >= 0.01) return "$" + val.toFixed(4);
-  return "$" + val.toExponential(2);
-}
 
 function formatAmount(val: number) {
   if (val === 0) return "0";
@@ -56,9 +38,12 @@ function formatAmount(val: number) {
   return val.toLocaleString("en-US", { maximumFractionDigits: 4 });
 }
 
-function formatPnl(val: number) {
-  const prefix = val >= 0 ? "+" : "";
-  return prefix + formatUsd(val);
+function formatTokenPrice(val: number, symbol = "$") {
+  if (val === 0) return "-";
+  if (val >= 1000) return symbol + val.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  if (val >= 1) return symbol + val.toFixed(2);
+  if (val >= 0.01) return symbol + val.toFixed(4);
+  return symbol + val.toExponential(2);
 }
 
 // ── Chart Colors ──
@@ -133,7 +118,7 @@ function KpiCell({
           <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold"
             style={{ color: pnl >= 0 ? "var(--color-green)" : "var(--color-red)" }}>
             {pnl >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
-            {currencySymbol ? formatCurrencyPnl(pnl, currencySymbol) : formatPnl(pnl)}
+            {formatCurrencyPnl(pnl, currencySymbol || "$")}
           </span>
         )}
       </div>
@@ -158,6 +143,7 @@ function DashboardStrip({
   onPeriodChange,
   onNavigate,
   convert,
+  convertFromUsd,
   currencySymbol,
 }: {
   totalUsd: number;
@@ -175,6 +161,7 @@ function DashboardStrip({
   onPeriodChange: (p: string) => void;
   onNavigate: (path: string) => void;
   convert: (value: number, quote: string) => { value: number; converted: boolean };
+  convertFromUsd: (val: number) => number;
   currencySymbol: string;
 }) {
   const execStats = useMemo(() => computeExecutorStats(allExecutors, period, convert), [allExecutors, period, convert]);
@@ -190,9 +177,10 @@ function DashboardStrip({
       <div className="flex items-stretch divide-x divide-[var(--color-border)]">
         <KpiCell
           label="Portfolio"
-          mainValue={formatUsd(totalUsd)}
-          pnl={portfolioPnl ?? undefined}
+          mainValue={formatCurrency(convertFromUsd(totalUsd), currencySymbol)}
+          pnl={portfolioPnl != null ? convertFromUsd(portfolioPnl) : undefined}
           details={`${totalTokens} assets · ${connectorCount} connector${connectorCount !== 1 ? "s" : ""}`}
+          currencySymbol={currencySymbol}
         />
 
         <KpiCell
@@ -214,8 +202,9 @@ function DashboardStrip({
         <KpiCell
           label="Agents"
           mainValue={activeAgents.length}
-          pnl={agentPnl}
+          pnl={convertFromUsd(agentPnl)}
           details={`${agents.length} total · ${agentSessions} session${agentSessions !== 1 ? "s" : ""}`}
+          currencySymbol={currencySymbol}
         />
 
         {/* ── Period + Quick Links ── */}
@@ -320,7 +309,17 @@ function AllocationBar({ pct }: { pct: number }) {
 
 // ── Table Rows ──
 
-function TokenRow({ b, totalPortfolio }: { b: BalanceItem; totalPortfolio: number }) {
+function TokenRow({
+  b,
+  totalPortfolio,
+  convertFromUsd,
+  currencySymbol,
+}: {
+  b: BalanceItem;
+  totalPortfolio: number;
+  convertFromUsd: (val: number) => number;
+  currencySymbol: string;
+}) {
   const price = b.total > 0 ? b.usd_value / b.total : 0;
   const pct = totalPortfolio > 0 ? (b.usd_value / totalPortfolio) * 100 : 0;
 
@@ -331,10 +330,10 @@ function TokenRow({ b, totalPortfolio }: { b: BalanceItem; totalPortfolio: numbe
       </td>
       <td className="px-4 py-2 text-right text-sm tabular-nums">{formatAmount(b.total)}</td>
       <td className="px-4 py-2 text-right text-sm tabular-nums text-[var(--color-text-muted)]">
-        {formatPrice(price)}
+        {formatTokenPrice(convertFromUsd(price), currencySymbol)}
       </td>
       <td className="px-4 py-2 text-right text-sm tabular-nums font-medium">
-        {formatUsd(b.usd_value)}
+        {formatCurrency(convertFromUsd(b.usd_value), currencySymbol)}
       </td>
       <td className="px-4 py-2">
         <AllocationBar pct={pct} />
@@ -346,9 +345,13 @@ function TokenRow({ b, totalPortfolio }: { b: BalanceItem; totalPortfolio: numbe
 function ConnectorRow({
   connector,
   totalPortfolio,
+  convertFromUsd,
+  currencySymbol,
 }: {
   connector: ConnectorBalance;
   totalPortfolio: number;
+  convertFromUsd: (val: number) => number;
+  currencySymbol: string;
 }) {
   const [expanded, setExpanded] = useState(true);
   const Chevron = expanded ? ChevronDown : ChevronRight;
@@ -372,7 +375,7 @@ function ConnectorRow({
         <td className="px-4 py-3" />
         <td className="px-4 py-3" />
         <td className="px-4 py-3 text-right font-semibold tabular-nums">
-          {formatUsd(connector.total_usd)}
+          {formatCurrency(convertFromUsd(connector.total_usd), currencySymbol)}
         </td>
         <td className="px-4 py-3">
           <span className="text-sm tabular-nums text-[var(--color-text-muted)]">
@@ -382,7 +385,7 @@ function ConnectorRow({
       </tr>
       {expanded &&
         connector.balances.map((b) => (
-          <TokenRow key={b.token} b={b} totalPortfolio={totalPortfolio} />
+          <TokenRow key={b.token} b={b} totalPortfolio={totalPortfolio} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
         ))}
     </>
   );
@@ -404,7 +407,7 @@ function formatTooltipDate(ts: number, range: string) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function PortfolioEvolution({ server, range }: { server: string; range: string }) {
+function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: { server: string; range: string; convertFromUsd: (val: number) => number; currencySymbol: string }) {
   const [stacked, setStacked] = useState(false);
   const [hover, setHover] = useState<{ x: number; point: PortfolioHistoryPoint } | null>(null);
   const queryClient = useQueryClient();
@@ -435,8 +438,20 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
   });
 
   const activeData: PortfolioHistoryResponse | undefined = stacked && breakdownData ? breakdownData : data;
-  const points = activeData?.points ?? [];
+  const rawPoints = activeData?.points ?? [];
   const topTokens = activeData?.top_tokens ?? [];
+
+  // Convert all values from USDT to display currency
+  const points = useMemo(() =>
+    rawPoints.map(p => ({
+      ...p,
+      total_usd: convertFromUsd(p.total_usd),
+      tokens: p.tokens ? Object.fromEntries(
+        Object.entries(p.tokens).map(([k, v]) => [k, convertFromUsd(v)])
+      ) : undefined,
+    })),
+    [rawPoints, convertFromUsd]
+  );
 
   const W = 800;
   const H = 250;
@@ -603,7 +618,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
                   fill="var(--color-text-muted)"
                   fontSize="10"
                 >
-                  {formatUsd(val)}
+                  {formatCurrency(val, currencySymbol)}
                 </text>
               </g>
             ))}
@@ -681,14 +696,14 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
                             {entry.token}
                           </text>
                           <text x={tooltipW - 8} y="7" fill="var(--color-text-muted)" fontSize="9" textAnchor="end">
-                            {formatUsd(entry.value)}
+                            {formatCurrency(entry.value, currencySymbol)}
                           </text>
                         </g>
                       ))}
                     </>
                   ) : (
                     <text x="8" y="32" fill="var(--color-text)" fontSize="12" fontWeight="bold">
-                      {formatUsd(hover.point.total_usd)}
+                      {formatCurrency(hover.point.total_usd, currencySymbol)}
                     </text>
                   )}
                 </g>
@@ -789,7 +804,7 @@ export function Portfolio() {
   const controllers = bots?.controllers ?? [];
   const executorsList = allExecutors ?? [];
   const quoteCurrencies = useMemo(() => {
-    const quotes = new Set<string>();
+    const quotes = new Set<string>(["USDT"]);
     for (const c of controllers) {
       quotes.add(c.trading_pair?.split("-")[1] || "USDT");
     }
@@ -799,6 +814,12 @@ export function Portfolio() {
     return Array.from(quotes);
   }, [controllers, executorsList]);
   const { convert, currencySymbol } = useRates(quoteCurrencies);
+
+  // Convert a USDT-denominated value to the display currency
+  const convertFromUsd = useCallback(
+    (val: number) => convert(val, "USDT").value,
+    [convert]
+  );
 
   if (!server) {
     return (
@@ -906,13 +927,14 @@ export function Portfolio() {
         onPeriodChange={setPeriod}
         onNavigate={navigate}
         convert={convert}
+        convertFromUsd={convertFromUsd}
         currencySymbol={currencySymbol}
       />
 
       {/* Portfolio Evolution + Top Holdings side by side */}
       <div className="flex flex-col lg:flex-row gap-4">
         <div className={connectors.length > 0 && topTokens.length > 0 ? "lg:flex-[2] min-w-0" : "w-full"}>
-          <PortfolioEvolution server={server!} range={period} />
+          <PortfolioEvolution server={server!} range={period} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
         </div>
         {connectors.length > 0 && topTokens.length > 0 && (
           <div className="lg:flex-1 min-w-0">
@@ -951,7 +973,7 @@ export function Portfolio() {
             </thead>
             <tbody>
               {connectors.map((c) => (
-                <ConnectorRow key={c.connector} connector={c} totalPortfolio={totalUsd} />
+                <ConnectorRow key={c.connector} connector={c} totalPortfolio={totalUsd} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
               ))}
             </tbody>
           </table>

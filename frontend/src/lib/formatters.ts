@@ -10,6 +10,8 @@ export function formatCurrency(val: number, symbol = "$") {
       minimumFractionDigits: 2,
     });
   }
+  // Adaptive precision for small values (e.g. BTC)
+  if (Math.abs(val) < 0.01 && val !== 0) return symbol + val.toPrecision(4);
   return symbol + val.toFixed(2);
 }
 
