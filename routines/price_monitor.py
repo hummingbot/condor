@@ -81,6 +81,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         # Main monitoring loop
         while True:
             try:
+                # Re-acquire client each iteration to avoid stale sessions
+                client = await get_client(chat_id, context=context)
+                if not client:
+                    await asyncio.sleep(config.interval_sec)
+                    continue
+
                 # Get current price
                 prices = await client.market_data.get_prices(
                     connector_name=config.connector, trading_pairs=config.trading_pair
@@ -157,7 +163,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         report.builder.kpi("Runtime", f"{mins}m {secs}s")
                         report.builder.kpi("Alerts", str(state["alerts_sent"]))
                         report.builder.table(history[-50:])
-                        report.update()
+                        await report.update()
                     except Exception as e:
                         logger.debug(f"Report update failed: {e}")
 

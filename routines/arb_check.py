@@ -544,7 +544,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             if levels:
                 builder.table(levels)
 
-        builder.save()
+        await builder.save()
     except Exception as e:
         logger.warning(f"Report generation failed: {e}")
 
