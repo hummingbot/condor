@@ -51,7 +51,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     model_lower = model_name.lower()
 
     # Cloud providers always get full access (they're powerful enough)
-    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]):
+    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:", "venice:"]):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
 
@@ -160,6 +160,9 @@ class PydanticAIClient:
           - openrouter:model → OpenAI-compat at https://openrouter.ai/api/v1,
                                requires OPENROUTER_API_KEY; model id must be
                                explicit (e.g. "openrouter:anthropic/claude-sonnet-4-5").
+          - venice:model     → OpenAI-compat at https://api.venice.ai/api/v1,
+                               requires VENICE_API_KEY; model id must be
+                               explicit (e.g. "venice:llama-3.3-70b").
           - openai:model     → OpenAI API (or custom base_url for vLLM, etc.)
           - groq/anthropic   → standard pydantic-ai resolution
         """
