@@ -68,7 +68,8 @@ export function useMainControllerData(
     ];
     return all.filter(
       (p) =>
-        p.controller_id === "main" &&
+        // Show positions from main controller or untagged (executor-level positions)
+        (!p.controller_id || p.controller_id === "main") &&
         p.connector_name === connector &&
         p.trading_pair === pair,
     );

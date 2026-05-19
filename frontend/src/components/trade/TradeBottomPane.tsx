@@ -1,13 +1,12 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock } from "lucide-react";
+import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
+import { useRates } from "@/hooks/useRates";
 import {
-  formatPnl,
   formatPct,
-  formatVolume,
   formatAge,
   formatUsd,
   pnlColor,
@@ -188,6 +187,35 @@ function ExecutorTooltip({
   );
 }
 
+function SortTh<T extends string>({
+  col, current, asc, onClick, align, children,
+}: {
+  col: T; current: T; asc: boolean; onClick: (col: T) => void;
+  align?: "right"; children: React.ReactNode;
+}) {
+  const active = current === col;
+  return (
+    <th
+      className={`px-3 py-1.5 font-medium cursor-pointer select-none hover:text-[var(--color-text)] transition-colors ${align === "right" ? "text-right" : ""}`}
+      onClick={() => onClick(col)}
+    >
+      <span className="inline-flex items-center gap-0.5">
+        {align === "right" && (
+          active
+            ? (asc ? <ArrowUp className="h-2.5 w-2.5" /> : <ArrowDown className="h-2.5 w-2.5" />)
+            : <ArrowUpDown className="h-2.5 w-2.5 opacity-30" />
+        )}
+        {children}
+        {align !== "right" && (
+          active
+            ? (asc ? <ArrowUp className="h-2.5 w-2.5" /> : <ArrowDown className="h-2.5 w-2.5" />)
+            : <ArrowUpDown className="h-2.5 w-2.5 opacity-30" />
+        )}
+      </span>
+    </th>
+  );
+}
+
 export function TradeBottomPane({
   executors,
   positions,
@@ -303,11 +331,49 @@ export function TradeBottomPane({
     setHoveredExecutor(null);
   }, []);
 
+  // Currency conversion for the current pair's quote asset
+  const quoteCurrency = pair.split("-")[1] || "USDT";
+  const { formatPnlValue, formatValue } = useRates([quoteCurrency]);
+
+  const fmtPnl = (val: number) => formatPnlValue(val, quoteCurrency);
+  const fmtVol = (val: number) => formatValue(val, quoteCurrency);
+
   const activeExecutors = executors.filter((e) => isExecutorActive(e.status));
   const totalPnl = executors.reduce((sum, e) => sum + (e.pnl || 0), 0);
   const totalVolume = executors.reduce((sum, e) => sum + (e.volume || 0), 0);
 
-  const sortedExecutors = [...executors].sort((a, b) => b.timestamp - a.timestamp);
+  type SortCol = "status" | "pnl" | "pnl_pct" | "volume" | "age";
+  const [sortCol, setSortCol] = useState<SortCol>("status");
+  const [sortAsc, setSortAsc] = useState(false);
+
+  const handleSortClick = useCallback((col: SortCol) => {
+    setSortCol((prev) => {
+      if (prev === col) { setSortAsc((a) => !a); return col; }
+      setSortAsc(false);
+      return col;
+    });
+  }, []);
+
+  const sortedExecutors = useMemo(() => {
+    const arr = [...executors];
+    const dir = sortAsc ? 1 : -1;
+    arr.sort((a, b) => {
+      switch (sortCol) {
+        case "status": {
+          const aActive = isExecutorActive(a.status) ? 1 : 0;
+          const bActive = isExecutorActive(b.status) ? 1 : 0;
+          if (aActive !== bActive) return (bActive - aActive) * dir;
+          return (b.timestamp - a.timestamp) * dir;
+        }
+        case "pnl": return (a.pnl - b.pnl) * dir;
+        case "pnl_pct": return ((a.net_pnl_pct || 0) - (b.net_pnl_pct || 0)) * dir;
+        case "volume": return (a.volume - b.volume) * dir;
+        case "age": return (a.timestamp - b.timestamp) * dir;
+        default: return (b.timestamp - a.timestamp) * dir;
+      }
+    });
+    return arr;
+  }, [executors, sortCol, sortAsc]);
 
   return (
     <div ref={containerRef} className="border-t border-[var(--color-border)] bg-[var(--color-surface)] h-full flex flex-col relative">
@@ -329,9 +395,9 @@ export function TradeBottomPane({
             <>
               <span className="text-[var(--color-border)]">|</span>
               <span style={{ color: pnlColor(totalPnl) }} className="font-mono font-medium">
-                {formatPnl(totalPnl)}
+                {fmtPnl(totalPnl)}
               </span>
-              <span className="font-mono">{formatVolume(totalVolume)} vol</span>
+              <span className="font-mono">{fmtVol(totalVolume)} vol</span>
             </>
           )}
         </div>
@@ -394,19 +460,20 @@ export function TradeBottomPane({
                     <th className="px-3 py-1.5 font-medium">ID</th>
                     <th className="px-3 py-1.5 font-medium">Type</th>
                     <th className="px-3 py-1.5 font-medium">Side</th>
+                    <SortTh col="status" current={sortCol} asc={sortAsc} onClick={handleSortClick}>Status</SortTh>
                     <th className="px-3 py-1.5 font-medium text-right">Entry</th>
                     <th className="px-3 py-1.5 font-medium text-right">Price</th>
-                    <th className="px-3 py-1.5 font-medium text-right">PnL</th>
-                    <th className="px-3 py-1.5 font-medium text-right">PnL%</th>
-                    <th className="px-3 py-1.5 font-medium text-right">Volume</th>
-                    <th className="px-3 py-1.5 font-medium text-right">Age</th>
+                    <SortTh col="pnl" current={sortCol} asc={sortAsc} onClick={handleSortClick} align="right">PnL</SortTh>
+                    <SortTh col="pnl_pct" current={sortCol} asc={sortAsc} onClick={handleSortClick} align="right">PnL%</SortTh>
+                    <SortTh col="volume" current={sortCol} asc={sortAsc} onClick={handleSortClick} align="right">Volume</SortTh>
+                    <SortTh col="age" current={sortCol} asc={sortAsc} onClick={handleSortClick} align="right">Age</SortTh>
                     <th className="w-8" />
                   </tr>
                 </thead>
                 <tbody>
                   {sortedExecutors.length === 0 ? (
                     <tr>
-                      <td colSpan={10} className="px-3 py-3 text-center text-[var(--color-text-muted)]">
+                      <td colSpan={11} className="px-3 py-3 text-center text-[var(--color-text-muted)]">
                         No executors for this pair
                       </td>
                     </tr>
@@ -416,17 +483,20 @@ export function TradeBottomPane({
                       const stopping = stoppingIds.has(ex.id);
                       const side = ex.side?.toUpperCase();
                       const isBuy = side === "BUY" || side === "1";
-                      const borderColor = ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
+                      const borderColor = active ? "var(--color-primary)" : ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
                       const isSelected = selectedExecutorId === ex.id;
                       const entry = getEntryPrice(ex);
                       const exit = getExitPrice(ex);
+                      const closeLabel = ex.close_type ? ex.close_type.replace(/_/g, " ") : "";
                       return (
                         <tr
                           key={ex.id}
                           className={`border-b border-[var(--color-border)]/30 transition-colors ${
                             isSelected
                               ? "bg-[var(--color-primary)]/10 hover:bg-[var(--color-primary)]/15"
-                              : "hover:bg-[var(--color-surface-hover)]/50"
+                              : active
+                                ? "bg-[var(--color-green)]/5 hover:bg-[var(--color-green)]/10"
+                                : "hover:bg-[var(--color-surface-hover)]/50"
                           } ${onExecutorSelect ? "cursor-pointer" : ""}`}
                           style={{
                             borderLeft: isSelected
@@ -453,6 +523,18 @@ export function TradeBottomPane({
                               {side}
                             </span>
                           </td>
+                          <td className="px-3 py-1.5">
+                            {active ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
+                                <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
+                                ACTIVE
+                              </span>
+                            ) : (
+                              <span className="rounded px-1.5 py-0.5 text-[9px] font-medium bg-[var(--color-text-muted)]/10 text-[var(--color-text-muted)] capitalize">
+                                {closeLabel || ex.status}
+                              </span>
+                            )}
+                          </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
                             {entry > 0 ? formatPrice(entry) : "—"}
                           </td>
@@ -463,7 +545,7 @@ export function TradeBottomPane({
                             className="px-3 py-1.5 text-right font-mono font-medium tabular-nums"
                             style={{ color: pnlColor(ex.pnl) }}
                           >
-                            {formatPnl(ex.pnl)}
+                            {fmtPnl(ex.pnl)}
                           </td>
                           <td
                             className="px-3 py-1.5 text-right font-mono tabular-nums"
@@ -472,7 +554,7 @@ export function TradeBottomPane({
                             {formatPct(ex.net_pnl_pct)}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
-                            {formatVolume(ex.volume)}
+                            {fmtVol(ex.volume)}
                           </td>
                           <td className="px-3 py-1.5 text-right text-[var(--color-text-muted)]">
                             <span className="inline-flex items-center gap-1">
@@ -551,7 +633,7 @@ export function TradeBottomPane({
                               <span className="text-[10px] text-[var(--color-text-muted)]">{pos.leverage}x</span>
                             )}
                             <span className={`font-mono font-medium ${pos.unrealized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
-                              {formatPnl(pos.unrealized_pnl)}
+                              {fmtPnl(pos.unrealized_pnl)}
                             </span>
                             <button
                               onClick={() => setConfirmClearPos(pos)}
@@ -570,7 +652,7 @@ export function TradeBottomPane({
                         <div className="mt-1 flex items-center gap-3 text-[10px] text-[var(--color-text-muted)]">
                           <span>
                             Realized: <span className={`font-mono ${pos.realized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
-                              {formatPnl(pos.realized_pnl)}
+                              {fmtPnl(pos.realized_pnl)}
                             </span>
                           </span>
                           <span>

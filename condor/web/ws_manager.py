@@ -1199,10 +1199,10 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
-        # Try SDS cache first (pre-warmed by auto_subscribe_servers on startup)
-        if channel not in self._last_data:
-            from condor.server_data_service import ServerDataType, get_server_data_service
+        # Try SDS cache first (pre-warmed by auto_subscribe_servers or REST prefetch)
+        from condor.server_data_service import ServerDataType, get_server_data_service
 
+        if channel not in self._last_data:
             sds = get_server_data_service()
             cached = sds.get(server_name, ServerDataType.EXECUTORS)
             if cached is not None:
@@ -1213,6 +1213,23 @@ class WebSocketManager:
                         "Executor SDS cache hit: %d executors for %s",
                         len(executors), channel,
                     )
+
+        # Wait briefly for SDS to be populated by a concurrent REST request
+        # (usePrefetchData fires getExecutors which calls get_or_fetch on SDS)
+        if channel not in self._last_data:
+            sds = get_server_data_service()
+            for _ in range(6):  # up to 3 seconds
+                await asyncio.sleep(0.5)
+                cached = sds.get(server_name, ServerDataType.EXECUTORS)
+                if cached is not None:
+                    executors = self._transform_executors(cached)
+                    if executors:
+                        await self.broadcast(channel, executors)
+                        logger.info(
+                            "Executor SDS cache populated during wait: %d executors for %s",
+                            len(executors), channel,
+                        )
+                    break
 
         # Progressive pre-fetch only if we still have no data
         if channel not in self._last_data:

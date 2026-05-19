@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Simple TTL cache for candle data
 _candle_cache: dict[tuple, tuple[float, list]] = {}  # key -> (timestamp, data)
-_CANDLE_CACHE_TTL = 5.0  # seconds
+_CANDLE_CACHE_TTL = 30.0  # seconds
 from condor.web.auth import get_current_user
 from condor.web.models import (
     CandleData,
@@ -205,7 +205,10 @@ async def get_candles(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
-    cache_key = (name, connector, trading_pair, interval, limit, start_time, end_time)
+    # Bucket start_time to 60s intervals so near-identical requests share cache
+    bucketed_start = int(start_time // 60) * 60 if start_time is not None else None
+    bucketed_end = int(end_time // 60) * 60 if end_time is not None else None
+    cache_key = (name, connector, trading_pair, interval, limit, bucketed_start, bucketed_end)
     now = time.monotonic()
     cached = _candle_cache.get(cache_key)
     if cached and (now - cached[0]) < _CANDLE_CACHE_TTL:

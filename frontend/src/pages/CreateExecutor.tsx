@@ -27,7 +27,9 @@ import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
+import { useRates } from "@/hooks/useRates";
 import { api } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 import type { ExecutorType } from "@/components/executor/types";
 import {
   type GridState,
@@ -274,6 +276,19 @@ export function CreateExecutor() {
     useMainControllerData(server, connector, pair);
 
   const rulesData = useTradingRules(server ?? "", connector);
+
+  // Currency conversion for chart tooltip values
+  const quoteCurrency = pair.split("-")[1] || "USDT";
+  const { formatPnlValue, formatValue } = useRates([quoteCurrency]);
+  const convertPnl = useCallback((val: number) => formatPnlValue(val, quoteCurrency), [formatPnlValue, quoteCurrency]);
+  const convertValue = useCallback((val: number) => formatValue(val, quoteCurrency), [formatValue, quoteCurrency]);
+
+  // Load candles for an executor that's outside the current range
+  const handleRequestCandleRange = useCallback((startTime: number) => {
+    if (!server) return;
+    const newLookback = Math.ceil(Date.now() / 1000 - startTime) + 3600; // +1h padding
+    gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: newLookback });
+  }, [server]);
 
   // Persist last-used connector/pair to localStorage & clear executor selection
   useEffect(() => {
@@ -550,6 +565,9 @@ export function CreateExecutor() {
               executorOverlays={mainOverlays}
               positions={mainPositions}
               selectedExecutorId={selectedExecutorId}
+              convertValue={convertValue}
+              convertPnl={convertPnl}
+              onExecutorDeselect={() => setSelectedExecutorId(null)}
             />
           </div>
           {/* Horizontal resize handle */}
@@ -568,7 +586,20 @@ export function CreateExecutor() {
               pair={pair}
               isSpot={isSpot}
               selectedExecutorId={selectedExecutorId}
-              onExecutorSelect={(ex) => setSelectedExecutorId(ex?.id ?? null)}
+              onExecutorSelect={(ex) => {
+                setSelectedExecutorId(ex?.id ?? null);
+                // If this executor is older than current candle range, expand lookback
+                if (ex && ex.timestamp > 0) {
+                  const key = `candles:${server}:${connector}:${pair}:${gridState.interval}`;
+                  const candles = candleStore.getCandles(key);
+                  if (candles.length > 0) {
+                    const minTime = candles[0].timestamp;
+                    if (ex.timestamp < minTime) {
+                      handleRequestCandleRange(ex.timestamp);
+                    }
+                  }
+                }
+              }}
             />
           </div>
         </div>

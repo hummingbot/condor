@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { api, type ConsolidatedPosition } from "@/lib/api";
@@ -29,6 +29,13 @@ interface GridChartProps {
   executorOverlays?: ExecutorOverlay[];
   positions?: ConsolidatedPosition[];
   selectedExecutorId?: string | null;
+  /** Convert a value from the pair's quote currency to display currency */
+  convertValue?: (val: number) => string;
+  convertPnl?: (val: number) => string;
+  /** Callback when user clicks an executor in the list that's outside candle range */
+  onRequestCandleRange?: (startTime: number) => void;
+  /** Callback when user clicks chart background to deselect executor */
+  onExecutorDeselect?: () => void;
 }
 
 function getChartColors() {
@@ -62,6 +69,9 @@ export function GridChart({
   executorOverlays,
   positions,
   selectedExecutorId,
+  convertValue,
+  convertPnl,
+  onExecutorDeselect,
 }: GridChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
@@ -72,6 +82,10 @@ export function GridChart({
   const crosshairPriceRef = useRef<number | null>(null);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const lastZoomedIdRef = useRef<string | null>(null);
+  const convertValueRef = useRef(convertValue);
+  const convertPnlRef = useRef(convertPnl);
+  convertValueRef.current = convertValue;
+  convertPnlRef.current = convertPnl;
   const [chartReady, setChartReady] = useState(false);
 
   // Price line refs
@@ -86,6 +100,20 @@ export function GridChart({
 
   // ── Candle data from the singleton store (WS live + cached) ──
   const { candles, mergeCandles, setDuration } = useCandleStore(server, connector, pair, interval);
+
+  // ── Filter executor overlays to those within candle time range ──
+  const filteredOverlays = useMemo(() => {
+    if (!executorOverlays?.length) return executorOverlays;
+    if (!candles.length) return executorOverlays; // no candles yet → show all
+    const minTime = candles[0].timestamp;
+    return executorOverlays.filter((o) => {
+      const s = o.status?.toLowerCase();
+      if (s === "running" || s === "active") return true;
+      if (selectedExecutorId && o.executorId === selectedExecutorId) return true;
+      const end = o.timeRange.end > 1e12 ? o.timeRange.end / 1000 : o.timeRange.end;
+      return end >= minTime;
+    });
+  }, [executorOverlays, candles, selectedExecutorId]);
 
   // ── REST backfill on pair/interval/lookback change ──
   const backfillKeyRef = useRef("");
@@ -226,11 +254,12 @@ export function GridChart({
 
         const o = bestOverlay;
         const pnlClr = pnlHexColor(o.pnl);
-        const pnlSign = o.pnl >= 0 ? "+" : "";
-        const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
+        const _cvtPnl = convertPnlRef.current;
+        const _cvtVal = convertValueRef.current;
+        const pnlStr = _cvtPnl ? _cvtPnl(o.pnl) : (Math.abs(o.pnl) >= 1000 ? `${o.pnl >= 0 ? "+" : ""}$${(o.pnl / 1000).toFixed(1)}K` : `${o.pnl >= 0 ? "+" : ""}$${o.pnl.toFixed(2)}`);
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
-        const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
+        const volStr = _cvtVal ? _cvtVal(o.volume) : (Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`);
+        const feesStr = o.fees ? (_cvtVal ? _cvtVal(o.fees) : `$${o.fees.toFixed(2)}`) : "";
 
         const sideClr = sideColor(o.side);
         const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
@@ -278,7 +307,7 @@ export function GridChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", fmtUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : fmtUsd(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
@@ -540,12 +569,12 @@ export function GridChart({
     }
     overlayPriceLinesRef.current = [];
 
-    if (!executorOverlays?.length) return;
+    if (!filteredOverlays?.length) return;
 
     const hasSelection = !!selectedExecutorId;
-    const isMulti = executorOverlays.length > 1;
+    const isMulti = filteredOverlays.length > 1;
 
-    executorOverlays.forEach((overlay, idx) => {
+    filteredOverlays.forEach((overlay, idx) => {
       const isSelectedOverlay = hasSelection && overlay.executorId === selectedExecutorId;
       const isDimmed = hasSelection && !isSelectedOverlay;
       // When selected: use bright color and thicker lines; when dimmed: reduce opacity
@@ -662,13 +691,13 @@ export function GridChart({
     });
 
     // Full-width price lines for active or selected executor
-    if (series && executorOverlays?.length) {
+    if (series && filteredOverlays?.length) {
       const styleMap: Record<string, number> = {
         solid: mod.LineStyle.Solid,
         dashed: mod.LineStyle.Dashed,
         dotted: mod.LineStyle.Dotted,
       };
-      for (const overlay of executorOverlays) {
+      for (const overlay of filteredOverlays) {
         const isRunning = overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active";
         const isSelectedOverlay = overlay.executorId === selectedExecutorId;
         // Show price lines for active executors, and always for the selected one
@@ -687,14 +716,14 @@ export function GridChart({
         }
       }
     }
-  }, [executorOverlays, selectedExecutorId]);
+  }, [filteredOverlays, selectedExecutorId]);
 
   // ── Zoom to selected executor (one-time action) ──
   useEffect(() => {
-    if (!selectedExecutorId || !chartRef.current || !executorOverlays?.length) return;
+    if (!selectedExecutorId || !chartRef.current || !filteredOverlays?.length) return;
     // Only zoom once per selection — don't re-zoom on overlay data refresh
     if (lastZoomedIdRef.current === selectedExecutorId) return;
-    const overlay = executorOverlays.find((o) => o.executorId === selectedExecutorId);
+    const overlay = filteredOverlays.find((o) => o.executorId === selectedExecutorId);
     if (!overlay) return;
 
     lastZoomedIdRef.current = selectedExecutorId;
@@ -708,7 +737,7 @@ export function GridChart({
       from: (start - padding) as import("lightweight-charts").UTCTimestamp,
       to: (end + padding) as import("lightweight-charts").UTCTimestamp,
     });
-  }, [selectedExecutorId, executorOverlays]);
+  }, [selectedExecutorId, filteredOverlays]);
 
   // Reset zoom tracking when executor is deselected
   useEffect(() => {
@@ -717,8 +746,8 @@ export function GridChart({
 
   // Keep overlaysRef in sync for tooltip
   useEffect(() => {
-    overlaysRef.current = executorOverlays ?? [];
-  }, [executorOverlays]);
+    overlaysRef.current = filteredOverlays ?? [];
+  }, [filteredOverlays]);
 
   // ── Position hold lines ──
   useEffect(() => {
@@ -737,10 +766,8 @@ export function GridChart({
       if (pos.entry_price <= 0) continue;
       const isLong = pos.position_side?.toUpperCase() === "LONG";
       const pnl = pos.unrealized_pnl ?? 0;
-      const pnlSign = pnl >= 0 ? "+" : "";
-      const pnlStr = Math.abs(pnl) >= 1000
-        ? `${pnlSign}$${(pnl / 1000).toFixed(1)}K`
-        : `${pnlSign}$${pnl.toFixed(2)}`;
+      const _cvtPnl2 = convertPnlRef.current;
+      const pnlStr = _cvtPnl2 ? _cvtPnl2(pnl) : (Math.abs(pnl) >= 1000 ? `${pnl >= 0 ? "+" : ""}$${(pnl / 1000).toFixed(1)}K` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
       const amt = Math.abs(pos.amount);
       const color = pnlHexColor(pnl);
       const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
@@ -756,10 +783,16 @@ export function GridChart({
     }
   }, [positions]);
 
-  // ── Click-to-set price ──
+  // ── Click-to-set price / deselect executor ──
   const handleClick = () => {
-    if (!activePickField || crosshairPriceRef.current === null) return;
-    onPriceSet(activePickField, crosshairPriceRef.current);
+    if (activePickField && crosshairPriceRef.current !== null) {
+      onPriceSet(activePickField, crosshairPriceRef.current);
+      return;
+    }
+    // Click on chart background deselects executor
+    if (selectedExecutorId && onExecutorDeselect) {
+      onExecutorDeselect();
+    }
   };
 
   return (
