@@ -60,6 +60,7 @@ export function useRates(quoteCurrencies: string[]) {
     enabled: !!server && (needed.length > 0 || stablePairs.length > 0),
     staleTime: 60_000,
     refetchInterval: 60_000,
+    placeholderData: (prev: Record<string, number | null> | undefined) => prev,
   });
 
   const convert = useMemo(() => {

@@ -11,6 +11,7 @@ import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlC
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
+import { useRates } from "@/hooks/useRates";
 import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/pages/Executors";
 
 // ── Helper ──
@@ -149,6 +150,13 @@ export function SessionExecutors({
     }
     return merged;
   }, [restExecutors, wsExecutors]);
+
+  // Currency conversion
+  const quoteCurrencies = useMemo(
+    () => executorInfos.map((ex) => ex.trading_pair?.split("-")[1] || "USDT"),
+    [executorInfos],
+  );
+  const { formatPnlValue, formatValue, formatValueDetailed } = useRates(quoteCurrencies);
 
   // Fetch snapshots for bubble markers
   const { data: snapshotsData } = useQuery({
@@ -440,6 +448,9 @@ export function SessionExecutors({
           onClose={() => setSelectedExecutor(null)}
           onStop={() => {}}
           stopping={false}
+          rateFormatPnl={formatPnlValue}
+          rateFormatValue={formatValue}
+          rateFormatDetailed={formatValueDetailed}
         />
       )}
     </div>

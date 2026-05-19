@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
@@ -72,11 +73,9 @@ function getExitPrice(ex: ExecutorInfo): number {
 function ExecutorTooltip({
   executor,
   anchorRect,
-  containerRect,
 }: {
   executor: ExecutorInfo;
   anchorRect: DOMRect;
-  containerRect: DOMRect;
 }) {
   const entry = getEntryPrice(executor);
   const exit = getExitPrice(executor);
@@ -84,11 +83,13 @@ function ExecutorTooltip({
 
   const active = isExecutorActive(executor.status);
 
-  // Position tooltip above the row, centered
-  const top = anchorRect.top - containerRect.top - 8;
+  // Position tooltip using viewport-fixed coords (rendered via portal)
+  const tooltipHeight = 180; // approximate max height
+  // If tooltip would go above viewport top, flip it below the row
+  const flipBelow = anchorRect.top - tooltipHeight < 0;
   const left = Math.min(
-    Math.max(anchorRect.left - containerRect.left + anchorRect.width / 2 - 120, 8),
-    containerRect.width - 260,
+    Math.max(anchorRect.left + anchorRect.width / 2 - 120, 8),
+    window.innerWidth - 260,
   );
 
   const slPct = Number(config.stop_loss);
@@ -96,10 +97,14 @@ function ExecutorTooltip({
   const leverage = Number(config.leverage);
   const amount = Number(config.total_amount_quote) || Number(config.amount);
 
-  return (
+  return createPortal(
     <div
-      className="absolute z-50 pointer-events-none"
-      style={{ top, left, transform: "translateY(-100%)" }}
+      className="fixed z-[9999] pointer-events-none"
+      style={{
+        top: flipBelow ? anchorRect.bottom + 8 : anchorRect.top - 8,
+        left,
+        transform: flipBelow ? undefined : "translateY(-100%)",
+      }}
     >
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm shadow-xl p-3 w-[250px] text-[11px]">
         {/* Header */}
@@ -179,11 +184,19 @@ function ExecutorTooltip({
         </div>
 
         {/* Arrow */}
-        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-full">
-          <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-l-transparent border-r-transparent border-t-[var(--color-border)]" />
-        </div>
+        {!flipBelow && (
+          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-full">
+            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-t-[6px] border-l-transparent border-r-transparent border-t-[var(--color-border)]" />
+          </div>
+        )}
+        {flipBelow && (
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-full">
+            <div className="w-0 h-0 border-l-[6px] border-r-[6px] border-b-[6px] border-l-transparent border-r-transparent border-b-[var(--color-border)]" />
+          </div>
+        )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -333,7 +346,8 @@ export function TradeBottomPane({
 
   // Currency conversion for the current pair's quote asset
   const quoteCurrency = pair.split("-")[1] || "USDT";
-  const { formatPnlValue, formatValue } = useRates([quoteCurrency]);
+  const quoteCurrencies = useMemo(() => [quoteCurrency], [quoteCurrency]);
+  const { formatPnlValue, formatValue } = useRates(quoteCurrencies);
 
   const fmtPnl = (val: number) => formatPnlValue(val, quoteCurrency);
   const fmtVol = (val: number) => formatValue(val, quoteCurrency);
@@ -673,11 +687,10 @@ export function TradeBottomPane({
       )}
 
       {/* Hover tooltip */}
-      {hoveredExecutor && containerRef.current && (
+      {hoveredExecutor && (
         <ExecutorTooltip
           executor={hoveredExecutor.executor}
           anchorRect={hoveredExecutor.rect}
-          containerRect={containerRef.current.getBoundingClientRect()}
         />
       )}
 

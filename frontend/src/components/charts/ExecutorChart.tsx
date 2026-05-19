@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -294,17 +295,21 @@ export function ExecutorChart({
         `;
         tooltip.style.display = "block";
 
-        // Position tooltip on opposite side of cursor
+        // Position tooltip on opposite side of cursor (fixed/viewport coords)
         const containerRect = containerRef.current.getBoundingClientRect();
         const tooltipW = 280;
+        const tooltipH = tooltip.offsetHeight || 200;
         const cursorInRightHalf = param.point.x > containerRect.width / 2;
         let left = cursorInRightHalf
-          ? param.point.x - tooltipW - 16
-          : param.point.x + 16;
+          ? containerRect.left + param.point.x - tooltipW - 16
+          : containerRect.left + param.point.x + 16;
         if (left < 4) left = 4;
-        if (left + tooltipW > containerRect.width - 4) left = containerRect.width - tooltipW - 4;
-        let top = param.point.y - 10;
-        if (top < 0) top = 4;
+        if (left + tooltipW > window.innerWidth - 4) left = window.innerWidth - tooltipW - 4;
+        let top = containerRect.top + param.point.y - 10;
+        if (top + tooltipH > window.innerHeight - 4) {
+          top = window.innerHeight - tooltipH - 4;
+        }
+        if (top < 4) top = 4;
 
         tooltip.style.left = `${left}px`;
         tooltip.style.top = `${top}px`;
@@ -698,30 +703,33 @@ export function ExecutorChart({
           ref={containerRef}
           style={{ height: fullscreen ? "100%" : height, width: "100%" }}
         />
-        {/* Executor tooltip overlay */}
-        <div
-          ref={tooltipRef}
-          className="chart-tooltip"
-          style={{
-            display: "none",
-            position: "absolute",
-            top: 0,
-            left: 0,
-            zIndex: 10,
-            pointerEvents: "none",
-            background: "var(--color-surface)",
-            border: "1px solid var(--color-border)",
-            borderRadius: 6,
-            padding: "6px 10px",
-            fontSize: 11,
-            color: "var(--color-text)",
-            maxWidth: 280,
-            minWidth: 200,
-            lineHeight: 1.4,
-            backdropFilter: "blur(8px)",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
-          }}
-        />
+        {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
+        {createPortal(
+          <div
+            ref={tooltipRef}
+            className="chart-tooltip"
+            style={{
+              display: "none",
+              position: "fixed",
+              top: 0,
+              left: 0,
+              zIndex: 9999,
+              pointerEvents: "none",
+              background: "var(--color-surface)",
+              border: "1px solid var(--color-border)",
+              borderRadius: 6,
+              padding: "6px 10px",
+              fontSize: 11,
+              color: "var(--color-text)",
+              maxWidth: 280,
+              minWidth: 200,
+              lineHeight: 1.4,
+              backdropFilter: "blur(8px)",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+            }}
+          />,
+          document.body,
+        )}
         {/* Snapshot tooltip overlay */}
         <div
           ref={snapshotTooltipRef}

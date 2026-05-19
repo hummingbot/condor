@@ -448,12 +448,18 @@ export function DetailPanel({
   onClose,
   onStop,
   stopping,
+  rateFormatPnl,
+  rateFormatValue,
+  rateFormatDetailed,
 }: {
   executor: ExecutorInfo;
   server: string;
   onClose: () => void;
   onStop: (id: string) => void;
   stopping: boolean;
+  rateFormatPnl?: (val: number, quote: string) => string;
+  rateFormatValue?: (val: number, quote: string) => string;
+  rateFormatDetailed?: (val: number, quote: string) => string;
 }) {
   const navigate = useNavigate();
   const [panelWidth, setPanelWidth] = useState(480);
@@ -500,6 +506,11 @@ export function DetailPanel({
     }
     return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   })();
+
+  const quote = executor.trading_pair?.split("-")[1] || "USDT";
+  const fmtPnl = rateFormatPnl ? (v: number) => rateFormatPnl(v, quote) : formatPnl;
+  const fmtVal = rateFormatValue ? (v: number) => rateFormatValue(v, quote) : formatUsd;
+  const fmtDet = rateFormatDetailed ? (v: number) => rateFormatDetailed(v, quote) : formatUsd;
 
   return (
       <div
@@ -620,7 +631,7 @@ export function DetailPanel({
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Net PnL</div>
                 <div className="font-medium tabular-nums" style={{ color: pnlColor(executor.pnl) }}>
-                  {formatPnl(executor.pnl)}
+                  {fmtPnl(executor.pnl)}
                 </div>
               </div>
               <div>
@@ -634,12 +645,12 @@ export function DetailPanel({
               </div>
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Volume</div>
-                <div className="font-medium tabular-nums">{formatVolume(executor.volume)}</div>
+                <div className="font-medium tabular-nums">{fmtVal(executor.volume)}</div>
               </div>
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Fees</div>
                 <div className="font-medium tabular-nums">
-                  {executor.cum_fees_quote ? formatUsd(executor.cum_fees_quote) : "\u2014"}
+                  {executor.cum_fees_quote ? fmtDet(executor.cum_fees_quote) : "\u2014"}
                 </div>
               </div>
             </div>
@@ -677,7 +688,7 @@ export function DetailPanel({
                 {config.total_amount_quote != null && (
                   <div>
                     <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Amount</div>
-                    <div className="font-medium tabular-nums">{formatUsd(Number(config.total_amount_quote))}</div>
+                    <div className="font-medium tabular-nums">{fmtDet(Number(config.total_amount_quote))}</div>
                   </div>
                 )}
               </div>
@@ -718,7 +729,7 @@ export function DetailPanel({
                 {config.total_amount_quote != null && (
                   <div>
                     <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Amount</div>
-                    <div className="font-medium tabular-nums">{formatUsd(Number(config.total_amount_quote))}</div>
+                    <div className="font-medium tabular-nums">{fmtDet(Number(config.total_amount_quote))}</div>
                   </div>
                 )}
                 {tripleBarrier.take_profit != null && (
@@ -979,8 +990,8 @@ export function Executors() {
     trading_pair: "",
     controller_ids: [] as string[],
   });
-  const [maxPages, setMaxPages] = useState<number>(40); // 40 * 50 = 2000 cap by default
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 500;
+  const [maxPages, setMaxPages] = useState<number>(4); // 4 * 500 = 2000 cap by default
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -1220,7 +1231,7 @@ export function Executors() {
         </span>
         {reachedCap && (
           <button
-            onClick={() => setMaxPages((p) => p + 40)}
+            onClick={() => setMaxPages((p) => p + 4)}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
           >
             Load more
@@ -1426,6 +1437,9 @@ export function Executors() {
           onClose={() => setSelectedExecutor(null)}
           onStop={handleStopOne}
           stopping={stoppingIds.has(selectedExecutor.id)}
+          rateFormatPnl={formatPnlValue}
+          rateFormatValue={formatValue}
+          rateFormatDetailed={formatValueDetailed}
         />
       )}
 
