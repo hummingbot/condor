@@ -357,7 +357,7 @@ export function TradeBottomPane({
   const totalVolume = executors.reduce((sum, e) => sum + (e.volume || 0), 0);
 
   type SortCol = "status" | "pnl" | "pnl_pct" | "volume" | "age";
-  const [sortCol, setSortCol] = useState<SortCol>("status");
+  const [sortCol, setSortCol] = useState<SortCol>("age");
   const [sortAsc, setSortAsc] = useState(false);
 
   const handleSortClick = useCallback((col: SortCol) => {
@@ -372,13 +372,13 @@ export function TradeBottomPane({
     const arr = [...executors];
     const dir = sortAsc ? 1 : -1;
     arr.sort((a, b) => {
+      // Always pin active executors to the top
+      const aActive = isExecutorActive(a.status) ? 1 : 0;
+      const bActive = isExecutorActive(b.status) ? 1 : 0;
+      if (aActive !== bActive) return bActive - aActive;
+
       switch (sortCol) {
-        case "status": {
-          const aActive = isExecutorActive(a.status) ? 1 : 0;
-          const bActive = isExecutorActive(b.status) ? 1 : 0;
-          if (aActive !== bActive) return (bActive - aActive) * dir;
-          return (b.timestamp - a.timestamp) * dir;
-        }
+        case "status": return (b.timestamp - a.timestamp) * dir;
         case "pnl": return (a.pnl - b.pnl) * dir;
         case "pnl_pct": return ((a.net_pnl_pct || 0) - (b.net_pnl_pct || 0)) * dir;
         case "volume": return (a.volume - b.volume) * dir;
