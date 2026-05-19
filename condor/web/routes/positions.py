@@ -125,6 +125,37 @@ async def get_consolidated_positions(
         for pos, source_name in bot_raw
     ]
 
+    # Enrich positions missing current_price (the positions_summary endpoint doesn't provide it)
+    all_positions = executor_positions + bot_positions
+    pairs_needing_price = {}
+    for pos in all_positions:
+        if pos["current_price"] == 0 and pos["connector_name"] and pos["trading_pair"]:
+            key = (pos["connector_name"], pos["trading_pair"])
+            pairs_needing_price[key] = None
+
+    if pairs_needing_price:
+        try:
+            client = await cm.get_client(name)
+            price_tasks = [
+                client.market_data.get_prices(connector_name=conn, trading_pairs=pair)
+                for conn, pair in pairs_needing_price
+            ]
+            results = await asyncio.gather(*price_tasks, return_exceptions=True)
+            for (conn, pair), result in zip(pairs_needing_price, results):
+                if isinstance(result, dict):
+                    price = result.get("prices", {}).get(pair)
+                    if price:
+                        pairs_needing_price[(conn, pair)] = float(price)
+
+            for pos in all_positions:
+                if pos["current_price"] == 0:
+                    key = (pos["connector_name"], pos["trading_pair"])
+                    price = pairs_needing_price.get(key)
+                    if price:
+                        pos["current_price"] = price
+        except Exception as e:
+            logger.warning("Failed to enrich positions with current prices: %s", e)
+
     return {
         "executor_positions": executor_positions,
         "bot_positions": bot_positions,

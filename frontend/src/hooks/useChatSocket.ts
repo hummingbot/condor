@@ -31,7 +31,7 @@ export interface ChatSlot {
 
 let msgIdCounter = 0;
 function nextMsgId(): string {
-  return `msg_${++msgIdCounter}`;
+  return `msg_${Date.now()}_${++msgIdCounter}`;
 }
 
 // ── localStorage persistence for chat messages ──
