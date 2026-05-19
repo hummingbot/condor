@@ -46,19 +46,32 @@ def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
     """Build LLM picker keyboard.
 
     The current selection is marked with a bullet. If the user has previously
-    picked an OpenRouter model (agent_llm starts with "openrouter:<slug>"), the
-    "openrouter:" sentinel row matches and shows the slug they picked.
+    picked a sentinel-backed model (OpenRouter or Venice — agent_llm starts with
+    "openrouter:<slug>" or "venice:<slug>"), the corresponding sentinel row
+    matches and shows the slug they picked.
     """
     keyboard = []
     for key, info in AGENT_OPTIONS.items():
         label = info["label"]
-        # Treat any "openrouter:<slug>" as matching the sentinel "openrouter:" row
-        is_current = key == current_llm or (
-            key == "openrouter:" and current_llm.startswith("openrouter:") and current_llm != "openrouter:"
+        # Treat any "openrouter:<slug>" / "venice:<slug>" as matching their sentinel row
+        is_or_current = (
+            key == "openrouter:"
+            and current_llm.startswith("openrouter:")
+            and current_llm != "openrouter:"
         )
-        if is_current and current_llm.startswith("openrouter:") and current_llm != "openrouter:":
+        is_vc_current = (
+            key == "venice:"
+            and current_llm.startswith("venice:")
+            and current_llm != "venice:"
+        )
+        is_current = key == current_llm or is_or_current or is_vc_current
+
+        if is_or_current:
             slug = current_llm.split(":", 1)[1]
             label = f"• OpenRouter — {slug}"
+        elif is_vc_current:
+            slug = current_llm.split(":", 1)[1]
+            label = f"• Venice — {slug}"
         elif is_current:
             label = f"• {label}"
         keyboard.append(
@@ -70,6 +83,9 @@ def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
 
 # OpenRouter picker pagination
 OPENROUTER_PAGE_SIZE = 8
+
+# Venice picker pagination (same shape as OpenRouter)
+VENICE_PAGE_SIZE = 8
 
 
 def _openrouter_picker_keyboard(
@@ -116,6 +132,56 @@ def _openrouter_picker_keyboard(
     if page < total_pages - 1:
         nav_row.append(
             InlineKeyboardButton("Next ›", callback_data=f"agent:or_page:{page + 1}")
+        )
+    keyboard.append(nav_row)
+    keyboard.append([InlineKeyboardButton("Back", callback_data="agent:settings")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _venice_picker_keyboard(
+    models: list, page: int, current_slug: str | None
+) -> InlineKeyboardMarkup:
+    """Paginated keyboard for picking a Venice model.
+
+    Same shape as `_openrouter_picker_keyboard` — references each model by its
+    index in the cached list so callback_data stays well under Telegram's
+    64-byte cap regardless of slug length.
+    """
+    from .venice_models import format_button_label
+
+    if not models:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Back", callback_data="agent:settings")]]
+        )
+
+    total_pages = (len(models) + VENICE_PAGE_SIZE - 1) // VENICE_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start = page * VENICE_PAGE_SIZE
+    end = min(start + VENICE_PAGE_SIZE, len(models))
+
+    keyboard: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("Enter model manually", callback_data="agent:vc_type")],
+    ]
+    for idx in range(start, end):
+        m = models[idx]
+        label = format_button_label(m)
+        if current_slug and m.slug == current_slug:
+            label = f"• {label}"
+        keyboard.append(
+            [InlineKeyboardButton(label, callback_data=f"agent:vc_pick:{idx}")]
+        )
+
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton("‹ Prev", callback_data=f"agent:vc_page:{page - 1}")
+        )
+    nav_row.append(
+        InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="agent:vc_noop")
+    )
+    if page < total_pages - 1:
+        nav_row.append(
+            InlineKeyboardButton("Next ›", callback_data=f"agent:vc_page:{page + 1}")
         )
     keyboard.append(nav_row)
     keyboard.append([InlineKeyboardButton("Back", callback_data="agent:settings")])
