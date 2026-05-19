@@ -42,6 +42,7 @@ class AgentSession:
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _abort_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def prompt_stream(self, text: str):
         """Stream a prompt, managing the busy flag and lock.
@@ -55,6 +56,9 @@ class AgentSession:
             ctx = self.pending_context
             self.pending_context = None
             text = f"{ctx}\n\n---\n\nUser message:\n{text}"
+
+        # Clear abort flag for this new prompt
+        self._abort_event.clear()
 
         # Acquire lock with timeout -- prevents infinite wait when previous prompt is stuck
         try:
@@ -71,6 +75,10 @@ class AgentSession:
             loop = asyncio.get_event_loop()
             deadline = loop.time() + PROMPT_OVERALL_TIMEOUT
             async for event in self.client.prompt_stream(text):
+                # Check if abort was requested between events
+                if self._abort_event.is_set():
+                    yield PromptDone(stop_reason="cancelled")
+                    break
                 yield event
                 if isinstance(event, PromptDone):
                     break
@@ -89,19 +97,15 @@ class AgentSession:
     def abort(self) -> None:
         """Abort the current in-flight prompt.
 
-        Cancels the ACP-level request future and drains the event queue so
-        the next prompt_stream call starts clean. Also resets is_busy and
-        releases the lock if held.
+        Sets the abort event so prompt_stream breaks out on the next iteration,
+        which triggers its finally block to properly release the lock.
+        Also cancels the ACP-level request future and drains the event queue
+        so the next prompt starts clean.
         """
+        # Signal prompt_stream to stop iterating
+        self._abort_event.set()
         if isinstance(self.client, ACPClient):
             self.client.abort_prompt()
-        if self.is_busy:
-            self.is_busy = False
-            if self._lock.locked():
-                try:
-                    self._lock.release()
-                except RuntimeError:
-                    pass  # lock not held by this task
         log.info("Session %s: prompt aborted", self.chat_id)
 
 

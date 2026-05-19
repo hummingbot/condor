@@ -338,7 +338,9 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
 
-    # Abort the ACP-level prompt so stale events don't leak into the next message
+    # Abort the ACP-level prompt so stale events don't leak into the next message.
+    # session.abort() sets an event flag that makes prompt_stream break out on the
+    # next iteration, triggering its finally block to release the lock properly.
     session_key = _session_key(user_id, slot_id)
     session = get_session(session_key)
     if session:
@@ -348,8 +350,12 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
     task = _active_prompt_tasks.get(task_key)
     if task and not task.done():
         task.cancel()
-        # Don't send prompt_done here — the CancelledError handler in
-        # _handle_send_message already sends it when the task is cancelled.
+        # Wait briefly for the task to finish so the lock is released
+        # before the next message can acquire it.
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
     else:
         # No active task to cancel — send prompt_done directly so the frontend resets
         await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
