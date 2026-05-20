@@ -263,8 +263,8 @@ export function ControllerBrowser({
   const toggleMutation = useMutation({
     mutationFn: () =>
       isKilled
-        ? api.startControllers(server, activeCtrl.bot_name, [activeCtrl.controller_name])
-        : api.stopControllers(server, activeCtrl.bot_name, [activeCtrl.controller_name]),
+        ? api.startControllers(server, activeCtrl.bot_name, [activeCtrl.controller_id])
+        : api.stopControllers(server, activeCtrl.bot_name, [activeCtrl.controller_id]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
     },
