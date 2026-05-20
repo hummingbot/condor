@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 
 from config_manager import get_client
 from routines.base import RoutineResult
+from routines.hl_candles import fetch_hl_candles
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +51,21 @@ async def run(
 
     # --- Fetch candles ---
     try:
-        candles = await client.market_data.get_candles(
-            connector_name=config.connector_name,
-            trading_pair=config.trading_pair,
-            interval=config.interval,
-            max_records=config.max_records,
-        )
-        if isinstance(candles, dict):
-            candles = candles.get("data", [])
+        if config.connector_name == "hyperliquid_perpetual":
+            candles = await fetch_hl_candles(
+                config.trading_pair,
+                config.interval,
+                config.max_records,
+            )
+        else:
+            candles = await client.market_data.get_candles(
+                connector_name=config.connector_name,
+                trading_pair=config.trading_pair,
+                interval=config.interval,
+                max_records=config.max_records,
+            )
+            if isinstance(candles, dict):
+                candles = candles.get("data", [])
     except Exception as e:
         return f"Failed to fetch candles for {config.trading_pair}: {e}"
 
