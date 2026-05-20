@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/lib/auth";
-import type { BotsPageResponse, ControllerInfo } from "@/lib/api";
+import type { BotsPageResponse, ControllerInfo, ControllerPerformanceHistoryResponse, ControllerPerformanceSnapshot } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import { CondorWebSocket } from "@/lib/websocket";
 
@@ -129,6 +129,58 @@ export function useCondorWebSocket(
               return { ...old, pages: [nextFirst, ...old.pages.slice(1)] };
             },
           );
+        }
+      } else if (prefix === "controller_perf") {
+        // Update the "all controllers" sparkline cache
+        const incoming = data as { snapshots?: ControllerPerformanceSnapshot[] };
+        if (incoming?.snapshots) {
+          queryClient.setQueryData(
+            ["controller-perf-history-all", server],
+            (old: ControllerPerformanceHistoryResponse | undefined) => {
+              if (!old) return old;
+              // Append new snapshots and deduplicate by controller_id+timestamp
+              const existing = old.snapshots ?? [];
+              const merged = [...existing];
+              const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+              for (const snap of incoming.snapshots!) {
+                const key = `${snap.controller_id}:${snap.timestamp}`;
+                if (!seen.has(key)) {
+                  merged.push(snap);
+                  seen.add(key);
+                }
+              }
+              return { ...old, snapshots: merged };
+            },
+          );
+
+          // Also update per-controller history caches
+          const byController = new Map<string, ControllerPerformanceSnapshot[]>();
+          for (const snap of incoming.snapshots) {
+            const cid = snap.controller_id || snap.controller_name;
+            if (!cid) continue;
+            const arr = byController.get(cid) ?? [];
+            arr.push(snap);
+            byController.set(cid, arr);
+          }
+          for (const [cid, snaps] of byController) {
+            queryClient.setQueryData(
+              ["controller-perf-history", server, cid],
+              (old: ControllerPerformanceHistoryResponse | undefined) => {
+                if (!old) return old;
+                const existing = old.snapshots ?? [];
+                const merged = [...existing];
+                const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+                for (const snap of snaps) {
+                  const key = `${snap.controller_id}:${snap.timestamp}`;
+                  if (!seen.has(key)) {
+                    merged.push(snap);
+                    seen.add(key);
+                  }
+                }
+                return { ...old, snapshots: merged };
+              },
+            );
+          }
         }
       } else if (prefix === "orderbook") {
         const parts = channel.split(":");

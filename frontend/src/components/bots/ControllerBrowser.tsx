@@ -17,7 +17,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { HIDDEN_KEYS, inferInputType, parseValue } from "@/components/bots/DeployBotDialog";
-import { api, type BotLogEntry, type ControllerInfo } from "@/lib/api";
+import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
+import { api, type ControllerInfo } from "@/lib/api";
 import { setViewContext } from "@/lib/viewContext";
 
 // ── Shared formatters ──
@@ -57,23 +58,12 @@ function StatusDot({ status }: { status: string }) {
   return <Circle className={`h-2 w-2 fill-current ${color}`} />;
 }
 
-function formatLogTime(ts?: number): string {
-  if (!ts) return "";
-  try {
-    const d = new Date(ts * 1000);
-    return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch {
-    return "";
-  }
-}
-
 // ── Types ──
 
 interface ControllerBrowserProps {
   controllers: ControllerInfo[];
   server: string;
   initialControllerKey: string;
-  allLogs: Record<string, BotLogEntry[]>;
   onClose: () => void;
 }
 
@@ -254,12 +244,10 @@ export function ControllerBrowser({
   controllers,
   server,
   initialControllerKey,
-  allLogs,
   onClose,
 }: ControllerBrowserProps) {
   const queryClient = useQueryClient();
   const [isCompact, setIsCompact] = useState(false);
-  const [rightTab, setRightTab] = useState<"config" | "logs">("config");
   const sidebarRef = useRef<HTMLDivElement>(null);
 
   const ctrlKey = useCallback(
@@ -324,7 +312,6 @@ export function ControllerBrowser({
 
   if (!activeCtrl) return null;
 
-  const logs = allLogs[activeCtrl.bot_name] ?? [];
   const configId = activeCtrl.controller_id || activeCtrl.controller_name;
 
   return (
@@ -504,6 +491,15 @@ export function ControllerBrowser({
         <div className="flex flex-1 min-h-0">
           {/* Left column: Performance data */}
           <div className="flex-1 overflow-y-auto p-5 space-y-4 min-w-0">
+            {/* PnL Evolution Chart */}
+            <ControllerPnlChart
+              key={configId}
+              server={server}
+              controllerId={configId}
+              botName={activeCtrl.bot_name}
+              height={200}
+            />
+
             {/* PnL Breakdown - compact horizontal */}
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 text-sm">
@@ -644,49 +640,13 @@ export function ControllerBrowser({
 
           {/* Right column: Config + Logs */}
           <div className="w-[380px] xl:w-[440px] shrink-0 border-l border-[var(--color-border)] flex flex-col bg-[var(--color-surface)]">
-            {/* Tabs */}
-            <div className="flex border-b border-[var(--color-border)]">
-              <button
-                onClick={() => setRightTab("config")}
-                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                  rightTab === "config"
-                    ? "text-[var(--color-primary)] border-b-2 border-[var(--color-primary)] -mb-px"
-                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                }`}
-              >
-                Config
-              </button>
-              <button
-                onClick={() => setRightTab("logs")}
-                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                  rightTab === "logs"
-                    ? "text-[var(--color-primary)] border-b-2 border-[var(--color-primary)] -mb-px"
-                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                }`}
-              >
-                Logs
-                {logs.filter((l) => l.log_category === "error").length > 0 && (
-                  <span className="ml-1.5 inline-flex items-center justify-center rounded-full bg-[var(--color-red)]/15 px-1.5 text-[9px] font-semibold text-[var(--color-red)]">
-                    {logs.filter((l) => l.log_category === "error").length}
-                  </span>
-                )}
-              </button>
-            </div>
-
-            {/* Tab content */}
-            {rightTab === "config" ? (
-              <InlineConfigEditor
-                key={configId}
-                config={activeCtrl.config || {}}
-                server={server}
-                configId={configId}
-                onSaved={() => queryClient.invalidateQueries({ queryKey: ["bots", server] })}
-              />
-            ) : (
-              <div className="flex-1 overflow-y-auto">
-                <LogsSection logs={logs} />
-              </div>
-            )}
+            <InlineConfigEditor
+              key={configId}
+              config={activeCtrl.config || {}}
+              server={server}
+              configId={configId}
+              onSaved={() => queryClient.invalidateQueries({ queryKey: ["bots", server] })}
+            />
           </div>
         </div>
       </div>
@@ -694,66 +654,3 @@ export function ControllerBrowser({
   );
 }
 
-// ── Logs section ──
-
-function LogsSection({ logs }: { logs: BotLogEntry[] }) {
-  const [filter, setFilter] = useState<"all" | "error" | "general">("all");
-  const filtered = filter === "all" ? logs : logs.filter((l) => l.log_category === filter);
-
-  const errorCount = logs.filter((l) => l.log_category === "error").length;
-  const generalCount = logs.filter((l) => l.log_category === "general").length;
-
-  if (logs.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-muted)]">
-        <p className="text-xs">No logs available</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-[var(--color-border)]/50">
-        {(["all", "general", "error"] as const).map((f) => {
-          const count = f === "all" ? logs.length : f === "error" ? errorCount : generalCount;
-          return (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                filter === f
-                  ? f === "error"
-                    ? "bg-[var(--color-red)]/15 text-[var(--color-red)]"
-                    : "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              {f} ({count})
-            </button>
-          );
-        })}
-      </div>
-      <div className="flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed">
-        {filtered.map((log, i) => (
-          <div
-            key={i}
-            className={`flex gap-2 px-2.5 py-1 border-b border-[var(--color-border)]/10 ${
-              log.log_category === "error" ? "bg-[var(--color-red)]/5" : ""
-            }`}
-          >
-            <span className="text-[var(--color-text-muted)] shrink-0 tabular-nums">
-              {formatLogTime(log.timestamp)}
-            </span>
-            <span
-              className={`break-all ${
-                log.log_category === "error" ? "text-[var(--color-red)]" : "text-[var(--color-text)]"
-              }`}
-            >
-              {log.msg || JSON.stringify(log)}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}

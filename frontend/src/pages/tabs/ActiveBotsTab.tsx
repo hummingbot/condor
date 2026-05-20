@@ -17,11 +17,12 @@ import { useMemo, useState } from "react";
 
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { PnlSparkline } from "@/components/bots/PnlSparkline";
 
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type BotLogEntry, type BotSummary, type ControllerInfo } from "@/lib/api";
+import { api, type BotLogEntry, type BotSummary, type ControllerInfo, type ControllerPerformanceSnapshot } from "@/lib/api";
 import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
 
 function formatUptime(deployedAt: string | null): string {
@@ -247,6 +248,7 @@ function ControllerRow({
   onSelect,
   formatPnlValue,
   formatValue,
+  sparklineValues,
 }: {
   ctrl: ControllerInfo;
   server: string;
@@ -254,6 +256,7 @@ function ControllerRow({
   onSelect: () => void;
   formatPnlValue: (val: number, quote: string) => string;
   formatValue: (val: number, quote: string) => string;
+  sparklineValues?: number[];
 }) {
   const queryClient = useQueryClient();
   const isKilled = ctrl.config?.manual_kill_switch === true;
@@ -261,8 +264,8 @@ function ControllerRow({
   const toggleMutation = useMutation({
     mutationFn: () =>
       isKilled
-        ? api.startControllers(server, ctrl.bot_name, [ctrl.controller_name])
-        : api.stopControllers(server, ctrl.bot_name, [ctrl.controller_name]),
+        ? api.startControllers(server, ctrl.bot_name, [ctrl.controller_id])
+        : api.stopControllers(server, ctrl.bot_name, [ctrl.controller_id]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
     },
@@ -310,6 +313,15 @@ function ControllerRow({
               style={{ color: pnlColor(ctrl.global_pnl_quote) }}
             >
               {formatPnlValue(ctrl.global_pnl_quote, quote)}
+            </td>
+            <td className="px-2 py-2.5">
+              <div className="flex justify-center">
+                {sparklineValues && sparklineValues.length >= 2 ? (
+                  <PnlSparkline values={sparklineValues} />
+                ) : (
+                  <span className="text-[10px] text-[var(--color-text-muted)]">—</span>
+                )}
+              </div>
             </td>
             <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
               {formatValue(ctrl.volume_traded, quote)}
@@ -472,7 +484,7 @@ function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
 
 // ── Main Page ──
 
-const BOTS_WS_CHANNELS = ["bots"];
+const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
 
 export function ActiveBotsTab() {
   const { server } = useServer();
@@ -491,6 +503,41 @@ export function ActiveBotsTab() {
     refetchInterval: 30000, // Slower polling since WS handles real-time updates
   });
 
+  // Fetch performance history for sparklines (all controllers at once)
+  const { data: perfHistory } = useQuery({
+    queryKey: ["controller-perf-history-all", server],
+    queryFn: () =>
+      api.getControllerPerformanceHistory(server!, {
+        interval: "5m",
+        limit: 1000,
+      }),
+    enabled: !!server && (data?.controllers?.length ?? 0) > 0,
+    refetchInterval: 120_000,
+    staleTime: 60_000,
+  });
+
+  // Build a map: controller_id -> sorted pnl values for sparklines
+  const sparklineMap = useMemo(() => {
+    const map: Record<string, number[]> = {};
+    if (!perfHistory?.snapshots) return map;
+    // Group by controller_id
+    const grouped: Record<string, ControllerPerformanceSnapshot[]> = {};
+    for (const snap of perfHistory.snapshots) {
+      const key = snap.controller_id || snap.controller_name;
+      if (!key) continue;
+      (grouped[key] ??= []).push(snap);
+    }
+    for (const [key, snaps] of Object.entries(grouped)) {
+      const sorted = snaps.sort((a, b) => {
+        const ta = Date.parse(a.timestamp) || 0;
+        const tb = Date.parse(b.timestamp) || 0;
+        return ta - tb;
+      });
+      map[key] = sorted.map((s) => s.global_pnl_quote);
+    }
+    return map;
+  }, [perfHistory]);
+
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -504,17 +551,6 @@ export function ActiveBotsTab() {
   const bots = data?.bots ?? [];
 
   // Aggregate logs per bot for the overlay
-  const allLogsByBot = useMemo(() => {
-    const map: Record<string, BotLogEntry[]> = {};
-    for (const bot of bots) {
-      map[bot.bot_name] = [
-        ...(bot.error_logs || []).map((l) => ({ ...l, log_category: "error" as const })),
-        ...(bot.general_logs || []).map((l) => ({ ...l, log_category: "general" as const })),
-      ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-    }
-    return map;
-  }, [bots]);
-
   const sortedControllers = useMemo(
     () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
     [controllers, sortKey, sortDir],
@@ -610,6 +646,9 @@ export function ActiveBotsTab() {
                       <SortHeader label="Realized" sortKey="realized_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Unrealized" sortKey="unrealized_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Total PnL" sortKey="global_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                      <th className="px-2 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)] text-center">
+                        Trend
+                      </th>
                       <SortHeader label="Volume" sortKey="volume_traded" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Age" sortKey="deployed_at" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="center" />
@@ -619,17 +658,21 @@ export function ActiveBotsTab() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedControllers.map((ctrl) => (
-                      <ControllerRow
-                        key={`${ctrl.bot_name}-${ctrl.controller_name}`}
-                        ctrl={ctrl}
-                        server={server!}
-                        isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_name}`}
-                        onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_name}`)}
-                        formatPnlValue={formatPnlValue}
-                        formatValue={formatValue}
-                      />
-                    ))}
+                    {sortedControllers.map((ctrl) => {
+                      const cid = ctrl.controller_id || ctrl.controller_name;
+                      return (
+                        <ControllerRow
+                          key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                          ctrl={ctrl}
+                          server={server!}
+                          isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_name}`}
+                          onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_name}`)}
+                          formatPnlValue={formatPnlValue}
+                          formatValue={formatValue}
+                          sparklineValues={sparklineMap[cid]}
+                        />
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -647,7 +690,6 @@ export function ActiveBotsTab() {
           controllers={sortedControllers}
           server={server}
           initialControllerKey={selectedKey}
-          allLogs={allLogsByBot}
           onClose={() => setSelectedKey(null)}
         />
       )}
