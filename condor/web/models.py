@@ -133,6 +133,64 @@ class BotsPageResponse(BaseModel):
     error_hint: Optional[str] = None
 
 
+# ── Bot Runs ──
+
+
+class BotRunInfo(BaseModel):
+    bot_name: str
+    account_name: str = ""
+    strategy_type: str = ""
+    strategy_name: str = ""
+    run_status: str = ""
+    deployment_status: str = ""
+    created_at: Optional[str] = None
+    stopped_at: Optional[str] = None
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    volume_traded: float = 0.0
+    num_controllers: int = 0
+
+
+class BotRunsResponse(BaseModel):
+    runs: list[BotRunInfo] = []
+    total: int = 0
+
+
+# ── Controller Performance ──
+
+
+class ControllerPerformanceSnapshot(BaseModel):
+    timestamp: str = ""
+    bot_name: str = ""
+    controller_id: str = ""
+    controller_name: str = ""
+    connector: str = ""
+    trading_pair: str = ""
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    global_pnl_pct: float = 0.0
+    volume_traded: float = 0.0
+    close_type_counts: dict[str, int] = {}
+    positions_summary: list[dict[str, Any]] = []
+    custom_info: dict[str, Any] = {}
+
+
+class ControllerPerformanceLatestResponse(BaseModel):
+    snapshots: list[ControllerPerformanceSnapshot] = []
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+class ControllerPerformanceHistoryResponse(BaseModel):
+    snapshots: list[ControllerPerformanceSnapshot] = []
+    next_cursor: Optional[str] = None
+    interval: str = "5m"
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
 # ── Executors ──
 
 

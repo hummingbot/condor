@@ -131,6 +131,7 @@ class WebSocketManager:
         self._bots_ws_tasks: dict[str, asyncio.Task] = {}
         self._positions_ws_tasks: dict[str, asyncio.Task] = {}
         self._performance_ws_tasks: dict[str, asyncio.Task] = {}
+        self._controller_perf_tasks: dict[str, asyncio.Task] = {}
         self._sds_listener_registered = False
         # Track SDS subscriptions: channel -> CacheKey
         self._sds_subscriptions: dict[str, Any] = {}
@@ -245,6 +246,11 @@ class WebSocketManager:
                 task.cancel()
         self._performance_ws_tasks.clear()
 
+        for task in self._controller_perf_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._controller_perf_tasks.clear()
+
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
             self._cleanup_task = None
@@ -299,6 +305,8 @@ class WebSocketManager:
                     self._maybe_stop_positions_ws_stream(channel)
                 elif channel.startswith("performance_ws:"):
                     self._maybe_stop_performance_ws_stream(channel)
+                elif channel.startswith("controller_perf:"):
+                    self._maybe_stop_controller_perf_stream(channel)
                 else:
                     self._maybe_unsub_sds(channel)
 
@@ -366,6 +374,10 @@ class WebSocketManager:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
                 self._ensure_performance_ws_stream(channel)
+            elif channel.startswith("controller_perf:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
+                self._ensure_controller_perf_stream(channel)
             else:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
@@ -387,6 +399,8 @@ class WebSocketManager:
                 self._maybe_stop_positions_ws_stream(channel)
             elif channel.startswith("performance_ws:"):
                 self._maybe_stop_performance_ws_stream(channel)
+            elif channel.startswith("controller_perf:"):
+                self._maybe_stop_controller_perf_stream(channel)
             else:
                 self._maybe_unsub_sds(channel)
 
@@ -1555,6 +1569,78 @@ class WebSocketManager:
                 logger.warning("Performance WS stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+
+    # -- Controller Performance polling stream --
+
+    def _ensure_controller_perf_stream(self, channel: str) -> None:
+        if channel in self._controller_perf_tasks and not self._controller_perf_tasks[channel].done():
+            return
+        self._controller_perf_tasks[channel] = asyncio.create_task(
+            self._controller_perf_stream(channel)
+        )
+        logger.info("Started controller performance stream for %s", channel)
+
+    def _maybe_stop_controller_perf_stream(self, channel: str) -> None:
+        for conn in self._connections:
+            if channel in conn.channels:
+                return
+        task = self._controller_perf_tasks.pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("Stopped controller performance stream for %s", channel)
+
+    async def _controller_perf_stream(self, channel: str) -> None:
+        """Poll latest controller performance every 30s and broadcast snapshots."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        while True:
+            try:
+                if not any(channel in c.channels for c in self._connections):
+                    logger.info("No subscribers for %s, stopping controller perf stream", channel)
+                    self._controller_perf_tasks.pop(channel, None)
+                    return
+
+                client = await cm.get_client(server_name)
+                result = await client.bot_orchestration.get_latest_controller_performance()
+
+                # Normalize to list of snapshots
+                snapshots = []
+                if isinstance(result, list):
+                    snapshots = result
+                elif isinstance(result, dict):
+                    data = result.get("data", result.get("snapshots", result.get("records", [])))
+                    if isinstance(data, list):
+                        snapshots = data
+                    elif isinstance(data, dict):
+                        for key, val in data.items():
+                            if isinstance(val, dict):
+                                val.setdefault("controller_id", key)
+                                snapshots.append(val)
+
+                if snapshots:
+                    await self._broadcast_update(channel, {"snapshots": snapshots})
+                    backoff = 5
+
+                await asyncio.sleep(30)
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(
+                    "Controller perf stream error for %s: %s, retrying in %ds...",
+                    channel, e, backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
 
 
 # -- Singleton --
