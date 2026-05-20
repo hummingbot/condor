@@ -2,7 +2,9 @@
 
 CATEGORY = "Market Data"
 
+import asyncio
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -10,12 +12,7 @@ from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
 from config_manager import get_client
-from routines.market_scanner import (
-    analyze_pair,
-    classify_markets,
-    fetch_all_candles,
-    format_volume,
-)
+from routines.market_scanner import analyze_pair, classify_markets, format_volume
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +38,12 @@ class Config(BaseModel):
     )
     quote_suffix: str = Field(
         default="USD", description="Quote suffix filter for trading_rules keys"
+    )
+    max_concurrent_candles: int = Field(
+        default=20,
+        ge=1,
+        le=30,
+        description="Max parallel HL REST candleSnapshot requests",
     )
 
 
@@ -251,14 +254,100 @@ def _pair_label(trading_pair: str) -> str:
     return trading_pair.rsplit("-", 1)[0]
 
 
+def _parse_hl_candle_snapshot(raw: list) -> list[dict]:
+    """Convert HL candleSnapshot rows to market_scanner analyze_pair format."""
+    candles = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        try:
+            candles.append(
+                {
+                    "close": float(row["c"]),
+                    "high": float(row["h"]),
+                    "low": float(row["l"]),
+                    "volume": float(row["v"]),
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return candles
+
+
+async def _fetch_candle_snapshot_rest(
+    session: aiohttp.ClientSession,
+    coin: str,
+    start_ms: int,
+    end_ms: int,
+) -> tuple[list[dict] | None, str | None]:
+    """Fetch 1m candles via HL REST (no hummingbot WS)."""
+    payload = {
+        "type": "candleSnapshot",
+        "req": {
+            "coin": coin,
+            "interval": "1m",
+            "startTime": start_ms,
+            "endTime": end_ms,
+        },
+    }
+    try:
+        async with session.post(HL_INFO_URL, json=payload) as resp:
+            if resp.status != 200:
+                return None, f"http_{resp.status}"
+            data = await resp.json()
+        if not isinstance(data, list) or not data:
+            return None, "empty_snapshot"
+        parsed = _parse_hl_candle_snapshot(data)
+        if len(parsed) >= 30:
+            return parsed, None
+        return None, f"too_few_bars:{len(parsed)}"
+    except Exception as e:
+        return None, f"{type(e).__name__}:{str(e)[:80]}"
+
+
+async def _fetch_all_candles_hl_rest(
+    session: aiohttp.ClientSession,
+    pairs: list[dict],
+    lookback_hours: int,
+    max_concurrent: int,
+) -> dict[str, list[dict]]:
+    """Fetch candles for all pairs via parallel HL REST candleSnapshot."""
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - lookback_hours * 3600 * 1000
+
+    semaphore = asyncio.Semaphore(max_concurrent)
+    candles_map: dict[str, list[dict]] = {}
+    failures: list[dict] = []
+
+    async def _fetch_one(pair_info: dict) -> None:
+        trading_pair = pair_info["trading_pair"]
+        coin = pair_info["asset_name"]
+        async with semaphore:
+            candles, err = await _fetch_candle_snapshot_rest(
+                session, coin, start_ms, end_ms
+            )
+            if candles:
+                candles_map[trading_pair] = candles
+            elif err:
+                failures.append({"pair": trading_pair, "coin": coin, "reason": err})
+
+    await asyncio.gather(*[_fetch_one(p) for p in pairs], return_exceptions=True)
+    if failures:
+        logger.warning(
+            "HL candleSnapshot failures: %d/%d — %s",
+            len(failures),
+            len(pairs),
+            failures[:5],
+        )
+    return candles_map
+
+
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Scan top Hyperliquid markets and classify by volume/volatility profile."""
     chat_id = context._chat_id if hasattr(context, "_chat_id") else None
     client = await get_client(chat_id, context=context)
     if not client:
         return "No server available. Configure servers in /config."
-
-    max_records = config.lookback_hours * 60
 
     try:
         top_pairs = await fetch_top_hl_pairs(
@@ -275,9 +364,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if not top_pairs:
         return "No pairs found matching volume criteria on Hyperliquid."
 
-    candles_map = await fetch_all_candles(
-        client, config.connector, top_pairs, max_records
-    )
+    async with aiohttp.ClientSession() as session:
+        candles_map = await _fetch_all_candles_hl_rest(
+            session,
+            top_pairs,
+            config.lookback_hours,
+            config.max_concurrent_candles,
+        )
 
     if not candles_map:
         return "Failed to fetch candles for any pair."
