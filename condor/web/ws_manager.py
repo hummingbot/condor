@@ -690,6 +690,44 @@ class WebSocketManager:
             "server_online": True,
         }
 
+    @staticmethod
+    def _overlay_stopping_state(server_name: str, data: dict) -> None:
+        """Apply transitional 'stopping' state to WS broadcast data."""
+        from condor.web.routes.bots import (
+            clear_bot_stopping,
+            get_stopping_bots,
+            get_stopping_controllers,
+            _stopping_controllers,
+        )
+
+        stopping_bot_names = get_stopping_bots(server_name)
+        stopping_ctrl_keys = get_stopping_controllers(server_name)
+
+        if not stopping_bot_names and not stopping_ctrl_keys:
+            return
+
+        active_bot_names = set()
+        for bot in data.get("bots", []):
+            active_bot_names.add(bot.get("bot_name", ""))
+            if bot.get("bot_name") in stopping_bot_names:
+                if bot.get("status") in ("running",):
+                    bot["status"] = "stopping"
+                else:
+                    clear_bot_stopping(server_name, bot["bot_name"])
+
+        # Clear stopping entries for bots that disappeared (fully stopped)
+        for sbn in list(stopping_bot_names):
+            if sbn not in active_bot_names:
+                clear_bot_stopping(server_name, sbn)
+
+        for ctrl in data.get("controllers", []):
+            key = f"{ctrl.get('bot_name')}:{ctrl.get('controller_id')}"
+            if key in stopping_ctrl_keys:
+                if ctrl.get("config", {}).get("manual_kill_switch") is True:
+                    _stopping_controllers.pop(f"{server_name}:{key}", None)
+                else:
+                    ctrl["status"] = "stopping"
+
     def _on_data_update(self, server_name: str, cache_key: str, data_type: Any, value: Any) -> None:
         """Called by SDS when cache is updated. Maps to WS channels and broadcasts."""
         dt_name = data_type.name if hasattr(data_type, "name") else str(data_type)
@@ -715,6 +753,8 @@ class WebSocketManager:
         if dt_name == "BOTS_STATUS":
             try:
                 value = self._transform_bots(value)
+                # Overlay transitional "stopping" state from Condor's in-memory store
+                self._overlay_stopping_state(server_name, value)
             except Exception as e:
                 logger.debug("Failed to transform bots data for WS: %s", e)
                 return
@@ -1416,6 +1456,7 @@ class WebSocketManager:
                             get_server_data_service().put(server_name, ServerDataType.BOTS_STATUS, raw_data)
                             try:
                                 data = self._transform_bots(raw_data)
+                                self._overlay_stopping_state(server_name, data)
                                 await self._broadcast_update(channel, data)
                             except Exception as e:
                                 logger.debug("Failed to transform bots WS data: %s", e)

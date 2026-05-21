@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { PnlSparkline } from "@/components/bots/PnlSparkline";
@@ -118,13 +119,18 @@ function StatCard({
 // ── Status Dot ──
 
 function StatusDot({ status }: { status: string }) {
+  const isStopping = status === "stopping";
   const color =
     status === "running"
       ? "text-[var(--color-green)]"
       : status === "stopped" || status === "error"
         ? "text-[var(--color-red)]"
         : "text-[var(--color-yellow)]";
-  return <Circle className={`h-2 w-2 fill-current ${color}`} />;
+  return isStopping ? (
+    <span className="h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
+  ) : (
+    <Circle className={`h-2 w-2 fill-current ${color}`} />
+  );
 }
 
 // ── Sortable Header ──
@@ -260,6 +266,7 @@ function ControllerRow({
 }) {
   const queryClient = useQueryClient();
   const isKilled = ctrl.config?.manual_kill_switch === true;
+  const isStopping = ctrl.status === "stopping";
 
   const toggleMutation = useMutation({
     mutationFn: () =>
@@ -341,15 +348,17 @@ function ControllerRow({
         <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => toggleMutation.mutate()}
-            disabled={toggleMutation.isPending}
+            disabled={toggleMutation.isPending || isStopping}
             className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
-              isKilled
-                ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
-                : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
+              isStopping
+                ? "text-[var(--color-yellow)]"
+                : isKilled
+                  ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
+                  : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
             }`}
-            title={isKilled ? "Start controller" : "Pause controller"}
+            title={isStopping ? "Stopping..." : isKilled ? "Start controller" : "Pause controller"}
           >
-            {toggleMutation.isPending ? (
+            {toggleMutation.isPending || isStopping ? (
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
             ) : isKilled ? (
               <Play className="h-3.5 w-3.5" />
@@ -369,6 +378,7 @@ function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
   const [showLogs, setShowLogs] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const queryClient = useQueryClient();
+  const isStopping = bot.status === "stopping";
 
   const stopMutation = useMutation({
     mutationFn: () => api.stopBot(server, bot.bot_name),
@@ -416,7 +426,12 @@ function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
         <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
           {formatUptime(bot.deployed_at)}
         </span>
-        {confirmStop ? (
+        {isStopping ? (
+            <div className="flex items-center gap-1.5 text-[var(--color-yellow)]" onClick={(e) => e.stopPropagation()}>
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              <span className="text-xs font-medium">Stopping</span>
+            </div>
+          ) : confirmStop ? (
             <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => stopMutation.mutate()}
@@ -547,8 +562,18 @@ export function ActiveBotsTab() {
     }
   };
 
-  const controllers = data?.controllers ?? [];
   const bots = data?.bots ?? [];
+
+  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
+  const controllers = useMemo(() => {
+    const raw = data?.controllers ?? [];
+    const seen = new Map<string, ControllerInfo>();
+    for (const ctrl of raw) {
+      const key = `${ctrl.bot_name}:${ctrl.controller_id || ctrl.controller_name}`;
+      seen.set(key, ctrl); // last wins (most recent data)
+    }
+    return Array.from(seen.values());
+  }, [data?.controllers]);
 
   // Aggregate logs per bot for the overlay
   const sortedControllers = useMemo(
@@ -576,7 +601,7 @@ export function ActiveBotsTab() {
 
   const serverOnline = data?.server_online !== false;
   const errorHint = data?.error_hint;
-  const activeBots = bots.filter((b) => b.status === "running").length;
+  const activeBots = bots.filter((b) => b.status === "running" || b.status === "stopping").length;
 
   // Compute totals with currency conversion
   let totalPnl = 0;
@@ -625,6 +650,14 @@ export function ActiveBotsTab() {
           Deploy Bot
         </button>
       </div>
+
+      {/* Aggregated PnL chart */}
+      {perfHistory?.snapshots && perfHistory.snapshots.length > 0 && (
+        <AggregatedPnlChart
+          snapshots={perfHistory.snapshots}
+          currencySymbol={currencySymbol}
+        />
+      )}
 
       {isEmpty ? (
         <div className="flex flex-col items-center gap-2 py-16 text-[var(--color-text-muted)]">

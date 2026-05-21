@@ -216,9 +216,14 @@ export function useCondorWebSocket(
   // ── Effect 2: Diff channels — subscribe/unsubscribe without reconnecting ──
   useEffect(() => {
     const ws = wsRef.current;
-    if (!ws) return;
+    if (!ws || !server) return;
 
-    const newSet = new Set(nonCandleChannels(channels));
+    // Bare channel names (e.g. "bots") need server prefix ("bots:local")
+    // to match the backend broadcast channel format.
+    const resolved = nonCandleChannels(channels).map((ch) =>
+      ch.includes(":") ? ch : `${ch}:${server}`,
+    );
+    const newSet = new Set(resolved);
     const oldSet = prevChannelsRef.current;
 
     // Subscribe new channels
@@ -231,7 +236,7 @@ export function useCondorWebSocket(
     }
 
     prevChannelsRef.current = newSet;
-  }, [channels.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [channels.join(","), server]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { wsRef, wsVersion };
 }

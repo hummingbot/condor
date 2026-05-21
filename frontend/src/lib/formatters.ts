@@ -18,7 +18,7 @@ export function formatCurrency(val: number, symbol = "$") {
 export function formatCurrencyVolume(val: number, symbol = "$") {
   if (Math.abs(val) >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
   if (Math.abs(val) >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";
-  return symbol + val.toFixed(0);
+  return symbol + val.toFixed(Math.abs(val) < 100 ? 2 : 0);
 }
 
 export function formatCurrencyPnl(val: number, symbol = "$") {

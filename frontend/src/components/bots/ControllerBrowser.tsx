@@ -49,13 +49,18 @@ function parseSide(raw: string): string {
 }
 
 function StatusDot({ status }: { status: string }) {
+  const isStopping = status === "stopping";
   const color =
     status === "running"
       ? "text-[var(--color-green)]"
       : status === "stopped" || status === "error"
         ? "text-[var(--color-red)]"
         : "text-[var(--color-yellow)]";
-  return <Circle className={`h-2 w-2 fill-current ${color}`} />;
+  return isStopping ? (
+    <span className="h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
+  ) : (
+    <Circle className={`h-2 w-2 fill-current ${color}`} />
+  );
 }
 
 // ── Types ──
@@ -259,6 +264,7 @@ export function ControllerBrowser({
   const activeCtrl = controllers.find((c) => ctrlKey(c) === activeKey) ?? controllers[0];
 
   const isKilled = activeCtrl?.config?.manual_kill_switch === true;
+  const isStopping = activeCtrl?.status === "stopping";
 
   const toggleMutation = useMutation({
     mutationFn: () =>
@@ -343,6 +349,7 @@ export function ControllerBrowser({
             const key = ctrlKey(c);
             const isActive = key === activeKey;
             const killed = c.config?.manual_kill_switch === true;
+            const ctrlStopping = c.status === "stopping";
 
             if (isCompact) {
               return (
@@ -357,7 +364,7 @@ export function ControllerBrowser({
                   }`}
                   title={c.controller_name}
                 >
-                  <StatusDot status={killed ? "stopped" : c.status} />
+                  <StatusDot status={ctrlStopping ? "stopping" : killed ? "stopped" : c.status} />
                 </button>
               );
             }
@@ -374,7 +381,7 @@ export function ControllerBrowser({
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <StatusDot status={killed ? "stopped" : c.status} />
+                  <StatusDot status={ctrlStopping ? "stopping" : killed ? "stopped" : c.status} />
                   <span className={`truncate text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
                     {c.controller_name}
                   </span>
@@ -437,22 +444,24 @@ export function ControllerBrowser({
               </span>
             )}
             <div className="flex items-center gap-1.5 shrink-0">
-              <StatusDot status={isKilled ? "stopped" : activeCtrl.status} />
-              <span className="text-xs capitalize">{isKilled ? "stopped" : activeCtrl.status}</span>
+              <StatusDot status={isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status} />
+              <span className="text-xs capitalize">{isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status}</span>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
             <button
               onClick={() => toggleMutation.mutate()}
-              disabled={toggleMutation.isPending}
+              disabled={toggleMutation.isPending || isStopping}
               className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
-                isKilled
-                  ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
-                  : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
+                isStopping
+                  ? "text-[var(--color-yellow)]"
+                  : isKilled
+                    ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
+                    : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
               }`}
-              title={isKilled ? "Start controller" : "Pause controller"}
+              title={isStopping ? "Stopping..." : isKilled ? "Start controller" : "Pause controller"}
             >
-              {toggleMutation.isPending ? (
+              {toggleMutation.isPending || isStopping ? (
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
               ) : isKilled ? (
                 <>

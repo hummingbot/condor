@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft,
   Check,
   ChevronDown,
   ChevronRight,
@@ -9,6 +8,7 @@ import {
   Rocket,
   RotateCcw,
   Search,
+  Settings,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -52,18 +52,21 @@ export function ConfigEditor({
   server,
   configId,
   onDirtyChange,
+  onRemove,
 }: {
   server: string;
   configId: string;
   onDirtyChange: (configId: string, edits: Record<string, unknown> | null) => void;
+  onRemove?: (configId: string) => void;
 }) {
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [expanded, setExpanded] = useState(false);
+
   const { data, isLoading } = useQuery({
     queryKey: ["config-detail", server, configId],
     queryFn: () => api.getConfigDetail(server, configId),
+    enabled: expanded,
   });
-
-  const [edits, setEdits] = useState<Record<string, string>>({});
-  const [expanded, setExpanded] = useState(true);
 
   const config = data?.config ?? {};
   const entries = useMemo(
@@ -117,29 +120,40 @@ export function ConfigEditor({
   return (
     <div className={`rounded-lg border overflow-hidden transition-colors ${isDirty ? "border-[var(--color-warning)]/60" : "border-[var(--color-border)]"}`}>
       {/* Header */}
-      <button
-        className="flex w-full items-center gap-2 px-4 py-3 text-left bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] transition-colors"
-        onClick={() => setExpanded(!expanded)}
-      >
-        {expanded ? (
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+      <div className="flex items-center bg-[var(--color-surface)]">
+        <button
+          className="flex flex-1 items-center gap-2 px-4 py-3 text-left hover:bg-[var(--color-surface-hover)] transition-colors"
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? (
+            <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          )}
+          <Package className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          <span className="text-sm font-medium truncate">{configId}</span>
+          {data?.controller_name && (
+            <span className="text-xs text-[var(--color-text-muted)]">
+              {data.controller_name}
+            </span>
+          )}
+          {isDirty && (
+            <span className="flex items-center gap-1 text-xs text-[var(--color-warning)]">
+              <Pencil className="h-3 w-3" />
+              {Object.keys(edits).length} edited
+            </span>
+          )}
+        </button>
+        {onRemove && (
+          <button
+            onClick={() => onRemove(configId)}
+            className="px-3 py-3 text-[var(--color-text-muted)] hover:text-[var(--color-red)] transition-colors"
+            title="Remove config"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         )}
-        <Package className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-        <span className="text-sm font-medium truncate flex-1">{configId}</span>
-        {data?.controller_name && (
-          <span className="text-xs text-[var(--color-text-muted)]">
-            {data.controller_name}
-          </span>
-        )}
-        {isDirty && (
-          <span className="flex items-center gap-1 text-xs text-[var(--color-warning)]">
-            <Pencil className="h-3 w-3" />
-            {Object.keys(edits).length} edited
-          </span>
-        )}
-      </button>
+      </div>
 
       {/* Fields */}
       {expanded && (
@@ -238,50 +252,6 @@ export function ConfigEditor({
   );
 }
 
-// ── Config selection inline detail (read-only, for step 1) ──
-
-function ConfigDetailInline({
-  server,
-  configId,
-}: {
-  server: string;
-  configId: string;
-}) {
-  const { data, isLoading } = useQuery({
-    queryKey: ["config-detail", server, configId],
-    queryFn: () => api.getConfigDetail(server, configId),
-  });
-
-  if (isLoading) {
-    return (
-      <div className="px-4 py-2 text-xs text-[var(--color-text-muted)]">
-        Loading...
-      </div>
-    );
-  }
-
-  if (!data) return null;
-
-  const entries = Object.entries(data.config).filter(
-    ([k]) => !HIDDEN_KEYS.has(k),
-  );
-
-  return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-1 px-4 py-2 bg-[var(--color-bg)] border-t border-[var(--color-border)]/30 text-xs">
-      {entries.map(([key, val]) => (
-        <div key={key} className="flex justify-between gap-2 py-0.5 min-w-0">
-          <span className="text-[var(--color-text-muted)] truncate">{key}</span>
-          <span className="tabular-nums text-right truncate" title={String(val ?? "")}>
-            {typeof val === "object" && val !== null
-              ? JSON.stringify(val)
-              : String(val ?? "")}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // ── Main Dialog ──
 
 export function DeployBotDialog({
@@ -294,13 +264,12 @@ export function DeployBotDialog({
   server: string;
 }) {
   const queryClient = useQueryClient();
-  const [step, setStep] = useState<1 | 2>(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [expandedConfig, setExpandedConfig] = useState<string | null>(null);
-  const [expandedTypes, setExpandedTypes] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
 
-  // Step 2 fields
+  // Bot settings
   const [botName, setBotName] = useState(
     () => `bot_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 15)}`,
   );
@@ -308,9 +277,8 @@ export function DeployBotDialog({
   const [image, setImage] = useState("hummingbot/hummingbot:latest");
   const [maxGlobalDrawdown, setMaxGlobalDrawdown] = useState("");
   const [maxControllerDrawdown, setMaxControllerDrawdown] = useState("");
-  const [deployError, setDeployError] = useState<string | null>(null);
 
-  // Track edits per config: configId -> edited fields (null = not dirty)
+  // Track edits per config
   const [configEdits, setConfigEdits] = useState<Record<string, Record<string, unknown> | null>>({});
 
   const dirtyConfigs = useMemo(
@@ -323,11 +291,8 @@ export function DeployBotDialog({
       if (prev[configId] === edits) return prev;
       if (edits === null && !(configId in prev)) return prev;
       const next = { ...prev };
-      if (edits === null) {
-        delete next[configId];
-      } else {
-        next[configId] = edits;
-      }
+      if (edits === null) delete next[configId];
+      else next[configId] = edits;
       return next;
     });
   }, []);
@@ -352,56 +317,50 @@ export function DeployBotDialog({
     );
   }, [configs, search]);
 
-  const groupedConfigs = useMemo(() => {
+  // Group unselected configs by type for browsing
+  const unselectedConfigs = useMemo(
+    () => filteredConfigs.filter((c) => !selected.has(c.id)),
+    [filteredConfigs, selected],
+  );
+
+  const groupedUnselected = useMemo(() => {
     const groups: Record<string, ControllerConfigSummary[]> = {};
-    for (const c of filteredConfigs) {
+    for (const c of unselectedConfigs) {
       const type = c.controller_type || "other";
-      if (!groups[type]) groups[type] = [];
-      groups[type].push(c);
+      (groups[type] ??= []).push(c);
     }
     return groups;
-  }, [filteredConfigs]);
+  }, [unselectedConfigs]);
 
   const toggleSelect = (id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+        setConfigEdits((ce) => { const n = { ...ce }; delete n[id]; return n; });
+      } else {
+        next.add(id);
+      }
       return next;
     });
   };
 
-  const toggleType = (type: string) => {
-    setExpandedTypes((prev) => {
-      const next = new Set(prev);
-      if (next.has(type)) next.delete(type);
-      else next.add(type);
-      return next;
-    });
-  };
-
-  // Save modified configs then deploy
+  // Deploy
   const deployMutation = useMutation({
     mutationFn: async () => {
-      // First, save any configs that were edited
       for (const [configId, edits] of dirtyConfigs) {
         await api.updateConfig(server, configId, edits);
       }
-
-      // Then deploy
       return api.deployBot(server, {
         bot_name: botName,
         controllers_config: Array.from(selected),
         account_name: accountName,
         image,
         max_global_drawdown_quote: maxGlobalDrawdown ? parseFloat(maxGlobalDrawdown) : null,
-        max_controller_drawdown_quote: maxControllerDrawdown
-          ? parseFloat(maxControllerDrawdown)
-          : null,
+        max_controller_drawdown_quote: maxControllerDrawdown ? parseFloat(maxControllerDrawdown) : null,
       });
     },
     onSuccess: () => {
-      // Invalidate config caches since we may have updated them
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
       queryClient.invalidateQueries({ queryKey: ["config-detail"] });
       queryClient.invalidateQueries({ queryKey: ["available-configs", server] });
@@ -413,17 +372,24 @@ export function DeployBotDialog({
   });
 
   const handleClose = () => {
-    setStep(1);
     setSelected(new Set());
-    setExpandedConfig(null);
-    setExpandedTypes(new Set());
     setSearch("");
+    setShowAdvanced(false);
     setDeployError(null);
     setConfigEdits({});
     onClose();
   };
 
+  // Reset bot name on open
+  useEffect(() => {
+    if (open) {
+      setBotName(`bot_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 15)}`);
+    }
+  }, [open]);
+
   if (!open) return null;
+
+  const hasSelected = selected.size > 0;
 
   return (
     <div
@@ -437,17 +403,9 @@ export function DeployBotDialog({
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-4">
           <div className="flex items-center gap-3">
-            {step === 2 && (
-              <button
-                onClick={() => { setStep(1); setDeployError(null); }}
-                className="p-1 rounded hover:bg-[var(--color-surface-hover)] transition-colors"
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </button>
-            )}
             <Rocket className="h-5 w-5 text-[var(--color-primary)]" />
             <h2 className="text-lg font-semibold text-[var(--color-text)]">
-              {step === 1 ? "Select Configs" : "Review & Deploy"}
+              Deploy Bot
             </h2>
           </div>
           <button
@@ -459,227 +417,163 @@ export function DeployBotDialog({
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {step === 1 ? (
-            <div className="space-y-4">
-              {/* Search */}
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]" />
-                <input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Filter configs..."
-                  className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] pl-10 pr-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-                  autoFocus
-                />
+        <div className="flex-1 overflow-y-auto p-6 space-y-5">
+
+          {/* Selected configs with inline editors */}
+          {hasSelected && (
+            <div>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Selected ({selected.size})
+              </h3>
+              <div className="space-y-2">
+                {Array.from(selected).map((id) => (
+                  <ConfigEditor
+                    key={id}
+                    server={server}
+                    configId={id}
+                    onDirtyChange={handleDirtyChange}
+                    onRemove={toggleSelect}
+                  />
+                ))}
               </div>
-
-              {isLoading ? (
-                <div className="flex h-40 items-center justify-center text-[var(--color-text-muted)]">
-                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
-                </div>
-              ) : filteredConfigs.length === 0 ? (
-                <div className="flex h-40 flex-col items-center justify-center text-[var(--color-text-muted)]">
-                  <Package className="mb-2 h-8 w-8 opacity-30" />
-                  <p className="text-sm">No configs found</p>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {Object.entries(groupedConfigs).map(([type, cfgs]) => {
-                    const isTypeExpanded = expandedTypes.has(type);
-                    return (
-                      <div
-                        key={type}
-                        className="rounded-lg border border-[var(--color-border)] overflow-hidden"
-                      >
-                        <button
-                          className="flex w-full items-center gap-2 px-4 py-2.5 text-left bg-[var(--color-surface)] hover:bg-[var(--color-surface-hover)] transition-colors"
-                          onClick={() => toggleType(type)}
-                        >
-                          {isTypeExpanded ? (
-                            <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                          ) : (
-                            <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                          )}
-                          <span className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                            {type}
-                          </span>
-                          <span className="text-xs text-[var(--color-text-muted)]">
-                            ({cfgs.length})
-                          </span>
-                        </button>
-
-                        {isTypeExpanded && (
-                          <div className="divide-y divide-[var(--color-border)]/30">
-                            {cfgs.map((cfg) => {
-                              const isSelected = selected.has(cfg.id);
-                              const isExpanded = expandedConfig === cfg.id;
-                              return (
-                                <div key={cfg.id}>
-                                  <div
-                                    className={`flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]/50 ${
-                                      isSelected ? "bg-[var(--color-primary)]/5" : ""
-                                    }`}
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={isSelected}
-                                      onChange={() => toggleSelect(cfg.id)}
-                                      className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
-                                    />
-                                    <button
-                                      className="flex-1 flex items-center gap-3 text-left min-w-0"
-                                      onClick={() =>
-                                        setExpandedConfig(isExpanded ? null : cfg.id)
-                                      }
-                                    >
-                                      <span className="text-sm font-medium truncate">
-                                        {cfg.id}
-                                      </span>
-                                      <span className="text-xs text-[var(--color-text-muted)] truncate">
-                                        {cfg.controller_name}
-                                      </span>
-                                      {cfg.connector_name && (
-                                        <span className="text-xs text-[var(--color-text-muted)]">
-                                          {cfg.connector_name}
-                                        </span>
-                                      )}
-                                      {cfg.trading_pair && (
-                                        <span className="text-xs font-mono">
-                                          {cfg.trading_pair}
-                                        </span>
-                                      )}
-                                      <span className="ml-auto">
-                                        {isExpanded ? (
-                                          <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                                        ) : (
-                                          <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                                        )}
-                                      </span>
-                                    </button>
-                                  </div>
-                                  {isExpanded && (
-                                    <ConfigDetailInline
-                                      server={server}
-                                      configId={cfg.id}
-                                    />
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
             </div>
-          ) : (
-            /* Step 2: Review configs + Deploy settings */
-            <div className="space-y-6">
-              {/* Config editors */}
-              <div>
-                <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                  Controller Configs ({selected.size})
-                </h3>
-                <div className="space-y-3">
-                  {Array.from(selected).map((id) => (
-                    <ConfigEditor
-                      key={id}
-                      server={server}
-                      configId={id}
-                      onDirtyChange={handleDirtyChange}
-                    />
-                  ))}
-                </div>
+          )}
+
+          {/* Available configs */}
+          <div>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+              {hasSelected ? "Add more" : "Select configs"}
+            </h3>
+            <div className="relative mb-3">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--color-text-muted)]" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search configs..."
+                className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] pl-10 pr-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
+                autoFocus
+              />
+            </div>
+
+            {isLoading ? (
+              <div className="flex h-24 items-center justify-center text-[var(--color-text-muted)]">
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
               </div>
+            ) : unselectedConfigs.length === 0 ? (
+              <div className="flex h-16 items-center justify-center text-[var(--color-text-muted)]">
+                <p className="text-xs">{configs.length === 0 ? "No configs available" : "All configs selected"}</p>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-[var(--color-border)] overflow-hidden max-h-[300px] overflow-y-auto">
+                {Object.entries(groupedUnselected).map(([type, cfgs]) => (
+                  <div key={type}>
+                    <div className="px-4 py-1.5 bg-[var(--color-surface)] text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)] sticky top-0 border-b border-[var(--color-border)]/30">
+                      {type} ({cfgs.length})
+                    </div>
+                    {cfgs.map((cfg) => (
+                      <button
+                        key={cfg.id}
+                        onClick={() => toggleSelect(cfg.id)}
+                        className="flex w-full items-center gap-3 px-4 py-2 text-left hover:bg-[var(--color-surface-hover)]/50 transition-colors border-b border-[var(--color-border)]/20 last:border-b-0"
+                      >
+                        <div className="h-4 w-4 rounded border border-[var(--color-border)] flex items-center justify-center shrink-0" />
+                        <span className="text-sm font-medium truncate">{cfg.id}</span>
+                        {cfg.connector_name && (
+                          <span className="text-xs text-[var(--color-text-muted)]">{cfg.connector_name}</span>
+                        )}
+                        {cfg.trading_pair && (
+                          <span className="text-xs font-mono text-[var(--color-text-muted)]">{cfg.trading_pair}</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
-              {/* Divider */}
-              <div className="border-t border-[var(--color-border)]" />
+          {/* Advanced settings (collapsed by default) */}
+          <div className="border-t border-[var(--color-border)] pt-4">
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="flex items-center gap-2 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+            >
+              <Settings className="h-3.5 w-3.5" />
+              <span className="font-medium">Advanced Settings</span>
+              {showAdvanced ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+            </button>
 
-              {/* Deploy settings */}
-              <div>
-                <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                  Bot Settings
-                </h3>
-                <div className="space-y-3">
+            {showAdvanced && (
+              <div className="mt-3 space-y-3">
+                <div>
+                  <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Bot Name</label>
+                  <input
+                    type="text"
+                    value={botName}
+                    onChange={(e) => setBotName(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-                      Bot Name
-                    </label>
+                    <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Account</label>
                     <input
                       type="text"
-                      value={botName}
-                      onChange={(e) => setBotName(e.target.value)}
+                      value={accountName}
+                      onChange={(e) => setAccountName(e.target.value)}
                       className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-                        Account
-                      </label>
-                      <input
-                        type="text"
-                        value={accountName}
-                        onChange={(e) => setAccountName(e.target.value)}
-                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-                        Image
-                      </label>
-                      <input
-                        type="text"
-                        value={image}
-                        onChange={(e) => setImage(e.target.value)}
-                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]"
-                      />
-                    </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Image</label>
+                    <input
+                      type="text"
+                      value={image}
+                      onChange={(e) => setImage(e.target.value)}
+                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]"
+                    />
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-                        Max Global Drawdown
-                      </label>
-                      <input
-                        type="number"
-                        value={maxGlobalDrawdown}
-                        onChange={(e) => setMaxGlobalDrawdown(e.target.value)}
-                        placeholder="Optional"
-                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-                        Max Controller Drawdown
-                      </label>
-                      <input
-                        type="number"
-                        value={maxControllerDrawdown}
-                        onChange={(e) => setMaxControllerDrawdown(e.target.value)}
-                        placeholder="Optional"
-                        className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-                      />
-                    </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Max Global Drawdown</label>
+                    <input
+                      type="number"
+                      value={maxGlobalDrawdown}
+                      onChange={(e) => setMaxGlobalDrawdown(e.target.value)}
+                      placeholder="Optional"
+                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Max Controller Drawdown</label>
+                    <input
+                      type="number"
+                      value={maxControllerDrawdown}
+                      onChange={(e) => setMaxControllerDrawdown(e.target.value)}
+                      placeholder="Optional"
+                      className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
+                    />
                   </div>
                 </div>
               </div>
+            )}
+          </div>
 
-              {deployError && (
-                <div className="rounded-lg border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-4 py-3">
-                  <p className="text-sm text-[var(--color-red)]">{deployError}</p>
-                  <button
-                    onClick={() => { setDeployError(null); deployMutation.mutate(); }}
-                    className="mt-2 text-xs font-medium text-[var(--color-red)] underline"
-                  >
-                    Retry
-                  </button>
-                </div>
-              )}
+          {deployError && (
+            <div className="rounded-lg border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-4 py-3">
+              <p className="text-sm text-[var(--color-red)]">{deployError}</p>
+              <button
+                onClick={() => { setDeployError(null); deployMutation.mutate(); }}
+                className="mt-2 text-xs font-medium text-[var(--color-red)] underline"
+              >
+                Retry
+              </button>
             </div>
           )}
         </div>
@@ -687,11 +581,8 @@ export function DeployBotDialog({
         {/* Footer */}
         <div className="flex items-center justify-between border-t border-[var(--color-border)] px-6 py-4">
           <span className="text-xs text-[var(--color-text-muted)]">
-            {step === 1
-              ? `${selected.size} config${selected.size !== 1 ? "s" : ""} selected`
-              : dirtyConfigs.length > 0
-                ? `${dirtyConfigs.length} config${dirtyConfigs.length !== 1 ? "s" : ""} modified`
-                : ""}
+            {selected.size} config{selected.size !== 1 ? "s" : ""}
+            {dirtyConfigs.length > 0 && ` · ${dirtyConfigs.length} modified`}
           </span>
           <div className="flex gap-3">
             <button
@@ -700,30 +591,16 @@ export function DeployBotDialog({
             >
               Cancel
             </button>
-            {step === 1 ? (
-              <button
-                onClick={() => setStep(2)}
-                disabled={selected.size === 0}
-                className="rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
-              >
-                Next
-              </button>
-            ) : (
-              <button
-                onClick={() => deployMutation.mutate()}
-                disabled={!botName.trim() || deployMutation.isPending}
-                className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
-              >
-                <Rocket className="h-4 w-4" />
-                {deployMutation.isPending
-                  ? dirtyConfigs.length > 0
-                    ? "Saving & Deploying..."
-                    : "Deploying..."
-                  : dirtyConfigs.length > 0
-                    ? "Save & Deploy"
-                    : "Deploy"}
-              </button>
-            )}
+            <button
+              onClick={() => deployMutation.mutate()}
+              disabled={!hasSelected || !botName.trim() || deployMutation.isPending}
+              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
+            >
+              <Rocket className="h-4 w-4" />
+              {deployMutation.isPending
+                ? dirtyConfigs.length > 0 ? "Saving & Deploying..." : "Deploying..."
+                : dirtyConfigs.length > 0 ? "Save & Deploy" : "Deploy"}
+            </button>
           </div>
         </div>
       </div>

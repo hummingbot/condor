@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +28,65 @@ from condor.web.models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bots"])
+
+# ── Transitional state store ──
+# Tracks bots/controllers that have been sent a stop command but haven't
+# finished shutting down yet. Auto-expires after TTL seconds.
+
+_TRANSITIONAL_TTL = 300  # 5 minutes max
+
+# { "server:bot_name" -> timestamp }
+_stopping_bots: dict[str, float] = {}
+# { "server:bot_name:controller_id" -> timestamp }
+_stopping_controllers: dict[str, float] = {}
+
+
+def mark_bot_stopping(server: str, bot_name: str) -> None:
+    _stopping_bots[f"{server}:{bot_name}"] = time.monotonic()
+
+
+def mark_controllers_stopping(server: str, bot_name: str, controller_ids: list[str]) -> None:
+    now = time.monotonic()
+    for cid in controller_ids:
+        _stopping_controllers[f"{server}:{bot_name}:{cid}"] = now
+
+
+def clear_bot_stopping(server: str, bot_name: str) -> None:
+    _stopping_bots.pop(f"{server}:{bot_name}", None)
+
+
+def get_stopping_bots(server: str) -> set[str]:
+    """Return bot names currently in stopping state for a server."""
+    now = time.monotonic()
+    result = set()
+    expired = []
+    for key, ts in _stopping_bots.items():
+        if now - ts > _TRANSITIONAL_TTL:
+            expired.append(key)
+            continue
+        srv, bot = key.split(":", 1)
+        if srv == server:
+            result.add(bot)
+    for key in expired:
+        _stopping_bots.pop(key, None)
+    return result
+
+
+def get_stopping_controllers(server: str) -> set[str]:
+    """Return 'bot_name:controller_id' keys currently in stopping state."""
+    now = time.monotonic()
+    result = set()
+    expired = []
+    for key, ts in _stopping_controllers.items():
+        if now - ts > _TRANSITIONAL_TTL:
+            expired.append(key)
+            continue
+        parts = key.split(":", 2)
+        if len(parts) == 3 and parts[0] == server:
+            result.add(f"{parts[1]}:{parts[2]}")
+    for key in expired:
+        _stopping_controllers.pop(key, None)
+    return result
 
 
 def _parse_bot(bot: dict) -> BotInfo:
@@ -320,6 +380,33 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 general_logs=general_logs[-100:],
             )
         )
+
+    # Overlay transitional "stopping" state
+    stopping_bot_names = get_stopping_bots(name)
+    stopping_ctrl_keys = get_stopping_controllers(name)
+
+    for bot in bots:
+        if bot.bot_name in stopping_bot_names:
+            # Bot is no longer in the active list from API → it actually stopped
+            if bot.status not in ("running",):
+                clear_bot_stopping(name, bot.bot_name)
+            else:
+                bot.status = "stopping"
+
+    # Clear stopping bots that are no longer in the response at all
+    active_bot_names = {b.bot_name for b in bots}
+    for sbn in list(stopping_bot_names):
+        if sbn not in active_bot_names:
+            clear_bot_stopping(name, sbn)
+
+    for ctrl in controllers:
+        key = f"{ctrl.bot_name}:{ctrl.controller_id}"
+        if key in stopping_ctrl_keys:
+            # If kill switch is already on, the stop landed → clear
+            if ctrl.config.get("manual_kill_switch") is True:
+                _stopping_controllers.pop(f"{name}:{key}", None)
+            else:
+                ctrl.status = "stopping"
 
     return BotsPageResponse(
         controllers=controllers,
@@ -732,6 +819,9 @@ async def stop_bot_endpoint(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    # Mark as stopping immediately so UI reflects it
+    mark_bot_stopping(name, bot_name)
+
     client = await cm.get_client(name)
 
     from mcp_servers.hummingbot_api.tools.bot_management import manage_bot_execution
@@ -743,6 +833,7 @@ async def stop_bot_endpoint(
             action="stop_bot",
         )
     except Exception as e:
+        clear_bot_stopping(name, bot_name)
         raise HTTPException(status_code=502, detail=str(e))
 
     return result
@@ -755,6 +846,9 @@ async def stop_controllers_endpoint(
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
+
+    # Mark controllers as stopping immediately
+    mark_controllers_stopping(name, bot_name, body.controller_names)
 
     client = await cm.get_client(name)
 
