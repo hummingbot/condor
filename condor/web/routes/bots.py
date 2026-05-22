@@ -890,3 +890,39 @@ async def start_controllers_endpoint(
         raise HTTPException(status_code=502, detail=str(e))
 
     return result
+
+
+@router.put("/servers/{name}/bots/{bot_name}/controllers/{config_id}/config")
+async def update_bot_controller_config_endpoint(
+    name: str,
+    bot_name: str,
+    config_id: str,
+    body: dict[str, Any],
+    user: WebUser = Depends(get_current_user),
+):
+    """Update a controller config inside a running bot in real-time."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+
+    try:
+        # Fetch current bot controller config to merge partial updates
+        current_configs = await client.controllers.get_bot_controller_configs(bot_name)
+        existing = next((c for c in current_configs if c.get("id") == config_id), None)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Controller '{config_id}' not found in bot '{bot_name}'")
+
+        merged = {**existing, **body}
+        merged["id"] = config_id
+
+        result = await client.controllers.update_bot_controller_config(
+            bot_name, config_id, merged
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"updated": True, "config_id": config_id, "bot_name": bot_name, "result": result}

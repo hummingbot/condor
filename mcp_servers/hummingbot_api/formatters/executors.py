@@ -204,8 +204,36 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
     if close_timestamp is not None and close_timestamp != "N/A" and close_timestamp != 0:
         output += f"Closed: {format_timestamp(close_timestamp, '%Y-%m-%d %H:%M:%S')}\n"
 
-    # Show custom_info summary (skip large lists/dicts to keep response compact)
+    # Show full config if present (creation parameters)
+    config = executor.get("config")
+    if config and isinstance(config, dict):
+        output += "\nConfig:\n"
+        for key, value in config.items():
+            if isinstance(value, list):
+                output += f"  {key}: [{len(value)} items]\n"
+            else:
+                output += f"  {key}: {value}\n"
+
+    # Extract grid config from custom_info level prices
     if custom_info:
+        grid_levels = custom_info.get("grid_level_prices")
+        grid_tp = custom_info.get("grid_tp_prices")
+        if isinstance(grid_levels, list) and len(grid_levels) > 1:
+            output += "\nGrid Config (derived from level prices):\n"
+            output += f"  start_price: {format_number(min(grid_levels), decimals=2, compact=False)}\n"
+            output += f"  end_price: {format_number(max(grid_levels), decimals=2, compact=False)}\n"
+            output += f"  num_levels: {len(grid_levels)}\n"
+            sorted_levels = sorted(grid_levels)
+            spreads = [(sorted_levels[i+1] - sorted_levels[i]) / sorted_levels[i]
+                       for i in range(len(sorted_levels) - 1)]
+            avg_spread = sum(spreads) / len(spreads) if spreads else 0
+            output += f"  avg_spread_between_levels: {format_percentage(avg_spread)}\n"
+            if isinstance(grid_tp, list) and len(grid_tp) > 1:
+                tp_diffs = [abs(grid_tp[i] - grid_levels[i]) / grid_levels[i]
+                            for i in range(min(len(grid_tp), len(grid_levels)))]
+                avg_tp = sum(tp_diffs) / len(tp_diffs) if tp_diffs else 0
+                output += f"  avg_take_profit: {format_percentage(avg_tp)}\n"
+
         output += "\nCustom Info:\n"
         for key, value in custom_info.items():
             if isinstance(value, (list, dict)):

@@ -657,6 +657,12 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  updateBotControllerConfig: (server: string, botName: string, configId: string, data: Record<string, unknown>) =>
+    apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
   updateConfigYaml: (server: string, configId: string, yamlContent: string) =>
     apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
       method: "PUT",

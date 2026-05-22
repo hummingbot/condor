@@ -78,11 +78,13 @@ function InlineConfigEditor({
   config,
   server,
   configId,
+  botName,
   onSaved,
 }: {
   config: Record<string, unknown>;
   server: string;
   configId: string;
+  botName: string;
   onSaved: () => void;
 }) {
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -99,7 +101,7 @@ function InlineConfigEditor({
       for (const [key, raw] of Object.entries(edits)) {
         parsed[key] = parseValue(raw, inferInputType(config[key]));
       }
-      return api.updateConfig(server, configId, parsed);
+      return api.updateBotControllerConfig(server, botName, configId, parsed);
     },
     onSuccess: () => {
       setEdits({});
@@ -655,6 +657,7 @@ export function ControllerBrowser({
               config={activeCtrl.config || {}}
               server={server}
               configId={configId}
+              botName={activeCtrl.bot_name}
               onSaved={() => queryClient.invalidateQueries({ queryKey: ["bots", server] })}
             />
           </div>
