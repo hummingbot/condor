@@ -749,6 +749,17 @@ class WebSocketManager:
         if not has_subscribers:
             return
 
+        # Skip SDS-triggered broadcast for channels with active WS streams
+        # (the WS stream handler already broadcasts directly)
+        if dt_name == "BOTS_STATUS" and channel in self._bots_ws_tasks:
+            task = self._bots_ws_tasks.get(channel)
+            if task and not task.done():
+                return
+        if dt_name == "EXECUTORS" and channel in self._executor_ws_tasks:
+            task = self._executor_ws_tasks.get(channel)
+            if task and not task.done():
+                return
+
         # Transform raw data to match REST endpoint response shapes
         if dt_name == "BOTS_STATUS":
             try:

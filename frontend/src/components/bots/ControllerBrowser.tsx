@@ -506,6 +506,7 @@ export function ControllerBrowser({
               server={server}
               controllerId={configId}
               botName={activeCtrl.bot_name}
+              deployedAt={activeCtrl.deployed_at}
               height={200}
             />
 

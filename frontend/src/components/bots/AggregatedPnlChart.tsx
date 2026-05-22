@@ -1,280 +1,246 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo, useState } from "react";
+import {
+  Area,
+  CartesianGrid,
+  ComposedChart,
+  Legend,
+  Line,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
-import type { ControllerPerformanceSnapshot } from "@/lib/api";
+import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
 import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
 
-function getChartColors() {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
-    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
-    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
-    green: style.getPropertyValue("--chart-up").trim() || "#22c55e",
-    red: style.getPropertyValue("--chart-down").trim() || "#ef4444",
-    blue: "#3b82f6",
-    orange: "#f59e0b",
-  };
-}
+// ── Helpers ──
 
-function toSeconds(ts: string | number): number {
-  if (typeof ts === "number") return ts > 1e12 ? Math.floor(ts / 1000) : ts;
+function toMs(ts: string | number): number {
+  if (typeof ts === "number") return ts > 1e12 ? ts : ts * 1000;
   const parsed = Date.parse(ts);
-  if (!isNaN(parsed)) return Math.floor(parsed / 1000);
-  return 0;
+  return isNaN(parsed) ? 0 : parsed;
 }
 
-interface AggregatedPoint {
+function formatTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDateTime(ms: number): string {
+  const d = new Date(ms);
+  return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
+}
+
+/** Compute net position value in quote from positions_summary */
+function positionQuoteValue(positions: Record<string, unknown>[]): number {
+  let value = 0;
+  for (const pos of positions) {
+    const amt = Number(pos.amount || pos.net_amount_base || 0);
+    const price = Number(pos.breakeven_price || pos.entry_price || pos.current_price || 0);
+    const side = String(pos.side || pos.position_side || "");
+    const isSell = side.toLowerCase().includes("sell") || side.toLowerCase().includes("short");
+    const notional = amt * price;
+    value += isSell ? -notional : notional;
+  }
+  return value;
+}
+
+// ── Aggregation ──
+
+interface AggPoint {
   time: number;
   realized: number;
   unrealized: number;
   total: number;
   volume: number;
+  position: number; // net position in quote currency
 }
+
+function aggregate(
+  snapshots: ControllerPerformanceSnapshot[],
+  enabledIds: Set<string>,
+): AggPoint[] {
+  if (!snapshots || snapshots.length === 0) return [];
+
+  const byCtrl: Record<string, ControllerPerformanceSnapshot[]> = {};
+  for (const snap of snapshots) {
+    const key = snap.controller_id || snap.controller_name;
+    if (!key || !enabledIds.has(key)) continue;
+    (byCtrl[key] ??= []).push(snap);
+  }
+
+  for (const snaps of Object.values(byCtrl)) {
+    snaps.sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
+  }
+
+  const timeSet = new Set<number>();
+  for (const snaps of Object.values(byCtrl))
+    for (const s of snaps) timeSet.add(toMs(s.timestamp));
+  const times = Array.from(timeSet).sort((a, b) => a - b);
+  if (times.length === 0) return [];
+
+  const cids = Object.keys(byCtrl);
+  const cursors: Record<string, number> = {};
+  for (const c of cids) cursors[c] = 0;
+
+  const points: AggPoint[] = [];
+  for (const t of times) {
+    let realized = 0, unrealized = 0, volume = 0, position = 0;
+    for (const cid of cids) {
+      const snaps = byCtrl[cid];
+      while (cursors[cid] < snaps.length - 1 && toMs(snaps[cursors[cid] + 1].timestamp) <= t)
+        cursors[cid]++;
+      if (toMs(snaps[cursors[cid]].timestamp) <= t) {
+        const s = snaps[cursors[cid]];
+        realized += s.realized_pnl_quote;
+        unrealized += s.unrealized_pnl_quote;
+        volume += s.volume_traded;
+        if (Array.isArray(s.positions_summary)) {
+          position += positionQuoteValue(s.positions_summary as Record<string, unknown>[]);
+        }
+      }
+    }
+    points.push({ time: t, realized, unrealized, total: realized + unrealized, volume, position });
+  }
+  return points;
+}
+
+// ── Custom tooltips ──
+
+function PnlTooltip({ active, payload, label, symbol }: {
+  active?: boolean;
+  payload?: Array<{ dataKey: string; value: number }>;
+  label?: number;
+  symbol: string;
+}) {
+  if (!active || !payload?.length || !label) return null;
+  const byKey: Record<string, number> = {};
+  for (const p of payload) byKey[p.dataKey] = p.value;
+  const total = byKey.total ?? (byKey.realized ?? 0) + (byKey.unrealized ?? 0);
+  const sign = (v: number) => (v >= 0 ? "+" : "");
+
+  return (
+    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[150px]">
+      <div className="text-[var(--color-text-muted)] text-[10px] mb-1">{formatDateTime(label)}</div>
+      <div className="flex justify-between gap-3">
+        <span className="text-[var(--color-text-muted)]">Total</span>
+        <span className="font-semibold" style={{ color: pnlColor(total) }}>
+          {sign(total)}{formatCurrencyVolume(total, symbol)}
+        </span>
+      </div>
+      <div className="flex justify-between gap-3">
+        <span className="text-[var(--color-text-muted)]">Realized</span>
+        <span style={{ color: "var(--color-green)" }}>{sign(byKey.realized ?? 0)}{formatCurrencyVolume(byKey.realized ?? 0, symbol)}</span>
+      </div>
+      <div className="flex justify-between gap-3">
+        <span className="text-[var(--color-text-muted)]">Unrealized</span>
+        <span style={{ color: "#f59e0b" }}>{sign(byKey.unrealized ?? 0)}{formatCurrencyVolume(byKey.unrealized ?? 0, symbol)}</span>
+      </div>
+    </div>
+  );
+}
+
+function BottomTooltip({ active, payload, label, symbol }: {
+  active?: boolean;
+  payload?: Array<{ dataKey: string; value: number }>;
+  label?: number;
+  symbol: string;
+}) {
+  if (!active || !payload?.length || !label) return null;
+  const byKey: Record<string, number> = {};
+  for (const p of payload) byKey[p.dataKey] = p.value;
+
+  return (
+    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[130px]">
+      <div className="text-[var(--color-text-muted)] text-[10px] mb-1">{formatDateTime(label)}</div>
+      <div className="flex justify-between gap-3">
+        <span style={{ color: "#3b82f6" }}>Volume</span>
+        <span style={{ color: "#3b82f6" }}>{formatCurrencyVolume(byKey.volume ?? 0, symbol)}</span>
+      </div>
+      {byKey.position !== undefined && byKey.position !== 0 && (
+        <div className="flex justify-between gap-3">
+          <span style={{ color: "#a78bfa" }}>Position</span>
+          <span style={{ color: "#a78bfa" }}>{formatCurrencyVolume(byKey.position, symbol)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Controller color palette ──
+
+const CTRL_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#a78bfa", "#ec4899", "#14b8a6", "#f97316"];
+
+// ── Main component ──
 
 interface Props {
   snapshots: ControllerPerformanceSnapshot[];
+  controllers: ControllerInfo[];
   currencySymbol?: string;
-  height?: number;
 }
 
-/**
- * Aggregates all controller snapshots by timestamp bucket,
- * summing PnL and volume across all running controllers.
- */
-export function AggregatedPnlChart({ snapshots, currencySymbol = "$", height = 280 }: Props) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const tooltipRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
-
-  const aggregated = useMemo(() => {
-    if (!snapshots || snapshots.length === 0) return [];
-
-    // Group by controller, then align on time buckets
-    const byController: Record<string, ControllerPerformanceSnapshot[]> = {};
-    for (const snap of snapshots) {
-      const key = snap.controller_id || snap.controller_name;
-      if (!key) continue;
-      (byController[key] ??= []).push(snap);
-    }
-
-    // Sort each controller's snapshots by time
-    for (const snaps of Object.values(byController)) {
-      snaps.sort((a, b) => toSeconds(a.timestamp) - toSeconds(b.timestamp));
-    }
-
-    // Collect all unique timestamps
-    const timeSet = new Set<number>();
-    for (const snaps of Object.values(byController)) {
-      for (const s of snaps) timeSet.add(toSeconds(s.timestamp));
-    }
-    const times = Array.from(timeSet).sort((a, b) => a - b);
-    if (times.length === 0) return [];
-
-    // For each time, sum the latest known value per controller up to that time
-    const controllerIds = Object.keys(byController);
-    const points: AggregatedPoint[] = [];
-    // Track index cursor per controller for efficient lookup
-    const cursors: Record<string, number> = {};
-    for (const cid of controllerIds) cursors[cid] = 0;
-
-    for (const t of times) {
-      let realized = 0;
-      let unrealized = 0;
-      let volume = 0;
-
-      for (const cid of controllerIds) {
-        const snaps = byController[cid];
-        // Advance cursor to latest snap <= t
-        while (cursors[cid] < snaps.length - 1 && toSeconds(snaps[cursors[cid] + 1].timestamp) <= t) {
-          cursors[cid]++;
-        }
-        // Only include if this controller has data at or before time t
-        if (toSeconds(snaps[cursors[cid]].timestamp) <= t) {
-          const s = snaps[cursors[cid]];
-          realized += s.realized_pnl_quote;
-          unrealized += s.unrealized_pnl_quote;
-          volume += s.volume_traded;
-        }
+export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$" }: Props) {
+  const controllerIds = useMemo(() => {
+    const ids: { id: string }[] = [];
+    const seen = new Set<string>();
+    for (const c of controllers) {
+      const cid = c.controller_id || c.controller_name;
+      if (!seen.has(cid)) {
+        seen.add(cid);
+        ids.push({ id: cid });
       }
-
-      points.push({ time: t, realized, unrealized, total: realized + unrealized, volume });
     }
+    return ids;
+  }, [controllers]);
 
-    return points;
-  }, [snapshots]);
+  const [enabled, setEnabled] = useState<Set<string>>(() => new Set(controllerIds.map((c) => c.id)));
 
-  // Latest values for the header
-  const latest = aggregated.length > 0 ? aggregated[aggregated.length - 1] : null;
-
-  useEffect(() => {
-    if (!containerRef.current || aggregated.length === 0) return;
-
-    let cancelled = false;
-
-    import("lightweight-charts").then((mod) => {
-      if (cancelled || !containerRef.current) return;
-
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
+  // Sync when controllers change
+  useMemo(() => {
+    const allIds = new Set(controllerIds.map((c) => c.id));
+    setEnabled((prev) => {
+      const next = new Set(prev);
+      for (const id of prev) {
+        if (!allIds.has(id)) next.delete(id);
       }
-
-      const colors = getChartColors();
-      const chart = mod.createChart(containerRef.current!, {
-        autoSize: true,
-        layout: {
-          background: { type: mod.ColorType.Solid, color: colors.bg },
-          textColor: colors.text,
-        },
-        grid: {
-          vertLines: { color: colors.grid },
-          horzLines: { color: colors.grid },
-        },
-        crosshair: { mode: mod.CrosshairMode.Normal },
-        timeScale: { timeVisible: true, secondsVisible: false },
-        rightPriceScale: { borderVisible: false },
-        localization: {
-          priceFormatter: (price: number) => `${currencySymbol}${price >= 0 ? "+" : ""}${price.toFixed(2)}`,
-        },
-      });
-      chartRef.current = chart;
-
-      // Total PnL area
-      const totalSeries = chart.addSeries(mod.AreaSeries, {
-        lineColor: aggregated[aggregated.length - 1]?.total >= 0 ? colors.green : colors.red,
-        topColor: aggregated[aggregated.length - 1]?.total >= 0 ? `${colors.green}20` : `${colors.red}20`,
-        bottomColor: "transparent",
-        lineWidth: 2,
-        priceLineVisible: false,
-        lastValueVisible: true,
-        title: "Total PnL",
-        crosshairMarkerVisible: true,
-      });
-
-      // Realized PnL line
-      const realizedSeries = chart.addSeries(mod.LineSeries, {
-        color: colors.green,
-        lineWidth: 1,
-        lineStyle: mod.LineStyle.Solid,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        title: "Realized",
-        crosshairMarkerVisible: true,
-      });
-
-      // Unrealized PnL line
-      const unrealizedSeries = chart.addSeries(mod.LineSeries, {
-        color: colors.orange,
-        lineWidth: 1,
-        lineStyle: mod.LineStyle.Dashed,
-        priceLineVisible: false,
-        lastValueVisible: false,
-        title: "Unrealized",
-        crosshairMarkerVisible: true,
-      });
-
-      // Volume (secondary axis)
-      const volumeSeries = chart.addSeries(mod.LineSeries, {
-        color: `${colors.blue}70`,
-        lineWidth: 1,
-        priceScaleId: "volume",
-        priceLineVisible: false,
-        lastValueVisible: false,
-        title: "Cum. Vol",
-        priceFormat: { type: "volume" },
-      });
-      chart.priceScale("volume").applyOptions({
-        scaleMargins: { top: 0.8, bottom: 0 },
-      });
-
-      type TS = import("lightweight-charts").UTCTimestamp;
-
-      totalSeries.setData(aggregated.map((p) => ({ time: p.time as TS, value: p.total })));
-      realizedSeries.setData(aggregated.map((p) => ({ time: p.time as TS, value: p.realized })));
-      unrealizedSeries.setData(aggregated.map((p) => ({ time: p.time as TS, value: p.unrealized })));
-      volumeSeries.setData(aggregated.map((p) => ({ time: p.time as TS, value: p.volume })));
-
-      chart.timeScale().fitContent();
-
-      // Crosshair tooltip
-      chart.subscribeCrosshairMove((param) => {
-        const tooltip = tooltipRef.current;
-        if (!tooltip || !containerRef.current) return;
-
-        if (!param.time || !param.point || param.point.x < 0 || param.point.y < 0) {
-          tooltip.style.display = "none";
-          return;
-        }
-
-        const totalData = param.seriesData.get(totalSeries);
-        const realizedData = param.seriesData.get(realizedSeries);
-        const unrealizedData = param.seriesData.get(unrealizedSeries);
-        const volData = param.seriesData.get(volumeSeries);
-
-        if (!totalData || !("value" in totalData)) {
-          tooltip.style.display = "none";
-          return;
-        }
-
-        const total = (totalData as { value: number }).value;
-        const realized = realizedData && "value" in realizedData ? (realizedData as { value: number }).value : 0;
-        const unrealized = unrealizedData && "value" in unrealizedData ? (unrealizedData as { value: number }).value : 0;
-        const vol = volData && "value" in volData ? (volData as { value: number }).value : 0;
-        const ts = typeof param.time === "number" ? param.time : 0;
-        const date = new Date(ts * 1000);
-        const timeStr = date.toLocaleString("en-US", {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-
-        const sign = (v: number) => (v >= 0 ? "+" : "");
-        const totalColor = total >= 0 ? colors.green : colors.red;
-
-        tooltip.innerHTML = `
-          <div style="color:#9ca3af;font-size:10px;margin-bottom:3px">${timeStr}</div>
-          <div style="display:flex;justify-content:space-between;gap:12px">
-            <span style="color:#9ca3af;font-size:10px">Total</span>
-            <span style="color:${totalColor};font-weight:600;font-size:12px">${currencySymbol}${sign(total)}${total.toFixed(2)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;gap:12px">
-            <span style="color:#9ca3af;font-size:10px">Realized</span>
-            <span style="color:${colors.green};font-size:11px">${currencySymbol}${sign(realized)}${realized.toFixed(2)}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;gap:12px">
-            <span style="color:#9ca3af;font-size:10px">Unrealized</span>
-            <span style="color:${colors.orange};font-size:11px">${currencySymbol}${sign(unrealized)}${unrealized.toFixed(2)}</span>
-          </div>
-          ${vol > 0 ? `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:2px;border-top:1px solid rgba(107,121,148,0.2);padding-top:2px"><span style="color:#9ca3af;font-size:10px">Cum. Vol</span><span style="color:${colors.blue};font-size:10px">${currencySymbol}${vol >= 1000 ? (vol / 1000).toFixed(1) + "K" : vol.toFixed(0)}</span></div>` : ""}
-        `;
-        tooltip.style.display = "block";
-
-        const containerRect = containerRef.current.getBoundingClientRect();
-        const tooltipW = 200;
-        let left = containerRect.left + param.point.x + 16;
-        if (left + tooltipW > window.innerWidth - 8) left = containerRect.left + param.point.x - tooltipW - 10;
-        const top = containerRect.top + Math.max(4, param.point.y - 30);
-        tooltip.style.left = `${left}px`;
-        tooltip.style.top = `${top}px`;
-      });
+      if (next.size === 0) return allIds;
+      return next;
     });
+  }, [controllerIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    return () => {
-      cancelled = true;
-      if (chartRef.current) {
-        chartRef.current.remove();
-        chartRef.current = null;
+  const toggleController = (id: string) => {
+    setEnabled((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+        if (next.size === 0) return prev;
+      } else {
+        next.add(id);
       }
-    };
-  }, [aggregated, currencySymbol]);
+      return next;
+    });
+  };
 
-  if (!snapshots || snapshots.length === 0) return null;
+  const allEnabled = enabled.size === controllerIds.length;
+  const toggleAll = () => {
+    if (allEnabled) return;
+    setEnabled(new Set(controllerIds.map((c) => c.id)));
+  };
 
-  if (aggregated.length < 2) return null;
+  const data = useMemo(() => aggregate(snapshots, enabled), [snapshots, enabled]);
+  const latest = data.length > 0 ? data[data.length - 1] : null;
+  const hasPosition = data.some((p) => p.position !== 0);
+
+  if (!snapshots || snapshots.length === 0 || data.length < 2) return null;
+
+  const fmtPnl = (v: number) => `${v >= 0 ? "+" : ""}${formatCurrencyVolume(v, currencySymbol)}`;
+  const fmtAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(Math.abs(v) < 10 ? 2 : 0)}`;
+  const fmtVolAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(0)}`;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+      {/* Header */}
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
         <div className="flex items-center gap-4">
           <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -283,13 +249,13 @@ export function AggregatedPnlChart({ snapshots, currencySymbol = "$", height = 2
           {latest && (
             <div className="flex items-center gap-3 text-xs tabular-nums">
               <span style={{ color: pnlColor(latest.total) }} className="font-semibold">
-                {latest.total >= 0 ? "+" : ""}{formatCurrencyVolume(latest.total, currencySymbol)}
+                {fmtPnl(latest.total)}
               </span>
               <span className="text-[var(--color-text-muted)]">
-                R: <span style={{ color: "var(--color-green)" }}>{latest.realized >= 0 ? "+" : ""}{formatCurrencyVolume(latest.realized, currencySymbol)}</span>
+                R: <span style={{ color: "var(--color-green)" }}>{fmtPnl(latest.realized)}</span>
               </span>
               <span className="text-[var(--color-text-muted)]">
-                U: <span style={{ color: "#f59e0b" }}>{latest.unrealized >= 0 ? "+" : ""}{formatCurrencyVolume(latest.unrealized, currencySymbol)}</span>
+                U: <span style={{ color: "#f59e0b" }}>{fmtPnl(latest.unrealized)}</span>
               </span>
               <span className="text-[var(--color-text-muted)]">
                 Vol: {formatCurrencyVolume(latest.volume, currencySymbol)}
@@ -297,44 +263,138 @@ export function AggregatedPnlChart({ snapshots, currencySymbol = "$", height = 2
             </div>
           )}
         </div>
-        <div className="flex items-center gap-2 text-[9px]">
-          <span className="flex items-center gap-1">
-            <span className="inline-block w-2.5 h-0.5 rounded" style={{ background: "#22c55e" }} />
-            Realized
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block w-2.5 h-0.5 rounded" style={{ background: "#f59e0b" }} />
-            Unrealized
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="inline-block w-2.5 h-0.5 rounded" style={{ background: "#3b82f690" }} />
-            Volume
-          </span>
-        </div>
       </div>
-      <div>
-        <div ref={containerRef} style={{ height, width: "100%" }} />
-        <div
-          ref={tooltipRef}
-          style={{
-            display: "none",
-            position: "fixed",
-            top: 0,
-            left: 0,
-            zIndex: 9999,
-            pointerEvents: "none",
-            background: "rgba(15, 21, 37, 0.95)",
-            border: "1px solid rgba(107, 121, 148, 0.3)",
-            borderRadius: 6,
-            padding: "6px 10px",
-            fontSize: 11,
-            color: "#e2e8f0",
-            minWidth: 160,
-            whiteSpace: "nowrap",
-            lineHeight: 1.5,
-            backdropFilter: "blur(8px)",
-          }}
-        />
+
+      {/* Controller filter chips */}
+      {controllerIds.length > 1 && (
+        <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-[var(--color-border)] bg-[var(--color-bg)] overflow-x-auto">
+          <button
+            onClick={toggleAll}
+            className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium transition-colors whitespace-nowrap ${
+              allEnabled
+                ? "bg-[var(--color-text-muted)]/20 text-[var(--color-text)]"
+                : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            All
+          </button>
+          {controllerIds.map((c, i) => {
+            const color = CTRL_COLORS[i % CTRL_COLORS.length];
+            const active = enabled.has(c.id);
+            return (
+              <button
+                key={c.id}
+                onClick={() => toggleController(c.id)}
+                className={`rounded-full px-2.5 py-0.5 text-[10px] font-medium transition-all whitespace-nowrap ${
+                  active ? "text-white" : "opacity-40 hover:opacity-70"
+                }`}
+                style={{
+                  backgroundColor: active ? color : "transparent",
+                  border: `1px solid ${color}`,
+                  color: active ? "white" : color,
+                }}
+              >
+                {c.id}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* PnL chart (top) */}
+      <div className="px-1">
+        <ResponsiveContainer width="100%" height={220}>
+          <ComposedChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} syncId="agg">
+            <defs>
+              <linearGradient id="aggPnlGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.15} />
+                <stop offset="95%" stopColor={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
+            <XAxis
+              dataKey="time"
+              type="number"
+              domain={["dataMin", "dataMax"]}
+              tickFormatter={formatTime}
+              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
+              stroke="var(--color-border)"
+              tickLine={false}
+            />
+            <YAxis
+              tickFormatter={fmtAxis}
+              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
+              stroke="var(--color-border)"
+              tickLine={false}
+              axisLine={false}
+              width={52}
+            />
+            <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
+            <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
+            <Area type="monotone" dataKey="total" stroke="none" fill="url(#aggPnlGrad)" activeDot={false} legendType="none" />
+            <Line type="monotone" dataKey="total" stroke={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} strokeWidth={2} dot={false} strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="realized" stroke="#22c55e" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="unrealized" stroke="#f59e0b" strokeWidth={2} strokeDasharray="5 3" dot={false} />
+            <Legend
+              verticalAlign="top"
+              align="right"
+              iconType="plainline"
+              wrapperStyle={{ fontSize: 10, paddingBottom: 4 }}
+              formatter={(value: string) => <span className="text-[var(--color-text-muted)] text-[10px] capitalize">{value}</span>}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Volume + Position chart (bottom) */}
+      <div className="px-1 border-t border-[var(--color-border)]/30">
+        <ResponsiveContainer width="100%" height={120}>
+          <ComposedChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 4 }} syncId="agg">
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
+            <XAxis
+              dataKey="time"
+              type="number"
+              domain={["dataMin", "dataMax"]}
+              tickFormatter={formatTime}
+              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
+              stroke="var(--color-border)"
+              tickLine={false}
+            />
+            <YAxis
+              yAxisId="vol"
+              tickFormatter={fmtVolAxis}
+              tick={{ fontSize: 10, fill: "#3b82f6" }}
+              stroke="var(--color-border)"
+              tickLine={false}
+              axisLine={false}
+              width={52}
+            />
+            {hasPosition && (
+              <YAxis
+                yAxisId="pos"
+                orientation="right"
+                tickFormatter={fmtVolAxis}
+                tick={{ fontSize: 10, fill: "#a78bfa" }}
+                stroke="var(--color-border)"
+                tickLine={false}
+                axisLine={false}
+                width={52}
+              />
+            )}
+            <Tooltip content={<BottomTooltip symbol={currencySymbol} />} />
+            <Line yAxisId="vol" type="monotone" dataKey="volume" stroke="#3b82f6" strokeWidth={1.5} dot={false} />
+            {hasPosition && (
+              <Line yAxisId="pos" type="monotone" dataKey="position" stroke="#a78bfa" strokeWidth={1.5} dot={false} />
+            )}
+            <Legend
+              verticalAlign="top"
+              align="right"
+              iconType="plainline"
+              wrapperStyle={{ fontSize: 10, paddingBottom: 0 }}
+              formatter={(value: string) => <span className="text-[var(--color-text-muted)] text-[10px] capitalize">{value}</span>}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );

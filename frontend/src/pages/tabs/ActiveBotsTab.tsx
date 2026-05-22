@@ -13,7 +13,7 @@ import {
   TrendingUp,
   Volume2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
@@ -255,6 +255,7 @@ function ControllerRow({
   formatPnlValue,
   formatValue,
   sparklineValues,
+  isBotStopping,
 }: {
   ctrl: ControllerInfo;
   server: string;
@@ -263,10 +264,11 @@ function ControllerRow({
   formatPnlValue: (val: number, quote: string) => string;
   formatValue: (val: number, quote: string) => string;
   sparklineValues?: number[];
+  isBotStopping?: boolean;
 }) {
   const queryClient = useQueryClient();
   const isKilled = ctrl.config?.manual_kill_switch === true;
-  const isStopping = ctrl.status === "stopping";
+  const isStopping = ctrl.status === "stopping" || (isBotStopping && !isKilled);
 
   const toggleMutation = useMutation({
     mutationFn: () =>
@@ -341,7 +343,7 @@ function ControllerRow({
       </td>
       <td className="px-4 py-2.5">
         <div className="flex items-center gap-1.5 justify-center">
-          <StatusDot status={isKilled ? "stopped" : ctrl.status} />
+          <StatusDot status={isKilled ? "stopped" : isStopping ? "stopping" : ctrl.status} />
         </div>
       </td>
       <td className="px-4 py-2.5">
@@ -374,17 +376,23 @@ function ControllerRow({
 
 // ── Bots Collapsible Section ──
 
-function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
+function BotRow({ bot, server, onStopInitiated, onStopSettled }: { bot: BotSummary; server: string; onStopInitiated?: (botName: string) => void; onStopSettled?: (botName: string) => void }) {
   const [showLogs, setShowLogs] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const queryClient = useQueryClient();
   const isStopping = bot.status === "stopping";
 
   const stopMutation = useMutation({
-    mutationFn: () => api.stopBot(server, bot.bot_name),
+    mutationFn: () => {
+      onStopInitiated?.(bot.bot_name);
+      return api.stopBot(server, bot.bot_name);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
       setConfirmStop(false);
+    },
+    onSettled: () => {
+      onStopSettled?.(bot.bot_name);
     },
   });
 
@@ -472,7 +480,7 @@ function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
   );
 }
 
-function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
+function BotsSection({ bots, server, onStopInitiated, onStopSettled }: { bots: BotSummary[]; server: string; onStopInitiated?: (botName: string) => void; onStopSettled?: (botName: string) => void }) {
   const [expanded, setExpanded] = useState(true);
   const Chevron = expanded ? ChevronDown : ChevronRight;
 
@@ -489,7 +497,7 @@ function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
       {expanded && (
         <div className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border)]/30">
           {bots.map((bot) => (
-            <BotRow key={bot.bot_name} bot={bot} server={server} />
+            <BotRow key={bot.bot_name} bot={bot} server={server} onStopInitiated={onStopInitiated} onStopSettled={onStopSettled} />
           ))}
         </div>
       )}
@@ -507,6 +515,18 @@ export function ActiveBotsTab() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showDeploy, setShowDeploy] = useState(false);
+  const [pendingStopBots, setPendingStopBots] = useState<Set<string>>(new Set());
+
+  const onStopInitiated = useCallback((botName: string) => {
+    setPendingStopBots((prev) => new Set(prev).add(botName));
+  }, []);
+  const onStopSettled = useCallback((botName: string) => {
+    setPendingStopBots((prev) => {
+      const next = new Set(prev);
+      next.delete(botName);
+      return next;
+    });
+  }, []);
 
   // Subscribe to real-time bots updates via WS
   useCondorWebSocket(BOTS_WS_CHANNELS, server);
@@ -518,26 +538,98 @@ export function ActiveBotsTab() {
     refetchInterval: 30000, // Slower polling since WS handles real-time updates
   });
 
+  // Compute earliest deploy time from active bots for filtering perf history
+  const earliestDeploy = useMemo(() => {
+    if (!data?.bots?.length) return undefined;
+    let earliest: number | undefined;
+    for (const bot of data.bots) {
+      if (bot.deployed_at) {
+        const ms = Date.parse(bot.deployed_at);
+        if (!isNaN(ms) && (earliest === undefined || ms < earliest)) earliest = ms;
+      }
+    }
+    return earliest ? new Date(earliest).toISOString() : undefined;
+  }, [data?.bots]);
+
   // Fetch performance history for sparklines (all controllers at once)
   const { data: perfHistory } = useQuery({
-    queryKey: ["controller-perf-history-all", server],
+    queryKey: ["controller-perf-history-all", server, earliestDeploy],
     queryFn: () =>
       api.getControllerPerformanceHistory(server!, {
         interval: "5m",
         limit: 1000,
+        start_time: earliestDeploy,
       }),
     enabled: !!server && (data?.controllers?.length ?? 0) > 0,
     refetchInterval: 120_000,
     staleTime: 60_000,
   });
 
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
+
+  const bots = data?.bots ?? [];
+
+  // Track which bots are stopping (server-side status + optimistic pending mutations)
+  const stoppingBotNames = useMemo(() => {
+    const names = new Set(pendingStopBots);
+    for (const bot of bots) {
+      if (bot.status === "stopping") names.add(bot.bot_name);
+    }
+    return names;
+  }, [bots, pendingStopBots]);
+
+  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
+  const controllers = useMemo(() => {
+    const raw = data?.controllers ?? [];
+    const seen = new Map<string, ControllerInfo>();
+    for (const ctrl of raw) {
+      const key = `${ctrl.bot_name}:${ctrl.controller_id || ctrl.controller_name}`;
+      seen.set(key, ctrl); // last wins (most recent data)
+    }
+    return Array.from(seen.values());
+  }, [data?.controllers]);
+
+  const sortedControllers = useMemo(
+    () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
+    [controllers, sortKey, sortDir],
+  );
+
+  // Filter performance snapshots to only active controllers and current run
+  const activeSnapshots = useMemo(() => {
+    if (!perfHistory?.snapshots || controllers.length === 0) return [];
+
+    // Build set of active controller IDs and their deploy times
+    const activeControllers = new Map<string, number>(); // id -> deployedAt ms
+    for (const ctrl of controllers) {
+      const cid = ctrl.controller_id || ctrl.controller_name;
+      const deployMs = ctrl.deployed_at ? Date.parse(ctrl.deployed_at) : 0;
+      activeControllers.set(cid, deployMs);
+    }
+
+    return perfHistory.snapshots.filter((snap) => {
+      const key = snap.controller_id || snap.controller_name;
+      if (!key || !activeControllers.has(key)) return false;
+      const deployMs = activeControllers.get(key)!;
+      if (!deployMs) return true; // no deploy time known, keep it
+      const snapMs = Date.parse(snap.timestamp) || 0;
+      return snapMs >= deployMs;
+    });
+  }, [perfHistory, controllers]);
+
   // Build a map: controller_id -> sorted pnl values for sparklines
   const sparklineMap = useMemo(() => {
     const map: Record<string, number[]> = {};
-    if (!perfHistory?.snapshots) return map;
+    if (activeSnapshots.length === 0) return map;
     // Group by controller_id
     const grouped: Record<string, ControllerPerformanceSnapshot[]> = {};
-    for (const snap of perfHistory.snapshots) {
+    for (const snap of activeSnapshots) {
       const key = snap.controller_id || snap.controller_name;
       if (!key) continue;
       (grouped[key] ??= []).push(snap);
@@ -551,35 +643,7 @@ export function ActiveBotsTab() {
       map[key] = sorted.map((s) => s.global_pnl_quote);
     }
     return map;
-  }, [perfHistory]);
-
-  const handleSort = (key: SortKey) => {
-    if (key === sortKey) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortKey(key);
-      setSortDir("desc");
-    }
-  };
-
-  const bots = data?.bots ?? [];
-
-  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
-  const controllers = useMemo(() => {
-    const raw = data?.controllers ?? [];
-    const seen = new Map<string, ControllerInfo>();
-    for (const ctrl of raw) {
-      const key = `${ctrl.bot_name}:${ctrl.controller_id || ctrl.controller_name}`;
-      seen.set(key, ctrl); // last wins (most recent data)
-    }
-    return Array.from(seen.values());
-  }, [data?.controllers]);
-
-  // Aggregate logs per bot for the overlay
-  const sortedControllers = useMemo(
-    () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
-    [controllers, sortKey, sortDir],
-  );
+  }, [activeSnapshots]);
 
   // Currency conversion
   const quoteCurrencies = useMemo(
@@ -652,9 +716,10 @@ export function ActiveBotsTab() {
       </div>
 
       {/* Aggregated PnL chart */}
-      {perfHistory?.snapshots && perfHistory.snapshots.length > 0 && (
+      {activeSnapshots.length > 0 && (
         <AggregatedPnlChart
-          snapshots={perfHistory.snapshots}
+          snapshots={activeSnapshots}
+          controllers={controllers}
           currencySymbol={currencySymbol}
         />
       )}
@@ -703,6 +768,7 @@ export function ActiveBotsTab() {
                           formatPnlValue={formatPnlValue}
                           formatValue={formatValue}
                           sparklineValues={sparklineMap[cid]}
+                          isBotStopping={stoppingBotNames.has(ctrl.bot_name)}
                         />
                       );
                     })}
@@ -713,7 +779,7 @@ export function ActiveBotsTab() {
           )}
 
           {/* Bots collapsible section */}
-          {bots.length > 0 && <BotsSection bots={bots} server={server} />}
+          {bots.length > 0 && <BotsSection bots={bots} server={server} onStopInitiated={onStopInitiated} onStopSettled={onStopSettled} />}
         </>
       )}
 

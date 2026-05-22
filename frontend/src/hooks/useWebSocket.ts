@@ -67,16 +67,19 @@ export function useCondorWebSocket(
           if (!incoming?.controllers) return old ?? data;
           if (!old?.controllers?.length) return incoming;
 
+          // Key by controller_id (stable) — controller_name may differ between REST and WS
           const oldMap = new Map<string, ControllerInfo>();
           for (const c of old.controllers) {
-            oldMap.set(`${c.bot_name}-${c.controller_name}`, c);
+            const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
+            oldMap.set(key, c);
           }
           const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
 
           return {
             ...incoming,
             controllers: incoming.controllers.map((c) => {
-              const prev = oldMap.get(`${c.bot_name}-${c.controller_name}`);
+              const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
+              const prev = oldMap.get(key);
               if (!prev) return c;
               return {
                 ...c,
