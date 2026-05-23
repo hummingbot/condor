@@ -286,6 +286,7 @@ export interface RunningInstance {
   trading_context: string;
   frequency_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
+  digest_interval_ticks: number;
   risk_limits: Record<string, unknown>;
 }
 

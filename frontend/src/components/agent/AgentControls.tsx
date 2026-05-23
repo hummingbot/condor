@@ -36,6 +36,9 @@ export function StartSessionDialog({
   const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
   const [frequencySec, setFrequencySec] = useState(String(agentConfig.frequency_sec ?? 60));
+  const [digestIntervalTicks, setDigestIntervalTicks] = useState(
+    String(agentConfig.digest_interval_ticks ?? 0),
+  );
   const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
   const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
   const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
@@ -52,6 +55,7 @@ export function StartSessionDialog({
         server_name: serverName,
         total_amount_quote: Number(totalAmountQuote) || 100,
         frequency_sec: Number(frequencySec) || 60,
+        digest_interval_ticks: Math.max(0, Number(digestIntervalTicks) || 0),
         execution_mode: executionMode,
         risk_limits: {
           max_position_size_quote: Number(maxPositionSize) || 500,
@@ -187,6 +191,24 @@ export function StartSessionDialog({
               </div>
             )}
           </div>
+
+          {executionMode === "loop" && (
+            <div>
+              <label className={labelClass}>Digest interval (ticks)</label>
+              <p className="mb-2 text-xs text-[var(--color-text-muted)]">
+                Telegram summary every N hold-only ticks. 0 = off. Default from strategy is{" "}
+                {String(agentConfig.digest_interval_ticks ?? 0)}.
+              </p>
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={digestIntervalTicks}
+                onChange={(e) => setDigestIntervalTicks(e.target.value)}
+                className={inputClass}
+              />
+            </div>
+          )}
 
           {/* Risk Limits */}
           <div>

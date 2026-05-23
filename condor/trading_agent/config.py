@@ -28,6 +28,10 @@ class AgentConfig(BaseModel):
     trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
     execution_mode: Literal["dry_run", "run_once", "loop"] = Field(default="loop", description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)")
     max_ticks: int = Field(default=0, description="Max ticks before auto-stop; 0 = unlimited")
+    digest_interval_ticks: int = Field(
+        default=0,
+        description="Telegram digest every N hold-only ticks; 0 = disabled",
+    )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:
