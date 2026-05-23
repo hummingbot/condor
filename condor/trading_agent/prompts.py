@@ -62,10 +62,11 @@ ROUTINES:
 NOTIFICATIONS (Telegram push — keep readable on a phone screen):
 - Call send_notification at the END of substantive work for this tick. Default is plain text (no Telegram markup — do NOT use MarkdownV2 backslashes like "\\|" or "\\$"; they render as ugly escape junk).
 - Be brief: ideally under ~900 characters, 5–10 short lines maximum.
+- **Position size in notifications:** report **notional USD** only — the position value shown on the exchange (~`total_amount_quote` used for sizing, or half for half-size entries). **Do NOT multiply notional × leverage.** Leverage sets margin (~notional/leverage), not a larger "effective" position.
 - Structured layout (adapt fields to what happened):
   📊 TICK #<n> — <agent_id matching [TICK INFO]>
 
-  ⚡ One-line WHAT (e.g. OPENED SHORT ZEC-USD | ~$200 notional | 30x | SL 1.5% TP 3%)
+  ⚡ One-line WHAT (e.g. OPENED SHORT BTC-USD | ~$200 notional | 30x | SL 1.5% TP 3% market)
 
   🔑 Executor ID: <id on its own line, full string, monospace not required>
 
@@ -102,13 +103,16 @@ def _build_routines_section(strategy: Strategy) -> str:
     from routines.base import discover_routines, discover_routines_from_path
 
     lines = ["[AVAILABLE ROUTINES]"]
-    lines.append(f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.id}", config={{...}})')
+    lines.append(
+        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.id}", config={{...}})'
+    )
     lines.append("")
 
     # Agent-local routines first
     routines_dir = strategy.agent_dir / "routines"
     if routines_dir.exists():
         from routines.base import discover_routines_from_path
+
         local = discover_routines_from_path(routines_dir)
         if local:
             lines.append("Agent-local:")
@@ -123,6 +127,30 @@ def _build_routines_section(strategy: Strategy) -> str:
             lines.append(f"  - {name}: {r.description}")
 
     return "\n".join(lines)
+
+
+def _build_sizing_section(config: dict[str, Any], execution_mode: str) -> str | None:
+    """Clarify notional vs leverage for position_executor sizing (prevents bad notifications)."""
+    if execution_mode == "dry_run":
+        return None
+    raw = config.get("total_amount_quote")
+    if raw is None:
+        return None
+    try:
+        quote = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if quote <= 0:
+        return None
+    half = quote / 2
+    return (
+        "[POSITION SIZING]\n"
+        f"total_amount_quote=${quote:g} → target **position notional (USD)** on the exchange "
+        f"(formal/full entry). Half-size entries: ~${half:g} notional.\n"
+        "Sizing: base `amount` ≈ notional / price. **Leverage does not increase notional** — "
+        "it reduces margin required (~notional / leverage).\n"
+        "Telegram WHAT line: `~$<notional> notional | <leverage>x | SL … TP …` — never notional×leverage."
+    )
 
 
 def build_tick_prompt(
@@ -159,7 +187,7 @@ def build_tick_prompt(
             "local Cursor session—call MCP tools directly by name. Tool names may differ from ACP-style "
             "mcp__prefixed identifiers; rely on Composer's exposed tool list. "
             "Note: MCP tool approvals are handled by Composer, not Telegram confirmation.\n"
-            "EXECUTORS: Before manage_executors(action=\"create\"), invoke manage_executors(executor_type=\"...\") "
+            'EXECUTORS: Before manage_executors(action="create"), invoke manage_executors(executor_type="...") '
             "without action once so hummingbot-api returns the live schema and guide."
         )
     elif not use_pydantic_ai:
@@ -178,7 +206,7 @@ def build_tick_prompt(
         if not is_dry_run:
             tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
             tick_info += (
-                "\nFor manage_executors(action=\"search\"): pass controller_id="
+                '\nFor manage_executors(action="search"): pass controller_id='
                 f'"{agent_id}" (and/or controller_ids=[...]) and status=RUNNING '
                 "to list live executors; hummingbot-api does not use ACTIVE — MCP maps synonyms if needed."
             )
@@ -219,8 +247,12 @@ def build_tick_prompt(
 
     # Current config (exclude keys shown elsewhere or not useful to the LLM)
     _CONFIG_EXCLUDE = {
-        "trading_context", "risk_limits",  # shown in dedicated sections
-        "agent_key", "server_name", "frequency_sec", "execution_mode",  # noise / internal
+        "trading_context",
+        "risk_limits",  # shown in dedicated sections
+        "agent_key",
+        "server_name",
+        "frequency_sec",
+        "execution_mode",  # noise / internal
     }
     config_lines = ["[CURRENT CONFIG]"]
     for k, v in config.items():
@@ -229,10 +261,18 @@ def build_tick_prompt(
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))
 
+    sizing_section = _build_sizing_section(config, execution_mode)
+    if sizing_section:
+        sections.append(sizing_section)
+
     # Risk state
     rs = risk_state
-    max_dd = rs.get('max_drawdown_pct', -1)
-    dd_display = f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit" if max_dd >= 0 else "disabled"
+    max_dd = rs.get("max_drawdown_pct", -1)
+    dd_display = (
+        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
+        if max_dd >= 0
+        else "disabled"
+    )
     risk_lines = [
         "[RISK STATE]",
         f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
