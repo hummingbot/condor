@@ -164,6 +164,8 @@ def build_tick_prompt(
     tick_number: int = 1,
     agent_id: str = "",
     cached_routines_section: str | None = None,
+    digest_boundary: bool = False,
+    digest_interval: int = 0,
 ) -> str:
     """Build the full prompt for one agent tick."""
     from condor.acp.cursor_sdk_client import is_cursor_sdk_model
@@ -293,7 +295,19 @@ def build_tick_prompt(
         )
     if summary:
         sections.append(f"[CURRENT STATUS]\n{summary}")
+    if digest_boundary and digest_interval > 0:
+        sections.append(
+            f"[DIGEST BOUNDARY — tick #{tick_number}]\n"
+            f"Every-{digest_interval}-tick rollup tick. If this tick is hold-only (no open/close/flip, "
+            f"not risk-blocked), send ONE compact digest notification per strategy NOTIFICATIONS rules. "
+            f"Synthesize from [RECENT DECISIONS] below — do not call trading_agent_journal_read."
+        )
     if recent_decisions:
-        sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
+        recent_label = (
+            f"last {digest_interval} decisions"
+            if digest_boundary and digest_interval > 0
+            else "last 3 snapshots"
+        )
+        sections.append(f"[RECENT DECISIONS — {recent_label}]\n{recent_decisions}")
 
     return "\n\n".join(sections)

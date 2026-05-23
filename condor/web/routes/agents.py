@@ -63,6 +63,7 @@ class RunningInstance(BaseModel):
     trading_context: str = ""
     frequency_sec: int = 60
     execution_mode: str = "loop"
+    digest_interval_ticks: int = 0
     risk_limits: dict[str, Any] = {}
 
 
@@ -568,6 +569,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                     frequency_sec=info.get("frequency_sec", 60),
                     agent_key=info.get("agent_key", ""),
                     execution_mode=info.get("execution_mode", "loop"),
+                    digest_interval_ticks=info.get("digest_interval_ticks", 0),
                     risk_limits=info.get("risk_limits", {}),
                 )
             )
@@ -674,6 +676,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
                 trading_context=info.get("trading_context", ""),
                 frequency_sec=info.get("frequency_sec", 60),
                 execution_mode=info.get("execution_mode", "loop"),
+                digest_interval_ticks=info.get("digest_interval_ticks", 0),
                 risk_limits=info.get("risk_limits", {}),
             )
         )

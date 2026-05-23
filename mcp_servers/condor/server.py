@@ -877,7 +877,8 @@ async def manage_trading_agent(
         skills: List of optional skill names to enable (for create/update).
         config: Agent config overrides (for create/update/start) or routine config (for run_routine).
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
-            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
+            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks,
+            digest_interval_ticks (0 = no periodic digest).
 
     Returns:
         Action-specific result dict.

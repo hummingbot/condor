@@ -274,7 +274,13 @@ class TickEngine:
 
         # 3. Read journal context (sessions only)
         learnings = self.journal.read_learnings() if self.journal else ""
-        recent_decisions = self.journal.get_recent_decisions(count=3) if self.journal else ""
+        next_tick = self.journal.tick_count + 1 if self.journal else 1
+        digest_interval = int(self.config.get("digest_interval_ticks", 0) or 0)
+        is_digest_boundary = digest_interval > 0 and next_tick % digest_interval == 0
+        recent_count = digest_interval if is_digest_boundary else 3
+        recent_decisions = (
+            self.journal.get_recent_decisions(count=recent_count) if self.journal else ""
+        )
         summary = self.journal.read_summary() if self.journal else ""
 
         # 4. Get risk state (experiments pass None — returns clean state)
@@ -299,7 +305,6 @@ class TickEngine:
             except Exception:
                 self._cached_routines_section = ""
 
-        next_tick = self.journal.tick_count + 1 if self.journal else 1
         prompt = build_tick_prompt(
             strategy=self.strategy,
             config=self.config,
@@ -311,6 +316,8 @@ class TickEngine:
             tick_number=next_tick,
             agent_id=self.agent_id,
             cached_routines_section=self._cached_routines_section or None,
+            digest_boundary=is_digest_boundary,
+            digest_interval=digest_interval,
         )
 
         # Inject pending user directives
@@ -598,6 +605,7 @@ class TickEngine:
             "agent_key": self.config.get("agent_key") or self.strategy.agent_key,
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
+            "digest_interval_ticks": int(self.config.get("digest_interval_ticks", 0) or 0),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
             "session_dir": str(self.session_dir) if self.session_dir else "",
