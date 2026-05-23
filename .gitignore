@@ -183,6 +183,8 @@ trading_agents/*/dry_runs/*
 trading_agents/*/learnings.md
 trading_agents/*/journal.md
 trading_agents/*/agent.md
+trading_agents/*/agent.old.md
+trading_agents/*/learnings.old.md
 
 # Backups
 agent_backups/*
