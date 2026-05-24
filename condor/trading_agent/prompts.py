@@ -166,6 +166,7 @@ def build_tick_prompt(
     cached_routines_section: str | None = None,
     digest_boundary: bool = False,
     digest_interval: int = 0,
+    barrier_closes_section: str = "",
 ) -> str:
     """Build the full prompt for one agent tick."""
     from condor.acp.cursor_sdk_client import is_cursor_sdk_model
@@ -287,6 +288,9 @@ def build_tick_prompt(
     # Core skill data (pre-computed)
     for name, data_summary in core_data.items():
         sections.append(f"[CORE DATA - {name}]\n{data_summary}")
+
+    if barrier_closes_section:
+        sections.append(barrier_closes_section)
 
     # Journal -- compact memory
     if learnings:
