@@ -189,6 +189,8 @@ _TELEGRAM_FORMATTING = (
     "- NEVER use Markdown tables. Use bullet lists or key: value lines.\n"
     "- Keep paragraphs short (2-3 sentences max).\n"
     "- Cap lists at 5-7 items.\n"
+    "- Use **bold** for labels/headings and `inline code` for symbols, pairs, and agent IDs.\n"
+    "- Do not use HTML entities (write P&L, not P&amp;L).\n"
     "- Respond in the user's language."
 )
 
