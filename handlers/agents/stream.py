@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import re
 import time
 
 from telegram import Bot
@@ -13,62 +12,23 @@ from condor.acp import (
     Heartbeat,
     PromptDone,
     TextChunk,
-    ThoughtChunk,
     ToolCallEvent,
     ToolCallUpdate,
 )
+from utils.telegram_formatters import escape_markdown_v2
+from utils.telegram_markdown_v2 import markdown_to_telegram_v2, plain_text_from_agent_markdown
 
 log = logging.getLogger(__name__)
 
 EDIT_INTERVAL = 0.5
 MAX_MESSAGE_LEN = 4096
+PARSE_MODE_MARKDOWN_V2 = "MarkdownV2"
 
 TOOL_RUNNING = "\u2699\ufe0f"
 TOOL_DONE = "\u2705"
 TOOL_FAILED = "\u274c"
 
 _THINKING_FRAMES = ["Thinking.", "Thinking..", "Thinking..."]
-
-# Markdown conversion patterns
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
-_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
-_HEADER_RE = re.compile(r"^#{1,6}\s+(.+)$", re.MULTILINE)
-_BLOCKQUOTE_RE = re.compile(r"^>\s?(.*)$", re.MULTILINE)
-_HR_RE = re.compile(r"^-{3,}$", re.MULTILINE)
-_TABLE_SEP_RE = re.compile(r"^\|[-| :]+\|$", re.MULTILINE)
-_TABLE_ROW_RE = re.compile(r"^\|(.+)\|$", re.MULTILINE)
-
-
-def _convert_table_row(m: re.Match) -> str:
-    cells = [c.strip() for c in m.group(1).split("|")]
-    return "  ".join(cells)
-
-
-def _to_telegram_markdown(text: str) -> str:
-    """Convert standard Markdown to Telegram Markdown v1."""
-    protected: list[str] = []
-
-    def _protect(m: re.Match) -> str:
-        protected.append(m.group(0))
-        return f"\x00{len(protected) - 1}\x00"
-
-    result = re.sub(r"```[\s\S]*?```|`[^`\n]+`", _protect, text)
-
-    result = _HEADER_RE.sub(r"*\1*", result)
-    result = _BLOCKQUOTE_RE.sub(r"\1", result)
-    result = _HR_RE.sub("", result)
-    result = _TABLE_SEP_RE.sub("", result)
-    result = _TABLE_ROW_RE.sub(_convert_table_row, result)
-    result = _BOLD_RE.sub(r"*\1*", result)
-    result = _ITALIC_RE.sub(r"_\1_", result)
-
-    result = re.sub(r"(\n[ \t]*){3,}", "\n\n", result)
-    result = result.lstrip("\n")
-
-    for i, original in enumerate(protected):
-        result = result.replace(f"\x00{i}\x00", original)
-
-    return result
 
 
 def _split_text(text: str, max_len: int) -> list[str]:
@@ -172,33 +132,44 @@ class TelegramStreamer:
 
     # --- Build & flush ---
 
-    def _build_text(self, final: bool) -> tuple[str, str | None]:
+    def _build_text(self, final: bool) -> tuple[str, str | None, str | None]:
         parts: list[str] = []
+        plain_parts: list[str] = []
         parse_mode = None
+        plain_fallback: str | None = None
 
         if self._prefix:
-            parts.append(self._prefix)
+            parts.append(escape_markdown_v2(self._prefix) if final else self._prefix)
+            plain_parts.append(self._prefix)
 
         tool_block = self._build_tool_block()
         if tool_block:
-            parts.append(tool_block)
+            parts.append(escape_markdown_v2(tool_block) if final else tool_block)
+            plain_parts.append(tool_block)
 
         buf = self._buffer.strip()
         if buf:
             if final:
-                parts.append(_to_telegram_markdown(buf))
-                parse_mode = "Markdown"
+                parts.append(markdown_to_telegram_v2(buf))
+                parse_mode = PARSE_MODE_MARKDOWN_V2
             else:
                 parts.append(buf)
+            plain_parts.append(buf)
         elif not final:
             parts.append(_THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)])
         elif self._finished_tools:
-            parts.append("_(done)_")
-            parse_mode = "Markdown"
+            parts.append("_done_")
+            parse_mode = PARSE_MODE_MARKDOWN_V2
+            plain_parts.append("(done)")
         else:
-            parts.append("_(no response)_")
+            parts.append("_no response_")
+            parse_mode = PARSE_MODE_MARKDOWN_V2
+            plain_parts.append("(no response)")
 
-        return "\n\n".join(parts), parse_mode
+        if final and parse_mode:
+            plain_fallback = plain_text_from_agent_markdown("\n\n".join(plain_parts))
+
+        return "\n\n".join(parts), parse_mode, plain_fallback
 
     def _build_tool_block(self) -> str:
         now = time.monotonic()
@@ -211,24 +182,30 @@ class TelegramStreamer:
 
     async def _flush(self, final: bool) -> None:
         self._needs_edit = False
-        text, parse_mode = self._build_text(final)
+        text, parse_mode, plain_fallback = self._build_text(final)
         chunks = _split_text(text, MAX_MESSAGE_LEN)
 
         # Edit the main placeholder message
-        await self._edit(self._message_id, chunks[0], parse_mode)
+        await self._edit(self._message_id, chunks[0], parse_mode, plain_fallback)
 
         # Handle overflow chunks
         for i, chunk in enumerate(chunks[1:]):
             if i < len(self._continuation_ids):
-                await self._edit(self._continuation_ids[i], chunk, parse_mode)
+                await self._edit(self._continuation_ids[i], chunk, parse_mode, plain_fallback)
             else:
-                msg_id = await self._send(chunk, parse_mode)
+                msg_id = await self._send(chunk, parse_mode, plain_fallback)
                 if msg_id:
                     self._continuation_ids.append(msg_id)
 
     # --- Telegram I/O ---
 
-    async def _edit(self, message_id: int, text: str, parse_mode: str | None = None) -> None:
+    async def _edit(
+        self,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        plain_fallback: str | None = None,
+    ) -> None:
         try:
             await self._bot.edit_message_text(
                 chat_id=self._chat_id,
@@ -238,8 +215,11 @@ class TelegramStreamer:
             )
         except BadRequest as e:
             if "not modified" not in str(e).lower():
-                if parse_mode:
-                    await self._edit(message_id, text, parse_mode=None)
+                if parse_mode and plain_fallback is not None:
+                    log.warning("MarkdownV2 edit failed, falling back to plain text: %s", e)
+                    await self._edit(message_id, plain_fallback, parse_mode=None)
+                elif parse_mode:
+                    await self._edit(message_id, plain_text_from_agent_markdown(text), parse_mode=None)
                 else:
                     log.warning("Failed to edit message: %s", e)
         except RetryAfter as e:
@@ -258,7 +238,12 @@ class TelegramStreamer:
         except Exception:
             log.exception("Unexpected error editing message")
 
-    async def _send(self, text: str, parse_mode: str | None = None) -> int | None:
+    async def _send(
+        self,
+        text: str,
+        parse_mode: str | None = None,
+        plain_fallback: str | None = None,
+    ) -> int | None:
         try:
             msg = await self._bot.send_message(
                 chat_id=self._chat_id,
@@ -266,9 +251,11 @@ class TelegramStreamer:
                 parse_mode=parse_mode,
             )
             return msg.message_id
-        except BadRequest:
+        except BadRequest as e:
             if parse_mode:
-                return await self._send(text, parse_mode=None)
+                fallback = plain_fallback or plain_text_from_agent_markdown(text)
+                log.warning("MarkdownV2 send failed, falling back to plain text: %s", e)
+                return await self._send(fallback, parse_mode=None)
             return None
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)
