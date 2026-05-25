@@ -37,6 +37,89 @@ from .providers import ProviderRegistry
 log = logging.getLogger(__name__)
 
 
+_TRIPLE_BARRIER_CLOSE_TYPES = frozenset({"STOP_LOSS", "TAKE_PROFIT"})
+
+
+def _normalize_close_type(close_type: str) -> str:
+    return (close_type or "").upper().replace(" ", "_").replace("-", "_")
+
+
+def _is_barrier_close_type(close_type: str) -> bool:
+    """True only for triple-barrier SL/TP — not EARLY_STOP, manual, or agent stop."""
+    return _normalize_close_type(close_type) in _TRIPLE_BARRIER_CLOSE_TYPES
+
+
+def _extract_agent_closed_executor_ids(tool_calls: list[dict[str, Any]]) -> set[str]:
+    """Executor IDs the agent stopped this tick (manage_executors action=stop)."""
+    closed: set[str] = set()
+    for tc in tool_calls:
+        name = (tc.get("name") or "").lower()
+        if "manage_executors" not in name:
+            continue
+        inp = tc.get("input") or {}
+        if isinstance(inp, str):
+            try:
+                import json
+
+                inp = json.loads(inp)
+            except Exception:
+                continue
+        if not isinstance(inp, dict):
+            continue
+        action = str(inp.get("action") or "").lower()
+        if action not in ("stop", "close"):
+            continue
+        eid = inp.get("executor_id") or inp.get("id")
+        if eid:
+            closed.add(str(eid))
+    return closed
+
+
+def _detect_barrier_closes(
+    all_executors: list[dict[str, Any]],
+    last_running_ids: set[str],
+    already_notified: set[str],
+    agent_closed_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Find executors that were RUNNING last tick and closed via SL/TP since then."""
+    if not last_running_ids:
+        return []
+
+    running_ids = {
+        e["id"] for e in all_executors if e.get("status") == "RUNNING" and e.get("id")
+    }
+    by_id = {e["id"]: e for e in all_executors if e.get("id")}
+
+    closes: list[dict[str, Any]] = []
+    for eid in last_running_ids:
+        if eid in running_ids or eid in already_notified or eid in agent_closed_ids:
+            continue
+        ex = by_id.get(eid)
+        if not ex or ex.get("status") == "RUNNING":
+            continue
+        if _is_barrier_close_type(str(ex.get("close_type") or "")):
+            closes.append(ex)
+    return closes
+
+
+def _format_barrier_closes_section(closes: list[dict[str, Any]]) -> str:
+    if not closes:
+        return ""
+    lines = [
+        "[BARRIER CLOSES SINCE LAST TICK]",
+        "Triple-barrier STOP_LOSS or TAKE_PROFIT only (not EARLY_STOP / agent exits). "
+        "One send_notification per row — do not duplicate for the same executor_id:",
+    ]
+    for ex in closes:
+        close_type = ex.get("close_type") or "UNKNOWN"
+        pnl = float(ex.get("pnl") or 0)
+        lines.append(
+            f"- {ex.get('pair', '?')} {ex.get('side', '')} | {close_type} | "
+            f"PnL ${pnl:+.2f} | id={ex.get('id', '')}"
+        )
+    return "\n".join(lines)
+
+
 async def _notify_via_telegram_bot_api(chat_id: int, text: str) -> None:
     """Send plain text using TELEGRAM_TOKEN when no python-telegram-bot handle exists."""
     from condor.telegram_notify import prepare_agent_notification_text
@@ -109,6 +192,9 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
+    _last_running_executor_ids: set[str] = field(default_factory=set, init=False)
+    _notified_barrier_close_ids: set[str] = field(default_factory=set, init=False)
+    _agent_closed_executor_ids: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self):
         agent_dir = self.strategy.agent_dir
@@ -272,6 +358,26 @@ class TickEngine:
             name: result.summary for name, result in skill_results.items()
         }
 
+        barrier_closes_section = ""
+        if executors_result and not self.is_experiment:
+            all_executors = executors_result.data.get("all_executors") or []
+            barrier_closes = _detect_barrier_closes(
+                all_executors,
+                self._last_running_executor_ids,
+                self._notified_barrier_close_ids,
+                self._agent_closed_executor_ids,
+            )
+            barrier_closes_section = _format_barrier_closes_section(barrier_closes)
+            for ex in barrier_closes:
+                eid = ex.get("id")
+                if eid:
+                    self._notified_barrier_close_ids.add(eid)
+            self._last_running_executor_ids = {
+                e["id"]
+                for e in all_executors
+                if e.get("status") == "RUNNING" and e.get("id")
+            }
+
         # 3. Read journal context (sessions only)
         learnings = self.journal.read_learnings() if self.journal else ""
         next_tick = self.journal.tick_count + 1 if self.journal else 1
@@ -318,6 +424,7 @@ class TickEngine:
             cached_routines_section=self._cached_routines_section or None,
             digest_boundary=is_digest_boundary,
             digest_interval=digest_interval,
+            barrier_closes_section=barrier_closes_section,
         )
 
         # Inject pending user directives
@@ -443,6 +550,12 @@ class TickEngine:
                 "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
                 self.agent_id, tick_num, len(tool_calls), len(response_text),
             )
+
+            agent_closed = _extract_agent_closed_executor_ids(tool_calls)
+            if agent_closed:
+                self._agent_closed_executor_ids.update(agent_closed)
+                self._notified_barrier_close_ids.update(agent_closed)
+                self._last_running_executor_ids -= agent_closed
 
     async def _collect_stream(
         self,
