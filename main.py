@@ -145,6 +145,7 @@ You can control me by sending these commands:
 /bots \\- deploy and manage trading bots
 /trade \\- place CEX and DEX orders
 /agent \\- AI trading assistant
+/performance \\- trading agent performance stats
 /web \\- open the web dashboard"""
 
     await update.message.reply_text(
@@ -269,6 +270,10 @@ def register_handlers(application: Application) -> None:
     from handlers.admin import admin_command
     from handlers.admin.update import update_command
     from handlers.agents import agent_callback_handler, agent_command, agent_voice_handler
+    from handlers.agents.performance import (
+        performance_callback_handler,
+        performance_command,
+    )
     from handlers.bots import (
         bots_callback_handler,
         bots_command,
@@ -305,6 +310,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    application.add_handler(CommandHandler("performance", performance_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -340,6 +346,9 @@ def register_handlers(application: Application) -> None:
     # Add agent callback handler
     application.add_handler(
         CallbackQueryHandler(agent_callback_handler, pattern="^agent:")
+    )
+    application.add_handler(
+        CallbackQueryHandler(performance_callback_handler, pattern="^perf:")
     )
 
     # Add admin callback handler
@@ -419,6 +428,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Welcome message and setup"),
         BotCommand("portfolio", "View balances across exchanges"),
         BotCommand("agent", "AI trading assistant"),
+        BotCommand("performance", "Trading agent performance stats"),
         BotCommand("executors", "Deploy and manage trading executors"),
         BotCommand("bots", "Deploy and manage trading bots"),
         BotCommand("new_bot", "Create bot configurations"),
