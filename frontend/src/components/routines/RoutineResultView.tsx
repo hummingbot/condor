@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { RoutineInstance } from "@/lib/api";
+import { sentimentClass } from "@/lib/sentiment-color";
 
 interface Props {
   instance: RoutineInstance;
@@ -50,17 +51,17 @@ function KpiBar({ kpis }: { kpis: KpiSection[] }) {
           <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
             {k.label}
           </div>
-          <div className="text-lg font-bold text-[var(--color-text)] mt-0.5">
+          <div
+            className={`text-lg font-bold mt-0.5 ${
+              sentimentClass(k.value, k.trend) || "text-[var(--color-text)]"
+            }`}
+          >
             {k.value}
           </div>
           {k.delta && (
             <div
               className={`text-xs mt-0.5 ${
-                k.trend === "up"
-                  ? "text-[var(--color-green)]"
-                  : k.trend === "down"
-                    ? "text-[var(--color-red)]"
-                    : "text-[var(--color-text-muted)]"
+                sentimentClass(k.delta, k.trend) || "text-[var(--color-text-muted)]"
               }`}
             >
               {k.delta}
@@ -118,14 +119,13 @@ export function RoutineResultView({ instance }: Props) {
                   {(instance.table_columns || Object.keys(row)).map((col) => {
                     const val = row[col];
                     const isNum = typeof val === "number";
-                    const numColor = isNum && val > 0
-                      ? "text-[var(--color-green)]"
-                      : isNum && val < 0
-                        ? "text-[var(--color-red)]"
-                        : "";
+                    const display = isNum
+                      ? (val as number).toFixed(val % 1 === 0 ? 0 : 2)
+                      : String(val ?? "");
+                    const colorClass = sentimentClass(val);
                     return (
-                      <td key={col} className={`px-3 py-1.5 font-mono ${numColor}`}>
-                        {isNum ? (val as number).toFixed(val % 1 === 0 ? 0 : 2) : String(val ?? "")}
+                      <td key={col} className={`px-3 py-1.5 font-mono ${colorClass}`}>
+                        {display}
                       </td>
                     );
                   })}

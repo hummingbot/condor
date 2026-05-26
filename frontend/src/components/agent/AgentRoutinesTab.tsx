@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { type ReportSummary, type RoutineInfo, api } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
+import { useColorizeReportIframe } from "@/hooks/useColorizeReportIframe";
 import { RoutineConfigForm } from "@/components/routines/RoutineConfigForm";
 import { RoutineResultView } from "@/components/routines/RoutineResultView";
 
@@ -161,6 +162,8 @@ function RoutineCard({ routine }: { routine: RoutineInfo }) {
 function AgentReports({ slug }: { slug: string }) {
   const [viewReport, setViewReport] = useState<ReportSummary | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  useColorizeReportIframe(iframeRef, viewReport?.id);
 
   const { data, isLoading } = useQuery({
     queryKey: ["agent-reports", slug],
@@ -246,6 +249,7 @@ function AgentReports({ slug }: { slug: string }) {
             </button>
           </div>
           <iframe
+            ref={iframeRef}
             src={`/reports/${viewReport.filename}`}
             className={`w-full border-0 ${fullscreen ? "h-[calc(100vh-40px)]" : "h-[560px]"}`}
             title={viewReport.title}
