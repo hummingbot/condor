@@ -23,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type RoutineInstance, api } from "@/lib/api";
 import { setViewContext } from "@/lib/viewContext";
 import { useServer } from "@/hooks/useServer";
+import { useColorizeReportIframe } from "@/hooks/useColorizeReportIframe";
 import { RoutineConfigForm } from "./RoutineConfigForm";
 import { ScheduleDropdown } from "./ScheduleDropdown";
 
@@ -115,6 +116,7 @@ export function ReportBrowser({
     setSelectedReportIdx(0);
   }
   const selectedReport = reports[selectedReportIdx] ?? null;
+  useColorizeReportIframe(iframeRef, selectedReport?.id);
 
   // Active instances for current source
   const sourceInstances = useMemo(

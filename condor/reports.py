@@ -62,6 +62,10 @@ _HTML_TEMPLATE = """\
   .kpi-card .delta {{ font-size: 12px; }}
   .kpi-card .delta.up {{ color: var(--green); }}
   .kpi-card .delta.down {{ color: var(--red); }}
+  .kpi-card .value.positive {{ color: var(--green); }}
+  .kpi-card .value.negative {{ color: var(--red); }}
+  .positive {{ color: var(--green); }}
+  .negative {{ color: var(--red); }}
   .section {{ margin-bottom: 32px; }}
   .section-md {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; }}
   .section-md h1, .section-md h2, .section-md h3 {{ color: var(--text); margin: 12px 0 6px; }}
@@ -261,6 +265,37 @@ def _cleanup(max_reports: int = MAX_REPORTS) -> None:
 
 _SECTION_PRIORITY = {"kpi": 0, "plotly": 1, "table": 2, "markdown": 3}
 
+_POSITIVE_TERMS = frozenset(
+    {"long", "bullish", "true", "increasing", "positive", "yes", "buy"}
+)
+_NEGATIVE_TERMS = frozenset(
+    {"short", "bearish", "false", "decreasing", "negative", "no", "sell"}
+)
+
+
+def _sentiment_class(value: Any, trend: str | None = None) -> str:
+    if trend in ("positive", "up"):
+        return "positive"
+    if trend in ("negative", "down"):
+        return "negative"
+    if value is True:
+        return "positive"
+    if value is False:
+        return "negative"
+    if isinstance(value, (int, float)):
+        if value > 0:
+            return "positive"
+        if value < 0:
+            return "negative"
+        return ""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _POSITIVE_TERMS:
+            return "positive"
+        if normalized in _NEGATIVE_TERMS:
+            return "negative"
+    return ""
+
 
 class ReportBuilder:
     def __init__(self, title: str = "Report"):
@@ -365,12 +400,13 @@ class ReportBuilder:
                 for k in kpis:
                     delta_html = ""
                     if k["delta"]:
-                        cls = f' {k["trend"]}' if k["trend"] in ("up", "down") else ""
-                        delta_html = f'<div class="delta{cls}">{k["delta"]}</div>'
+                        delta_cls = _sentiment_class(k["delta"], k.get("trend"))
+                        delta_html = f'<div class="delta{(" " + delta_cls) if delta_cls else ""}">{k["delta"]}</div>'
+                    value_cls = _sentiment_class(k["value"], k.get("trend"))
                     cards.append(
                         f'<div class="kpi-card">'
                         f'<div class="label">{k["label"]}</div>'
-                        f'<div class="value">{k["value"]}</div>'
+                        f'<div class="value{(" " + value_cls) if value_cls else ""}">{k["value"]}</div>'
                         f'{delta_html}</div>'
                     )
                 parts.append(f'<div class="kpi-bar">{"".join(cards)}</div>')
@@ -392,7 +428,14 @@ class ReportBuilder:
         header = "".join(f"<th>{c}</th>" for c in columns)
         body_rows = []
         for row in rows:
-            cells = "".join(f"<td>{row.get(c, '')}</td>" for c in columns)
-            body_rows.append(f"<tr>{cells}</tr>")
+            cells = []
+            for c in columns:
+                val = row.get(c, "")
+                cls = _sentiment_class(val)
+                if cls:
+                    cells.append(f'<td class="{cls}">{val}</td>')
+                else:
+                    cells.append(f"<td>{val}</td>")
+            body_rows.append(f"<tr>{''.join(cells)}</tr>")
         body = "\n".join(body_rows)
         return f'<div class="section section-table"><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>'
