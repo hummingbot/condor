@@ -11,7 +11,8 @@ import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlC
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
-import { ExecutorTable, type SortDir, type SortKey } from "@/pages/Executors";
+import { useRates } from "@/hooks/useRates";
+import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/pages/Executors";
 
 // ── Helper ──
 
@@ -40,148 +41,22 @@ function agentRowToExecutorInfo(row: AgentExecutorRow): ExecutorInfo {
 
 // ── Session Overview ──
 
-export function SessionOverview({
-  journal,
-  perf,
-}: {
+export function SessionOverview(props: {
   journal: ParsedJournal;
   perf?: AgentPerformance | null;
 }) {
-  const { summary, executors, metrics } = journal;
-  const pnl = perf ? perf.total_pnl : summary.pnl;
+  const { metrics } = props.journal;
 
   // PnL chart data from metrics timeline
   const pnlData = useMemo(() => metricsToDataPoints(metrics), [metrics]);
 
+  if (pnlData.length <= 1) {
+    return null;
+  }
+
   return (
     <div className="space-y-4">
-      {/* Summary Card */}
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-        <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Summary</h3>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm md:grid-cols-4">
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Status</span>
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${
-              summary.status === "ACTIVE" || summary.status === "running"
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                : summary.status === "paused"
-                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
-                  : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
-            }`}>
-              {summary.status || "idle"}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Tick</span>
-            <span className="font-mono text-sm text-[var(--color-text)]">#{summary.lastTick}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">PnL</span>
-            <span className={`font-mono text-sm ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              ${pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Action</span>
-            <span className="text-sm text-[var(--color-text)]">{summary.lastAction || "—"}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Executor Table */}
-      {executors.length > 0 && (
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-          <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Executors</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead>
-                <tr className="border-b border-[var(--color-border)] text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-                  <th className="pb-2 pr-3">ID</th>
-                  <th className="pb-2 pr-3">Type</th>
-                  <th className="pb-2 pr-3">Pair</th>
-                  <th className="pb-2 pr-3">Side</th>
-                  <th className="pb-2 pr-3 text-right">Amount</th>
-                  <th className="pb-2 pr-3">Status</th>
-                  <th className="pb-2 pr-3 text-right">PnL</th>
-                  <th className="pb-2 text-right">Volume</th>
-                </tr>
-              </thead>
-              <tbody>
-                {executors.map((ex, i) => (
-                  <tr key={`${ex.id}-${i}`} className="border-b border-[var(--color-border)]/30">
-                    <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{ex.id.slice(0, 8)}</td>
-                    <td className="py-2 pr-3 text-[var(--color-text-muted)]">{ex.type}</td>
-                    <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{ex.pair}</td>
-                    <td className="py-2 pr-3">
-                      <span className={ex.side.toLowerCase() === "buy" ? "text-emerald-400" : "text-red-400"}>
-                        {ex.side.toUpperCase()}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${ex.amount.toFixed(2)}</td>
-                    <td className="py-2 pr-3">
-                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${
-                        ex.status === "open"
-                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                          : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
-                      }`}>
-                        {ex.status}
-                      </span>
-                    </td>
-                    <td className={`py-2 pr-3 text-right font-mono ${ex.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      {ex.pnl >= 0 ? "+" : ""}{ex.pnl.toFixed(2)}
-                    </td>
-                    <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{ex.volume.toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* PnL Chart (replaces metrics timeline text) */}
-      {pnlData.length > 1 && (
-        <AgentPnlChart data={pnlData} height={400} title="Metrics Timeline" />
-      )}
-
-      {/* Metrics table (compact, below chart) */}
-      {metrics.length > 0 && (
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-          <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">Metrics Detail</h3>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                  <th className="px-2 py-1">Time</th>
-                  <th className="px-2 py-1 text-right">PnL</th>
-                  <th className="px-2 py-1 text-right">Volume</th>
-                  <th className="px-2 py-1 text-right">Open</th>
-                  <th className="px-2 py-1 text-right">Exposure</th>
-                </tr>
-              </thead>
-              <tbody>
-                {metrics.map((m, i) => (
-                  <tr key={i} className="border-t border-[var(--color-border)]/30 font-mono">
-                    <td className="px-2 py-1.5 text-[var(--color-text-muted)]">{m.timestamp}</td>
-                    <td className={`px-2 py-1.5 text-right ${m.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      ${m.pnl >= 0 ? "+" : ""}{m.pnl.toFixed(2)}
-                    </td>
-                    <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
-                      ${m.volume.toLocaleString("en-US", { maximumFractionDigits: 0 })}
-                    </td>
-                    <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{m.open}</td>
-                    <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">${m.exposure.toFixed(2)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {executors.length === 0 && metrics.length === 0 && (
-        <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No executors or metrics yet.</p>
-      )}
+      <AgentPnlChart data={pnlData} height={400} title="Metrics Timeline" />
     </div>
   );
 }
@@ -238,12 +113,14 @@ export function SessionExecutors({
   serverName,
   controllerIds,
   onSnapshotClick,
+  sessionSummary,
 }: {
   slug: string;
   sessionNum: number;
   serverName: string;
   controllerIds?: string[];
   onSnapshotClick?: (tick: number) => void;
+  sessionSummary?: { status: string; lastTick: number; lastAction: string };
 }) {
   // REST data (fallback + historical executors)
   const { data: sessionDetail } = useQuery({
@@ -273,6 +150,13 @@ export function SessionExecutors({
     }
     return merged;
   }, [restExecutors, wsExecutors]);
+
+  // Currency conversion
+  const quoteCurrencies = useMemo(
+    () => executorInfos.map((ex) => ex.trading_pair?.split("-")[1] || "USDT"),
+    [executorInfos],
+  );
+  const { formatPnlValue, formatValue, formatValueDetailed } = useRates(quoteCurrencies);
 
   // Fetch snapshots for bubble markers
   const { data: snapshotsData } = useQuery({
@@ -350,6 +234,21 @@ export function SessionExecutors({
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const stoppingIds = useMemo(() => new Set<string>(), []);
+  const [selectedExecutor, setSelectedExecutor] = useState<ExecutorInfo | null>(null);
+
+  // Positions held (filtered by controller IDs)
+  const { data: positionsData } = useQuery({
+    queryKey: ["positions-held", serverName],
+    queryFn: () => api.getPositionsHeld(serverName),
+    enabled: !!serverName && (controllerIds?.length ?? 0) > 0,
+    refetchInterval: 10000,
+  });
+
+  const positions = useMemo(() => {
+    if (!positionsData?.positions || !controllerIds?.length) return [];
+    const cidSet = new Set(controllerIds);
+    return positionsData.positions.filter((p) => p.controller_id && cidSet.has(p.controller_id));
+  }, [positionsData, controllerIds]);
 
   const handleSort = useCallback((key: SortKey) => {
     setSortDir((prev) => (sortKey === key ? (prev === "asc" ? "desc" : "asc") : "desc"));
@@ -395,6 +294,20 @@ export function SessionExecutors({
     <div className="space-y-3">
       {/* Stats strip */}
       <div className="flex flex-wrap items-center gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
+        {sessionSummary && (
+          <div>
+            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Status</span>
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${
+              sessionSummary.status === "ACTIVE" || sessionSummary.status === "running"
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                : sessionSummary.status === "paused"
+                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                  : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+            }`}>
+              {sessionSummary.status || "idle"}
+            </span>
+          </div>
+        )}
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Net PnL</span>
           <span className={`font-mono text-sm font-semibold ${stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
@@ -418,7 +331,69 @@ export function SessionExecutors({
             )}
           </span>
         </div>
+        {sessionSummary && sessionSummary.lastTick > 0 && (
+          <div>
+            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Tick</span>
+            <span className="font-mono text-sm text-[var(--color-text)]">#{sessionSummary.lastTick}</span>
+          </div>
+        )}
+        {sessionSummary?.lastAction && (
+          <div>
+            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Action</span>
+            <span className="text-sm text-[var(--color-text)]">{sessionSummary.lastAction}</span>
+          </div>
+        )}
       </div>
+
+      {/* Positions Held */}
+      {positions.length > 0 && (
+        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+          <h3 className="mb-3 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+            Positions Held ({positions.length})
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-[var(--color-border)] text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+                  <th className="pb-2 pr-3">Pair</th>
+                  <th className="pb-2 pr-3">Side</th>
+                  <th className="pb-2 pr-3 text-right">Amount</th>
+                  <th className="pb-2 pr-3 text-right">Entry</th>
+                  <th className="pb-2 pr-3 text-right">Current</th>
+                  <th className="pb-2 pr-3 text-right">Unreal. PnL</th>
+                  <th className="pb-2 text-right">Leverage</th>
+                </tr>
+              </thead>
+              <tbody>
+                {positions.map((p, i) => {
+                  const upnl = p.unrealized_pnl_quote ?? p.unrealized_pnl ?? 0;
+                  const side = p.position_side || p.side || "—";
+                  const amount = p.net_amount_base ?? p.amount ?? 0;
+                  const entry = p.buy_breakeven_price ?? p.entry_price ?? 0;
+                  const current = p.current_price ?? 0;
+                  return (
+                    <tr key={`${p.trading_pair}-${i}`} className="border-b border-[var(--color-border)]/30">
+                      <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{p.trading_pair}</td>
+                      <td className="py-2 pr-3">
+                        <span className={side.toLowerCase().includes("long") || side.toLowerCase() === "buy" ? "text-emerald-400" : "text-red-400"}>
+                          {side.toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">{Math.abs(amount).toFixed(4)}</td>
+                      <td className="py-2 pr-3 text-right font-mono text-[var(--color-text-muted)]">${entry.toFixed(2)}</td>
+                      <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${current.toFixed(2)}</td>
+                      <td className={`py-2 pr-3 text-right font-mono ${upnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {upnl >= 0 ? "+" : ""}${upnl.toFixed(2)}
+                      </td>
+                      <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{p.leverage ? `${p.leverage}x` : "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Chart-focused view — each trading pair gets a prominent chart */}
       {chartGroups.map(([key, group]) => {
@@ -459,11 +434,25 @@ export function SessionExecutors({
         onToggleSelect={toggleSelect}
         onSelectAll={selectAll}
         allSelected={allSelected}
-        onRowClick={() => {}}
-        selectedExecutorId={null}
+        onRowClick={(ex) => setSelectedExecutor(ex)}
+        selectedExecutorId={selectedExecutor?.id ?? null}
         onStop={() => {}}
         stoppingIds={stoppingIds}
       />
+
+      {/* Executor Detail Panel */}
+      {selectedExecutor && (
+        <DetailPanel
+          executor={selectedExecutor}
+          server={serverName}
+          onClose={() => setSelectedExecutor(null)}
+          onStop={() => {}}
+          stopping={false}
+          rateFormatPnl={formatPnlValue}
+          rateFormatValue={formatValue}
+          rateFormatDetailed={formatValueDetailed}
+        />
+      )}
     </div>
   );
 }

@@ -180,6 +180,16 @@ def set_controller_config(context, config: Dict[str, Any]) -> None:
     context.user_data["controller_config_params"] = config
 
 
+def clean_config_for_save(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip internal fields (e.g. _config_name) before saving to backend.
+
+    The backend adds _config_name to YAML files, but Pydantic models with
+    extra='forbid' reject it on reload. Strip any underscore-prefixed keys
+    that aren't part of the controller config schema.
+    """
+    return {k: v for k, v in config.items() if not k.startswith("_")}
+
+
 def init_new_controller_config(
     context, controller_type: str = "grid_strike"
 ) -> Dict[str, Any]:

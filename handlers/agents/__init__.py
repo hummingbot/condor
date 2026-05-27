@@ -304,6 +304,11 @@ async def _handle_set_llm(
         return
 
     context.user_data["agent_llm"] = llm_key
+
+    # Destroy existing session so the next interaction uses the new LLM
+    chat_id = update.effective_chat.id
+    await destroy_session(chat_id)
+
     label = AGENT_OPTIONS[llm_key]["label"]
     await query.message.edit_text(
         f"LLM set to {label}. New sessions will use this model.\n\n"
@@ -383,6 +388,9 @@ async def _handle_openrouter_pick(
     model = models[idx]
     agent_key = f"openrouter:{model.slug}"
     context.user_data["agent_llm"] = agent_key
+
+    # Destroy existing session so the next interaction uses the new LLM
+    await destroy_session(update.effective_chat.id)
 
     pricing = ""
     if model.prompt_price or model.completion_price:
@@ -480,6 +488,10 @@ async def _handle_openrouter_type_confirm(
         return
 
     context.user_data["agent_llm"] = f"openrouter:{slug}"
+
+    # Destroy existing session so the next interaction uses the new LLM
+    await destroy_session(update.effective_chat.id)
+
     await query.message.edit_text(
         f"LLM set to OpenRouter — {slug}.\n\n"
         "New sessions will use this model. Use /agent to continue."

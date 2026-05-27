@@ -13,6 +13,7 @@ import {
   type FieldDispatch,
 } from "./fields";
 import type { ChartPriceMapping, ExecutorValidation, ExtraLine } from "./types";
+import { getThemeColors } from "@/lib/theme-colors";
 
 // ── State ──
 
@@ -240,7 +241,7 @@ export function useDCAConfig() {
         extras.push({
           price: tpPrice,
           label: `TP (${(state.take_profit * 100).toFixed(1)}%)`,
-          color: "#22c55e",
+          color: getThemeColors().green,
           lineStyle: "dashed",
           lineWidth: 2,
         });
@@ -252,7 +253,7 @@ export function useDCAConfig() {
         extras.push({
           price: slPrice,
           label: `SL (${(state.stop_loss * 100).toFixed(1)}%)`,
-          color: "#ef4444",
+          color: getThemeColors().red,
           lineStyle: "dashed",
           lineWidth: 2,
         });

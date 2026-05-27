@@ -270,7 +270,8 @@ async def update_bot_controller_config(
                            "Set confirm_override=True to update it."),
             }
         else:
-            update_op = await client.controllers.update_bot_controller_config(bot_name, config_name, config_data)
+            clean_data = {k: v for k, v in config_data.items() if not k.startswith("_")}
+            update_op = await client.controllers.update_bot_controller_config(bot_name, config_name, clean_data)
             return {
                 "action": "update_config",
                 "exists": False,
@@ -283,7 +284,8 @@ async def update_bot_controller_config(
         # Ensure config_data has the correct id
         if "id" not in config_data or config_data["id"] != config_name:
             config_data["id"] = config_name
-        update_op = await client.controllers.update_bot_controller_config(bot_name, config_name, config_data)
+        clean_data = {k: v for k, v in config_data.items() if not k.startswith("_")}
+        update_op = await client.controllers.update_bot_controller_config(bot_name, config_name, clean_data)
         return {
             "action": "update_config",
             "exists": True,

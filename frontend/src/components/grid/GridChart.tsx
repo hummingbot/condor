@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
+import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 type PickField = "start" | "end" | "limit" | null;
 
@@ -28,6 +30,13 @@ interface GridChartProps {
   executorOverlays?: ExecutorOverlay[];
   positions?: ConsolidatedPosition[];
   selectedExecutorId?: string | null;
+  /** Convert a value from the pair's quote currency to display currency */
+  convertValue?: (val: number) => string;
+  convertPnl?: (val: number) => string;
+  /** Callback when user clicks an executor in the list that's outside candle range */
+  onRequestCandleRange?: (startTime: number) => void;
+  /** Callback when user clicks chart background to deselect executor */
+  onExecutorDeselect?: () => void;
 }
 
 function getChartColors() {
@@ -61,6 +70,9 @@ export function GridChart({
   executorOverlays,
   positions,
   selectedExecutorId,
+  convertValue,
+  convertPnl,
+  onExecutorDeselect,
 }: GridChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
@@ -71,6 +83,10 @@ export function GridChart({
   const crosshairPriceRef = useRef<number | null>(null);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const lastZoomedIdRef = useRef<string | null>(null);
+  const convertValueRef = useRef(convertValue);
+  const convertPnlRef = useRef(convertPnl);
+  convertValueRef.current = convertValue;
+  convertPnlRef.current = convertPnl;
   const [chartReady, setChartReady] = useState(false);
 
   // Price line refs
@@ -85,6 +101,20 @@ export function GridChart({
 
   // ── Candle data from the singleton store (WS live + cached) ──
   const { candles, mergeCandles, setDuration } = useCandleStore(server, connector, pair, interval);
+
+  // ── Filter executor overlays to those within candle time range ──
+  const filteredOverlays = useMemo(() => {
+    if (!executorOverlays?.length) return executorOverlays;
+    if (!candles.length) return executorOverlays; // no candles yet → show all
+    const minTime = candles[0].timestamp;
+    return executorOverlays.filter((o) => {
+      const s = o.status?.toLowerCase();
+      if (s === "running" || s === "active") return true;
+      if (selectedExecutorId && o.executorId === selectedExecutorId) return true;
+      const end = o.timeRange.end > 1e12 ? o.timeRange.end / 1000 : o.timeRange.end;
+      return end >= minTime;
+    });
+  }, [executorOverlays, candles, selectedExecutorId]);
 
   // ── REST backfill on pair/interval/lookback change ──
   const backfillKeyRef = useRef("");
@@ -224,19 +254,20 @@ export function GridChart({
         }
 
         const o = bestOverlay;
-        const pnlClr = o.pnl >= 0 ? "#22c55e" : "#ef4444";
-        const pnlSign = o.pnl >= 0 ? "+" : "";
-        const pnlStr = Math.abs(o.pnl) >= 1000 ? `${pnlSign}$${(o.pnl / 1000).toFixed(1)}K` : `${pnlSign}$${o.pnl.toFixed(2)}`;
+        const pnlClr = pnlHexColor(o.pnl);
+        const _cvtPnl = convertPnlRef.current;
+        const _cvtVal = convertValueRef.current;
+        const pnlStr = _cvtPnl ? _cvtPnl(o.pnl) : (Math.abs(o.pnl) >= 1000 ? `${o.pnl >= 0 ? "+" : ""}$${(o.pnl / 1000).toFixed(1)}K` : `${o.pnl >= 0 ? "+" : ""}$${o.pnl.toFixed(2)}`);
         const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
-        const volStr = Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`;
-        const feesStr = o.fees ? `$${o.fees.toFixed(2)}` : "";
+        const volStr = _cvtVal ? _cvtVal(o.volume) : (Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`);
+        const feesStr = o.fees ? (_cvtVal ? _cvtVal(o.fees) : `$${o.fees.toFixed(2)}`) : "";
 
-        const sideClr = o.side === "buy" ? "#22c55e" : "#ef4444";
+        const sideClr = sideColor(o.side);
         const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
         const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
           ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
         const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
-          ? "#22c55e" : "#9ca3af";
+          ? getThemeColors().green : "#9ca3af";
 
         // Build config detail rows
         const cfg = o.config || {};
@@ -277,13 +308,13 @@ export function GridChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", fmtUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : fmtUsd(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
-        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, "#22c55e");
+        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
         const sl = Number(cfg.stop_loss);
-        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, "#ef4444");
+        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
         if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
 
         tooltip.innerHTML = `
@@ -306,18 +337,21 @@ export function GridChart({
         `;
         tooltip.style.display = "block";
 
+        // Position tooltip using viewport-fixed coords (rendered via portal)
         const containerRect = containerRef.current.getBoundingClientRect();
         const tooltipW = 280;
-        // Show tooltip on opposite side of cursor to avoid covering the executor
+        const tooltipH = tooltip.offsetHeight || 200;
         const cursorInRightHalf = param.point.x > containerRect.width / 2;
         let left = cursorInRightHalf
-          ? param.point.x - tooltipW - 16
-          : param.point.x + 16;
-        // Clamp to container bounds
+          ? containerRect.left + param.point.x - tooltipW - 16
+          : containerRect.left + param.point.x + 16;
         if (left < 4) left = 4;
-        if (left + tooltipW > containerRect.width - 4) left = containerRect.width - tooltipW - 4;
-        let top = param.point.y - 10;
-        if (top < 0) top = 4;
+        if (left + tooltipW > window.innerWidth - 4) left = window.innerWidth - tooltipW - 4;
+        let top = containerRect.top + param.point.y - 10;
+        if (top + tooltipH > window.innerHeight - 4) {
+          top = window.innerHeight - tooltipH - 4;
+        }
+        if (top < 4) top = 4;
 
         tooltip.style.left = `${left}px`;
         tooltip.style.top = `${top}px`;
@@ -433,7 +467,7 @@ export function GridChart({
     if (startPrice > 0) {
       startLineRef.current = series.createPriceLine({
         price: startPrice,
-        color: activePickField === "start" ? "#22c55e" : "#16a34a",
+        color: getThemeColors().green,
         lineWidth: 2,
         lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
@@ -444,7 +478,7 @@ export function GridChart({
     if (endPrice > 0) {
       endLineRef.current = series.createPriceLine({
         price: endPrice,
-        color: activePickField === "end" ? "#22c55e" : "#16a34a",
+        color: getThemeColors().green,
         lineWidth: 2,
         lineStyle: mod.LineStyle.Dashed,
         axisLabelVisible: true,
@@ -453,7 +487,7 @@ export function GridChart({
     }
 
     if (limitPrice > 0) {
-      const limitColor = side === 1 ? "#ef4444" : "#f97316";
+      const limitColor = side === 1 ? getThemeColors().red : "#f97316";
       limitLineRef.current = series.createPriceLine({
         price: limitPrice,
         color: activePickField === "limit" ? "#fbbf24" : limitColor,
@@ -539,12 +573,12 @@ export function GridChart({
     }
     overlayPriceLinesRef.current = [];
 
-    if (!executorOverlays?.length) return;
+    if (!filteredOverlays?.length) return;
 
     const hasSelection = !!selectedExecutorId;
-    const isMulti = executorOverlays.length > 1;
+    const isMulti = filteredOverlays.length > 1;
 
-    executorOverlays.forEach((overlay, idx) => {
+    filteredOverlays.forEach((overlay, idx) => {
       const isSelectedOverlay = hasSelection && overlay.executorId === selectedExecutorId;
       const isDimmed = hasSelection && !isSelectedOverlay;
       // When selected: use bright color and thicker lines; when dimmed: reduce opacity
@@ -625,7 +659,7 @@ export function GridChart({
 
           if (box.limitPrice) {
             const limit = chart.addSeries(mod.LineSeries, {
-              color: applyDim("#ef4444"), lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
+              color: applyDim(getThemeColors().red), lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
               priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
             });
             limit.setData([
@@ -661,13 +695,13 @@ export function GridChart({
     });
 
     // Full-width price lines for active or selected executor
-    if (series && executorOverlays?.length) {
+    if (series && filteredOverlays?.length) {
       const styleMap: Record<string, number> = {
         solid: mod.LineStyle.Solid,
         dashed: mod.LineStyle.Dashed,
         dotted: mod.LineStyle.Dotted,
       };
-      for (const overlay of executorOverlays) {
+      for (const overlay of filteredOverlays) {
         const isRunning = overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active";
         const isSelectedOverlay = overlay.executorId === selectedExecutorId;
         // Show price lines for active executors, and always for the selected one
@@ -686,14 +720,14 @@ export function GridChart({
         }
       }
     }
-  }, [executorOverlays, selectedExecutorId]);
+  }, [filteredOverlays, selectedExecutorId]);
 
   // ── Zoom to selected executor (one-time action) ──
   useEffect(() => {
-    if (!selectedExecutorId || !chartRef.current || !executorOverlays?.length) return;
+    if (!selectedExecutorId || !chartRef.current || !filteredOverlays?.length) return;
     // Only zoom once per selection — don't re-zoom on overlay data refresh
     if (lastZoomedIdRef.current === selectedExecutorId) return;
-    const overlay = executorOverlays.find((o) => o.executorId === selectedExecutorId);
+    const overlay = filteredOverlays.find((o) => o.executorId === selectedExecutorId);
     if (!overlay) return;
 
     lastZoomedIdRef.current = selectedExecutorId;
@@ -707,7 +741,7 @@ export function GridChart({
       from: (start - padding) as import("lightweight-charts").UTCTimestamp,
       to: (end + padding) as import("lightweight-charts").UTCTimestamp,
     });
-  }, [selectedExecutorId, executorOverlays]);
+  }, [selectedExecutorId, filteredOverlays]);
 
   // Reset zoom tracking when executor is deselected
   useEffect(() => {
@@ -716,8 +750,8 @@ export function GridChart({
 
   // Keep overlaysRef in sync for tooltip
   useEffect(() => {
-    overlaysRef.current = executorOverlays ?? [];
-  }, [executorOverlays]);
+    overlaysRef.current = filteredOverlays ?? [];
+  }, [filteredOverlays]);
 
   // ── Position hold lines ──
   useEffect(() => {
@@ -736,12 +770,10 @@ export function GridChart({
       if (pos.entry_price <= 0) continue;
       const isLong = pos.position_side?.toUpperCase() === "LONG";
       const pnl = pos.unrealized_pnl ?? 0;
-      const pnlSign = pnl >= 0 ? "+" : "";
-      const pnlStr = Math.abs(pnl) >= 1000
-        ? `${pnlSign}$${(pnl / 1000).toFixed(1)}K`
-        : `${pnlSign}$${pnl.toFixed(2)}`;
+      const _cvtPnl2 = convertPnlRef.current;
+      const pnlStr = _cvtPnl2 ? _cvtPnl2(pnl) : (Math.abs(pnl) >= 1000 ? `${pnl >= 0 ? "+" : ""}$${(pnl / 1000).toFixed(1)}K` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
       const amt = Math.abs(pos.amount);
-      const color = pnl >= 0 ? "#22c55e" : "#ef4444";
+      const color = pnlHexColor(pnl);
       const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
       const pl = series.createPriceLine({
         price: pos.entry_price,
@@ -755,10 +787,16 @@ export function GridChart({
     }
   }, [positions]);
 
-  // ── Click-to-set price ──
+  // ── Click-to-set price / deselect executor ──
   const handleClick = () => {
-    if (!activePickField || crosshairPriceRef.current === null) return;
-    onPriceSet(activePickField, crosshairPriceRef.current);
+    if (activePickField && crosshairPriceRef.current !== null) {
+      onPriceSet(activePickField, crosshairPriceRef.current);
+      return;
+    }
+    // Click on chart background deselects executor
+    if (selectedExecutorId && onExecutorDeselect) {
+      onExecutorDeselect();
+    }
   };
 
   return (
@@ -780,28 +818,31 @@ export function GridChart({
           style={{ cursor: activePickField ? "crosshair" : "default" }}
           onClick={handleClick}
         />
-        {/* Executor tooltip overlay */}
-        <div
-          ref={tooltipRef}
-          style={{
-            display: "none",
-            position: "absolute",
-            top: 0,
-            left: 0,
-            zIndex: 10,
-            pointerEvents: "none",
-            background: "var(--color-surface)",
-            border: "1px solid var(--color-border)",
-            borderRadius: 8,
-            padding: "10px 14px",
-            fontSize: 11,
-            color: "var(--color-text)",
-            width: 280,
-            lineHeight: 1.4,
-            backdropFilter: "blur(12px)",
-            boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
-          }}
-        />
+        {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
+        {createPortal(
+          <div
+            ref={tooltipRef}
+            style={{
+              display: "none",
+              position: "fixed",
+              top: 0,
+              left: 0,
+              zIndex: 9999,
+              pointerEvents: "none",
+              background: "var(--color-surface)",
+              border: "1px solid var(--color-border)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              fontSize: 11,
+              color: "var(--color-text)",
+              width: 280,
+              lineHeight: 1.4,
+              backdropFilter: "blur(12px)",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+            }}
+          />,
+          document.body,
+        )}
       </div>
     </div>
   );

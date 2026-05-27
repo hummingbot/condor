@@ -21,6 +21,7 @@ export interface SlotInfo {
   agent_key: string;
   mode: string;
   is_busy?: boolean;
+  server_name?: string;
 }
 
 export interface ChatSlot {
@@ -30,7 +31,38 @@ export interface ChatSlot {
 
 let msgIdCounter = 0;
 function nextMsgId(): string {
-  return `msg_${++msgIdCounter}`;
+  return `msg_${Date.now()}_${++msgIdCounter}`;
+}
+
+// ── localStorage persistence for chat messages ──
+const STORAGE_KEY = "condor_chat_messages";
+
+function saveSlotMessages(slots: ChatSlot[]) {
+  try {
+    const data: Record<string, ChatMessage[]> = {};
+    for (const s of slots) {
+      if (s.messages.length > 0) {
+        data[s.info.slot_id] = s.messages;
+      }
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch { /* quota exceeded or private mode */ }
+}
+
+function loadSlotMessages(): Record<string, ChatMessage[]> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch { /* corrupted */ }
+  return {};
+}
+
+function clearStoredSlot(slotId: string) {
+  try {
+    const data = loadSlotMessages();
+    delete data[slotId];
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch { /* ignore */ }
 }
 
 export function useChatSocket() {
@@ -43,6 +75,9 @@ export function useChatSocket() {
   const [isConnected, setIsConnected] = useState(false);
   const [slots, setSlots] = useState<ChatSlot[]>([]);
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
+  // Track whether we've received the initial sessions_list from the backend.
+  // Prevents the empty initial slots from overwriting localStorage.
+  const hydrated = useRef(false);
   const [streamingSlotId, setStreamingSlotId] = useState<string | null>(null);
   const [permissionRequest, setPermissionRequest] = useState<{
     request_id: string;
@@ -103,13 +138,17 @@ export function useChatSocket() {
       switch (event) {
         case "sessions_list": {
           const sessions = data.sessions as SlotInfo[];
+          hydrated.current = true;
           if (sessions.length > 0) {
+            const stored = loadSlotMessages();
             setSlots((prev) => {
-              // Merge: keep existing messages for known slots, add new ones
+              // Merge: keep existing messages for known slots, restore from localStorage, or start empty
               const existing = new Map(prev.map((s) => [s.info.slot_id, s]));
               const merged = sessions.map((info) => {
                 const ex = existing.get(info.slot_id);
-                return ex ? { ...ex, info } : { info, messages: [] };
+                if (ex) return { ...ex, info };
+                const restored = stored[info.slot_id];
+                return { info, messages: restored || [] };
               });
               return merged;
             });
@@ -126,6 +165,7 @@ export function useChatSocket() {
             slot_id: data.slot_id as string,
             agent_key: data.agent_key as string,
             mode: data.mode as string,
+            server_name: (data.server_name as string) || undefined,
           };
           setSlots((prev) => [...prev, { info: newSlot, messages: [] }]);
           setActiveSlotId(newSlot.slot_id);
@@ -134,6 +174,7 @@ export function useChatSocket() {
 
         case "session_destroyed": {
           const destroyedId = data.slot_id as string;
+          clearStoredSlot(destroyedId);
           setSlots((prev) => prev.filter((s) => s.info.slot_id !== destroyedId));
           setActiveSlotId((prev) => {
             if (prev === destroyedId) return null;
@@ -269,14 +310,60 @@ export function useChatSocket() {
 
         case "prompt_done":
           if (slotId) {
+            // Mark any in-flight tool calls as completed so the spinner stops
+            setSlots((prev) =>
+              prev.map((s) => {
+                if (s.info.slot_id !== slotId) return s;
+                const curId = currentAssistantMsg.current[slotId];
+                if (!curId) return s;
+                return {
+                  ...s,
+                  messages: s.messages.map((m) =>
+                    m.id === curId && m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
+                      ? {
+                          ...m,
+                          toolCalls: m.toolCalls.map((tc) =>
+                            tc.status === "completed" || tc.status === "failed"
+                              ? tc
+                              : { ...tc, status: "completed" },
+                          ),
+                        }
+                      : m,
+                  ),
+                };
+              }),
+            );
             currentAssistantMsg.current[slotId] = null;
           }
           setStreamingSlotId(null);
           break;
 
-        case "error":
+        case "error": {
+          const errSlotId = slotId || null;
+          // Reset current assistant message so next response creates a new bubble
+          if (errSlotId) {
+            currentAssistantMsg.current[errSlotId] = null;
+          }
+          // Show error as a system message in the chat
+          const errMsg = (data.message as string) || "Unknown error";
+          if (errSlotId) {
+            setSlots((prev) =>
+              prev.map((s) => {
+                if (s.info.slot_id !== errSlotId) return s;
+                const id = nextMsgId();
+                return {
+                  ...s,
+                  messages: [
+                    ...s.messages,
+                    { id, role: "assistant" as const, text: `⚠️ ${errMsg}`, toolCalls: [] },
+                  ],
+                };
+              }),
+            );
+          }
           setStreamingSlotId(null);
           break;
+        }
 
         case "heartbeat":
           break;
@@ -311,8 +398,8 @@ export function useChatSocket() {
   );
 
   const startSession = useCallback(
-    (agentKey: string, mode: string) => {
-      send({ action: "start_session", agent_key: agentKey, mode });
+    (agentKey: string, mode: string, serverName?: string) => {
+      send({ action: "start_session", agent_key: agentKey, mode, server_name: serverName });
     },
     [send],
   );
@@ -320,7 +407,40 @@ export function useChatSocket() {
   const destroySession = useCallback(
     (slotId: string) => {
       currentAssistantMsg.current[slotId] = null;
+      clearStoredSlot(slotId);
       send({ action: "destroy_session", slot_id: slotId });
+    },
+    [send],
+  );
+
+  const abortPrompt = useCallback(
+    (slotId: string) => {
+      send({ action: "abort_prompt", slot_id: slotId });
+      // Immediately reset streaming state so the UI doesn't get stuck
+      // if the backend's prompt_done event is lost or delayed
+      setStreamingSlotId(null);
+      currentAssistantMsg.current[slotId] = null;
+      // Mark any in-flight tool calls as completed
+      setSlots((prev) =>
+        prev.map((s) => {
+          if (s.info.slot_id !== slotId) return s;
+          return {
+            ...s,
+            messages: s.messages.map((m) =>
+              m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
+                ? {
+                    ...m,
+                    toolCalls: m.toolCalls.map((tc) =>
+                      tc.status === "completed" || tc.status === "failed"
+                        ? tc
+                        : { ...tc, status: "completed" },
+                    ),
+                  }
+                : m,
+            ),
+          };
+        }),
+      );
     },
     [send],
   );
@@ -340,6 +460,14 @@ export function useChatSocket() {
     };
   }, []);
 
+  // Persist messages to localStorage on every change (but only after initial hydration
+  // to avoid the empty initial state wiping saved messages before WS reconnects)
+  useEffect(() => {
+    if (hydrated.current) {
+      saveSlotMessages(slots);
+    }
+  }, [slots]);
+
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;
   const isStreaming = streamingSlotId !== null;
 
@@ -357,6 +485,7 @@ export function useChatSocket() {
     sendMessage,
     startSession,
     destroySession,
+    abortPrompt,
     resolvePermission,
   };
 }

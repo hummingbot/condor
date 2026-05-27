@@ -166,7 +166,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
   useEffect(() => {
     if (!priceRef.current || data.candles.length === 0) return;
-    const isDark = theme === "dark";
+    const isDark = theme !== "light";
     let ro: ResizeObserver | undefined;
     let isSyncing = false;
 

@@ -2,25 +2,29 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Brain,
+  ChevronDown,
   Loader2,
   MessageSquare,
   Minus,
   Plus,
+  Server,
   X,
   Zap,
 } from "lucide-react";
 import { useChatSocket, type ChatSlot } from "@/hooks/useChatSocket";
 import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
+import { api, type ChatAgentOption, type ChatModeOption } from "@/lib/api";
+import { useServer } from "@/hooks/useServer";
 
 const MIN_WIDTH = 360;
 const MAX_WIDTH = 1200;
 const DEFAULT_WIDTH = 480;
 
-const MODE_OPTIONS = [
-  { key: "condor", label: "Condor", icon: Zap },
-  { key: "agent_builder", label: "Agent Builder", icon: Brain },
-] as const;
+const MODE_ICONS: Record<string, typeof Zap> = {
+  condor: Zap,
+  agent_builder: Brain,
+};
 
 interface ChatPanelProps {
   isOpen: boolean;
@@ -29,6 +33,7 @@ interface ChatPanelProps {
 
 export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const chat = useChatSocket();
+  const { server } = useServer();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -36,6 +41,35 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [showNewMenu, setShowNewMenu] = useState(false);
   const [pendingSession, setPendingSession] = useState(false);
+
+  // Chat options from backend
+  const [agents, setAgents] = useState<ChatAgentOption[]>([]);
+  const [modes, setModes] = useState<ChatModeOption[]>([]);
+  const [defaultAgent, setDefaultAgent] = useState("claude-code");
+  const [defaultMode, setDefaultMode] = useState("condor");
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [selectedMode, setSelectedMode] = useState<string | null>(null);
+  const optionsFetched = useRef(false);
+
+  // Fetch chat options on first open
+  useEffect(() => {
+    if (isOpen && !optionsFetched.current) {
+      optionsFetched.current = true;
+      api.getChatOptions().then((opts) => {
+        setAgents(opts.agents);
+        setModes(opts.modes);
+        setDefaultAgent(opts.default_agent);
+        setDefaultMode(opts.default_mode);
+      }).catch(() => {
+        // Fallback defaults
+        setAgents([{ key: "claude-code", label: "Claude Code" }]);
+        setModes([
+          { key: "condor", label: "Condor", description: "" },
+          { key: "agent_builder", label: "Agent Builder", description: "" },
+        ]);
+      });
+    }
+  }, [isOpen]);
 
   // Keyboard shortcut: Cmd+K (Mac) / Ctrl+K (other) to toggle panel
   useEffect(() => {
@@ -89,19 +123,28 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     }
   }, [chat.activeSlot, pendingSession]);
 
-  const handleNewSession = (mode: string) => {
+  const handleNewSession = (agentKey: string, mode: string) => {
     setPendingSession(true);
     onToggle(true);
-    chat.startSession("claude-code", mode);
+    chat.startSession(agentKey, mode, server || undefined);
     setShowNewMenu(false);
+    setSelectedAgent(null);
+    setSelectedMode(null);
   };
 
   const activeSlot = chat.activeSlot;
   const isActiveStreaming = chat.streamingSlotId === chat.activeSlotId;
 
+  // Resolve effective selections for the new-session menu
+  const effectiveAgent = selectedAgent || defaultAgent;
+  const effectiveMode = selectedMode || defaultMode;
+
+  // Filter out sentinel keys (ending with :) that are pickers, not direct agents
+  const directAgents = agents.filter((a) => !a.key.endsWith(":"));
+
   return (
     <>
-      {/* Panel — slides from right, below navbar */}
+      {/* Panel -- slides from right, below navbar */}
       <div
         ref={panelRef}
         style={{ width: isOpen ? width : 0 }}
@@ -133,8 +176,15 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
             )}
           </div>
+          {/* Active session server indicator */}
+          {activeSlot?.info.server_name && (
+            <div className="flex items-center gap-1 rounded bg-[var(--color-surface-hover)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)]">
+              <Server className="h-2.5 w-2.5" />
+              <span className="truncate max-w-[80px]">{activeSlot.info.server_name}</span>
+            </div>
+          )}
           <div className="flex items-center gap-1">
-            {/* New session button with mode selector */}
+            {/* New session button */}
             <div className="relative">
               <button
                 onClick={() => setShowNewMenu((v) => !v)}
@@ -144,24 +194,16 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 <Plus className="h-4 w-4" />
               </button>
               {showNewMenu && (
-                <>
-                  <div
-                    className="fixed inset-0 z-50"
-                    onClick={() => setShowNewMenu(false)}
-                  />
-                  <div className="absolute right-0 top-full z-50 mt-1 w-44 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
-                    {MODE_OPTIONS.map(({ key, label, icon: Icon }) => (
-                      <button
-                        key={key}
-                        onClick={() => handleNewSession(key)}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-                      >
-                        <Icon className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </>
+                <NewSessionMenu
+                  agents={directAgents}
+                  modes={modes}
+                  selectedAgent={effectiveAgent}
+                  selectedMode={effectiveMode}
+                  onSelectAgent={setSelectedAgent}
+                  onSelectMode={setSelectedMode}
+                  onStart={(agent, mode) => handleNewSession(agent, mode)}
+                  onClose={() => setShowNewMenu(false)}
+                />
               )}
             </div>
             <button
@@ -181,6 +223,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               <SessionTab
                 key={slot.info.slot_id}
                 slot={slot}
+                agents={agents}
+                modes={modes}
                 isActive={slot.info.slot_id === chat.activeSlotId}
                 isStreaming={slot.info.slot_id === chat.streamingSlotId}
                 onClick={() => chat.setActiveSlotId(slot.info.slot_id)}
@@ -240,40 +284,28 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               </p>
             </div>
           ) : !activeSlot ? (
-            <div className="flex h-full flex-col items-center justify-center text-center">
-              <MessageSquare className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
-              <p className="text-sm text-[var(--color-text-muted)]">
-                Start a new session to chat with the AI assistant.
-              </p>
-              <div className="mt-4 flex gap-2">
-                {MODE_OPTIONS.map(({ key, label, icon: Icon }) => (
-                  <button
-                    key={key}
-                    onClick={() => handleNewSession(key)}
-                    className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-                  >
-                    <Icon className="h-3.5 w-3.5 text-[var(--color-primary)]" />
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <EmptyState
+              agents={directAgents}
+              modes={modes}
+              defaultAgent={defaultAgent}
+              defaultMode={defaultMode}
+              onStart={handleNewSession}
+            />
           ) : activeSlot.messages.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center text-center">
-              {activeSlot.info.mode === "agent_builder" ? (
-                <Brain className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
-              ) : (
-                <MessageSquare className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
-              )}
+              {(() => {
+                const ModeIcon = MODE_ICONS[activeSlot.info.mode] || MessageSquare;
+                return <ModeIcon className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />;
+              })()}
               <p className="text-sm font-medium text-[var(--color-text)]">
-                {activeSlot.info.mode === "agent_builder"
-                  ? "Agent Builder"
-                  : "Condor Assistant"}
+                {modes.find((m) => m.key === activeSlot.info.mode)?.label || "Assistant"}
               </p>
               <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                {activeSlot.info.mode === "agent_builder"
-                  ? "Create and manage autonomous trading strategies."
-                  : "Ask about your portfolio, prices, trades, or bot status."}
+                {modes.find((m) => m.key === activeSlot.info.mode)?.description ||
+                  "Ask about your portfolio, prices, trades, or bot status."}
+              </p>
+              <p className="mt-2 text-[10px] text-[var(--color-text-muted)] opacity-60">
+                {resolveAgentLabel(activeSlot.info.agent_key, agents)}
               </p>
             </div>
           ) : (
@@ -289,6 +321,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           <ChatInput
             onSend={(text) => chat.sendMessage(activeSlot.info.slot_id, text)}
             disabled={isActiveStreaming}
+            isStreaming={isActiveStreaming}
+            onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
           />
         )}
       </div>
@@ -296,23 +330,241 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   );
 }
 
+/** Resolve a short label for an agent key */
+function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
+  const match = agents.find((a) => a.key === agentKey);
+  if (match) return match.label;
+  // Handle dynamic keys like "openrouter:anthropic/claude-3.5-sonnet"
+  if (agentKey.includes(":")) {
+    const [provider, model] = agentKey.split(":", 2);
+    return model || provider;
+  }
+  return agentKey;
+}
+
+/** Shorten agent label for tab display */
+function shortAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
+  const full = resolveAgentLabel(agentKey, agents);
+  // Shorten common names
+  const shortMap: Record<string, string> = {
+    "Claude Code": "Claude",
+    "Gemini CLI": "Gemini",
+    "GitHub Copilot CLI": "Copilot",
+    "ChatGPT Codex": "Codex",
+  };
+  return shortMap[full] || (full.length > 12 ? full.slice(0, 12) + "..." : full);
+}
+
+// ── New Session Menu ──
+
+function NewSessionMenu({
+  agents,
+  modes,
+  selectedAgent,
+  selectedMode,
+  onSelectAgent,
+  onSelectMode,
+  onStart,
+  onClose,
+}: {
+  agents: ChatAgentOption[];
+  modes: ChatModeOption[];
+  selectedAgent: string;
+  selectedMode: string;
+  onSelectAgent: (key: string) => void;
+  onSelectMode: (key: string) => void;
+  onStart: (agent: string, mode: string) => void;
+  onClose: () => void;
+}) {
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+
+  const agentLabel = agents.find((a) => a.key === selectedAgent)?.label || selectedAgent;
+  const ModeIcon = MODE_ICONS[selectedMode] || Zap;
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50" onClick={onClose} />
+      <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
+        {/* Model selector */}
+        <div className="px-3 pt-2 pb-1">
+          <label className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            Model
+          </label>
+          <div className="relative mt-1">
+            <button
+              onClick={() => setShowAgentPicker((v) => !v)}
+              className="flex w-full items-center justify-between rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-left text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
+            >
+              <span className="truncate">{agentLabel}</span>
+              <ChevronDown className="ml-1 h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+            </button>
+            {showAgentPicker && (
+              <div className="absolute left-0 top-full z-10 mt-1 max-h-48 w-full overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
+                {agents.map((a) => (
+                  <button
+                    key={a.key}
+                    onClick={() => {
+                      onSelectAgent(a.key);
+                      setShowAgentPicker(false);
+                    }}
+                    className={`flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                      a.key === selectedAgent
+                        ? "text-[var(--color-primary)] font-medium"
+                        : "text-[var(--color-text)]"
+                    }`}
+                  >
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Mode buttons */}
+        <div className="px-3 pt-2 pb-1">
+          <label className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            Mode
+          </label>
+        </div>
+        {modes.map(({ key, label }) => {
+          const Icon = MODE_ICONS[key] || Zap;
+          return (
+            <button
+              key={key}
+              onClick={() => onSelectMode(key)}
+              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-hover)] ${
+                key === selectedMode
+                  ? "text-[var(--color-primary)]"
+                  : "text-[var(--color-text)]"
+              }`}
+            >
+              <Icon className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+              {label}
+            </button>
+          );
+        })}
+
+        {/* Start button */}
+        <div className="mt-1 border-t border-[var(--color-border)] px-3 pt-2 pb-2">
+          <button
+            onClick={() => onStart(selectedAgent, selectedMode)}
+            className="flex w-full items-center justify-center gap-2 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-black hover:bg-[var(--color-primary)]/80"
+          >
+            <ModeIcon className="h-3.5 w-3.5" />
+            Start Session
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Empty State ──
+
+function EmptyState({
+  agents,
+  modes,
+  defaultAgent,
+  onStart,
+}: {
+  agents: ChatAgentOption[];
+  modes: ChatModeOption[];
+  defaultAgent: string;
+  defaultMode?: string;
+  onStart: (agent: string, mode: string) => void;
+}) {
+  const [selectedAgent, setSelectedAgent] = useState(defaultAgent);
+  const [showAgentPicker, setShowAgentPicker] = useState(false);
+
+  const agentLabel = agents.find((a) => a.key === selectedAgent)?.label || selectedAgent;
+
+  return (
+    <div className="flex h-full flex-col items-center justify-center text-center">
+      <MessageSquare className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
+      <p className="text-sm text-[var(--color-text-muted)]">
+        Start a new session to chat with the AI assistant.
+      </p>
+
+      {/* Agent picker */}
+      {agents.length > 1 && (
+        <div className="relative mt-4 mb-2">
+          <button
+            onClick={() => setShowAgentPicker((v) => !v)}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
+          >
+            <span>{agentLabel}</span>
+            <ChevronDown className="h-3 w-3 text-[var(--color-text-muted)]" />
+          </button>
+          {showAgentPicker && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setShowAgentPicker(false)} />
+              <div className="absolute left-1/2 top-full z-50 mt-1 max-h-48 w-48 -translate-x-1/2 overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
+                {agents.map((a) => (
+                  <button
+                    key={a.key}
+                    onClick={() => {
+                      setSelectedAgent(a.key);
+                      setShowAgentPicker(false);
+                    }}
+                    className={`flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                      a.key === selectedAgent
+                        ? "text-[var(--color-primary)] font-medium"
+                        : "text-[var(--color-text)]"
+                    }`}
+                  >
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Mode buttons */}
+      <div className="mt-2 flex gap-2">
+        {modes.map(({ key, label }) => {
+          const Icon = MODE_ICONS[key] || Zap;
+          return (
+            <button
+              key={key}
+              onClick={() => onStart(selectedAgent, key)}
+              className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+            >
+              <Icon className="h-3.5 w-3.5 text-[var(--color-primary)]" />
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Session Tab ──
+
 function SessionTab({
   slot,
+  agents,
+  modes,
   isActive,
   isStreaming,
   onClick,
   onClose,
 }: {
   slot: ChatSlot;
+  agents: ChatAgentOption[];
+  modes: ChatModeOption[];
   isActive: boolean;
   isStreaming: boolean;
   onClick: () => void;
   onClose: () => void;
 }) {
   const modeLabel =
-    slot.info.mode === "agent_builder" ? "Builder" : "Condor";
-  const ModeIcon =
-    slot.info.mode === "agent_builder" ? Brain : Zap;
+    modes.find((m) => m.key === slot.info.mode)?.label || slot.info.mode;
+  const agentShort = shortAgentLabel(slot.info.agent_key, agents);
+  const ModeIcon = MODE_ICONS[slot.info.mode] || Zap;
 
   return (
     <button
@@ -327,7 +579,13 @@ function SessionTab({
         <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--color-primary)]" />
       )}
       <ModeIcon className="h-3 w-3 shrink-0" />
-      <span className="max-w-[80px] truncate">{modeLabel}</span>
+      <span className="max-w-[140px] truncate">
+        {modeLabel}
+        <span className="text-[var(--color-text-muted)]"> · {agentShort}</span>
+        {slot.info.server_name && (
+          <span className="text-[var(--color-text-muted)]"> · {slot.info.server_name}</span>
+        )}
+      </span>
       {isStreaming && (
         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--color-primary)]" />
       )}

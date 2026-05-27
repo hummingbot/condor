@@ -257,7 +257,10 @@ def build_tick_prompt(
         "frequency_sec",
         "execution_mode",  # noise / internal
     }
-    config_lines = ["[CURRENT CONFIG]"]
+    config_lines = [
+        "[CURRENT CONFIG]",
+        "These are the ACTIVE values for this session. If the strategy instructions mention different defaults, IGNORE them and use these values instead.",
+    ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:
             continue

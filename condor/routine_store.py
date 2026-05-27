@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import logging
 import time
+import traceback
 from typing import Any
 
 from pathlib import Path
@@ -19,12 +20,67 @@ from routines.base import RoutineResult, discover_routines, discover_routines_fr
 logger = logging.getLogger(__name__)
 
 
+class _HttpBot:
+    """Fallback bot that sends Telegram messages via HTTP when no real bot is available."""
+
+    def __init__(self):
+        import os
+        self._token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN", "")
+
+    async def _post(self, method: str, data: dict, files: dict | None = None):
+        if not self._token:
+            return None
+        import httpx
+        url = f"https://api.telegram.org/bot{self._token}/{method}"
+        async with httpx.AsyncClient(timeout=30) as client:
+            if files:
+                resp = await client.post(url, data=data, files=files)
+            else:
+                resp = await client.post(url, json=data)
+            result = resp.json()
+            if not result.get("ok"):
+                logger.warning(f"Telegram {method} failed: {resp.text}")
+            return result
+
+    async def send_message(self, *a, **kw):
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        text = kw.get("text") or (a[1] if len(a) > 1 else "")
+        data = {"chat_id": chat_id, "text": text}
+        if kw.get("parse_mode"):
+            data["parse_mode"] = kw["parse_mode"]
+        return await self._post("sendMessage", data)
+
+    async def send_photo(self, *a, **kw):
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        photo = kw.get("photo") or (a[1] if len(a) > 1 else None)
+        data = {"chat_id": chat_id}
+        if kw.get("caption"):
+            data["caption"] = kw["caption"]
+        files = {"photo": ("chart.png", photo, "image/png")} if photo else None
+        return await self._post("sendPhoto", data, files=files)
+
+    async def send_document(self, *a, **kw):
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        document = kw.get("document") or (a[1] if len(a) > 1 else None)
+        data = {"chat_id": chat_id}
+        if kw.get("caption"):
+            data["caption"] = kw["caption"]
+        files = {"document": ("file", document, "application/octet-stream")} if document else None
+        return await self._post("sendDocument", data, files=files)
+
+    async def edit_message_text(self, *a, **kw):
+        data = {k: v for k, v in kw.items() if v is not None}
+        return await self._post("editMessageText", data)
+
+_http_bot = _HttpBot()
+
+
 class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
     def __init__(self, server_name: str, bot=None, chat_id: int = 0):
         self._chat_id = chat_id
-        self.bot = bot
+        self.bot = bot if bot is not None else _http_bot
         self._user_data: dict[str, Any] = {
             "preferences": {"general": {"active_server": server_name}},
         }
@@ -51,7 +107,7 @@ class RoutineStore:
 
     def _discover_all(self) -> dict[str, "RoutineInfo"]:
         """Discover global routines + agent routines, merged into one dict."""
-        all_routines = dict(discover_routines())
+        all_routines = dict(discover_routines(force_reload=True))
 
         # Scan trading_agents/*/routines/
         agents_dir = Path(__file__).resolve().parent.parent / "trading_agents"
@@ -123,6 +179,8 @@ class RoutineStore:
             entry["table_data"] = result.table_data
             entry["table_columns"] = result.table_columns
             entry["sections"] = result.sections
+        # Ensure error is always present in response
+        entry.setdefault("error", None)
         return entry
 
     def add_instance(self, instance_id: str, metadata: dict) -> None:
@@ -200,15 +258,83 @@ class RoutineStore:
             raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except Exception as e:
-            logger.error(f"Web routine {routine.name}[{instance_id}] failed: {e}")
-            result = RoutineResult(text=f"Error: {e}")
+            tb = traceback.format_exc()
+            logger.error(f"Web routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}")
+            error_msg = f"{type(e).__name__}: {e}"
+            result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
+            failed = True
+        else:
+            error_msg = None
+            failed = False
 
         duration = time.time() - start
         self._results[instance_id] = result
 
         if instance_id in self._instances:
             self._instances[instance_id].update({
-                "status": "completed",
+                "status": "failed" if failed else "completed",
+                "last_run_at": time.time(),
+                "last_result": result.text[:500],
+                "last_duration": duration,
+                "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                "error": error_msg,
+            })
+
+    async def start_continuous(
+        self,
+        routine_name: str,
+        config: dict,
+        server_name: str,
+        user_id: int = 0,
+    ) -> str:
+        """Start a continuous routine as a background task. Returns instance_id."""
+        routine = self._resolve_routine(routine_name)
+        if not routine:
+            raise ValueError(f"Routine '{routine_name}' not found")
+        if not routine.is_continuous:
+            raise ValueError(f"Routine '{routine_name}' is not continuous — use execute() instead")
+
+        instance_id = self._gen_id()
+        self._instances[instance_id] = {
+            "routine_name": routine_name,
+            "config": config,
+            "status": "running",
+            "source": "mcp",
+            "server_name": server_name,
+            "user_id": user_id,
+            "created_at": time.time(),
+            "last_run_at": None,
+            "last_result": None,
+            "last_duration": None,
+            "run_count": 0,
+        }
+
+        task = asyncio.create_task(
+            self._run_continuous(instance_id, routine, config, server_name, user_id)
+        )
+        self._tasks[instance_id] = task
+        return instance_id
+
+    async def _run_continuous(self, instance_id: str, routine, config: dict, server_name: str, user_id: int = 0) -> None:
+        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
+        start = time.time()
+        try:
+            cfg = routine.config_class(**config)
+            raw = await routine.run_fn(cfg, ctx)
+            result = normalize_result(raw)
+        except asyncio.CancelledError:
+            result = RoutineResult(text="Stopped by user")
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(f"Continuous routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}")
+            result = RoutineResult(text=f"Error: {type(e).__name__}: {e}\n\n{tb}")
+
+        duration = time.time() - start
+        self._results[instance_id] = result
+
+        if instance_id in self._instances:
+            self._instances[instance_id].update({
+                "status": "stopped",
                 "last_run_at": time.time(),
                 "last_result": result.text[:500],
                 "last_duration": duration,
@@ -262,8 +388,14 @@ class RoutineStore:
                     raw = await routine.run_fn(cfg, ctx)
                     result = normalize_result(raw)
                 except Exception as e:
-                    logger.error(f"Scheduled routine {routine.name}[{instance_id}] error: {e}")
-                    result = RoutineResult(text=f"Error: {e}")
+                    tb = traceback.format_exc()
+                    logger.error(f"Scheduled routine {routine.name}[{instance_id}] error: {type(e).__name__}: {e}\n{tb}")
+                    error_msg = f"{type(e).__name__}: {e}"
+                    result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
+                    run_failed = True
+                else:
+                    error_msg = None
+                    run_failed = False
 
                 duration = time.time() - start
                 self._results[instance_id] = result
@@ -275,6 +407,7 @@ class RoutineStore:
                         "last_result": result.text[:500],
                         "last_duration": duration,
                         "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                        "error": error_msg,
                     })
 
                 await asyncio.sleep(interval_sec)

@@ -43,6 +43,7 @@ from ._shared import (
     SIDE_LONG,
     SIDE_SHORT,
     calculate_auto_prices,
+    clean_config_for_save,
     clear_bots_state,
     fetch_candles,
     fetch_current_price,
@@ -1098,7 +1099,7 @@ async def handle_cfg_edit_save(
 
     try:
         client, _ = await get_bots_client(chat_id, context.user_data)
-        await client.controllers.create_or_update_controller_config(config_id, config)
+        await client.controllers.create_or_update_controller_config(config_id, clean_config_for_save(config))
         await query.answer()
 
         # Remove from modified since it's now saved
@@ -1145,7 +1146,7 @@ async def handle_cfg_edit_save_all(
     for config_id, config in modified.items():
         try:
             await client.controllers.create_or_update_controller_config(
-                config_id, config
+                config_id, clean_config_for_save(config)
             )
             saved.append(config_id)
         except Exception as e:
@@ -2923,7 +2924,7 @@ async def handle_gs_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     try:
         client, _ = await get_bots_client(chat_id, context.user_data)
         result = await client.controllers.create_or_update_controller_config(
-            config_id, config
+            config_id, clean_config_for_save(config)
         )
 
         # Clean up wizard state
@@ -4801,7 +4802,7 @@ async def handle_save_config(
         # Save to backend using config id as the config_name
         config_name = config.get("id", "")
         result = await client.controllers.create_or_update_controller_config(
-            config_name, config
+            config_name, clean_config_for_save(config)
         )
 
         # Clear state
@@ -6990,7 +6991,7 @@ async def handle_pmm_save(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         client, _ = await get_bots_client(chat_id, context.user_data)
         config_id = config.get("id", "")
         result = await client.controllers.create_or_update_controller_config(
-            config_id, config
+            config_id, clean_config_for_save(config)
         )
 
         if result.get("status") == "success" or "success" in str(result).lower():
@@ -8366,7 +8367,7 @@ async def handle_pv1_save(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         client, _ = await get_bots_client(chat_id, context.user_data)
         config_id = config.get("id", "")
         result = await client.controllers.create_or_update_controller_config(
-            config_id, config
+            config_id, clean_config_for_save(config)
         )
 
         if result.get("status") == "success" or "success" in str(result).lower():
@@ -8940,7 +8941,7 @@ async def handle_config_file_upload(
         # Save to backend
         client, _ = await get_bots_client(chat_id, context.user_data)
         result = await client.controllers.create_or_update_controller_config(
-            config_id, config
+            config_id, clean_config_for_save(config)
         )
 
         # Clear state

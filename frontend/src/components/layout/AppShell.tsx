@@ -4,6 +4,7 @@ import {
   Bot,
   Brain,
   MessageSquare,
+  Eye,
   Moon,
   Settings,
   Sun,
@@ -20,6 +21,7 @@ import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
+import { CurrencySelector } from "./CurrencySelector";
 import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
@@ -79,6 +81,7 @@ export function AppShell() {
         {/* Right: server selector + controls */}
         <div className="ml-auto flex items-center gap-3">
           <ServerSelector />
+          <CurrencySelector />
 
           <div className="flex items-center gap-1">
             <NavLink
@@ -98,9 +101,15 @@ export function AppShell() {
             <button
               onClick={toggleTheme}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              title={
+                theme === "dark" ? "Switch to light mode" :
+                theme === "light" ? "Switch to color-blind mode" :
+                "Switch to dark mode"
+              }
             >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              {theme === "dark" ? <Sun className="h-4 w-4" /> :
+               theme === "light" ? <Eye className="h-4 w-4" /> :
+               <Moon className="h-4 w-4" />}
             </button>
 
           </div>

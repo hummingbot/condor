@@ -51,6 +51,31 @@
   color-scheme: light;
 }
 
+/* ── Color-blind Mode: Blue/Orange (deuteranopia/protanopia safe) ── */
+[data-theme="colorblind"] {
+  --color-bg: #0a0e1a;
+  --color-surface: #111729;
+  --color-surface-hover: #1a2138;
+  --color-border: #1e2a45;
+  --color-text: #e8e6e3;
+  --color-text-muted: #7b8ba4;
+  --color-accent: #56b4e9;
+  --color-primary: #56b4e9;
+  --color-primary-hover: #7ec8f0;
+  --color-green: #0072b2;
+  --color-red: #e69f00;
+  --color-yellow: #f0e442;
+
+  /* Chart-specific */
+  --chart-bg: #111729;
+  --chart-grid: #1e2a45;
+  --chart-text: #7b8ba4;
+  --chart-up: #0072b2;
+  --chart-down: #e69f00;
+
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
   background-color: var(--color-bg);

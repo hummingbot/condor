@@ -16,7 +16,7 @@ async def fetch_current_price(
         )
         return prices.get("prices", {}).get(trading_pair)
     except Exception as e:
-        logger.error("Error fetching price for %s: %s", trading_pair, e, exc_info=True)
+        logger.warning("Error fetching price for %s: %s", trading_pair, e)
         return None
 
 
