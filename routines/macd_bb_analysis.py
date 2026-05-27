@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 
 from config_manager import get_client
 from routines.base import RoutineResult
-from routines.hl_candles import fetch_hl_candles
+from routines.lib.hl_candles import fetch_hl_candles
 
 logger = logging.getLogger(__name__)
 
