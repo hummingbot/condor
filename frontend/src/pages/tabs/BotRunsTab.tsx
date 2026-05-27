@@ -81,7 +81,7 @@ export function BotRunsTab() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (botName: string) => api.deleteBotRun(server!, botName),
+    mutationFn: (botRunId: number) => api.deleteBotRun(server!, botRunId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bot-runs", server] });
     },
@@ -131,13 +131,14 @@ export function BotRunsTab() {
     }
   };
 
-  const handleDelete = async (botName: string) => {
-    setDeleting(botName);
+  const handleDelete = async (run: BotRunInfo) => {
+    if (!run.bot_run_id) return;
+    setDeleting(run.bot_name);
     try {
-      await deleteMutation.mutateAsync(botName);
+      await deleteMutation.mutateAsync(run.bot_run_id);
       setSelected((prev) => {
         const next = new Set(prev);
-        next.delete(botName);
+        next.delete(run.bot_name);
         return next;
       });
     } finally {
@@ -146,16 +147,16 @@ export function BotRunsTab() {
   };
 
   const handleBulkDelete = async () => {
-    const toDelete = [...selected].filter((name) =>
-      runs.find((r) => r.bot_name === name && r.deployment_status === "ARCHIVED"),
+    const toDelete = runs.filter(
+      (r) => selected.has(r.bot_name) && r.deployment_status === "ARCHIVED" && r.bot_run_id,
     );
     if (toDelete.length === 0) return;
     if (!confirm(`Delete ${toDelete.length} archived bot run(s)?`)) return;
 
-    for (const name of toDelete) {
-      setDeleting(name);
+    for (const run of toDelete) {
+      setDeleting(run.bot_name);
       try {
-        await deleteMutation.mutateAsync(name);
+        await deleteMutation.mutateAsync(run.bot_run_id!);
       } catch {
         // continue with remaining
       }
@@ -264,7 +265,7 @@ export function BotRunsTab() {
                   isSelected={selected.has(run.bot_name)}
                   isDeleting={deleting === run.bot_name}
                   onToggleSelect={() => toggleSelect(run.bot_name)}
-                  onDelete={() => handleDelete(run.bot_name)}
+                  onDelete={() => handleDelete(run)}
                 />
               ))}
             </tbody>

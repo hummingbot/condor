@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -6,12 +6,14 @@ import {
   ArrowUpDown,
   BarChart3,
   CheckCircle,
+  Copy,
   Grid3X3,
   Layers,
   Loader2,
   Rocket,
   Settings2,
   TrendingUp,
+  X,
 } from "lucide-react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
@@ -172,6 +174,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
 export function CreateExecutor() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Executor type from URL param or default to grid
@@ -218,7 +221,7 @@ export function CreateExecutor() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const [successId, setSuccessId] = useState<string | null>(null);
+  const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
   const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
@@ -456,10 +459,13 @@ export function CreateExecutor() {
         case "order": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;
       }
-      setSuccessId(data.executor_id);
-      // Auto-dismiss success toast after 2.5s — stay on this page
-      // so the new executor appears in the bottom pane via WS
-      setTimeout(() => setSuccessId(null), 2500);
+      // Show success modal
+      setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
+      // Invalidate executor queries so the new one appears immediately
+      queryClient.invalidateQueries({ queryKey: ["executors", server, "main", pair] });
+      queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
+      // Auto-select the new executor in the bottom pane
+      setSelectedExecutorId(data.executor_id);
     },
   });
 
@@ -705,13 +711,68 @@ export function CreateExecutor() {
         </div>
       </div>
 
-      {/* Success toast */}
-      {successId && (
-        <div className="absolute bottom-16 left-1/2 z-50 -translate-x-1/2">
-          <div className="flex items-center gap-2 rounded-lg border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-4 py-2.5 shadow-2xl shadow-black/40">
-            <CheckCircle className="h-4 w-4 text-[var(--color-green)]" />
-            <span className="text-xs font-medium text-[var(--color-text)]">{TYPE_LABELS[executorType]} Created</span>
-            <span className="font-mono text-[10px] text-[var(--color-text-muted)]">{successId.slice(0, 8)}</span>
+      {/* Success modal */}
+      {successInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="relative w-[360px] rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] p-6 shadow-2xl shadow-black/40 animate-in fade-in zoom-in-95 duration-200">
+            {/* Close button */}
+            <button
+              onClick={() => setSuccessInfo(null)}
+              className="absolute right-3 top-3 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            {/* Icon */}
+            <div className="mb-4 flex justify-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-green)]/15">
+                <CheckCircle className="h-6 w-6 text-[var(--color-green)]" />
+              </div>
+            </div>
+
+            {/* Title */}
+            <h3 className="mb-1 text-center text-sm font-semibold text-[var(--color-text)]">
+              {TYPE_LABELS[successInfo.type]} Created
+            </h3>
+            <p className="mb-4 text-center text-[11px] text-[var(--color-text-muted)]">
+              Successfully deployed on {successInfo.connector}
+            </p>
+
+            {/* Details */}
+            <div className="mb-4 space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Executor ID</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[var(--color-text)]">{successInfo.id.slice(0, 12)}…</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(successInfo.id)}
+                    className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    title="Copy full ID"
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Pair</span>
+                <span className="font-mono text-[var(--color-text)]">{successInfo.pair}</span>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Status</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
+                  ACTIVE
+                </span>
+              </div>
+            </div>
+
+            {/* Action */}
+            <button
+              onClick={() => setSuccessInfo(null)}
+              className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110"
+            >
+              Continue Trading
+            </button>
           </div>
         </div>
       )}

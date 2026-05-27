@@ -50,6 +50,14 @@ function tsToSeconds(ts: number): number {
   return ts > 1e12 ? Math.floor(ts / 1000) : ts;
 }
 
+/** Vertical line definition for grid box edges drawn directly on the canvas */
+interface GridVerticalLine {
+  time: number;
+  topPrice: number;
+  bottomPrice: number;
+  color: string;
+}
+
 /** Parse snapshot timestamp string to unix seconds */
 function parseSnapshotTs(ts: string): number {
   // Handle formats like "2024-01-15 14:30:22" or ISO
@@ -77,6 +85,7 @@ export function ExecutorChart({
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
   const segmentSeriesRef = useRef<import("lightweight-charts").ISeriesApi<"Line">[]>([]);
+  const gridVerticalLinesRef = useRef<GridVerticalLine[]>([]);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const initializedRef = useRef(false);
   const [chartReady, setChartReady] = useState(false);
@@ -315,6 +324,72 @@ export function ExecutorChart({
         tooltip.style.top = `${top}px`;
       });
 
+      // Draw vertical lines for grid boxes on a canvas overlay
+      const drawVerticalLines = () => {
+        const lines = gridVerticalLinesRef.current;
+        const chartEl = containerRef.current;
+        if (!chartEl) return;
+
+        // If no lines, clear the overlay canvas if it exists
+        if (!lines.length) {
+          const existing = chartEl.querySelector<HTMLCanvasElement>(".grid-vlines-canvas");
+          if (existing) {
+            const ctx2 = existing.getContext("2d");
+            if (ctx2) ctx2.clearRect(0, 0, existing.width, existing.height);
+          }
+          return;
+        }
+        // lightweight-charts renders into a canvas inside the container
+        const sourceCanvas = chartEl.querySelector("canvas");
+        if (!sourceCanvas) return;
+
+        // Get or create overlay canvas
+        let overlay = chartEl.querySelector<HTMLCanvasElement>(".grid-vlines-canvas");
+        if (!overlay) {
+          overlay = document.createElement("canvas");
+          overlay.className = "grid-vlines-canvas";
+          overlay.style.position = "absolute";
+          overlay.style.top = "0";
+          overlay.style.left = "0";
+          overlay.style.pointerEvents = "none";
+          overlay.style.zIndex = "3";
+          chartEl.style.position = "relative";
+          chartEl.appendChild(overlay);
+        }
+
+        const dpr = window.devicePixelRatio || 1;
+        const w = sourceCanvas.clientWidth;
+        const h = sourceCanvas.clientHeight;
+        overlay.width = w * dpr;
+        overlay.height = h * dpr;
+        overlay.style.width = `${w}px`;
+        overlay.style.height = `${h}px`;
+
+        const ctx = overlay.getContext("2d");
+        if (!ctx) return;
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, w, h);
+
+        const ts = chart.timeScale();
+        for (const line of lines) {
+          const x = ts.timeToCoordinate(line.time as import("lightweight-charts").UTCTimestamp);
+          if (x === null) continue;
+          const yTop = series.priceToCoordinate(line.topPrice);
+          const yBottom = series.priceToCoordinate(line.bottomPrice);
+          if (yTop === null || yBottom === null) continue;
+
+          ctx.beginPath();
+          ctx.strokeStyle = line.color;
+          ctx.lineWidth = 1;
+          ctx.moveTo(x, Math.min(yTop, yBottom));
+          ctx.lineTo(x, Math.max(yTop, yBottom));
+          ctx.stroke();
+        }
+      };
+
+      chart.timeScale().subscribeVisibleLogicalRangeChange(drawVerticalLines);
+      chart.subscribeCrosshairMove(drawVerticalLines);
+
       setChartReady(true);
     });
 
@@ -363,10 +438,11 @@ export function ExecutorChart({
     const mod = chartModuleRef.current;
     if (!series || !chart || !mod || !chartReady) return;
 
-    // Clean up old segment series
+    // Clean up old segment series and vertical lines
     for (const s of segmentSeriesRef.current) {
       try { chart.removeSeries(s); } catch { /* ok */ }
     }
+    gridVerticalLinesRef.current = [];
     segmentSeriesRef.current = [];
 
     const isMulti = overlays.length > 1;
@@ -421,27 +497,11 @@ export function ExecutorChart({
           ]);
           segmentSeriesRef.current.push(bottom);
 
-          // Left edge (vertical at start)
-          const left = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 1,
-            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
-          });
-          left.setData([
-            { time: t1 as TS, value: box.startPrice },
-            { time: (t1 + 1) as TS, value: box.endPrice },
-          ]);
-          segmentSeriesRef.current.push(left);
-
-          // Right edge (vertical at end)
-          const right = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 1,
-            priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
-          });
-          right.setData([
-            { time: (t2 - 1) as TS, value: box.endPrice },
-            { time: t2 as TS, value: box.startPrice },
-          ]);
-          segmentSeriesRef.current.push(right);
+          // Vertical edges — drawn on canvas overlay (see drawVerticalLines)
+          gridVerticalLinesRef.current.push(
+            { time: t1, topPrice: box.endPrice, bottomPrice: box.startPrice, color: boxColor },
+            { time: t2, topPrice: box.endPrice, bottomPrice: box.startPrice, color: boxColor },
+          );
 
           // Limit price line (if present) — dotted red
           if (box.limitPrice) {
@@ -487,6 +547,14 @@ export function ExecutorChart({
 
       segmentSeriesRef.current.push(lineSeries);
     });
+
+    // Trigger a redraw of grid vertical lines on the overlay canvas
+    if (gridVerticalLinesRef.current.length > 0) {
+      // Small delay to let chart render first
+      setTimeout(() => {
+        chart.timeScale().scrollToPosition(chart.timeScale().scrollPosition(), false);
+      }, 50);
+    }
   }, [overlays, chartReady]);
 
   // Position snapshot bubbles along the time axis

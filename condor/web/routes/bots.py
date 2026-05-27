@@ -920,6 +920,8 @@ async def update_bot_controller_config_endpoint(
 
         merged = {**existing, **body}
         merged["id"] = config_id
+        # Strip internal fields like _config_name that cause Pydantic validation errors
+        merged = {k: v for k, v in merged.items() if not k.startswith("_")}
 
         result = await client.controllers.update_bot_controller_config(
             bot_name, config_id, merged

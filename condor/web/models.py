@@ -138,6 +138,7 @@ class BotsPageResponse(BaseModel):
 
 class BotRunInfo(BaseModel):
     bot_name: str
+    bot_run_id: Optional[int] = None
     account_name: str = ""
     strategy_type: str = ""
     strategy_name: str = ""

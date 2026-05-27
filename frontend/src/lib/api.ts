@@ -122,6 +122,7 @@ export interface BotsPageResponse {
 
 export interface BotRunInfo {
   bot_name: string;
+  bot_run_id: number | null;
   account_name: string;
   strategy_type: string;
   strategy_name: string;
@@ -774,8 +775,8 @@ export const api = {
     );
   },
 
-  deleteBotRun: (server: string, botName: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/bot-runs/${botName}`, {
+  deleteBotRun: (server: string, botRunId: number) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/bot-runs/${botRunId}`, {
       method: "DELETE",
     }),
 

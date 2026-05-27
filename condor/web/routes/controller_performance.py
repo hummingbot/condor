@@ -65,12 +65,13 @@ def _parse_bot_run(raw: dict, perf_by_bot: dict[str, dict] | None = None) -> Bot
 
     return BotRunInfo(
         bot_name=bot_name,
+        bot_run_id=raw.get("id"),
         account_name=raw.get("account_name", ""),
         strategy_type=raw.get("strategy_type", ""),
         strategy_name=raw.get("strategy_name", ""),
         run_status=raw.get("run_status", raw.get("status", "")),
         deployment_status=raw.get("deployment_status", ""),
-        created_at=str(raw["created_at"]) if raw.get("created_at") else None,
+        created_at=str(raw["deployed_at"]) if raw.get("deployed_at") else None,
         stopped_at=str(raw["stopped_at"]) if raw.get("stopped_at") else None,
         realized_pnl_quote=realized,
         unrealized_pnl_quote=unrealized,
@@ -159,14 +160,14 @@ async def get_bot_runs(
 
 
 @router.delete(
-    "/servers/{name}/bot-runs/{bot_name}",
+    "/servers/{name}/bot-runs/{bot_run_id}",
 )
 async def delete_bot_run(
     name: str,
-    bot_name: str,
+    bot_run_id: int,
     user: WebUser = Depends(get_current_user),
 ):
-    """Delete an archived bot run."""
+    """Delete an archived bot run by its numeric ID."""
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
@@ -174,14 +175,12 @@ async def delete_bot_run(
     client = await cm.get_client(name)
 
     try:
-        result = await client.bot_orchestration._delete(
-            f"/bot-orchestration/bot-runs/{bot_name}"
-        )
+        result = await client.bot_orchestration.delete_bot_run(bot_run_id)
     except Exception as e:
-        logger.warning("Failed to delete bot run '%s' from '%s': %s", bot_name, name, e)
+        logger.warning("Failed to delete bot run %d from '%s': %s", bot_run_id, name, e)
         raise HTTPException(status_code=502, detail=str(e))
 
-    return {"deleted": True, "bot_name": bot_name, "result": result}
+    return {"deleted": True, "bot_run_id": bot_run_id, "result": result}
 
 
 def _extract_runs_list(result) -> list[dict]:
