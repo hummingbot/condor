@@ -6,46 +6,39 @@ import {
   Minimize2,
   Play,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type ReportSummary, type RoutineInfo, api } from "@/lib/api";
+import { buildConfigValues, formatAgo, formatRoutineName, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { useServer } from "@/hooks/useServer";
 import { RoutineConfigForm } from "@/components/routines/RoutineConfigForm";
 import { RoutineResultView } from "@/components/routines/RoutineResultView";
 
-// ── Helpers ──
-
-function formatName(name: string): string {
-  const display = name.includes("/") ? name.split("/").pop()! : name;
-  return display.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
-
-// ── Routine Card ──
-
 function RoutineCard({ routine }: { routine: RoutineInfo }) {
   const { server } = useServer();
   const qc = useQueryClient();
-  const [configValues, setConfigValues] = useState<Record<string, unknown>>({});
+  const [configValues, setConfigValues] = useState<Record<string, unknown>>(() =>
+    buildConfigValues(routine),
+  );
   const [expanded, setExpanded] = useState(false);
   const [activeInstanceId, setActiveInstanceId] = useState<string | null>(null);
   const isPolling = useRef(false);
 
-  // Reset config when routine changes
+  // Rebuild config when routine changes — merge saved values with current fields
   useEffect(() => {
-    const defaults: Record<string, unknown> = {};
-    for (const [key, field] of Object.entries(routine.fields)) {
-      defaults[key] = field.default;
-    }
-    setConfigValues(defaults);
+    setConfigValues(buildConfigValues(routine));
   }, [routine.name]);
+
+  const handleConfigChange = useCallback(
+    (key: string, value: unknown) => {
+      setConfigValues((prev) => {
+        const next = { ...prev, [key]: value };
+        saveConfig(routine.name, next);
+        return next;
+      });
+    },
+    [routine.name],
+  );
 
   // Poll active instance
   const { data: activeInstance } = useQuery({
@@ -64,8 +57,8 @@ function RoutineCard({ routine }: { routine: RoutineInfo }) {
     const status = activeInstance?.status;
     if (prevStatus.current === "running" && status && status !== "running") {
       isPolling.current = false;
-      // Invalidate agent reports so new report shows up
       qc.invalidateQueries({ queryKey: ["agent-reports"] });
+      invalidateRoutineQueries(qc, routine.name);
     }
     prevStatus.current = status;
   }, [activeInstance?.status, qc]);
@@ -91,7 +84,7 @@ function RoutineCard({ routine }: { routine: RoutineInfo }) {
           className="flex-1 text-left"
         >
           <h3 className="text-sm font-semibold text-[var(--color-text)]">
-            {formatName(routine.name)}
+            {formatRoutineName(routine.name)}
           </h3>
           <p className="mt-0.5 text-xs text-[var(--color-text-muted)]">
             {routine.description}
@@ -118,9 +111,7 @@ function RoutineCard({ routine }: { routine: RoutineInfo }) {
           <RoutineConfigForm
             fields={routine.fields}
             values={configValues}
-            onChange={(key, value) =>
-              setConfigValues((prev) => ({ ...prev, [key]: value }))
-            }
+            onChange={handleConfigChange}
           />
         </div>
       )}

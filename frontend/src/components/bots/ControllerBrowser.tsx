@@ -1,6 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -14,10 +13,12 @@ import {
   Save,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import yamlLib from "js-yaml";
 
-import { HIDDEN_KEYS, inferInputType, parseValue } from "@/components/bots/DeployBotDialog";
-import { api, type BotLogEntry, type ControllerInfo } from "@/lib/api";
+import { CodeEditor } from "@/components/editor/CodeEditor";
+import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
+import { api, type ControllerInfo } from "@/lib/api";
 import { setViewContext } from "@/lib/viewContext";
 
 // ── Shared formatters ──
@@ -48,23 +49,18 @@ function parseSide(raw: string): string {
 }
 
 function StatusDot({ status }: { status: string }) {
+  const isStopping = status === "stopping";
   const color =
     status === "running"
       ? "text-[var(--color-green)]"
       : status === "stopped" || status === "error"
         ? "text-[var(--color-red)]"
         : "text-[var(--color-yellow)]";
-  return <Circle className={`h-2 w-2 fill-current ${color}`} />;
-}
-
-function formatLogTime(ts?: number): string {
-  if (!ts) return "";
-  try {
-    const d = new Date(ts * 1000);
-    return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch {
-    return "";
-  }
+  return isStopping ? (
+    <span className="h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
+  ) : (
+    <Circle className={`h-2 w-2 fill-current ${color}`} />
+  );
 }
 
 // ── Types ──
@@ -73,56 +69,70 @@ interface ControllerBrowserProps {
   controllers: ControllerInfo[];
   server: string;
   initialControllerKey: string;
-  allLogs: Record<string, BotLogEntry[]>;
   onClose: () => void;
 }
 
-// ── Inline Config Editor ──
+// Keys to strip from the YAML display (internal / read-only fields)
+const YAML_HIDDEN_KEYS = new Set(["id", "controller_name", "controller_type"]);
 
-function InlineConfigEditor({
+function configToYaml(config: Record<string, unknown>): string {
+  const filtered: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(config)) {
+    if (!YAML_HIDDEN_KEYS.has(k) && !k.startsWith("_")) filtered[k] = v;
+  }
+  return yamlLib.dump(filtered, { lineWidth: -1, noRefs: true, sortKeys: true });
+}
+
+// ── YAML Config Editor ──
+
+function YamlConfigEditor({
   config,
   server,
   configId,
+  botName,
   onSaved,
 }: {
   config: Record<string, unknown>;
   server: string;
   configId: string;
+  botName: string;
   onSaved: () => void;
 }) {
-  const [edits, setEdits] = useState<Record<string, string>>({});
-  const entries = useMemo(
-    () => Object.entries(config).filter(([k]) => !HIDDEN_KEYS.has(k)),
-    [config],
-  );
+  const originalYaml = configToYaml(config);
+  const [yamlContent, setYamlContent] = useState(originalYaml);
+  const [parseError, setParseError] = useState<string | null>(null);
 
-  const isDirty = Object.keys(edits).length > 0;
+  // Sync when config changes externally (e.g. after save or controller switch)
+  useEffect(() => {
+    const newYaml = configToYaml(config);
+    setYamlContent(newYaml);
+    setParseError(null);
+  }, [config]);
+
+  const isDirty = yamlContent !== originalYaml;
+
+  const handleChange = useCallback((value: string) => {
+    setYamlContent(value);
+    try {
+      yamlLib.load(value);
+      setParseError(null);
+    } catch (e) {
+      setParseError((e as Error).message?.split("\n")[0] || "Invalid YAML");
+    }
+  }, []);
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      const parsed: Record<string, unknown> = {};
-      for (const [key, raw] of Object.entries(edits)) {
-        parsed[key] = parseValue(raw, inferInputType(config[key]));
+      const parsed = yamlLib.load(yamlContent) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object") {
+        throw new Error("YAML must be a mapping");
       }
-      return api.updateConfig(server, configId, parsed);
+      return api.updateBotControllerConfig(server, botName, configId, parsed);
     },
     onSuccess: () => {
-      setEdits({});
       onSaved();
     },
   });
-
-  const handleEdit = useCallback((key: string, value: string) => {
-    setEdits((prev) => ({ ...prev, [key]: value }));
-  }, []);
-
-  const handleReset = useCallback((key: string) => {
-    setEdits((prev) => {
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
-  }, []);
 
   return (
     <div className="flex flex-col h-full">
@@ -134,7 +144,7 @@ function InlineConfigEditor({
         <div className="flex items-center gap-1.5">
           {isDirty && (
             <button
-              onClick={() => setEdits({})}
+              onClick={() => { setYamlContent(originalYaml); setParseError(null); }}
               className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
             >
               <RotateCcw className="h-3 w-3" />
@@ -143,7 +153,7 @@ function InlineConfigEditor({
           )}
           <button
             onClick={() => saveMutation.mutate()}
-            disabled={!isDirty || saveMutation.isPending}
+            disabled={!isDirty || !!parseError || saveMutation.isPending}
             className="flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-semibold transition-colors disabled:opacity-30 bg-[var(--color-primary)] text-white hover:bg-[var(--color-primary)]/80 disabled:hover:bg-[var(--color-primary)]"
           >
             {saveMutation.isPending ? (
@@ -156,6 +166,11 @@ function InlineConfigEditor({
         </div>
       </div>
 
+      {parseError && (
+        <div className="px-4 py-1.5 text-[10px] text-[var(--color-red)] bg-[var(--color-red)]/5 truncate" title={parseError}>
+          {parseError}
+        </div>
+      )}
       {saveMutation.isError && (
         <div className="px-4 py-1.5 text-[10px] text-[var(--color-red)] bg-[var(--color-red)]/5">
           {(saveMutation.error as Error).message}
@@ -167,82 +182,15 @@ function InlineConfigEditor({
         </div>
       )}
 
-      {/* Scrollable fields */}
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-4 py-3 space-y-2">
-        {entries.map(([key, originalValue]) => {
-          const inputType = inferInputType(originalValue);
-          const isEdited = key in edits;
-          const displayValue = isEdited
-            ? edits[key]
-            : inputType === "json"
-              ? JSON.stringify(originalValue, null, 2)
-              : String(originalValue ?? "");
-
-          return (
-            <div key={key} className="grid grid-cols-[minmax(100px,1fr)_1.5fr] gap-2 items-start">
-              <label
-                className={`text-[11px] pt-1.5 truncate ${isEdited ? "text-[var(--color-warning)] font-medium" : "text-[var(--color-text-muted)]"}`}
-                title={key}
-              >
-                {key}
-              </label>
-              <div className="flex items-start gap-1">
-                {inputType === "boolean" ? (
-                  <button
-                    onClick={() => {
-                      const current = isEdited ? edits[key] === "true" : Boolean(originalValue);
-                      handleEdit(key, String(!current));
-                    }}
-                    className={`flex items-center gap-2 rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
-                      (isEdited ? edits[key] === "true" : Boolean(originalValue))
-                        ? "border-[var(--color-primary)]/40 bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                        : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
-                    }`}
-                  >
-                    <div className={`h-3 w-3 rounded-sm border flex items-center justify-center ${
-                      (isEdited ? edits[key] === "true" : Boolean(originalValue))
-                        ? "border-[var(--color-primary)] bg-[var(--color-primary)]"
-                        : "border-[var(--color-border)]"
-                    }`}>
-                      {(isEdited ? edits[key] === "true" : Boolean(originalValue)) && (
-                        <Check className="h-2 w-2 text-white" />
-                      )}
-                    </div>
-                    {isEdited ? edits[key] : String(originalValue)}
-                  </button>
-                ) : inputType === "json" ? (
-                  <textarea
-                    value={displayValue}
-                    onChange={(e) => handleEdit(key, e.target.value)}
-                    rows={Math.min(4, displayValue.split("\n").length + 1)}
-                    className={`w-full rounded-md border bg-[var(--color-bg)] px-2 py-1 font-mono text-[11px] text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)] resize-y ${
-                      isEdited ? "border-[var(--color-warning)]/60" : "border-[var(--color-border)]"
-                    }`}
-                  />
-                ) : (
-                  <input
-                    type={inputType === "number" ? "number" : "text"}
-                    step={inputType === "number" ? "any" : undefined}
-                    value={displayValue}
-                    onChange={(e) => handleEdit(key, e.target.value)}
-                    className={`w-full rounded-md border bg-[var(--color-bg)] px-2 py-1 text-[11px] text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)] ${
-                      inputType === "number" ? "font-mono tabular-nums" : ""
-                    } ${isEdited ? "border-[var(--color-warning)]/60" : "border-[var(--color-border)]"}`}
-                  />
-                )}
-                {isEdited && (
-                  <button
-                    onClick={() => handleReset(key)}
-                    className="mt-0.5 p-1 rounded text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
-                    title="Reset to original"
-                  >
-                    <RotateCcw className="h-2.5 w-2.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-          );
-        })}
+      {/* YAML editor */}
+      <div className="flex-1 min-h-0">
+        <CodeEditor
+          value={yamlContent}
+          onChange={handleChange}
+          language="yaml"
+          height="100%"
+          className="border-0 rounded-none"
+        />
       </div>
     </div>
   );
@@ -254,12 +202,10 @@ export function ControllerBrowser({
   controllers,
   server,
   initialControllerKey,
-  allLogs,
   onClose,
 }: ControllerBrowserProps) {
   const queryClient = useQueryClient();
   const [isCompact, setIsCompact] = useState(false);
-  const [rightTab, setRightTab] = useState<"config" | "logs">("config");
   const sidebarRef = useRef<HTMLDivElement>(null);
 
   const ctrlKey = useCallback(
@@ -271,12 +217,13 @@ export function ControllerBrowser({
   const activeCtrl = controllers.find((c) => ctrlKey(c) === activeKey) ?? controllers[0];
 
   const isKilled = activeCtrl?.config?.manual_kill_switch === true;
+  const isStopping = activeCtrl?.status === "stopping";
 
   const toggleMutation = useMutation({
     mutationFn: () =>
       isKilled
-        ? api.startControllers(server, activeCtrl.bot_name, [activeCtrl.controller_name])
-        : api.stopControllers(server, activeCtrl.bot_name, [activeCtrl.controller_name]),
+        ? api.startControllers(server, activeCtrl.bot_name, [activeCtrl.controller_id])
+        : api.stopControllers(server, activeCtrl.bot_name, [activeCtrl.controller_id]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
     },
@@ -324,7 +271,6 @@ export function ControllerBrowser({
 
   if (!activeCtrl) return null;
 
-  const logs = allLogs[activeCtrl.bot_name] ?? [];
   const configId = activeCtrl.controller_id || activeCtrl.controller_name;
 
   return (
@@ -356,6 +302,7 @@ export function ControllerBrowser({
             const key = ctrlKey(c);
             const isActive = key === activeKey;
             const killed = c.config?.manual_kill_switch === true;
+            const ctrlStopping = c.status === "stopping";
 
             if (isCompact) {
               return (
@@ -370,7 +317,7 @@ export function ControllerBrowser({
                   }`}
                   title={c.controller_name}
                 >
-                  <StatusDot status={killed ? "stopped" : c.status} />
+                  <StatusDot status={ctrlStopping ? "stopping" : killed ? "stopped" : c.status} />
                 </button>
               );
             }
@@ -387,7 +334,7 @@ export function ControllerBrowser({
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <StatusDot status={killed ? "stopped" : c.status} />
+                  <StatusDot status={ctrlStopping ? "stopping" : killed ? "stopped" : c.status} />
                   <span className={`truncate text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
                     {c.controller_name}
                   </span>
@@ -450,22 +397,24 @@ export function ControllerBrowser({
               </span>
             )}
             <div className="flex items-center gap-1.5 shrink-0">
-              <StatusDot status={isKilled ? "stopped" : activeCtrl.status} />
-              <span className="text-xs capitalize">{isKilled ? "stopped" : activeCtrl.status}</span>
+              <StatusDot status={isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status} />
+              <span className="text-xs capitalize">{isStopping ? "stopping" : isKilled ? "stopped" : activeCtrl.status}</span>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
             <button
               onClick={() => toggleMutation.mutate()}
-              disabled={toggleMutation.isPending}
+              disabled={toggleMutation.isPending || isStopping}
               className={`flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:opacity-50 ${
-                isKilled
-                  ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
-                  : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
+                isStopping
+                  ? "text-[var(--color-yellow)]"
+                  : isKilled
+                    ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
+                    : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
               }`}
-              title={isKilled ? "Start controller" : "Pause controller"}
+              title={isStopping ? "Stopping..." : isKilled ? "Start controller" : "Pause controller"}
             >
-              {toggleMutation.isPending ? (
+              {toggleMutation.isPending || isStopping ? (
                 <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
               ) : isKilled ? (
                 <>
@@ -504,6 +453,16 @@ export function ControllerBrowser({
         <div className="flex flex-1 min-h-0">
           {/* Left column: Performance data */}
           <div className="flex-1 overflow-y-auto p-5 space-y-4 min-w-0">
+            {/* PnL Evolution Chart */}
+            <ControllerPnlChart
+              key={configId}
+              server={server}
+              controllerId={configId}
+              botName={activeCtrl.bot_name}
+              deployedAt={activeCtrl.deployed_at}
+              height={200}
+            />
+
             {/* PnL Breakdown - compact horizontal */}
             <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 text-sm">
@@ -644,49 +603,14 @@ export function ControllerBrowser({
 
           {/* Right column: Config + Logs */}
           <div className="w-[380px] xl:w-[440px] shrink-0 border-l border-[var(--color-border)] flex flex-col bg-[var(--color-surface)]">
-            {/* Tabs */}
-            <div className="flex border-b border-[var(--color-border)]">
-              <button
-                onClick={() => setRightTab("config")}
-                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                  rightTab === "config"
-                    ? "text-[var(--color-primary)] border-b-2 border-[var(--color-primary)] -mb-px"
-                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                }`}
-              >
-                Config
-              </button>
-              <button
-                onClick={() => setRightTab("logs")}
-                className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
-                  rightTab === "logs"
-                    ? "text-[var(--color-primary)] border-b-2 border-[var(--color-primary)] -mb-px"
-                    : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                }`}
-              >
-                Logs
-                {logs.filter((l) => l.log_category === "error").length > 0 && (
-                  <span className="ml-1.5 inline-flex items-center justify-center rounded-full bg-[var(--color-red)]/15 px-1.5 text-[9px] font-semibold text-[var(--color-red)]">
-                    {logs.filter((l) => l.log_category === "error").length}
-                  </span>
-                )}
-              </button>
-            </div>
-
-            {/* Tab content */}
-            {rightTab === "config" ? (
-              <InlineConfigEditor
-                key={configId}
-                config={activeCtrl.config || {}}
-                server={server}
-                configId={configId}
-                onSaved={() => queryClient.invalidateQueries({ queryKey: ["bots", server] })}
-              />
-            ) : (
-              <div className="flex-1 overflow-y-auto">
-                <LogsSection logs={logs} />
-              </div>
-            )}
+            <YamlConfigEditor
+              key={configId}
+              config={activeCtrl.config || {}}
+              server={server}
+              configId={configId}
+              botName={activeCtrl.bot_name}
+              onSaved={() => queryClient.invalidateQueries({ queryKey: ["bots", server] })}
+            />
           </div>
         </div>
       </div>
@@ -694,66 +618,3 @@ export function ControllerBrowser({
   );
 }
 
-// ── Logs section ──
-
-function LogsSection({ logs }: { logs: BotLogEntry[] }) {
-  const [filter, setFilter] = useState<"all" | "error" | "general">("all");
-  const filtered = filter === "all" ? logs : logs.filter((l) => l.log_category === filter);
-
-  const errorCount = logs.filter((l) => l.log_category === "error").length;
-  const generalCount = logs.filter((l) => l.log_category === "general").length;
-
-  if (logs.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-muted)]">
-        <p className="text-xs">No logs available</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-[var(--color-border)]/50">
-        {(["all", "general", "error"] as const).map((f) => {
-          const count = f === "all" ? logs.length : f === "error" ? errorCount : generalCount;
-          return (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                filter === f
-                  ? f === "error"
-                    ? "bg-[var(--color-red)]/15 text-[var(--color-red)]"
-                    : "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              {f} ({count})
-            </button>
-          );
-        })}
-      </div>
-      <div className="flex-1 overflow-y-auto font-mono text-[11px] leading-relaxed">
-        {filtered.map((log, i) => (
-          <div
-            key={i}
-            className={`flex gap-2 px-2.5 py-1 border-b border-[var(--color-border)]/10 ${
-              log.log_category === "error" ? "bg-[var(--color-red)]/5" : ""
-            }`}
-          >
-            <span className="text-[var(--color-text-muted)] shrink-0 tabular-nums">
-              {formatLogTime(log.timestamp)}
-            </span>
-            <span
-              className={`break-all ${
-                log.log_category === "error" ? "text-[var(--color-red)]" : "text-[var(--color-text)]"
-              }`}
-            >
-              {log.msg || JSON.stringify(log)}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}

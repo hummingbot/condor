@@ -160,7 +160,7 @@ export function StartSessionDialog({
           <div className={`grid gap-4 ${executionMode === "loop" ? "grid-cols-2" : "grid-cols-1"}`}>
             <div>
               <label className={labelClass}>
-                Budget (USDT)
+                Total Amount Quote
               </label>
               <input
                 type="number"

@@ -5,20 +5,14 @@ import { useSearchParams } from "react-router-dom";
 
 import { ReportViewer } from "@/components/routines/ReportViewer";
 import { type ReportSummary, api } from "@/lib/api";
+import { formatAgo } from "@/lib/routineUtils";
 
 interface RoutineReportsProps {
   routineName: string;
+  hasScheduledInstance?: boolean;
 }
 
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
-
-export function RoutineReports({ routineName }: RoutineReportsProps) {
+export function RoutineReports({ routineName, hasScheduledInstance }: RoutineReportsProps) {
   const [viewReport, setViewReport] = useState<ReportSummary | null>(null);
   const [, setSearchParams] = useSearchParams();
 
@@ -26,6 +20,7 @@ export function RoutineReports({ routineName }: RoutineReportsProps) {
     queryKey: ["routine-reports", routineName],
     queryFn: () => api.getRoutineReports(routineName),
     enabled: !!routineName,
+    refetchInterval: hasScheduledInstance ? 10_000 : false,
   });
 
   const reports = data?.reports ?? [];
@@ -84,14 +79,6 @@ export function RoutineReports({ routineName }: RoutineReportsProps) {
               <span className="text-[10px] text-[var(--color-text-muted)]">
                 {formatAgo(r.created_at)}
               </span>
-              {r.tags.slice(0, 2).map((tag) => (
-                <span
-                  key={tag}
-                  className="rounded bg-[var(--color-surface-hover)] px-1 py-0.5 text-[9px] text-[var(--color-text-muted)]"
-                >
-                  #{tag}
-                </span>
-              ))}
             </div>
           </button>
         ))}

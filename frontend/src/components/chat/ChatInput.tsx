@@ -9,11 +9,13 @@ const TOKEN_KEY = "condor_token";
 interface ChatInputProps {
   onSend: (text: string) => void;
   disabled?: boolean;
+  isStreaming?: boolean;
+  onAbort?: () => void;
 }
 
 type RecordingState = "idle" | "recording" | "transcribing";
 
-export function ChatInput({ onSend, disabled }: ChatInputProps) {
+export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -62,6 +64,10 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
+    }
+    if (e.key === "Escape" && isStreaming && onAbort) {
+      e.preventDefault();
+      onAbort();
     }
   };
 
@@ -151,10 +157,23 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     voiceSettingsRef.current = voiceSettings;
   }, [voiceSettings]);
 
-  // Global keyboard shortcut: ⌘M to toggle recording
+  // Global ESC to abort streaming
+  useEffect(() => {
+    if (!isStreaming || !onAbort) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onAbort();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isStreaming, onAbort]);
+
+  // Global keyboard shortcut: ⌘⇧M to toggle recording
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "m") {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "m") {
         e.preventDefault();
         if (recordingState === "recording") {
           stopRecording();
@@ -235,14 +254,24 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         </button>
       )}
 
-      {/* Send button */}
-      <button
-        onClick={handleSubmit}
-        disabled={disabled || !value.trim() || isRecording || isTranscribing}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-      >
-        <Send className="h-4 w-4" />
-      </button>
+      {/* Send / Stop button */}
+      {isStreaming ? (
+        <button
+          onClick={onAbort}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500 text-white transition-opacity hover:opacity-90"
+          title="Stop generation (Esc)"
+        >
+          <Square className="h-3.5 w-3.5" />
+        </button>
+      ) : (
+        <button
+          onClick={handleSubmit}
+          disabled={disabled || !value.trim() || isRecording || isTranscribing}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+        >
+          <Send className="h-4 w-4" />
+        </button>
+      )}
     </div>
   );
 }

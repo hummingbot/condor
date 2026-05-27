@@ -42,6 +42,6 @@ async def get_report_detail(report_id: str, user: WebUser = Depends(get_current_
 
 @router.delete("/{report_id}")
 async def delete_report_endpoint(report_id: str, user: WebUser = Depends(get_current_user)):
-    if not delete_report(report_id):
+    if not await delete_report(report_id):
         raise HTTPException(404, "Report not found")
     return {"deleted": True}

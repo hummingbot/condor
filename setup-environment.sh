@@ -470,6 +470,25 @@ if [ -n "${DEPLOY_HUMMINGBOT_API:-}" ]; then
         msg_ok "Hummingbot API already configured (skipped)"
     fi
 else
+    # Check if a Hummingbot API is already running on port 8000
+    existing_api=false
+    if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
+        existing_api=true
+        msg_warn "Hummingbot API already running on localhost:8000"
+        echo ""
+        prompt_visible "An API instance is already running. Override it? [y/N]" "N" "override_api"
+        if [[ "${override_api:-}" =~ ^[Yy]$ ]]; then
+            msg_info "Will reconfigure and restart the API."
+        else
+            echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
+            msg_ok "Keeping existing API instance"
+            hb_api_deployed=false
+            # Skip the rest of the API setup block
+            existing_api=skip
+        fi
+    fi
+
+    if [ "$existing_api" != "skip" ]; then
     msg_info "Condor connects to Hummingbot Backend API for trading."
     echo ""
     prompt_visible "Configure and launch local Hummingbot API with Docker? [Y/n]" "Y" "deploy_hb"
@@ -561,6 +580,7 @@ HBEOF
             hb_api_deployed=true
         fi
     fi
+    fi  # end existing_api != skip
 fi
 
 echo ""

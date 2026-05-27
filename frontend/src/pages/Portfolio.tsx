@@ -11,38 +11,24 @@ import {
   ArrowUpRight,
   ArrowDownRight,
 } from "lucide-react";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import {
   api,
   type AgentSummary,
   type BalanceItem,
   type ConnectorBalance,
+  type ExecutorInfo,
   type PortfolioHistoryPoint,
   type PortfolioHistoryResponse,
 } from "@/lib/api";
+import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
-
-function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-}
-
-function formatPrice(val: number) {
-  if (val === 0) return "-";
-  if (val >= 1000) return "$" + val.toLocaleString("en-US", { maximumFractionDigits: 0 });
-  if (val >= 1) return "$" + val.toFixed(2);
-  if (val >= 0.01) return "$" + val.toFixed(4);
-  return "$" + val.toExponential(2);
-}
 
 function formatAmount(val: number) {
   if (val === 0) return "0";
@@ -52,25 +38,31 @@ function formatAmount(val: number) {
   return val.toLocaleString("en-US", { maximumFractionDigits: 4 });
 }
 
-function formatPnl(val: number) {
-  const prefix = val >= 0 ? "+" : "";
-  return prefix + formatUsd(val);
+function formatTokenPrice(val: number, symbol = "$") {
+  if (val === 0) return "-";
+  if (val >= 1000) return symbol + val.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  if (val >= 1) return symbol + val.toFixed(2);
+  if (val >= 0.01) return symbol + val.toFixed(4);
+  return symbol + val.toExponential(2);
 }
 
 // ── Chart Colors ──
 
-const CHART_COLORS = [
-  "#d4a845", // gold
-  "#22c55e", // green
-  "#6366f1", // indigo
-  "#ef4444", // red
-  "#06b6d4", // cyan
-  "#8b5cf6", // violet
-  "#ec4899", // pink
-  "#14b8a6", // teal
-  "#f97316", // orange
-  "#a78bfa", // light violet
-];
+function getChartColors() {
+  const tc = getThemeColors();
+  return [
+    "#d4a845", // gold
+    tc.green,   // green (theme-aware)
+    "#6366f1", // indigo
+    tc.red,     // red (theme-aware)
+    "#06b6d4", // cyan
+    "#8b5cf6", // violet
+    "#ec4899", // pink
+    "#14b8a6", // teal
+    "#f97316", // orange
+    "#a78bfa", // light violet
+  ];
+}
 
 // ── KPI helpers ──
 
@@ -80,7 +72,11 @@ function isExecutorActive(status: string) {
   return status === "active" || status === "running";
 }
 
-function computeExecutorStats(executors: import("@/lib/api").ExecutorInfo[], period: string) {
+function computeExecutorStats(
+  executors: ExecutorInfo[],
+  period: string,
+  convert: (value: number, quote: string) => { value: number; converted: boolean },
+) {
   const now = Date.now() / 1000;
   const cutoff =
     period === "1D" ? now - 86400 :
@@ -88,10 +84,14 @@ function computeExecutorStats(executors: import("@/lib/api").ExecutorInfo[], per
     now - 30 * 86400;
 
   const filtered = executors.filter((e) => e.timestamp >= cutoff);
-  const pnl = filtered.reduce((s, e) => s + e.pnl, 0);
-  const volume = filtered.reduce((s, e) => s + e.volume, 0);
-  const count = filtered.length;
-  return { pnl, volume, count };
+  let pnl = 0;
+  let volume = 0;
+  for (const e of filtered) {
+    const quote = e.trading_pair?.split("-")[1] || "USDT";
+    pnl += convert(e.pnl, quote).value;
+    volume += convert(e.volume, quote).value;
+  }
+  return { pnl, volume, count: filtered.length };
 }
 
 // ── Unified Dashboard Strip ──
@@ -101,11 +101,13 @@ function KpiCell({
   mainValue,
   pnl,
   details,
+  currencySymbol,
 }: {
   label: string;
   mainValue: string | number;
   pnl?: number;
   details: string;
+  currencySymbol?: string;
 }) {
   return (
     <div className="flex-1 px-5 py-3 min-w-0">
@@ -116,7 +118,7 @@ function KpiCell({
           <span className="inline-flex items-center gap-0.5 text-sm tabular-nums font-semibold"
             style={{ color: pnl >= 0 ? "var(--color-green)" : "var(--color-red)" }}>
             {pnl >= 0 ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
-            {formatPnl(pnl)}
+            {formatCurrencyPnl(pnl, currencySymbol || "$")}
           </span>
         )}
       </div>
@@ -140,6 +142,9 @@ function DashboardStrip({
   period,
   onPeriodChange,
   onNavigate,
+  convert,
+  convertFromUsd,
+  currencySymbol,
 }: {
   totalUsd: number;
   totalTokens: number;
@@ -150,13 +155,16 @@ function DashboardStrip({
   botPnl: number;
   botVolume: number;
   activeExecutorCount: number;
-  allExecutors: import("@/lib/api").ExecutorInfo[];
+  allExecutors: ExecutorInfo[];
   agents: AgentSummary[];
   period: string;
   onPeriodChange: (p: string) => void;
   onNavigate: (path: string) => void;
+  convert: (value: number, quote: string) => { value: number; converted: boolean };
+  convertFromUsd: (val: number) => number;
+  currencySymbol: string;
 }) {
-  const execStats = useMemo(() => computeExecutorStats(allExecutors, period), [allExecutors, period]);
+  const execStats = useMemo(() => computeExecutorStats(allExecutors, period, convert), [allExecutors, period, convert]);
 
   const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
   const agentPnl = agents.reduce((s, a) => s + a.daily_pnl, 0);
@@ -169,30 +177,34 @@ function DashboardStrip({
       <div className="flex items-stretch divide-x divide-[var(--color-border)]">
         <KpiCell
           label="Portfolio"
-          mainValue={formatUsd(totalUsd)}
-          pnl={portfolioPnl ?? undefined}
+          mainValue={formatCurrency(convertFromUsd(totalUsd), currencySymbol)}
+          pnl={portfolioPnl != null ? convertFromUsd(portfolioPnl) : undefined}
           details={`${totalTokens} assets · ${connectorCount} connector${connectorCount !== 1 ? "s" : ""}`}
+          currencySymbol={currencySymbol}
         />
 
         <KpiCell
           label="Bots"
           mainValue={botCount}
           pnl={botPnl}
-          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatUsd(botVolume)}`}
+          details={`${controllerCount} controller${controllerCount !== 1 ? "s" : ""} · vol ${formatCurrencyVolume(botVolume, currencySymbol)}`}
+          currencySymbol={currencySymbol}
         />
 
         <KpiCell
           label="Executors"
           mainValue={`${activeExecutorCount} active`}
           pnl={execStats.pnl}
-          details={`${execStats.count} in ${period} · vol ${formatUsd(execStats.volume)}`}
+          details={`${execStats.count} in ${period} · vol ${formatCurrencyVolume(execStats.volume, currencySymbol)}`}
+          currencySymbol={currencySymbol}
         />
 
         <KpiCell
           label="Agents"
           mainValue={activeAgents.length}
-          pnl={agentPnl}
+          pnl={convertFromUsd(agentPnl)}
           details={`${agents.length} total · ${agentSessions} session${agentSessions !== 1 ? "s" : ""}`}
+          currencySymbol={currencySymbol}
         />
 
         {/* ── Period + Quick Links ── */}
@@ -252,7 +264,7 @@ function TokenBarChart({
               <div className="flex items-center gap-1.5 w-16 justify-end shrink-0">
                 <div
                   className="h-2.5 w-2.5 rounded-sm shrink-0"
-                  style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
+                  style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
                 />
                 <span className="text-xs font-medium truncate">{t.token}</span>
               </div>
@@ -261,7 +273,7 @@ function TokenBarChart({
                   className="h-full rounded transition-all duration-500"
                   style={{
                     width: `${Math.max(barPct, 2)}%`,
-                    backgroundColor: CHART_COLORS[i % CHART_COLORS.length],
+                    backgroundColor: getChartColors()[i % getChartColors().length],
                     opacity: 0.8,
                   }}
                 />
@@ -297,7 +309,17 @@ function AllocationBar({ pct }: { pct: number }) {
 
 // ── Table Rows ──
 
-function TokenRow({ b, totalPortfolio }: { b: BalanceItem; totalPortfolio: number }) {
+function TokenRow({
+  b,
+  totalPortfolio,
+  convertFromUsd,
+  currencySymbol,
+}: {
+  b: BalanceItem;
+  totalPortfolio: number;
+  convertFromUsd: (val: number) => number;
+  currencySymbol: string;
+}) {
   const price = b.total > 0 ? b.usd_value / b.total : 0;
   const pct = totalPortfolio > 0 ? (b.usd_value / totalPortfolio) * 100 : 0;
 
@@ -308,10 +330,10 @@ function TokenRow({ b, totalPortfolio }: { b: BalanceItem; totalPortfolio: numbe
       </td>
       <td className="px-4 py-2 text-right text-sm tabular-nums">{formatAmount(b.total)}</td>
       <td className="px-4 py-2 text-right text-sm tabular-nums text-[var(--color-text-muted)]">
-        {formatPrice(price)}
+        {formatTokenPrice(convertFromUsd(price), currencySymbol)}
       </td>
       <td className="px-4 py-2 text-right text-sm tabular-nums font-medium">
-        {formatUsd(b.usd_value)}
+        {formatCurrency(convertFromUsd(b.usd_value), currencySymbol)}
       </td>
       <td className="px-4 py-2">
         <AllocationBar pct={pct} />
@@ -323,9 +345,13 @@ function TokenRow({ b, totalPortfolio }: { b: BalanceItem; totalPortfolio: numbe
 function ConnectorRow({
   connector,
   totalPortfolio,
+  convertFromUsd,
+  currencySymbol,
 }: {
   connector: ConnectorBalance;
   totalPortfolio: number;
+  convertFromUsd: (val: number) => number;
+  currencySymbol: string;
 }) {
   const [expanded, setExpanded] = useState(true);
   const Chevron = expanded ? ChevronDown : ChevronRight;
@@ -349,7 +375,7 @@ function ConnectorRow({
         <td className="px-4 py-3" />
         <td className="px-4 py-3" />
         <td className="px-4 py-3 text-right font-semibold tabular-nums">
-          {formatUsd(connector.total_usd)}
+          {formatCurrency(convertFromUsd(connector.total_usd), currencySymbol)}
         </td>
         <td className="px-4 py-3">
           <span className="text-sm tabular-nums text-[var(--color-text-muted)]">
@@ -359,7 +385,7 @@ function ConnectorRow({
       </tr>
       {expanded &&
         connector.balances.map((b) => (
-          <TokenRow key={b.token} b={b} totalPortfolio={totalPortfolio} />
+          <TokenRow key={b.token} b={b} totalPortfolio={totalPortfolio} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
         ))}
     </>
   );
@@ -381,7 +407,7 @@ function formatTooltipDate(ts: number, range: string) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-function PortfolioEvolution({ server, range }: { server: string; range: string }) {
+function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: { server: string; range: string; convertFromUsd: (val: number) => number; currencySymbol: string }) {
   const [stacked, setStacked] = useState(false);
   const [hover, setHover] = useState<{ x: number; point: PortfolioHistoryPoint } | null>(null);
   const queryClient = useQueryClient();
@@ -412,8 +438,20 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
   });
 
   const activeData: PortfolioHistoryResponse | undefined = stacked && breakdownData ? breakdownData : data;
-  const points = activeData?.points ?? [];
+  const rawPoints = activeData?.points ?? [];
   const topTokens = activeData?.top_tokens ?? [];
+
+  // Convert all values from USDT to display currency
+  const points = useMemo(() =>
+    rawPoints.map(p => ({
+      ...p,
+      total_usd: convertFromUsd(p.total_usd),
+      tokens: p.tokens ? Object.fromEntries(
+        Object.entries(p.tokens).map(([k, v]) => [k, convertFromUsd(v)])
+      ) : undefined,
+    })),
+    [rawPoints, convertFromUsd]
+  );
 
   const W = 800;
   const H = 250;
@@ -440,7 +478,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
     const tokenOrder = topTokens;
     for (let ti = 0; ti < tokenOrder.length; ti++) {
       const token = tokenOrder[ti];
-      const color = CHART_COLORS[ti % CHART_COLORS.length];
+      const color = getChartColors()[ti % getChartColors().length];
 
       // Upper line (cumulative up to and including this token)
       const upperPoints = points.map((p) => {
@@ -510,7 +548,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
   // Tooltip dimensions for stacked mode
   const hoverTokens = hover?.point.tokens ?? {};
   const hoverTokenEntries = stacked && topTokens.length > 0
-    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: CHART_COLORS[topTokens.indexOf(t) % CHART_COLORS.length] }))
+    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: getChartColors()[topTokens.indexOf(t) % getChartColors().length] }))
     : [];
   const tooltipH = stacked && hoverTokenEntries.length > 0 ? 28 + hoverTokenEntries.length * 16 : 40;
   const tooltipW = stacked && hoverTokenEntries.length > 0 ? 150 : 108;
@@ -580,7 +618,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
                   fill="var(--color-text-muted)"
                   fontSize="10"
                 >
-                  {formatUsd(val)}
+                  {formatCurrency(val, currencySymbol)}
                 </text>
               </g>
             ))}
@@ -658,14 +696,14 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
                             {entry.token}
                           </text>
                           <text x={tooltipW - 8} y="7" fill="var(--color-text-muted)" fontSize="9" textAnchor="end">
-                            {formatUsd(entry.value)}
+                            {formatCurrency(entry.value, currencySymbol)}
                           </text>
                         </g>
                       ))}
                     </>
                   ) : (
                     <text x="8" y="32" fill="var(--color-text)" fontSize="12" fontWeight="bold">
-                      {formatUsd(hover.point.total_usd)}
+                      {formatCurrency(hover.point.total_usd, currencySymbol)}
                     </text>
                   )}
                 </g>
@@ -689,7 +727,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
                 <div key={token} className="flex items-center gap-1.5">
                   <div
                     className="h-2.5 w-2.5 rounded-sm"
-                    style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
+                    style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
                   />
                   <span className="text-xs text-[var(--color-text-muted)]">{token}</span>
                 </div>
@@ -707,6 +745,7 @@ function PortfolioEvolution({ server, range }: { server: string; range: string }
 export function Portfolio() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [period, setPeriod] = useState<string>("1W");
 
   const { data, isLoading, error, isPlaceholderData } = useQuery({
@@ -716,6 +755,20 @@ export function Portfolio() {
     refetchInterval: 15000,
     placeholderData: keepPreviousData,
   });
+
+  // One-time background refresh on mount / server change
+  useEffect(() => {
+    if (!server) return;
+    const timer = setTimeout(() => {
+      api
+        .getPortfolio(server, true)
+        .then((fresh) => {
+          queryClient.setQueryData(["portfolio", server], fresh);
+        })
+        .catch(() => {}); // silent fail, cached data still shown
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [server, queryClient]);
 
   const { data: bots } = useQuery({
     queryKey: ["bots", server],
@@ -746,6 +799,27 @@ export function Portfolio() {
     enabled: !!server,
     refetchInterval: 60000,
   });
+
+  // Currency conversion for bots + executors (must be before early returns)
+  const controllers = bots?.controllers ?? [];
+  const executorsList = allExecutors ?? [];
+  const quoteCurrencies = useMemo(() => {
+    const quotes = new Set<string>(["USDT"]);
+    for (const c of controllers) {
+      quotes.add(c.trading_pair?.split("-")[1] || "USDT");
+    }
+    for (const e of executorsList) {
+      quotes.add(e.trading_pair?.split("-")[1] || "USDT");
+    }
+    return Array.from(quotes);
+  }, [controllers, executorsList]);
+  const { convert, currencySymbol } = useRates(quoteCurrencies);
+
+  // Convert a USDT-denominated value to the display currency
+  const convertFromUsd = useCallback(
+    (val: number) => convert(val, "USDT").value,
+    [convert]
+  );
 
   if (!server) {
     return (
@@ -815,10 +889,17 @@ export function Portfolio() {
   // Compute aggregate stats
   const totalTokens = connectors.reduce((s, c) => s + c.balances.length, 0);
   const botsList = bots?.bots ?? [];
-  const controllerCount = bots?.controllers?.length ?? 0;
-  const botPnl = bots?.total_pnl ?? 0;
-  const botVolume = bots?.total_volume ?? 0;
-  const activeExecutorCount = (allExecutors ?? []).filter((e) => isExecutorActive(e.status)).length;
+  const controllerCount = controllers.length;
+  const activeExecutorCount = executorsList.filter((e) => isExecutorActive(e.status)).length;
+
+  // Convert bot PnL and volume per-controller
+  let botPnl = 0;
+  let botVolume = 0;
+  for (const ctrl of controllers) {
+    const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+    botPnl += convert(ctrl.global_pnl_quote, quote).value;
+    botVolume += convert(ctrl.volume_traded, quote).value;
+  }
 
   // Flatten all tokens for top holdings
   const allTokens = connectors.flatMap((c) =>
@@ -840,17 +921,20 @@ export function Portfolio() {
         botPnl={botPnl}
         botVolume={botVolume}
         activeExecutorCount={activeExecutorCount}
-        allExecutors={allExecutors ?? []}
+        allExecutors={executorsList}
         agents={agents ?? []}
         period={period}
         onPeriodChange={setPeriod}
         onNavigate={navigate}
+        convert={convert}
+        convertFromUsd={convertFromUsd}
+        currencySymbol={currencySymbol}
       />
 
       {/* Portfolio Evolution + Top Holdings side by side */}
       <div className="flex flex-col lg:flex-row gap-4">
         <div className={connectors.length > 0 && topTokens.length > 0 ? "lg:flex-[2] min-w-0" : "w-full"}>
-          <PortfolioEvolution server={server!} range={period} />
+          <PortfolioEvolution server={server!} range={period} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
         </div>
         {connectors.length > 0 && topTokens.length > 0 && (
           <div className="lg:flex-1 min-w-0">
@@ -889,7 +973,7 @@ export function Portfolio() {
             </thead>
             <tbody>
               {connectors.map((c) => (
-                <ConnectorRow key={c.connector} connector={c} totalPortfolio={totalUsd} />
+                <ConnectorRow key={c.connector} connector={c} totalPortfolio={totalUsd} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
               ))}
             </tbody>
           </table>

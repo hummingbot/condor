@@ -195,7 +195,10 @@ def build_tick_prompt(
         "trading_context", "risk_limits",  # shown in dedicated sections
         "agent_key", "server_name", "frequency_sec", "execution_mode",  # noise / internal
     }
-    config_lines = ["[CURRENT CONFIG]"]
+    config_lines = [
+        "[CURRENT CONFIG]",
+        "These are the ACTIVE values for this session. If the strategy instructions mention different defaults, IGNORE them and use these values instead.",
+    ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:
             continue

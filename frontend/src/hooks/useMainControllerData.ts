@@ -16,24 +16,20 @@ export function useMainControllerData(
   connector: string,
   pair: string,
 ) {
-  // Fetch executors via REST on mount (survives refresh), WS updates keep it fresh
+  // Fetch executors filtered server-side by controller_id + trading_pair
   const { data: cachedExecutors } = useQuery<ExecutorInfo[]>({
-    queryKey: ["executors", server, ""],
-    queryFn: () => api.getExecutors(server!),
-    enabled: !!server,
+    queryKey: ["executors", server, "main", pair],
+    queryFn: () => api.getExecutors(server!, { controller_id: "main", trading_pair: pair }),
+    enabled: !!server && !!pair,
     staleTime: 30_000, // REST fetch valid for 30s, WS pushes override instantly
     refetchOnWindowFocus: false,
   });
 
+  // connector is not a server-side filter — filter client-side (lightweight)
   const filteredExecutors = useMemo(() => {
     if (!cachedExecutors) return [];
-    return cachedExecutors.filter(
-      (ex) =>
-        ex.controller_id === "main" &&
-        ex.connector === connector &&
-        ex.trading_pair === pair,
-    );
-  }, [cachedExecutors, connector, pair]);
+    return cachedExecutors.filter((ex) => ex.connector === connector);
+  }, [cachedExecutors, connector]);
 
   // Stable reference: only update when executor data actually changes
   const prevFingerprintRef = useRef("");
@@ -68,7 +64,8 @@ export function useMainControllerData(
     ];
     return all.filter(
       (p) =>
-        p.controller_id === "main" &&
+        // Show positions from main controller or untagged (executor-level positions)
+        (!p.controller_id || p.controller_id === "main") &&
         p.connector_name === connector &&
         p.trading_pair === pair,
     );

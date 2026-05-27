@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Brain, ExternalLink, FileText, Loader2, Play } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { AlertTriangle, Brain, ExternalLink, FileText, Loader2, Play } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type RoutineInfo, type RoutineInstance, api } from "@/lib/api";
+import { buildConfigValues, formatRoutineName, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { useServer } from "@/hooks/useServer";
 
 import { RoutineConfigForm } from "./RoutineConfigForm";
@@ -21,20 +22,30 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
   const { server } = useServer();
   const qc = useQueryClient();
 
-  const [configValues, setConfigValues] = useState<Record<string, unknown>>({});
+  const [configValues, setConfigValues] = useState<Record<string, unknown>>(() =>
+    buildConfigValues(routine),
+  );
   const [activeInstanceId, setActiveInstanceId] = useState<string | null>(null);
   const isPolling = useRef(false);
 
-  // Reset config when routine changes
+  // Rebuild config when routine changes — merge saved values with current fields
   useEffect(() => {
-    const defaults: Record<string, unknown> = {};
-    for (const [key, field] of Object.entries(routine.fields)) {
-      defaults[key] = field.default;
-    }
-    setConfigValues(defaults);
+    setConfigValues(buildConfigValues(routine));
     setActiveInstanceId(null);
     isPolling.current = false;
   }, [routine.name]);
+
+  // Persist config to localStorage whenever it changes
+  const handleConfigChange = useCallback(
+    (key: string, value: unknown) => {
+      setConfigValues((prev) => {
+        const next = { ...prev, [key]: value };
+        saveConfig(routine.name, next);
+        return next;
+      });
+    },
+    [routine.name],
+  );
 
   // Poll active instance
   const { data: activeInstance } = useQuery({
@@ -53,8 +64,7 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
     const status = activeInstance?.status;
     if (prevStatus.current === "running" && status && status !== "running") {
       isPolling.current = false;
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
-      qc.invalidateQueries({ queryKey: ["routine-reports", routine.name] });
+      invalidateRoutineQueries(qc, routine.name);
     }
     prevStatus.current = status;
   }, [activeInstance?.status, qc, routine.name]);
@@ -64,7 +74,7 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
     onSuccess: (data) => {
       isPolling.current = true;
       setActiveInstanceId(data.instance_id);
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      invalidateRoutineQueries(qc, routine.name);
     },
   });
 
@@ -72,14 +82,14 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
     mutationFn: (intervalSec: number) =>
       api.scheduleRoutine(server!, routine.name, configValues, intervalSec),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      invalidateRoutineQueries(qc, routine.name);
     },
   });
 
   const stopMutation = useMutation({
     mutationFn: (id: string) => api.stopRoutineInstance(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      invalidateRoutineQueries(qc, routine.name);
     },
   });
 
@@ -93,7 +103,7 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
       <div>
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold text-[var(--color-text)]">
-            {formatName(routine.name)}
+            {formatRoutineName(routine.name)}
           </h2>
           {isAgent && (
             <span className="flex items-center gap-1 rounded bg-purple-500/10 px-2 py-0.5 text-[10px] font-bold text-purple-400">
@@ -116,7 +126,7 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
           <RoutineConfigForm
             fields={routine.fields}
             values={configValues}
-            onChange={(key, value) => setConfigValues((prev) => ({ ...prev, [key]: value }))}
+            onChange={handleConfigChange}
           />
         </div>
       )}
@@ -158,30 +168,44 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
         </div>
       )}
 
-      {/* Result - show link to report instead of raw text */}
-      {activeInstance && activeInstance.status !== "running" && (activeInstance.result_text || activeInstance.has_result) && (
+      {/* Result - show error or link to report */}
+      {activeInstance && activeInstance.status !== "running" && (activeInstance.result_text || activeInstance.has_result || activeInstance.error) && (
         <div>
           <h3 className="mb-2 text-xs font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
             Last Result
           </h3>
-          {onOpenReport ? (
-            <button
-              onClick={() => onOpenReport(routine.name)}
-              className="flex items-center gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 px-4 py-3 text-left transition-all hover:border-[var(--color-primary)]/50 hover:bg-[var(--color-primary)]/10 w-full"
-            >
-              <FileText className="h-5 w-5 text-[var(--color-primary)] shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-medium text-[var(--color-text)]">
-                  Report generated successfully
-                </p>
-                <p className="text-[10px] text-[var(--color-text-muted)] mt-0.5 truncate">
-                  {activeInstance.result_text?.split("\n")[0] || "Click to view the full report"}
-                </p>
+          {activeInstance.status === "failed" || activeInstance.error ? (
+            <div className="rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/5 px-4 py-3">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 text-[var(--color-red)] shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-[var(--color-red)]">
+                    Routine failed
+                  </p>
+                  <pre className="mt-1.5 text-[11px] text-[var(--color-text-muted)] whitespace-pre-wrap break-words font-mono">
+                    {activeInstance.error || activeInstance.result_text}
+                  </pre>
+                </div>
               </div>
-              <ExternalLink className="h-4 w-4 text-[var(--color-primary)] shrink-0" />
-            </button>
+            </div>
           ) : (
-            <RoutineResultView instance={activeInstance} />
+            <>
+              <RoutineResultView instance={activeInstance} />
+              {onOpenReport && routine.report_count > 0 && (
+                <button
+                  onClick={() => onOpenReport(routine.name)}
+                  className="flex items-center gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 px-4 py-3 text-left transition-all hover:border-[var(--color-primary)]/50 hover:bg-[var(--color-primary)]/10 w-full mt-2"
+                >
+                  <FileText className="h-5 w-5 text-[var(--color-primary)] shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-[var(--color-text)]">
+                      View reports
+                    </p>
+                  </div>
+                  <ExternalLink className="h-4 w-4 text-[var(--color-primary)] shrink-0" />
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
@@ -194,12 +218,11 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
       />
 
       {/* Reports section */}
-      <RoutineReports routineName={routine.name} />
+      <RoutineReports
+        routineName={routine.name}
+        hasScheduledInstance={selectedInstances.some(i => i.status === "running" || i.status === "scheduled")}
+      />
     </div>
   );
 }
 
-function formatName(name: string): string {
-  const display = name.includes("/") ? name.split("/")[1] : name;
-  return display.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}

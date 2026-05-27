@@ -120,6 +120,53 @@ export interface BotsPageResponse {
   error_hint?: string;
 }
 
+export interface BotRunInfo {
+  bot_name: string;
+  bot_run_id: number | null;
+  account_name: string;
+  strategy_type: string;
+  strategy_name: string;
+  run_status: string;
+  deployment_status: string;
+  created_at: string | null;
+  stopped_at: string | null;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  global_pnl_quote: number;
+  volume_traded: number;
+  num_controllers: number;
+}
+
+export interface BotRunsResponse {
+  runs: BotRunInfo[];
+  total: number;
+}
+
+export interface ControllerPerformanceSnapshot {
+  timestamp: string;
+  bot_name: string;
+  controller_id: string;
+  controller_name: string;
+  connector: string;
+  trading_pair: string;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  global_pnl_quote: number;
+  global_pnl_pct: number;
+  volume_traded: number;
+  close_type_counts: Record<string, number>;
+  positions_summary: Record<string, unknown>[];
+  custom_info: Record<string, unknown>;
+}
+
+export interface ControllerPerformanceHistoryResponse {
+  snapshots: ControllerPerformanceSnapshot[];
+  next_cursor: string | null;
+  interval: string;
+  server_online?: boolean;
+  error_hint?: string;
+}
+
 export interface ExecutorInfo {
   id: string;
   type: string;
@@ -422,6 +469,7 @@ export interface RoutineInstance {
   table_data?: Record<string, unknown>[] | null;
   table_columns?: string[] | null;
   sections?: Record<string, unknown>[] | null;
+  error?: string | null;
 }
 
 // ── Archived Bots ──
@@ -536,6 +584,26 @@ export interface VoiceSettingsResponse {
   available_languages: Record<string, string>;
 }
 
+// ── Chat ──
+
+export interface ChatAgentOption {
+  key: string;
+  label: string;
+}
+
+export interface ChatModeOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface ChatOptionsResponse {
+  agents: ChatAgentOption[];
+  modes: ChatModeOption[];
+  default_agent: string;
+  default_mode: string;
+}
+
 // ── Backtesting ──
 
 export interface BacktestTask {
@@ -558,8 +626,10 @@ export const api = {
       `/api/v1/servers/${name}/status`,
     ),
 
-  getPortfolio: (server: string) =>
-    apiFetch<PortfolioResponse>(`/api/v1/servers/${server}/portfolio`),
+  getPortfolio: (server: string, refresh = false) =>
+    apiFetch<PortfolioResponse>(
+      `/api/v1/servers/${server}/portfolio${refresh ? "?refresh=true" : ""}`,
+    ),
 
   getPortfolioHistory: (server: string, range = "1D", breakdown = false) =>
     apiFetch<PortfolioHistoryResponse>(
@@ -584,6 +654,12 @@ export const api = {
 
   updateConfig: (server: string, configId: string, data: Record<string, unknown>) =>
     apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  updateBotControllerConfig: (server: string, botName: string, configId: string, data: Record<string, unknown>) =>
+    apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
@@ -650,6 +726,59 @@ export const api = {
       `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/start`,
       { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
     ),
+
+  getControllerPerformanceHistory: (
+    server: string,
+    params: {
+      bot_name?: string;
+      controller_id?: string;
+      start_time?: string;
+      end_time?: string;
+      interval?: string;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.bot_name) qs.set("bot_name", params.bot_name);
+    if (params.controller_id) qs.set("controller_id", params.controller_id);
+    if (params.start_time) qs.set("start_time", params.start_time);
+    if (params.end_time) qs.set("end_time", params.end_time);
+    if (params.interval) qs.set("interval", params.interval);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.cursor) qs.set("cursor", params.cursor);
+    const q = qs.toString();
+    return apiFetch<ControllerPerformanceHistoryResponse>(
+      `/api/v1/servers/${server}/controller-performance/history${q ? `?${q}` : ""}`,
+    );
+  },
+
+  getBotRuns: (
+    server: string,
+    params: {
+      bot_name?: string;
+      run_status?: string;
+      deployment_status?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.bot_name) qs.set("bot_name", params.bot_name);
+    if (params.run_status) qs.set("run_status", params.run_status);
+    if (params.deployment_status) qs.set("deployment_status", params.deployment_status);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    const q = qs.toString();
+    return apiFetch<BotRunsResponse>(
+      `/api/v1/servers/${server}/bot-runs${q ? `?${q}` : ""}`,
+    );
+  },
+
+  deleteBotRun: (server: string, botRunId: number) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/bot-runs/${botRunId}`, {
+      method: "DELETE",
+    }),
 
   getExecutors: (
     server: string,
@@ -728,6 +857,12 @@ export const api = {
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
       `/api/v1/servers/${server}/market/prices?connector=${connector}&trading_pair=${pair}`,
+    ),
+
+  getRateOracleRates: (server: string, tradingPairs: string[]) =>
+    apiFetch<{ rates: Record<string, number> }>(
+      `/api/v1/servers/${server}/rate-oracle/rates`,
+      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
     ),
 
   getTradingRules: (server: string, connector: string) =>
@@ -967,6 +1102,11 @@ export const api = {
       method: "POST",
     }),
 
+  getRoutineSource: (name: string) =>
+    apiFetch<{ filename: string; source: string }>(
+      `/api/v1/routines/${encodeURIComponent(name)}/source`,
+    ),
+
   getRoutineReports: (name: string) =>
     apiFetch<ReportsListResponse>(
       `/api/v1/routines/${encodeURIComponent(name)}/reports`,
@@ -1080,4 +1220,9 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+
+  // ── Chat ──
+
+  getChatOptions: () =>
+    apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
 };

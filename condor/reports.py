@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,9 +15,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Module-level variable to capture the last saved report ID.
+# Safe in asyncio (single-threaded); reset before each routine execution.
+_last_report_id: str | None = None
+
 CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
 MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
+_index_lock = asyncio.Lock()
 
 # ── HTML Template ──
 
@@ -225,24 +231,26 @@ def get_report(report_id: str) -> dict | None:
     return None
 
 
-def delete_report(report_id: str) -> bool:
-    entries = _read_index()
-    new_entries = []
-    deleted = False
-    for e in entries:
-        if e["id"] == report_id:
-            fpath = CHARTS_DIR / e["filename"]
-            if fpath.exists():
-                fpath.unlink()
-            deleted = True
-        else:
-            new_entries.append(e)
-    if deleted:
-        _write_index(new_entries)
+async def delete_report(report_id: str) -> bool:
+    async with _index_lock:
+        entries = _read_index()
+        new_entries = []
+        deleted = False
+        for e in entries:
+            if e["id"] == report_id:
+                fpath = CHARTS_DIR / e["filename"]
+                if fpath.exists():
+                    fpath.unlink()
+                deleted = True
+            else:
+                new_entries.append(e)
+        if deleted:
+            _write_index(new_entries)
     return deleted
 
 
-def _cleanup(max_reports: int = MAX_REPORTS) -> None:
+def _cleanup_locked(max_reports: int = MAX_REPORTS) -> None:
+    """Run cleanup while caller already holds _index_lock."""
     entries = _read_index()
     if len(entries) <= max_reports:
         return
@@ -303,13 +311,15 @@ class ReportBuilder:
         self._sections.append({"type": "table", "columns": columns or [], "rows": rows})
         return self
 
-    def save(self) -> str:
+    async def save(self, report_id: str | None = None) -> str:
+        """Save the report as an HTML file.
+
+        Args:
+            report_id: If provided, update an existing report in place.
+                       If None (default), create a new report.
+        """
         CHARTS_DIR.mkdir(exist_ok=True)
-        report_id = uuid.uuid4().hex[:6]
         now = datetime.now(timezone.utc)
-        ts_str = now.strftime("%Y%m%d_%H%M%S")
-        slug = _slugify(self._title)
-        filename = f"{ts_str}_{slug}_{report_id}.html"
 
         sections_html = self._render_sections()
         meta_badges = ""
@@ -318,32 +328,60 @@ class ReportBuilder:
         for tag in self._tags:
             meta_badges += f"<span>#{tag}</span>"
 
-        html = _HTML_TEMPLATE.format(
+        html_content = _HTML_TEMPLATE.format(
             title=self._title,
             created_at=now.strftime("%Y-%m-%d %H:%M UTC"),
             meta_badges=meta_badges,
             sections_html=sections_html,
         )
 
-        (CHARTS_DIR / filename).write_text(html)
+        global _last_report_id
 
-        entry = {
-            "id": report_id,
-            "title": self._title,
-            "filename": filename,
-            "created_at": now.isoformat(),
-            "source_type": self._source_type,
-            "source_name": self._source_name,
-            "tags": self._tags,
-        }
+        async with _index_lock:
+            if report_id is not None:
+                # Update existing report
+                entries = _read_index()
+                entry = next((e for e in entries if e["id"] == report_id), None)
+                if entry is None:
+                    raise ValueError(f"Report '{report_id}' not found in index")
 
-        entries = _read_index()
-        entries.append(entry)
-        _write_index(entries)
-        _cleanup()
+                (CHARTS_DIR / entry["filename"]).write_text(html_content)
 
+                entry["updated_at"] = now.isoformat()
+                entry["title"] = self._title
+                entry["tags"] = self._tags
+                _write_index(entries)
+
+                _last_report_id = report_id
+                logger.info(f"Report updated: {entry['filename']}")
+                return report_id
+
+            # New report
+            new_id = uuid.uuid4().hex[:6]
+            ts_str = now.strftime("%Y%m%d_%H%M%S")
+            slug = _slugify(self._title)
+            filename = f"{ts_str}_{slug}_{new_id}.html"
+
+            (CHARTS_DIR / filename).write_text(html_content)
+
+            entry = {
+                "id": new_id,
+                "title": self._title,
+                "filename": filename,
+                "created_at": now.isoformat(),
+                "source_type": self._source_type,
+                "source_name": self._source_name,
+                "tags": self._tags,
+            }
+
+            entries = _read_index()
+            entries.append(entry)
+            _write_index(entries)
+            _cleanup_locked()
+
+        _last_report_id = new_id
         logger.info(f"Report saved: {filename}")
-        return report_id
+        return new_id
 
     def _render_sections(self) -> str:
         sections = list(self._sections)
@@ -396,3 +434,41 @@ class ReportBuilder:
             body_rows.append(f"<tr>{cells}</tr>")
         body = "\n".join(body_rows)
         return f'<div class="section section-table"><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>'
+
+
+# ── LiveReport ──
+
+
+class LiveReport:
+    """Updatable report for continuous routines.
+
+    Creates a single report on first update, then overwrites it on each
+    subsequent call. Ideal for continuous routines that accumulate data.
+    """
+
+    def __init__(self, title: str, source_name: str = "", tags: list[str] | None = None):
+        self._title = title
+        self._source_name = source_name
+        self._tags = tags or []
+        self._report_id: str | None = None
+        self._builder: ReportBuilder | None = None
+        self.clear()
+
+    @property
+    def report_id(self) -> str | None:
+        return self._report_id
+
+    @property
+    def builder(self) -> ReportBuilder:
+        return self._builder
+
+    def clear(self) -> None:
+        """Reset builder for a fresh render cycle."""
+        self._builder = ReportBuilder(self._title)
+        self._builder.source("routine", self._source_name)
+        self._builder.tags(self._tags)
+
+    async def update(self) -> str:
+        """Save or update the report. Returns report_id."""
+        self._report_id = await self._builder.save(report_id=self._report_id)
+        return self._report_id

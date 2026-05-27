@@ -1,42 +1,19 @@
 """Condor MCP Server -- exposes Condor capabilities to AI agents.
 
-Provides local-only tools for routines, servers, user context,
-trading agents, skills, and notes via MCP.
-
-Accepts CLI args (--chat-id, --user-id, --agent-slug) or falls back to
-CONDOR_CHAT_ID / CONDOR_USER_ID / CONDOR_AGENT_SLUG env vars.
+Thin wrapper layer: tool registration + docstrings only.
+All business logic lives in mcp_servers.condor.tools.*
 """
-
-import argparse
-import json
-import os
 
 from mcp.server.fastmcp import FastMCP
 
+from mcp_servers.condor.middleware import handle_errors
+from mcp_servers.condor.tools import context, notes, notification, routines, servers, trading_agent
+
 mcp = FastMCP("condor")
-
-# Parse CLI args, fall back to env vars
-_parser = argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--chat-id", type=int, default=None)
-_parser.add_argument("--user-id", type=int, default=None)
-_parser.add_argument("--agent-slug", default=None)
-_parser.add_argument("--bot-token", default=None)
-_parser.add_argument("--server-name", default=None)
-_args, _ = _parser.parse_known_args()
-
-CHAT_ID = _args.chat_id if _args.chat_id is not None else int(os.environ.get("CONDOR_CHAT_ID", "0"))
-USER_ID = _args.user_id if _args.user_id is not None else int(os.environ.get("CONDOR_USER_ID", "0"))
-TELEGRAM_BOT_TOKEN = _args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CONDOR_AGENT_SLUG = _args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", "")
-ACTIVE_SERVER = _args.server_name or os.environ.get("CONDOR_SERVER_NAME", "")
-
-
-# =============================================================================
-# Notification Tool
-# =============================================================================
 
 
 @mcp.tool()
+@handle_errors("send notification")
 async def send_notification(
     text: str,
     parse_mode: str = "Markdown",
@@ -50,333 +27,11 @@ async def send_notification(
     Returns:
         {"sent": true} on success, {"error": "..."} on failure.
     """
-    if not TELEGRAM_BOT_TOKEN:
-        return {"error": "TELEGRAM_BOT_TOKEN not configured"}
-    if not CHAT_ID:
-        return {"error": "CONDOR_CHAT_ID not configured"}
-
-    import httpx
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": parse_mode,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, json=payload)
-            data = resp.json()
-            if data.get("ok"):
-                return {"sent": True}
-            # Retry without parse_mode if formatting fails
-            if "can't parse" in data.get("description", "").lower():
-                payload.pop("parse_mode")
-                resp = await client.post(url, json=payload)
-                data = resp.json()
-                if data.get("ok"):
-                    return {"sent": True}
-            return {"error": data.get("description", "Unknown Telegram API error")}
-    except Exception as e:
-        return {"error": f"Failed to send: {e}"}
-
-
-# =============================================================================
-# Routines Tools (local: list and describe only)
-# =============================================================================
-
-
-def _local_manage_routines_list(strategy_id: str | None = None) -> dict:
-    from pathlib import Path
-    from routines.base import discover_routines, discover_routines_from_path
-
-    routines = discover_routines(force_reload=True)
-    result = []
-    for name, routine in sorted(routines.items()):
-        result.append({
-            "name": name,
-            "description": routine.description,
-            "type": "continuous" if routine.is_continuous else "one-shot",
-            "scope": "global",
-        })
-
-    if strategy_id:
-        # Specific strategy requested — only list its routines
-        agent_routines_dir = _get_agent_routines_dir(strategy_id)
-        if agent_routines_dir and agent_routines_dir.exists():
-            agent_routines = discover_routines_from_path(agent_routines_dir)
-            for name, routine in sorted(agent_routines.items()):
-                result.append({
-                    "name": name,
-                    "description": routine.description,
-                    "type": "continuous" if routine.is_continuous else "one-shot",
-                    "scope": "agent",
-                    "agent": strategy_id,
-                })
-    else:
-        # No specific strategy — scan all agents for their local routines
-        # First try CONDOR_AGENT_SLUG (scoped MCP session)
-        if CONDOR_AGENT_SLUG:
-            agent_routines_dir = Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
-            if agent_routines_dir.exists():
-                agent_routines = discover_routines_from_path(agent_routines_dir)
-                for name, routine in sorted(agent_routines.items()):
-                    result.append({
-                        "name": name,
-                        "description": routine.description,
-                        "type": "continuous" if routine.is_continuous else "one-shot",
-                        "scope": "agent",
-                        "agent": CONDOR_AGENT_SLUG,
-                    })
-        else:
-            # No agent scope — discover routines from ALL strategies
-            from condor.trading_agent.strategy import StrategyStore
-            store = StrategyStore()
-            for s in store.list_all():
-                agent_routines_dir = Path("trading_agents") / s.slug / "routines"
-                if not agent_routines_dir.exists():
-                    continue
-                agent_routines = discover_routines_from_path(agent_routines_dir)
-                for name, routine in sorted(agent_routines.items()):
-                    result.append({
-                        "name": name,
-                        "description": routine.description,
-                        "type": "continuous" if routine.is_continuous else "one-shot",
-                        "scope": "agent",
-                        "agent": s.slug,
-                    })
-
-    return {"routines": result}
-
-
-def _resolve_routine(name: str):
-    """Look up a routine: agent-local first, then global."""
-    if CONDOR_AGENT_SLUG:
-        from routines.base import discover_routines_from_path
-        from pathlib import Path
-
-        agent_routines_dir = Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
-        if agent_routines_dir.exists():
-            agent_routines = discover_routines_from_path(agent_routines_dir)
-            if name in agent_routines:
-                return agent_routines[name]
-
-    from routines.base import discover_routines
-    return discover_routines(force_reload=True).get(name)
-
-
-def _local_manage_routines_describe(name: str) -> dict:
-    routine = _resolve_routine(name)
-    if not routine:
-        return {"error": f"Routine '{name}' not found"}
-    fields = routine.get_fields()
-    return {
-        "name": name,
-        "description": routine.description,
-        "type": "continuous" if routine.is_continuous else "one-shot",
-        "fields": fields,
-    }
-
-
-async def _local_manage_routines_run(name: str, config: dict | None, strategy_id: str | None = None) -> dict:
-    """Execute a one-shot routine and return its result."""
-    import asyncio
-
-    routine = None
-
-    # If strategy_id provided, look in agent-local routines first
-    if strategy_id:
-        routines_dir = _get_agent_routines_dir(strategy_id)
-        if routines_dir and routines_dir.exists():
-            from routines.base import discover_routines_from_path
-            agent_routines = discover_routines_from_path(routines_dir)
-            routine = agent_routines.get(name)
-
-    # Fall back to default resolution (CONDOR_AGENT_SLUG → global)
-    if not routine:
-        routine = _resolve_routine(name)
-
-    if not routine:
-        return {"error": f"Routine '{name}' not found"}
-
-    if routine.is_continuous:
-        return {
-            "error": f"Routine '{name}' is continuous and cannot be run via MCP. "
-            "Use the Telegram /routines command to start/stop continuous routines."
-        }
-
-    # Build config from defaults + overrides
-    try:
-        config_obj = routine.config_class(**(config or {}))
-    except Exception as e:
-        return {"error": f"Invalid config: {e}"}
-
-    # Minimal mock context — provides _chat_id for API client resolution
-    class MCPContext:
-        def __init__(self):
-            self._chat_id = CHAT_ID
-            self._user_id = USER_ID
-            self._user_data: dict = {}
-            self.bot = None
-            self.application = None
-
-        @property
-        def user_data(self):
-            return self._user_data
-
-    context = MCPContext()
-
-    try:
-        result = await asyncio.wait_for(
-            routine.run_fn(config_obj, context), timeout=120
-        )
-        # Normalize RoutineResult for JSON serialization (strip binary chart_image)
-        from routines.base import normalize_result
-        nr = normalize_result(result)
-        return {"name": name, "result": {
-            "text": nr.text,
-            "table_data": nr.table_data,
-            "table_columns": nr.table_columns,
-            "chart_image": "(PNG bytes, view via dashboard)" if nr.chart_image else None,
-            "sections": nr.sections,
-        }}
-    except asyncio.TimeoutError:
-        return {"error": f"Routine '{name}' timed out after 120s"}
-    except Exception as e:
-        return {"error": f"Routine '{name}' failed: {e}"}
-
-
-def _get_agent_routines_dir(strategy_id: str | None) -> "Path | None":
-    """Resolve the routines directory for a strategy."""
-    from pathlib import Path
-
-    # If strategy_id given, resolve slug from StrategyStore
-    if strategy_id:
-        from condor.trading_agent.strategy import StrategyStore
-        store = StrategyStore()
-        s = store.get(strategy_id)
-        if not s:
-            return None
-        return Path("trading_agents") / s.slug / "routines"
-
-    # Fall back to CONDOR_AGENT_SLUG env var
-    if CONDOR_AGENT_SLUG:
-        return Path("trading_agents") / CONDOR_AGENT_SLUG / "routines"
-
-    return None
-
-
-def _local_manage_routines_create(name: str, code: str, strategy_id: str | None) -> dict:
-    """Create a new agent-local routine file."""
-    import re
-    from pathlib import Path
-
-    if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
-        return {"error": "name must be lowercase alphanumeric with underscores (e.g. 'my_scanner')"}
-    if not code:
-        return {"error": "code is required"}
-
-    routines_dir = _get_agent_routines_dir(strategy_id)
-    if not routines_dir:
-        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
-
-    file_path = routines_dir / f"{name}.py"
-    if file_path.exists():
-        return {"error": f"Routine '{name}' already exists. Use action='edit_routine' to update it."}
-
-    # Validate the code has required components
-    if "class Config" not in code:
-        return {"error": "Routine code must define a 'class Config(BaseModel)' class"}
-    if "async def run" not in code and "def run" not in code:
-        return {"error": "Routine code must define a 'run(config, context)' function"}
-
-    routines_dir.mkdir(parents=True, exist_ok=True)
-    file_path.write_text(code)
-
-    # Verify it loads
-    from routines.base import discover_routines_from_path
-    loaded = discover_routines_from_path(routines_dir)
-    if name not in loaded:
-        # Remove the broken file
-        file_path.unlink()
-        return {"error": "Routine file was created but failed to load. Check for syntax errors."}
-
-    routine = loaded[name]
-    return {
-        "created": True,
-        "name": name,
-        "description": routine.description,
-        "path": str(file_path),
-    }
-
-
-def _local_manage_routines_read(name: str, strategy_id: str | None) -> dict:
-    """Read the source code of a routine."""
-    from pathlib import Path
-
-    # Check agent-local first
-    routines_dir = _get_agent_routines_dir(strategy_id)
-    if routines_dir:
-        file_path = routines_dir / f"{name}.py"
-        if file_path.exists():
-            return {"name": name, "code": file_path.read_text(), "scope": "agent"}
-
-    # Check global routines
-    global_path = Path("routines") / f"{name}.py"
-    if global_path.exists():
-        return {"name": name, "code": global_path.read_text(), "scope": "global"}
-
-    return {"error": f"Routine '{name}' not found"}
-
-
-def _local_manage_routines_edit(name: str, code: str, strategy_id: str | None) -> dict:
-    """Update the source code of an agent-local routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
-    if not routines_dir:
-        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
-
-    file_path = routines_dir / f"{name}.py"
-    if not file_path.exists():
-        return {"error": f"Agent routine '{name}' not found. Use action='create_routine' first."}
-
-    if not code:
-        return {"error": "code is required"}
-
-    # Write new code
-    old_code = file_path.read_text()
-    file_path.write_text(code)
-
-    # Verify it loads
-    from routines.base import discover_routines_from_path
-    loaded = discover_routines_from_path(routines_dir)
-    if name not in loaded:
-        # Restore old code
-        file_path.write_text(old_code)
-        return {"error": "Updated code failed to load (syntax error?). Reverted to previous version."}
-
-    routine = loaded[name]
-    return {
-        "updated": True,
-        "name": name,
-        "description": routine.description,
-    }
-
-
-def _local_manage_routines_delete(name: str, strategy_id: str | None) -> dict:
-    """Delete an agent-local routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
-    if not routines_dir:
-        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
-
-    file_path = routines_dir / f"{name}.py"
-    if not file_path.exists():
-        return {"error": f"Agent routine '{name}' not found"}
-
-    file_path.unlink()
-    return {"deleted": True, "name": name}
+    return await notification.send_notification(text, parse_mode)
 
 
 @mcp.tool()
+@handle_errors("manage routines")
 async def manage_routines(
     action: str,
     name: str | None = None,
@@ -390,6 +45,9 @@ async def manage_routines(
     - "list": List all available routines with name, description, type, and scope
     - "describe": Show config schema for a routine (requires name)
     - "run": Execute a one-shot routine and return its result (requires name, optional config)
+    - "start": Start a continuous routine as a background task (requires name, optional config)
+    - "stop": Stop a running routine instance (requires name=instance_id)
+    - "list_instances": List all running/scheduled routine instances
 
     Actions -- Agent-Local Routine CRUD (requires strategy_id or CONDOR_AGENT_SLUG):
     - "create_routine": Create a new agent-local routine (requires name, code)
@@ -403,92 +61,19 @@ async def manage_routines(
 
     Args:
         action: The action to perform.
-        name: Routine name (required for all except list).
-        config: Config overrides for run (optional, merged with defaults).
+        name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
+        config: Config overrides for run/start (optional, merged with defaults).
         strategy_id: Strategy ID for agent-local routine CRUD operations.
         code: Python source code for create_routine / edit_routine.
 
     Returns:
         Action-specific result dict.
     """
-    if action == "list":
-        return _local_manage_routines_list(strategy_id)
-
-    if action == "describe":
-        if not name:
-            return {"error": "name is required"}
-        return _local_manage_routines_describe(name)
-
-    if action == "run":
-        if not name:
-            return {"error": "name is required"}
-        return await _local_manage_routines_run(name, config, strategy_id)
-
-    if action == "create_routine":
-        if not name:
-            return {"error": "name is required"}
-        return _local_manage_routines_create(name, code or "", strategy_id)
-
-    if action == "read_routine":
-        if not name:
-            return {"error": "name is required"}
-        return _local_manage_routines_read(name, strategy_id)
-
-    if action == "edit_routine":
-        if not name:
-            return {"error": "name is required"}
-        return _local_manage_routines_edit(name, code or "", strategy_id)
-
-    if action == "delete_routine":
-        if not name:
-            return {"error": "name is required"}
-        return _local_manage_routines_delete(name, strategy_id)
-
-    return {"error": f"Unknown action: {action}"}
-
-
-# =============================================================================
-# Servers Tools (local: list and status only)
-# =============================================================================
-
-
-def _local_manage_servers_list() -> dict:
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-    accessible = cm.get_accessible_servers(USER_ID)
-    active_server = cm.get_chat_default_server(CHAT_ID)
-    servers = []
-    for name in accessible:
-        server = cm.get_server(name)
-        if not server:
-            continue
-        perm = cm.get_server_permission(USER_ID, name)
-        servers.append({
-            "name": name,
-            "host": server["host"],
-            "port": server["port"],
-            "permission": perm.value if perm else "unknown",
-            "is_active": name == active_server,
-        })
-    return {"servers": servers, "active_server": active_server}
-
-
-async def _local_manage_servers_status(name: str | None) -> dict:
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-    if not name:
-        name = cm.get_chat_default_server(CHAT_ID)
-        if not name:
-            return {"error": "No active server"}
-    if not cm.has_server_access(USER_ID, name):
-        return {"error": f"No access to server '{name}'"}
-    status = await cm.check_server_status(name)
-    return {"server": name, **status}
+    return await routines.manage_routines(action, name, config, strategy_id, code)
 
 
 @mcp.tool()
+@handle_errors("manage servers")
 async def manage_servers(
     action: str,
     name: str | None = None,
@@ -506,21 +91,11 @@ async def manage_servers(
     Returns:
         Action-specific result dict.
     """
-    if action == "list":
-        return _local_manage_servers_list()
-
-    if action == "status":
-        return await _local_manage_servers_status(name)
-
-    return {"error": f"Unknown action: {action}"}
-
-
-# =============================================================================
-# User Context Tools
-# =============================================================================
+    return await servers.manage_servers(action, name)
 
 
 @mcp.tool()
+@handle_errors("get user context")
 async def get_user_context() -> dict:
     """Get the current user's context within Condor.
 
@@ -530,276 +105,11 @@ async def get_user_context() -> dict:
         - user_role: User's role (admin, user, pending, blocked)
         - is_admin: Whether the user is an admin
     """
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-    active_server = cm.get_chat_default_server(CHAT_ID)
-    user_role = cm.get_user_role(USER_ID)
-    is_admin = cm.is_admin(USER_ID)
-
-    return {
-        "active_server": active_server,
-        "user_role": user_role.value if user_role else None,
-        "is_admin": is_admin,
-    }
-
-
-# =============================================================================
-# Trading Agent Tools (mostly local)
-# =============================================================================
-
-
-def _local_journal_read(params: dict) -> dict:
-    from condor.trading_agent.journal import JournalManager
-    from condor.trading_agent.engine import get_engine
-
-    agent_id = params.get("agent_id", "")
-    if not agent_id:
-        return {"error": "agent_id is required"}
-
-    engine = get_engine(agent_id)
-    if engine:
-        if engine.is_experiment:
-            return {"content": "(experiment mode — no journal, results saved to dry_runs/)"}
-        session_dir = engine.session_dir
-        agent_dir = engine.strategy.agent_dir
-    else:
-        from condor.trading_agent.journal import resolve_agent_dirs
-        session_dir, agent_dir = resolve_agent_dirs(agent_id)
-    if not session_dir:
-        return {"content": "(no journal available for this agent)"}
-    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
-
-    section = params.get("section", "recent")
-    max_entries = params.get("max_entries", 30)
-
-    if section == "full":
-        return {"content": jm.read_full()}
-    elif section == "learnings":
-        return {"content": jm.read_learnings()}
-    elif section in ("state", "summary"):
-        return {"content": jm.read_state()}
-    elif section == "runs":
-        runs = jm.list_runs(limit=max_entries)
-        return {"runs": runs}
-    elif section.startswith("run:"):
-        try:
-            tick_num = int(section.split(":", 1)[1])
-        except (ValueError, IndexError):
-            return {"error": "Invalid run format. Use 'run:N' where N is the tick number."}
-        content = jm.read_run_snapshot(tick_num)
-        if not content:
-            return {"error": f"No run snapshot found for tick #{tick_num}"}
-        return {"content": content}
-    else:
-        return {"content": jm.read_recent(max_entries=max_entries)}
-
-
-def _local_journal_write(params: dict) -> dict:
-    from condor.trading_agent.journal import JournalManager
-    from condor.trading_agent.engine import get_engine
-
-    agent_id = params.get("agent_id", "")
-    if not agent_id:
-        return {"error": "agent_id is required"}
-
-    engine = get_engine(agent_id)
-    if engine:
-        if engine.is_experiment:
-            return {"error": "experiments don't have a journal — use dry_runs/ for results"}
-        session_dir = engine.session_dir
-        agent_dir = engine.strategy.agent_dir
-    else:
-        from condor.trading_agent.journal import resolve_agent_dirs
-        session_dir, agent_dir = resolve_agent_dirs(agent_id)
-    if not session_dir:
-        return {"error": "no journal available for this agent"}
-    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
-
-    entry_type = params.get("entry_type", "action")
-    text = params.get("text", "")
-    if not text:
-        return {"error": "text is required"}
-
-    if entry_type == "learning":
-        category = params.get("category", "market")
-        jm.append_learning(text, category=category)
-    elif entry_type == "state":
-        jm.write_state(text)
-    else:
-        tick = params.get("tick", 0)
-        reasoning = params.get("reasoning", "")
-        risk_note = params.get("risk_note", "")
-        jm.append_action(tick, text, reasoning, risk_note)
-    return {"written": True}
+    return await context.get_user_context()
 
 
 @mcp.tool()
-async def trading_agent_journal_read(
-    agent_id: str,
-    section: str = "recent",
-    max_entries: int = 30,
-) -> dict:
-    """Read the trading agent's journal.
-
-    Args:
-        agent_id: The trading agent instance ID.
-        section: What to read:
-                 "recent" (last 10 decisions from run snapshots),
-                 "learnings" (all learnings, max 20),
-                 "summary" (current status one-liner),
-                 "state" (alias for summary),
-                 "full" (entire journal),
-                 "runs" (list recent run snapshots),
-                 "run:N" (read specific run snapshot, e.g. "run:3").
-        max_entries: Max entries for recent/runs (default 30).
-
-    Returns:
-        {"content": "<journal text>"} or {"runs": [...]} for runs listing.
-    """
-    return _local_journal_read(
-        {"agent_id": agent_id, "section": section, "max_entries": max_entries}
-    )
-
-
-@mcp.tool()
-async def trading_agent_journal_write(
-    agent_id: str,
-    entry_type: str,
-    text: str,
-    reasoning: str = "",
-    risk_note: str = "",
-    tick: int = 0,
-    category: str = "",
-) -> dict:
-    """Write to the trading agent's journal. Keep entries SHORT (one line).
-
-    Args:
-        agent_id: The trading agent instance ID.
-        entry_type: "action", "learning", or "state".
-            - "action": What you did this tick (auto-trimmed to last 10).
-            - "learning": A new insight. Duplicates are auto-filtered. Only write
-              if this is genuinely new and not already in learnings (max 20).
-            - "state": Overwrite the current state snapshot (e.g. price, position, grids).
-        text: The entry content. Keep it to ONE short line.
-        reasoning: One-sentence reasoning (for actions only).
-        risk_note: Optional risk note (for actions only).
-        tick: Current tick number (for actions only).
-        category: Learning category: "market" (observations, patterns, volatility)
-            or "execution" (errors, fills, timing). Only used when entry_type="learning".
-            Defaults to "market".
-
-    Returns:
-        {"written": true}
-    """
-    return _local_journal_write({
-        "agent_id": agent_id,
-        "entry_type": entry_type,
-        "text": text,
-        "reasoning": reasoning,
-        "risk_note": risk_note,
-        "tick": tick,
-        "category": category,
-    })
-
-
-@mcp.tool()
-async def manage_notes(
-    action: str,
-    key: str | None = None,
-    value: str | None = None,
-) -> dict:
-    """Manage persistent key-value notes for Condor's memory.
-
-    Use this to remember facts across sessions: client chat IDs, server aliases,
-    trading preferences, or any context the user asks you to remember.
-
-    Actions:
-    - "list": List all saved notes
-    - "get": Get a specific note (requires key)
-    - "set": Save a note (requires key and value)
-    - "delete": Delete a note (requires key)
-
-    Naming convention for keys:
-    - Use dot-separated namespaces: "server.brigado_2.group_chat_id"
-    - Common prefixes: "server.", "client.", "routine.", "trading."
-
-    Args:
-        action: The action to perform (list, get, set, delete)
-        key: The note key (required for get, set, delete)
-        value: The note value (required for set)
-
-    Returns:
-        Action-specific result dict.
-    """
-    params: dict = {"action": action}
-    if key is not None:
-        params["key"] = key
-    if value is not None:
-        params["value"] = value
-
-    return _local_manage_notes(params)
-
-
-def _local_manage_notes(params: dict) -> dict:
-    """File-based notes storage."""
-    import json
-    from pathlib import Path
-
-    notes_file = Path("data") / "notes" / f"chat_{CHAT_ID}.json"
-
-    def _load() -> dict:
-        if notes_file.exists():
-            try:
-                return json.loads(notes_file.read_text())
-            except Exception:
-                return {}
-        return {}
-
-    def _save(notes: dict) -> None:
-        notes_file.parent.mkdir(parents=True, exist_ok=True)
-        notes_file.write_text(json.dumps(notes, indent=2))
-
-    action = params.get("action", "list")
-
-    if action == "list":
-        return {"notes": _load()}
-
-    elif action == "get":
-        key = params.get("key")
-        if not key:
-            return {"error": "key is required"}
-        notes = _load()
-        value = notes.get(key)
-        if value is None:
-            return {"error": f"Note '{key}' not found"}
-        return {"key": key, "value": value}
-
-    elif action == "set":
-        key = params.get("key")
-        value = params.get("value")
-        if not key or value is None:
-            return {"error": "key and value are required"}
-        notes = _load()
-        notes[key] = str(value)
-        _save(notes)
-        return {"saved": True, "key": key, "value": str(value)}
-
-    elif action == "delete":
-        key = params.get("key")
-        if not key:
-            return {"error": "key is required"}
-        notes = _load()
-        if key not in notes:
-            return {"error": f"Note '{key}' not found"}
-        del notes[key]
-        _save(notes)
-        return {"deleted": True, "key": key}
-
-    return {"error": f"Unknown action: {action}"}
-
-
-@mcp.tool()
+@handle_errors("manage trading agent")
 async def manage_trading_agent(
     action: str,
     agent_id: str | None = None,
@@ -831,13 +141,17 @@ async def manage_trading_agent(
     - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
     - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
 
+    Actions -- Journal:
+    - "journal_read": Read journal entries (requires agent_id, optional section/max_entries)
+    - "journal_write": Write a journal entry (requires agent_id, entry_type, text)
+
     Actions -- Monitoring:
     - "agent_tracker": Get the full tracker markdown (tick history, executor ledger, snapshots) (requires agent_id)
     - "agent_journal": Get recent journal entries and learnings (requires agent_id)
 
     Args:
         action: The action to perform.
-        agent_id: Agent instance ID (for lifecycle/monitoring actions).
+        agent_id: Agent instance ID (for lifecycle/monitoring/journal actions).
         strategy_id: Strategy ID (for strategy/routine/start actions).
         name: Strategy name (for create/update) or routine name (for run_routine).
         description: Strategy description (for create/update).
@@ -851,372 +165,111 @@ async def manage_trading_agent(
     Returns:
         Action-specific result dict.
     """
-    # Strategy operations work locally (file-based StrategyStore)
-    local_strategy_actions = {
-        "list_strategies", "get_strategy", "create_strategy",
-        "update_strategy", "delete_strategy",
-    }
-
-    if action in local_strategy_actions:
-        return _local_manage_strategy(action, strategy_id, name, description,
-                                       instructions, agent_key, skills, config)
-
-    # Routine actions scoped to a strategy
-    if action == "list_routines":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        return _local_strategy_list_routines(strategy_id)
-
-    if action == "run_routine":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        if not name:
-            return {"error": "name is required"}
-        return await _local_manage_routines_run(name, config, strategy_id)
-
-    # Agent lifecycle actions
-    lifecycle_actions = {"start_agent", "stop_agent", "pause_agent", "resume_agent", "list_agents"}
-    if action in lifecycle_actions:
-        return await _local_agent_lifecycle(action, strategy_id, agent_id, config)
-
-    # Journal/monitoring that's file-based
-    if action in ("agent_tracker", "agent_journal"):
-        return _local_agent_monitoring(action, agent_id)
-
-    return {"error": f"Unknown action: {action}"}
-
-
-def _local_strategy_list_routines(strategy_id: str) -> dict:
-    """List global + agent-local routines for a strategy, with scope labels."""
-    from routines.base import discover_routines, discover_routines_from_path
-
-    result = []
-
-    # Global routines
-    for name, routine in sorted(discover_routines(force_reload=True).items()):
-        result.append({
-            "name": name,
-            "description": routine.description,
-            "type": "continuous" if routine.is_continuous else "one-shot",
-            "scope": "global",
-        })
-
-    # Agent-local routines
-    routines_dir = _get_agent_routines_dir(strategy_id)
-    if routines_dir and routines_dir.exists():
-        for name, routine in sorted(discover_routines_from_path(routines_dir).items()):
-            result.append({
-                "name": name,
-                "description": routine.description,
-                "type": "continuous" if routine.is_continuous else "one-shot",
-                "scope": "agent",
-            })
-
-    return {"routines": result}
-
-
-def _local_manage_strategy(
-    action: str, strategy_id: str | None, name: str | None,
-    description: str | None, instructions: str | None,
-    agent_key: str | None, skills: list[str] | None, config: dict | None,
-) -> dict:
-    from condor.trading_agent.strategy import StrategyStore
-
-    store = StrategyStore()
-
-    if action == "list_strategies":
-        strategies = store.list_all()
-        return {
-            "strategies": [
-                {
-                    "id": s.id,
-                    "name": s.name,
-                    "description": s.description,
-                    "agent_key": s.agent_key,
-                    "skills": s.skills,
-                    "default_config": s.default_config,
-                }
-                for s in strategies
-            ]
-        }
-
-    elif action == "get_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get(strategy_id)
-        if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
-        return {
-            "id": s.id,
-            "name": s.name,
-            "description": s.description,
-            "agent_key": s.agent_key,
-            "instructions": s.instructions,
-            "skills": s.skills,
-            "default_config": s.default_config,
-            "created_by": s.created_by,
-            "created_at": s.created_at,
-        }
-
-    elif action == "create_strategy":
-        if not name or not instructions:
-            return {"error": "name and instructions are required"}
-        strategy = store.create(
-            name=name,
-            description=description or "",
-            agent_key=agent_key or "claude-code",
-            instructions=instructions,
-            skills=skills,
-            default_config=config,
-            created_by=USER_ID,
-        )
-        return {"created": True, "strategy_id": strategy.id, "name": strategy.name}
-
-    elif action == "update_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get(strategy_id)
-        if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
-        if name:
-            s.name = name
-        if description:
-            s.description = description
-        if instructions:
-            s.instructions = instructions
-        if agent_key:
-            s.agent_key = agent_key
-        if skills is not None:
-            s.skills = skills
-        if config:
-            s.default_config = config
-        store.update(s)
-        return {"updated": True, "strategy_id": s.id, "name": s.name}
-
-    elif action == "delete_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        deleted = store.delete(strategy_id)
-        return {"deleted": deleted}
-
-    return {"error": f"Unknown strategy action: {action}"}
-
-
-async def _call_main_api(method: str, path: str, body: dict | None = None) -> dict | list:
-    """Call the Condor web API in the main process.
-
-    The MCP server runs as a subprocess -- TickEngines must be created in the
-    main process so they survive beyond the MCP subprocess lifecycle.
-    """
-    import aiohttp
-    from condor.web.auth import create_jwt
-
-    from utils.config import WEB_PORT
-
-    url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
-    token = create_jwt(USER_ID, role="user")
-    headers = {"Authorization": f"Bearer {token}"}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.request(method, url, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                data = await resp.json()
-                if resp.status >= 400:
-                    detail = data.get("detail", str(data)) if isinstance(data, dict) else str(data)
-                    return {"error": f"API error ({resp.status}): {detail}"}
-                return data
-    except Exception as e:
-        return {"error": f"Failed to reach main process API: {e}"}
-
-
-async def _local_agent_lifecycle(
-    action: str, strategy_id: str | None, agent_id: str | None, config: dict | None,
-) -> dict:
-    # All lifecycle actions delegate to the main process via the web API.
-    # This ensures TickEngines live in the main process and survive beyond
-    # the MCP subprocess that created them.
-
-    if action == "list_agents":
-        result = await _call_main_api("GET", "/agents")
-        if isinstance(result, dict) and "error" in result:
-            return result
-        # The web API returns a list of AgentSummary objects.
-        # Extract running instances for a flat list like the old format.
-        agents = []
-        if isinstance(result, list):
-            for agent_summary in result:
-                for inst in agent_summary.get("instances", []):
-                    agents.append(inst)
-        if not agents:
-            return {"agents": [], "message": "No agents running"}
-        return {"agents": agents}
-
-    if action == "start_agent":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-
-        # Resolve the strategy slug from strategy_id
-        from condor.trading_agent.strategy import StrategyStore
-        store = StrategyStore()
-        strategy = store.get(strategy_id)
-        if not strategy:
-            return {"error": f"Strategy '{strategy_id}' not found"}
-
-        # Build config with server resolution and overrides
-        from condor.trading_agent.config import load_full_config
-        from config_manager import get_config_manager, get_effective_server
-        config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
-        if config:
-            if config.get("dry_run") and "execution_mode" not in config:
-                config["execution_mode"] = "dry_run"
-            config_dict.update(config)
-        if not config or "server_name" not in config:
-            effective = ACTIVE_SERVER or get_effective_server(CHAT_ID)
-            if not effective:
-                cm = get_config_manager()
-                accessible = cm.get_accessible_servers(USER_ID)
-                effective = accessible[0] if accessible else None
-            if effective:
-                config_dict["server_name"] = effective
-
-        # Extract trading_context from config (web API expects it separately)
-        trading_context = config_dict.pop("trading_context", "")
-
-        result = await _call_main_api("POST", f"/agents/{strategy.slug}/start", {
-            "config": config_dict,
-            "trading_context": trading_context,
-            "chat_id": CHAT_ID,
-            "user_id": USER_ID,
-        })
-        return result
-
-    if action == "stop_agent":
-        if not agent_id:
-            return {"error": "agent_id is required"}
-        # Extract slug from agent_id (format: {slug}_{session_num} or {slug}_e{num})
-        slug = _slug_from_agent_id(agent_id)
-        result = await _call_main_api("POST", f"/agents/{slug}/stop?agent_id={agent_id}")
-        return result
-
-    if action == "pause_agent":
-        if not agent_id:
-            return {"error": "agent_id is required"}
-        slug = _slug_from_agent_id(agent_id)
-        result = await _call_main_api("POST", f"/agents/{slug}/pause?agent_id={agent_id}")
-        return result
-
-    if action == "resume_agent":
-        if not agent_id:
-            return {"error": "agent_id is required"}
-        slug = _slug_from_agent_id(agent_id)
-        result = await _call_main_api("POST", f"/agents/{slug}/resume?agent_id={agent_id}")
-        return result
-
-    return {"error": f"Unknown lifecycle action: {action}"}
-
-
-def _slug_from_agent_id(agent_id: str) -> str:
-    """Extract strategy slug from agent_id.
-
-    agent_id formats: '{slug}_{session_num}' or '{slug}_e{num}'
-    The slug itself may contain underscores, so split from the right.
-    """
-    import re
-    # Match trailing _N or _eN
-    m = re.match(r'^(.+?)_(?:e?\d+)$', agent_id)
-    return m.group(1) if m else agent_id
-
-
-def _local_agent_monitoring(action: str, agent_id: str | None) -> dict:
-    if not agent_id:
-        return {"error": "agent_id is required"}
-
-    from condor.trading_agent.journal import JournalManager
-    from condor.trading_agent.engine import get_engine
-
-    engine = get_engine(agent_id)
-    if engine:
-        if engine.is_experiment:
-            return {"error": "experiments don't have a journal — use dry_runs/ for results"}
-        session_dir = engine.session_dir
-        agent_dir = engine.strategy.agent_dir
-    else:
-        from condor.trading_agent.journal import resolve_agent_dirs
-        session_dir, agent_dir = resolve_agent_dirs(agent_id)
-    if not session_dir:
-        return {"error": "no journal available for this agent"}
-    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
-
-    if action == "agent_tracker":
-        content = jm.read_full()
-        summary = jm.get_summary_dict()
-        return {"tracker_md": content, "summary": summary}
-
-    elif action == "agent_journal":
-        return {
-            "recent_actions": jm.read_recent(max_entries=30),
-            "learnings": jm.read_learnings(),
-            "entry_count": jm.entry_count(),
-        }
-
-    return {"error": f"Unknown monitoring action: {action}"}
+    return await trading_agent.manage_trading_agent(
+        action, agent_id, strategy_id, name, description,
+        instructions, agent_key, skills, config,
+    )
 
 
 @mcp.tool()
-async def manage_skills(
+@handle_errors("manage notes")
+async def manage_notes(
     action: str,
-    name: str | None = None,
-    params: dict | None = None,
+    key: str | None = None,
+    value: str | None = None,
 ) -> dict:
-    """(Deprecated) Use manage_routines instead.
+    """Manage persistent key-value notes for Condor's memory.
 
-    Skills are being replaced by routines. Use manage_routines(action="run", ...)
-    to execute analysis scripts directly.
+    Use this to remember facts across sessions: client chat IDs, server aliases,
+    trading preferences, or any context the user asks you to remember.
 
     Actions:
-    - "list": List all available skills with descriptions
-    - "test": Test a skill with given params (requires name)
+    - "list": List all saved notes
+    - "get": Get a specific note (requires key)
+    - "set": Save a note (requires key and value)
+    - "delete": Delete a note (requires key)
+
+    Naming convention for keys:
+    - Use dot-separated namespaces: "server.brigado_2.group_chat_id"
+    - Common prefixes: "server.", "client.", "routine.", "trading."
 
     Args:
-        action: The action to perform (list, test).
-        name: Skill name (for test).
-        params: Skill parameters (for test, e.g. {"connector_name": "binance", "trading_pair": "BTC-USDT"}).
+        action: The action to perform (list, get, set, delete)
+        key: The note key (required for get, set, delete)
+        value: The note value (required for set)
 
     Returns:
         Action-specific result dict.
     """
-    if action == "list":
-        return _local_manage_skills_list()
-
-    if action == "test":
-        if not name:
-            return {"error": "name is required"}
-        return _local_skill_test(name, params or {})
-
-    return {"error": f"Unknown action: {action}"}
+    return await notes.manage_notes(action, key, value)
 
 
-def _local_manage_skills_list() -> dict:
-    from condor.trading_agent.providers import list_providers
-
-    items = []
-    for p in list_providers():
-        items.append({
-            "name": p.name,
-            "is_core": p.is_core,
-            "type": "provider",
-        })
-    return {"skills": items}
+# ---------------------------------------------------------------------------
+# Backward-compatibility aliases for journal tools
+# ---------------------------------------------------------------------------
 
 
-def _local_skill_test(name: str, config: dict) -> dict:
-    from condor.trading_agent.providers import get_provider
+@mcp.tool()
+@handle_errors("journal read")
+async def trading_agent_journal_read(
+    agent_id: str,
+    section: str = "recent",
+    max_entries: int = 30,
+) -> dict:
+    """Read the trading agent's journal.
 
-    provider = get_provider(name)
-    if provider:
-        return {"error": f"Provider '{name}' requires the Condor bot to be running for testing (needs API client)"}
+    Args:
+        agent_id: The trading agent instance ID.
+        section: What to read:
+                 "recent" (last 10 decisions from run snapshots),
+                 "learnings" (all learnings, max 20),
+                 "summary" (current status one-liner),
+                 "state" (alias for summary),
+                 "full" (entire journal),
+                 "runs" (list recent run snapshots),
+                 "run:N" (read specific run snapshot, e.g. "run:3").
+        max_entries: Max entries for recent/runs (default 30).
 
-    return {"error": f"Skills have been removed; use manage_routines instead. Provider '{name}' not found."}
+    Returns:
+        {"content": "<journal text>"} or {"runs": [...]} for runs listing.
+    """
+    return trading_agent.journal_read(agent_id, section, max_entries)
+
+
+@mcp.tool()
+@handle_errors("journal write")
+async def trading_agent_journal_write(
+    agent_id: str,
+    entry_type: str,
+    text: str,
+    reasoning: str = "",
+    risk_note: str = "",
+    tick: int = 0,
+    category: str = "",
+) -> dict:
+    """Write to the trading agent's journal. Keep entries SHORT (one line).
+
+    Args:
+        agent_id: The trading agent instance ID.
+        entry_type: "action", "learning", or "state".
+            - "action": What you did this tick (auto-trimmed to last 10).
+            - "learning": A new insight. Duplicates are auto-filtered. Only write
+              if this is genuinely new and not already in learnings (max 20).
+            - "state": Overwrite the current state snapshot (e.g. price, position, grids).
+        text: The entry content. Keep it to ONE short line.
+        reasoning: One-sentence reasoning (for actions only).
+        risk_note: Optional risk note (for actions only).
+        tick: Current tick number (for actions only).
+        category: Learning category: "market" (observations, patterns, volatility)
+            or "execution" (errors, fills, timing). Only used when entry_type="learning".
+            Defaults to "market".
+
+    Returns:
+        {"written": true}
+    """
+    return trading_agent.journal_write(
+        agent_id, entry_type, text, reasoning, risk_note, tick, category,
+    )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 import { useCallback, useSyncExternalStore } from "react";
 
-export type Theme = "dark" | "light";
+export type Theme = "dark" | "light" | "colorblind";
 
+const THEMES: Theme[] = ["dark", "light", "colorblind"];
 const STORAGE_KEY = "condor_theme";
 
 function getSystemTheme(): Theme {
@@ -9,8 +10,8 @@ function getSystemTheme(): Theme {
 }
 
 function getStoredTheme(): Theme {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored === "dark" || stored === "light") return stored;
+  const stored = localStorage.getItem(STORAGE_KEY) as Theme | null;
+  if (stored && THEMES.includes(stored)) return stored;
   return getSystemTheme();
 }
 
@@ -45,7 +46,8 @@ export function useTheme() {
   }, []);
 
   const toggleTheme = useCallback(() => {
-    setTheme(currentTheme === "dark" ? "light" : "dark");
+    const idx = THEMES.indexOf(currentTheme);
+    setTheme(THEMES[(idx + 1) % THEMES.length]);
   }, [setTheme]);
 
   return { theme, setTheme, toggleTheme };

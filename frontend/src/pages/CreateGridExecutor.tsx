@@ -402,7 +402,7 @@ export function CreateGridExecutor() {
             </h3>
           </div>
           <div className="flex-1 overflow-y-auto">
-            <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+            <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={state.pair.split("-")[1] || "USDT"} />
           </div>
         </div>
       </div>

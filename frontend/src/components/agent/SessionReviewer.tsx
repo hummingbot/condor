@@ -392,6 +392,7 @@ export function SessionReviewer({
                       serverName={serverName}
                       controllerIds={controllerIds}
                       onSnapshotClick={handleSnapshotClick}
+                      sessionSummary={parsedJournal.summary}
                     />
                     <SessionOverview journal={parsedJournal} perf={sessionPerf} />
                   </div>

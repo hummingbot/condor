@@ -2,12 +2,12 @@ import { ChevronDown } from "lucide-react";
 import { useState } from "react";
 
 const PRESETS = [
-  { label: "30s", sec: 30 },
   { label: "1m", sec: 60 },
   { label: "5m", sec: 300 },
   { label: "15m", sec: 900 },
   { label: "30m", sec: 1800 },
   { label: "1h", sec: 3600 },
+  { label: "6h", sec: 21600 },
 ];
 
 interface Props {

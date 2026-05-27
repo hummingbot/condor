@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import type { RoutineFieldInfo } from "@/lib/api";
 import { api } from "@/lib/api";
@@ -33,9 +33,9 @@ function SelectField({
 
   // Auto-select first option when options load and no value is set
   useEffect(() => {
-    if (options.length > 0 && (!value || value === "")) {
-      onChange(options[0]);
-    }
+    if (options.length === 0) return;
+    if (value && value !== "" && options.includes(String(value))) return;
+    onChange(options[0]);
   }, [options, value, onChange]);
 
   return (
@@ -57,6 +57,38 @@ function SelectField({
       </select>
       <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--color-text-muted)]" />
     </div>
+  );
+}
+
+function NumberField({
+  fieldType,
+  value,
+  onChange,
+}: {
+  fieldType: string;
+  value: unknown;
+  onChange: (v: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value ?? ""));
+
+  // Sync from parent when value changes externally
+  useEffect(() => {
+    setDraft(String(value ?? ""));
+  }, [value]);
+
+  return (
+    <input
+      type="number"
+      step={fieldType === "float" ? "any" : "1"}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const v = fieldType === "int" ? parseInt(draft) : parseFloat(draft);
+        if (!isNaN(v)) onChange(v);
+        else setDraft(String(value ?? ""));
+      }}
+      className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+    />
   );
 }
 
@@ -87,15 +119,10 @@ export function RoutineConfigForm({ fields, values, onChange }: Props) {
               {values[key] ? "ON" : "OFF"}
             </button>
           ) : field.type === "int" || field.type === "float" ? (
-            <input
-              type="number"
-              step={field.type === "float" ? "any" : "1"}
-              value={String(values[key] ?? field.default ?? "")}
-              onChange={(e) => {
-                const v = field.type === "int" ? parseInt(e.target.value) : parseFloat(e.target.value);
-                if (!isNaN(v)) onChange(key, v);
-              }}
-              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+            <NumberField
+              fieldType={field.type}
+              value={values[key] ?? field.default ?? ""}
+              onChange={(v) => onChange(key, v)}
             />
           ) : (
             <input
