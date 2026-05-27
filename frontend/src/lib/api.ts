@@ -417,6 +417,7 @@ export interface AgentDetail {
   description: string;
   agent_md: string;
   config: Record<string, unknown>;
+  defaults: Record<string, unknown>;
   default_trading_context: string;
   learnings: string;
   status: string;
@@ -424,6 +425,13 @@ export interface AgentDetail {
   sessions: SessionInfo[];
   experiments: ExperimentInfo[];
   instances: RunningInstance[];
+}
+
+export interface AgentDefaults {
+  default_config: Record<string, unknown>;
+  default_trading_context: string;
+  agent_key: string;
+  model_base_url: string;
 }
 
 export interface SnapshotSummary {
@@ -934,6 +942,26 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ config }),
     }),
+
+  getAgentDefaults: (slug: string) =>
+    apiFetch<AgentDefaults>(`/api/v1/agents/${slug}/defaults`),
+
+  updateAgentDefaults: (
+    slug: string,
+    data: {
+      default_config?: Record<string, unknown>;
+      default_trading_context?: string;
+      agent_key?: string;
+      model_base_url?: string;
+    },
+  ) =>
+    apiFetch<AgentDefaults>(`/api/v1/agents/${slug}/defaults`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  getAgentConfigSchema: () =>
+    apiFetch<Record<string, unknown>>("/api/v1/agents/config-schema"),
 
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${slug}`, {

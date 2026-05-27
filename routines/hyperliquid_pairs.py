@@ -95,7 +95,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str | Routi
         )
         builder.markdown(text)
         builder.table(table_data, columns=["Pair", "HIP3", "Quote"])
-        builder.save()
+        await builder.save()
     except Exception as e:
         logger.warning(f"Report generation failed: {e}")
 

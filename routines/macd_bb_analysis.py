@@ -219,7 +219,7 @@ async def run(
         builder.table([table_row], columns=table_columns)
         builder.markdown("### Entry Rules Check")
         builder.table(conditions_rows, columns=conditions_columns)
-        builder.save()
+        await builder.save()
     except Exception as e:
         logger.warning(f"Report generation failed: {e}")
 

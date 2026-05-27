@@ -25,6 +25,14 @@ class RiskLimits:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
+def resolve_risk_limits(config: dict) -> RiskLimits:
+    """Build risk limits from session config; max exposure = budget × max executors."""
+    limits = RiskLimits.from_dict(config.get("risk_limits", {}))
+    budget = float(config.get("total_amount_quote", 100))
+    limits.max_position_size_quote = budget * limits.max_open_executors
+    return limits
+
+
 @dataclass
 class RiskState:
     total_exposure: float = 0.0

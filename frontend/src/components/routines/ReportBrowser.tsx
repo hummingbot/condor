@@ -102,15 +102,12 @@ export function ReportBrowser({
   );
   const isAgent = activeRoutine?.source.startsWith("agent:") ?? false;
 
-  // Reports for active source — poll when a scheduled instance is active
-  const hasScheduledInstance = instances.some(
-    (i) => i.routine_name === activeSource && (i.status === "running" || i.status === "scheduled"),
-  );
+  // Reports for active source — poll while browser is open
   const { data: reportsData, isLoading: loadingReports } = useQuery({
     queryKey: ["routine-reports", activeSource],
     queryFn: () => api.getRoutineReports(activeSource),
     enabled: !!activeSource,
-    refetchInterval: hasScheduledInstance ? 10_000 : false,
+    refetchInterval: 10_000,
   });
   const reports = reportsData?.reports ?? [];
 
@@ -323,7 +320,7 @@ export function ReportBrowser({
       el.removeEventListener("scroll", update);
       ro.disconnect();
     };
-  }, [reports.length]);
+  }, [reports.length, activeSource]);
 
   // Scroll active report tab into view
   useEffect(() => {
@@ -530,10 +527,10 @@ export function ReportBrowser({
       </div>
 
       {/* Main content */}
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Top bar */}
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2">
-          <div className="flex items-center gap-3 min-w-0">
+        <div className="flex min-w-0 shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] px-4 py-2">
+          <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden">
             <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
               {activeSource.replace(/_/g, " ")}
             </h2>
@@ -544,7 +541,7 @@ export function ReportBrowser({
               </span>
             )}
             {sourceInstances.length > 0 && (
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
                 {sourceInstances.map((inst) => (
                   <div key={inst.instance_id} className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[10px]">
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -568,7 +565,7 @@ export function ReportBrowser({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             {/* Run / Config actions — always show when routine exists */}
             {activeRoutine && server && (
               <div className="flex items-center gap-1 mr-2">

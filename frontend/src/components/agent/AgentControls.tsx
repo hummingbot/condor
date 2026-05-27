@@ -1,17 +1,24 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Clock,
-  MessageSquareText,
-  Pause,
-  Play,
-  Server,
-  Square,
-  X,
-  Zap,
-} from "lucide-react";
-import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Pause, Play, Square, X } from "lucide-react";
+import { useEffect, useState } from "react";
 
+import {
+  BudgetFrequencyFields,
+  DigestIntervalField,
+  ExecutionModePicker,
+  RiskLimitsFields,
+  ServerSelect,
+  TradingContextField,
+  buildRiskLimitsPayload,
+  type ExecutionMode,
+} from "@/components/agent/AgentSessionConfigFields";
 import { api } from "@/lib/api";
+
+function readRiskLimit(defaults: Record<string, unknown>, key: string, fallback: number) {
+  const risk = (defaults.risk_limits || {}) as Record<string, unknown>;
+  const value = risk[key];
+  return value !== undefined && value !== null ? String(value) : String(fallback);
+}
 
 // ── Start Session Dialog ──
 
@@ -29,9 +36,10 @@ export function StartSessionDialog({
   defaultContext: string;
 }) {
   const queryClient = useQueryClient();
-  const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
 
-  const [executionMode, setExecutionMode] = useState<"dry_run" | "run_once" | "loop">("loop");
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>(
+    (agentConfig.execution_mode as ExecutionMode) || "loop",
+  );
   const [context, setContext] = useState(defaultContext);
   const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
@@ -39,15 +47,22 @@ export function StartSessionDialog({
   const [digestIntervalTicks, setDigestIntervalTicks] = useState(
     String(agentConfig.digest_interval_ticks ?? 0),
   );
-  const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
-  const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
-  const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
+  const [maxOpenExecutors, setMaxOpenExecutors] = useState(
+    readRiskLimit(agentConfig, "max_open_executors", 5),
+  );
+  const [maxDrawdown, setMaxDrawdown] = useState(readRiskLimit(agentConfig, "max_drawdown_pct", -1));
 
-  const { data: servers } = useQuery({
-    queryKey: ["servers"],
-    queryFn: () => api.getServers(),
-    enabled: open,
-  });
+  useEffect(() => {
+    if (!open) return;
+    setExecutionMode((agentConfig.execution_mode as ExecutionMode) || "loop");
+    setContext(defaultContext);
+    setServerName((agentConfig.server_name as string) || "");
+    setTotalAmountQuote(String(agentConfig.total_amount_quote ?? 100));
+    setFrequencySec(String(agentConfig.frequency_sec ?? 60));
+    setDigestIntervalTicks(String(agentConfig.digest_interval_ticks ?? 0));
+    setMaxOpenExecutors(readRiskLimit(agentConfig, "max_open_executors", 5));
+    setMaxDrawdown(readRiskLimit(agentConfig, "max_drawdown_pct", -1));
+  }, [open, agentConfig, defaultContext]);
 
   const startMut = useMutation({
     mutationFn: () => {
@@ -57,11 +72,7 @@ export function StartSessionDialog({
         frequency_sec: Number(frequencySec) || 60,
         digest_interval_ticks: Math.max(0, Number(digestIntervalTicks) || 0),
         execution_mode: executionMode,
-        risk_limits: {
-          max_position_size_quote: Number(maxPositionSize) || 500,
-          max_open_executors: Number(maxOpenExecutors) || 5,
-          max_drawdown_pct: Number(maxDrawdown),
-        },
+        risk_limits: buildRiskLimitsPayload(maxOpenExecutors, maxDrawdown),
       };
       return api.startAgent(slug, config, context);
     },
@@ -72,10 +83,6 @@ export function StartSessionDialog({
   });
 
   if (!open) return null;
-
-  const inputClass =
-    "w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]";
-  const labelClass = "mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
@@ -91,163 +98,38 @@ export function StartSessionDialog({
         </div>
 
         <div className="space-y-5">
-          {/* Execution Mode */}
-          <div>
-            <label className={labelClass}>Execution Mode</label>
-            <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
-              {([
-                { value: "dry_run", label: "Dry Run", desc: "Simulate" },
-                { value: "run_once", label: "Run Once", desc: "Single tick" },
-                { value: "loop", label: "Loop", desc: "Continuous" },
-              ] as const).map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setExecutionMode(opt.value)}
-                  className={`flex-1 rounded-md px-3 py-2 text-center text-xs font-medium transition-all ${
-                    executionMode === opt.value
-                      ? opt.value === "dry_run"
-                        ? "bg-blue-500/15 text-blue-400"
-                        : opt.value === "run_once"
-                          ? "bg-amber-500/15 text-amber-400"
-                          : "bg-emerald-500/15 text-emerald-400"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                  }`}
-                >
-                  <div>{opt.label}</div>
-                  <div className="mt-0.5 text-[10px] opacity-60">{opt.desc}</div>
-                </button>
-              ))}
-            </div>
-          </div>
+          <ExecutionModePicker value={executionMode} onChange={setExecutionMode} />
 
-          {/* Trading Context */}
-          <div>
-            <label className={labelClass}>
-              <MessageSquareText className="h-3.5 w-3.5" />
-              Trading Context
-            </label>
-            <p className="mb-2 text-xs text-[var(--color-text-muted)]">
-              Describe what this session should focus on. This guides the agent's trading decisions.
-            </p>
-            <textarea
-              value={context}
-              onChange={(e) => setContext(e.target.value)}
-              placeholder="e.g. Focus on SOL meme coins, ride momentum for 5-10% gains, tight stops at 3%..."
-              rows={3}
-              className={`${inputClass} resize-none`}
-              autoFocus
-            />
-          </div>
+          <TradingContextField
+            value={context}
+            onChange={setContext}
+            autoFocus
+          />
 
-          {/* Server row */}
-          <div>
-            <label className={labelClass}>
-              <Server className="h-3.5 w-3.5" />
-              Server
-            </label>
-            <select
-              value={serverName}
-              onChange={(e) => setServerName(e.target.value)}
-              className={inputClass}
-            >
-              <option value="">Auto (current default)</option>
-              {servers?.map((s) => (
-                <option key={s.name} value={s.name} disabled={!s.online}>
-                  {s.name} {s.online ? "" : "(offline)"}
-                </option>
-              ))}
-            </select>
-          </div>
+          <ServerSelect value={serverName} onChange={setServerName} enabled={open} />
 
-          {/* Budget + Frequency row */}
-          <div className={`grid gap-4 ${executionMode === "loop" ? "grid-cols-2" : "grid-cols-1"}`}>
-            <div>
-              <label className={labelClass}>
-                Total Amount Quote
-              </label>
-              <input
-                type="number"
-                min={1}
-                step={10}
-                value={totalAmountQuote}
-                onChange={(e) => setTotalAmountQuote(e.target.value)}
-                className={inputClass}
-              />
-            </div>
-            {executionMode === "loop" && (
-              <div>
-                <label className={labelClass}>
-                  <Clock className="h-3.5 w-3.5" />
-                  Frequency (sec)
-                </label>
-                <input
-                  type="number"
-                  min={10}
-                  value={frequencySec}
-                  onChange={(e) => setFrequencySec(e.target.value)}
-                  className={inputClass}
-                />
-              </div>
-            )}
-          </div>
+          <BudgetFrequencyFields
+            executionMode={executionMode}
+            totalAmountQuote={totalAmountQuote}
+            frequencySec={frequencySec}
+            onBudgetChange={setTotalAmountQuote}
+            onFrequencyChange={setFrequencySec}
+          />
 
-          {executionMode === "loop" && (
-            <div>
-              <label className={labelClass}>Digest interval (ticks)</label>
-              <p className="mb-2 text-xs text-[var(--color-text-muted)]">
-                Telegram summary every N hold-only ticks. 0 = off. Default from strategy is{" "}
-                {String(agentConfig.digest_interval_ticks ?? 0)}.
-              </p>
-              <input
-                type="number"
-                min={0}
-                step={1}
-                value={digestIntervalTicks}
-                onChange={(e) => setDigestIntervalTicks(e.target.value)}
-                className={inputClass}
-              />
-            </div>
-          )}
+          <DigestIntervalField
+            value={digestIntervalTicks}
+            onChange={setDigestIntervalTicks}
+            defaultHint={Number(agentConfig.digest_interval_ticks ?? 0)}
+            executionMode={executionMode}
+          />
 
-          {/* Risk Limits */}
-          <div>
-            <label className={`${labelClass} mb-3`}>
-              <Zap className="h-3.5 w-3.5" />
-              Risk Limits
-            </label>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <span className="mb-1 block text-[10px] text-[var(--color-text-muted)]">Max Position ($)</span>
-                <input
-                  type="number"
-                  min={0}
-                  value={maxPositionSize}
-                  onChange={(e) => setMaxPositionSize(e.target.value)}
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <span className="mb-1 block text-[10px] text-[var(--color-text-muted)]">Max Executors</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={maxOpenExecutors}
-                  onChange={(e) => setMaxOpenExecutors(e.target.value)}
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <span className="mb-1 block text-[10px] text-[var(--color-text-muted)]">Max Drawdown %</span>
-                <input
-                  type="number"
-                  value={maxDrawdown}
-                  onChange={(e) => setMaxDrawdown(e.target.value)}
-                  className={inputClass}
-                />
-              </div>
-            </div>
-          </div>
+          <RiskLimitsFields
+            totalAmountQuote={totalAmountQuote}
+            maxOpenExecutors={maxOpenExecutors}
+            maxDrawdown={maxDrawdown}
+            onMaxOpenExecutorsChange={setMaxOpenExecutors}
+            onMaxDrawdownChange={setMaxDrawdown}
+          />
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
@@ -261,7 +143,11 @@ export function StartSessionDialog({
             onClick={() => startMut.mutate()}
             disabled={startMut.isPending}
             className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white transition-all disabled:opacity-40 ${
-              executionMode === "dry_run" ? "bg-blue-600 hover:bg-blue-500" : executionMode === "run_once" ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
+              executionMode === "dry_run"
+                ? "bg-blue-600 hover:bg-blue-500"
+                : executionMode === "run_once"
+                  ? "bg-amber-600 hover:bg-amber-500"
+                  : "bg-emerald-600 hover:bg-emerald-500"
             }`}
           >
             <Play className="h-3.5 w-3.5" />
@@ -281,7 +167,17 @@ export function StartSessionDialog({
 
 // ── Agent Controls ──
 
-export function AgentControls({ slug, status, defaultContext, agentConfig }: { slug: string; status: string; defaultContext: string; agentConfig: Record<string, unknown> }) {
+export function AgentControls({
+  slug,
+  status,
+  defaultContext,
+  agentConfig,
+}: {
+  slug: string;
+  status: string;
+  defaultContext: string;
+  agentConfig: Record<string, unknown>;
+}) {
   const queryClient = useQueryClient();
   const [showStartDialog, setShowStartDialog] = useState(false);
 

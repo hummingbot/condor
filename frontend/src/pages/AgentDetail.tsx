@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, FileText, ScrollText, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, FileText, ScrollText, Settings, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
+import { AgentDefaultsDialog } from "@/components/agent/AgentDefaultsDialog";
 import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
 import {
   InstanceCard,
@@ -27,6 +28,7 @@ export function AgentDetail() {
   const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
   const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
   const [showStrategyModal, setShowStrategyModal] = useState(false);
+  const [showDefaultsDialog, setShowDefaultsDialog] = useState(false);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -159,6 +161,14 @@ export function AgentDetail() {
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => setShowDefaultsDialog(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              title="Session defaults"
+            >
+              <Settings className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Settings</span>
+            </button>
+            <button
               onClick={() => setShowStrategyModal(true)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
               title="Strategy & Learnings"
@@ -255,6 +265,13 @@ export function AgentDetail() {
           onSessionClick={handleSessionClick}
         />
       </div>
+
+      {/* Session Defaults Dialog */}
+      <AgentDefaultsDialog
+        open={showDefaultsDialog}
+        onClose={() => setShowDefaultsDialog(false)}
+        slug={slug!}
+      />
 
       {/* Strategy & Learnings Modal (near full-screen) */}
       {showStrategyModal && (

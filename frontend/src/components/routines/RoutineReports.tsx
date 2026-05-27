@@ -12,7 +12,7 @@ interface RoutineReportsProps {
   hasScheduledInstance?: boolean;
 }
 
-export function RoutineReports({ routineName, hasScheduledInstance }: RoutineReportsProps) {
+export function RoutineReports({ routineName }: RoutineReportsProps) {
   const [viewReport, setViewReport] = useState<ReportSummary | null>(null);
   const [, setSearchParams] = useSearchParams();
 
@@ -20,7 +20,7 @@ export function RoutineReports({ routineName, hasScheduledInstance }: RoutineRep
     queryKey: ["routine-reports", routineName],
     queryFn: () => api.getRoutineReports(routineName),
     enabled: !!routineName,
-    refetchInterval: hasScheduledInstance ? 10_000 : false,
+    refetchInterval: 10_000,
   });
 
   const reports = data?.reports ?? [];

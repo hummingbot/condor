@@ -264,7 +264,7 @@ manage_trading_agent(
         "trading_context": "Trade BTC-USDT on binance_perpetual",
         "frequency_sec": 60,
         "total_amount_quote": 100,
-        "risk_limits": {"max_position_size_quote": 200, "max_open_executors": 3}
+        "risk_limits": {"max_open_executors": 3}
     }
 )
 ```
@@ -311,7 +311,7 @@ manage_trading_agent(
         "frequency_sec": 60,
         "trading_context": "Trade BTC-USDT on binance_perpetual",
         "total_amount_quote": 100,
-        "risk_limits": {"max_position_size_quote": 200, "max_open_executors": 3}
+        "risk_limits": {"max_open_executors": 3}
     }
 )
 ```
@@ -323,11 +323,12 @@ manage_trading_agent(
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `server_name` | str | "local" | Hummingbot API server name |
-| `total_amount_quote` | float | 100.0 | Total capital budget in quote currency |
+| `total_amount_quote` | float | 100.0 | Per-position notional budget in quote currency (USDT) |
 | `frequency_sec` | int | 60 | Tick frequency in seconds |
 | `trading_context` | str | "" | Natural language session context (pair, exchange, style) |
 | `execution_mode` | str | "loop" | "dry_run", "run_once", or "loop" |
 | `max_ticks` | int | 0 | Max ticks before auto-stop; 0 = unlimited |
-| `risk_limits.max_position_size_quote` | float | 500.0 | Max total position size |
 | `risk_limits.max_open_executors` | int | 5 | Max simultaneous executors |
 | `risk_limits.max_drawdown_pct` | float | -1.0 | Max drawdown %; -1 = disabled |
+
+Max total exposure is computed at runtime as `total_amount_quote × max_open_executors` (not a separate config field). Session defaults can be edited from the agent Settings UI in the web app without changing code.

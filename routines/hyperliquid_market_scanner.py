@@ -490,7 +490,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         builder.table(_to_table(classified["mature"]))
         builder.markdown("### Degen Markets\nHigh volatility, spiky activity")
         builder.table(_to_table(classified["degen"]))
-        builder.save()
+        await builder.save()
     except Exception as e:
         logger.warning(f"Report generation failed: {e}")
 

@@ -30,7 +30,7 @@ from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
-from .risk import RiskEngine, RiskLimits, auto_approve_with_risk_check
+from .risk import RiskEngine, auto_approve_with_risk_check, resolve_risk_limits
 from .strategy import Strategy
 from .providers import ProviderRegistry
 
@@ -225,8 +225,7 @@ class TickEngine:
                 agent_dir=agent_dir,
             )
 
-        risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
-        self.risk = RiskEngine(risk_limits)
+        self.risk = RiskEngine(resolve_risk_limits(self.config))
         self.provider_registry = ProviderRegistry()
 
     # ------------------------------------------------------------------
