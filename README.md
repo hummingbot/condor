@@ -215,16 +215,69 @@ chat_defaults: {}
 audit_log: []
 ```
 
+## Secure Connection via Tailscale
+
+[Tailscale](https://tailscale.com) creates a private WireGuard network (tailnet) so Condor can reach Hummingbot API securely without exposing port 8000 publicly.
+
+Use this when:
+- Hummingbot API is running on a remote server or VPS
+- You want an encrypted private connection without opening firewall ports
+
+### Prerequisites: Get a Tailscale auth key
+
+1. Create a free account at [tailscale.com](https://tailscale.com)
+2. Go to **Settings → Keys**: [tailscale.com/admin/settings/keys](https://tailscale.com/admin/settings/keys)
+3. Click **Generate auth key** — check **Reusable** for multiple deployments
+4. Copy the key (starts with `tskey-auth-`)
+
+### Setup
+
+Run `make setup` — the wizard supports two Tailscale scenarios:
+
+**Scenario A — Deploy Hummingbot API locally with Tailscale**
+
+Choose `Y` to deploy Hummingbot API locally, then `y` when asked about Tailscale. The wizard will:
+- Clone and start `hummingbot-api` with a Tailscale sidecar container
+- Install Tailscale on this machine and connect with hostname `condor`
+- Update `config.yml` to reach the API at `http://hummingbot-api:8000`
+
+**Scenario B — Connect to a remote Hummingbot API via Tailscale**
+
+Choose `N` to skip local deployment, enter the remote API URL, then `y` when asked about Tailscale. The wizard will:
+- Install Tailscale on this machine and connect with hostname `condor`
+- Update `config.yml` to use the Tailscale MagicDNS hostname of the remote API
+
+The remote machine must be running [hummingbot-api-tailscale](https://github.com/hummingbot/hummingbot-api) on the same tailnet.
+
+### Network layout
+
+```
+[Condor]  tailnet: condor  ──WireGuard──►  [API]  tailnet: hummingbot-api
+                           http://hummingbot-api:8000
+```
+
+Both machines must be on the same Tailscale account.
+
+### Verify the connection
+
+```bash
+tailscale status
+```
+
+Both `condor` and `hummingbot-api` should appear as connected peers.
+
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
 | Bot not responding | Check `TELEGRAM_TOKEN` and `ADMIN_USER_ID` in `.env` |
-| Access pending | Admin must approve the user via `/admin` or the admin flow from `/start` |
-| Commands failing | Verify Hummingbot Backend API is running and reachable |
-| Connection refused | Check host and port under `/servers` for the active server |
-| Auth error | Verify API username/password in `/servers` |
-| DEX features unavailable | Ensure Gateway is configured and running (`/gateway`) |
+| Access pending | Admin must approve user via /config > Admin Panel |
+| Commands failing | Verify Hummingbot API is running |
+| Connection refused | Check server host:port in `/config` |
+| Auth error | Verify server credentials |
+| DEX features unavailable | Ensure Gateway is configured and running |
+| Tailscale: can't reach API | Run `tailscale status` — confirm both peers are connected |
+| Tailscale: auth key rejected | Key must start with `tskey-auth-`, check expiry in Tailscale admin |
 
 ## Development
 
