@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Circle, Database, Filter, Trash2 } from "lucide-react";
+import { Circle, Database, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
@@ -64,11 +64,8 @@ function StatusDot({ status }: { status: string }) {
   return <Circle className={`h-2 w-2 fill-current ${color}`} />;
 }
 
-type FilterStatus = "ALL" | "RUNNING" | "STOPPED" | "ARCHIVED";
-
 export function BotRunsTab() {
   const { server } = useServer();
-  const [filter, setFilter] = useState<FilterStatus>("ALL");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<string | null>(null);
   const queryClient = useQueryClient();
@@ -89,27 +86,9 @@ export function BotRunsTab() {
 
   const runs = data?.runs ?? [];
 
-  const filtered = useMemo(() => {
-    if (filter === "ALL") return runs;
-    if (filter === "RUNNING") return runs.filter((r) => r.run_status === "RUNNING");
-    if (filter === "STOPPED") return runs.filter((r) => r.run_status === "STOPPED" && r.deployment_status !== "ARCHIVED");
-    if (filter === "ARCHIVED") return runs.filter((r) => r.deployment_status === "ARCHIVED");
-    return runs;
-  }, [runs, filter]);
-
-  const counts = useMemo(() => {
-    const c = { ALL: runs.length, RUNNING: 0, STOPPED: 0, ARCHIVED: 0 };
-    for (const r of runs) {
-      if (r.run_status === "RUNNING") c.RUNNING++;
-      else if (r.deployment_status === "ARCHIVED") c.ARCHIVED++;
-      else c.STOPPED++;
-    }
-    return c;
-  }, [runs]);
-
   const archivedInView = useMemo(
-    () => filtered.filter((r) => r.deployment_status === "ARCHIVED"),
-    [filtered],
+    () => runs.filter((r) => r.deployment_status === "ARCHIVED"),
+    [runs],
   );
 
   const allArchivedSelected = archivedInView.length > 0 && archivedInView.every((r) => selected.has(r.bot_name));
@@ -189,26 +168,8 @@ export function BotRunsTab() {
 
   return (
     <div className="space-y-4">
-      {/* Filters + bulk actions */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Filter className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-          {(["ALL", "RUNNING", "STOPPED", "ARCHIVED"] as const).map((f) => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                filter === f
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              {f.charAt(0) + f.slice(1).toLowerCase()} ({counts[f]})
-            </button>
-          ))}
-        </div>
-
-        {selected.size > 0 && (
+      {selected.size > 0 && (
+        <div className="flex justify-end">
           <button
             onClick={handleBulkDelete}
             disabled={deleting !== null}
@@ -217,8 +178,8 @@ export function BotRunsTab() {
             <Trash2 className="h-3 w-3" />
             Delete {selected.size} selected
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Table */}
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
@@ -258,7 +219,7 @@ export function BotRunsTab() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((run, i) => (
+              {runs.map((run, i) => (
                 <BotRunRow
                   key={`${run.bot_name}-${run.created_at}-${i}`}
                   run={run}
