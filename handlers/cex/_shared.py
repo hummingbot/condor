@@ -536,8 +536,8 @@ async def validate_trading_pair(
         # Log a few sample pairs to debug
         sample_pairs = available_pairs[:5] if available_pairs else []
         logger.info(f"Sample pairs: {sample_pairs}")
-        
-        # For input like "XYZ", look for pairs like "ISSUER:XYZ-USDC" or "ISSUER:XYZ-USD"
+
+        # For input like "XYZ" or "ISSUER:XYZ", look for pairs like "ISSUER:XYZ-USDC" or "ISSUER:XYZ-USD".
         hip3_matches = []
         for pair in available_pairs:
             if ":" in pair:
@@ -549,16 +549,21 @@ async def validate_trading_pair(
                     if ":" in issuer_symbol:
                         issuer, symbol = issuer_symbol.split(":", 1)
                         logger.debug(f"Checking pair '{pair}': issuer='{issuer}', symbol='{symbol}', quote='{quote}' vs input='{pair_normalized}'")
-                        # Check if the input matches the symbol part
-                        if symbol.upper() == pair_normalized.upper():
-                            logger.info(f"Found HIP3 symbol match: '{pair}' matches input '{pair_normalized}'")
-                            hip3_matches.append(pair)
-                        # Also check if input matches the full issuer:symbol part
-                        elif (
-                            issuer_symbol.upper().replace(":", "-")
-                            == pair_normalized.upper()
-                        ):
-                            logger.info(f"Found HIP3 issuer:symbol match: '{pair}' matches input '{pair_normalized}'")
+
+                        issuer_symbol_normalized = issuer_symbol.upper().replace(
+                            "_", "-"
+                        ).replace("/", "-")
+                        hip3_aliases = {
+                            symbol.upper(),
+                            f"{symbol.upper()}-{quote.upper()}",
+                            issuer_symbol_normalized,
+                            issuer_symbol_normalized.replace(":", "-"),
+                            pair.upper().replace("_", "-").replace("/", "-"),
+                        }
+                        if pair_normalized.upper() in hip3_aliases:
+                            logger.info(
+                                f"Found HIP3 match: '{pair}' matches input '{pair_normalized}'"
+                            )
                             hip3_matches.append(pair)
                 except ValueError as e:
                     logger.debug(f"Failed to parse HIP3 pair '{pair}': {e}")
