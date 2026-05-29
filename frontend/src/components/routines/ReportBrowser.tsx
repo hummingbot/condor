@@ -37,19 +37,14 @@ interface ReportBrowserProps {
   onClose: () => void;
 }
 
-function formatReportSelectLabel(
-  report: { created_at: string; title: string },
-  allReports: { title: string }[],
-): string {
+function formatReportSelectLabel(report: { created_at: string; title: string }): string {
   const when = new Date(report.created_at).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
-  const titleSuffix =
-    report.title !== allReports[0]?.title ? ` — ${report.title}` : "";
-  return `${when}${titleSuffix}`;
+  return `${when} — ${report.title}`;
 }
 
 export function ReportBrowser({
@@ -849,7 +844,7 @@ export function ReportBrowser({
               >
                 {reports.map((r, idx) => (
                   <option key={r.id} value={idx}>
-                    {formatReportSelectLabel(r, reports)}
+                    {formatReportSelectLabel(r)}
                   </option>
                 ))}
               </select>
