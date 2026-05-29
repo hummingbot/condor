@@ -37,8 +37,20 @@ interface ReportBrowserProps {
   onClose: () => void;
 }
 
-/** Active: upstream dropdown. Set to "scroll" to restore the horizontal arrow timeline. */
-const REPORT_TIMELINE_MODE: "dropdown" | "scroll" = "dropdown";
+function formatReportSelectLabel(
+  report: { created_at: string; title: string },
+  allReports: { title: string }[],
+): string {
+  const when = new Date(report.created_at).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const titleSuffix =
+    report.title !== allReports[0]?.title ? ` — ${report.title}` : "";
+  return `${when}${titleSuffix}`;
+}
 
 export function ReportBrowser({
   instances,
@@ -299,10 +311,8 @@ export function ReportBrowser({
     el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeSource]);
 
-  // Track timeline overflow for scroll arrows (scroll mode only)
+  // Track timeline overflow for scroll arrows
   useEffect(() => {
-    if (REPORT_TIMELINE_MODE !== "scroll") return;
-
     const el = timelineRef.current;
     const content = timelineContentRef.current;
     if (!el) return;
@@ -328,10 +338,8 @@ export function ReportBrowser({
     };
   }, [reports.length, activeSource]);
 
-  // Scroll active report tab into view (scroll mode only)
+  // Scroll active report tab into view
   useEffect(() => {
-    if (REPORT_TIMELINE_MODE !== "scroll") return;
-
     const el = timelineRef.current?.querySelector("[data-active-report]");
     el?.scrollIntoView({
       block: "nearest",
@@ -784,58 +792,8 @@ export function ReportBrowser({
           </div>
         )}
 
-        {/* Report timeline strip at top — toggle REPORT_TIMELINE_MODE to compare dropdown vs scroll */}
-        {reports.length > 1 && REPORT_TIMELINE_MODE === "dropdown" && (
-          <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5">
-            {reports.slice(0, 10).map((r, idx) => (
-              <button
-                key={r.id}
-                onClick={() => setSelectedReportIdx(idx)}
-                className={`shrink-0 rounded px-2 py-1 text-[10px] transition-all ${
-                  idx === selectedReportIdx
-                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] font-medium"
-                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                }`}
-                title={r.title}
-              >
-                {formatAgo(r.created_at)}
-              </button>
-            ))}
-            {reports.length > 10 && (
-              <div className="relative shrink-0 ml-auto">
-                <select
-                  value={selectedReportIdx >= 10 ? selectedReportIdx : ""}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val !== "") setSelectedReportIdx(Number(val));
-                  }}
-                  className={`appearance-none rounded-md pl-2.5 pr-7 py-1 text-[10px] font-medium cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40 ${
-                    selectedReportIdx >= 10
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] border border-[var(--color-primary)]/30"
-                      : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text)] hover:border-[var(--color-text-muted)]/30"
-                  }`}
-                >
-                  <option value="" disabled>
-                    +{reports.length - 10} older reports
-                  </option>
-                  {reports.slice(10).map((r, i) => (
-                    <option key={r.id} value={i + 10}>
-                      {new Date(r.created_at).toLocaleString(undefined, {
-                        month: "short",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                      {r.title !== reports[0]?.title ? ` — ${r.title}` : ""}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-muted)]" />
-              </div>
-            )}
-          </div>
-        )}
-        {reports.length > 1 && REPORT_TIMELINE_MODE === "scroll" && (
+        {/* Report timeline: scrollable tabs + jump dropdown with all runs */}
+        {reports.length > 1 && (
           <div className="flex min-w-0 items-center overflow-hidden border-b border-[var(--color-border)]/50">
             {timelineOverflow && (
               <button
@@ -882,6 +840,21 @@ export function ReportBrowser({
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             )}
+            <div className="relative shrink-0 border-l border-[var(--color-border)]/50 px-2 py-1.5">
+              <select
+                value={selectedReportIdx}
+                onChange={(e) => setSelectedReportIdx(Number(e.target.value))}
+                className="max-w-[14rem] appearance-none rounded-md border border-[var(--color-border)] bg-[var(--color-surface-hover)] py-1 pl-2.5 pr-7 text-[10px] font-medium text-[var(--color-text-muted)] cursor-pointer transition-colors hover:border-[var(--color-text-muted)]/30 hover:text-[var(--color-text)] focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40"
+                title="Jump to a specific run by date and time"
+              >
+                {reports.map((r, idx) => (
+                  <option key={r.id} value={idx}>
+                    {formatReportSelectLabel(r, reports)}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-3.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-muted)]" />
+            </div>
           </div>
         )}
 
