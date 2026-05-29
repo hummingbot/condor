@@ -14,24 +14,19 @@ mcp = FastMCP("condor")
 
 @mcp.tool()
 @handle_errors("send notification")
-async def send_notification(
-    text: str,
-    parse_mode: str = "plain",
-) -> dict:
+async def send_notification(text: str) -> dict:
     """Send a Telegram message to the user.
 
-    Prefer plain (default): no Telegram markup so messages read cleanly on mobile.
-    Agents should not emit MarkdownV2 backslash escapes; those appear as stray backslashes.
+    Messages are sent as plain text (no Telegram markup) so they read cleanly on mobile.
+    Do not use MarkdownV2 backslash escapes; they appear as stray backslashes.
 
     Args:
         text: Message body. Long text is softly truncated.
-        parse_mode: "plain" / "" / "none" (default — no Telegram parse_mode; recommended),
-          or "Markdown", "MarkdownV2", "HTML" (Telegram semantics). Case-insensitive.
 
     Returns:
         {"sent": true} on success, {"error": "..."} on failure.
     """
-    return await notification.send_notification(text, parse_mode)
+    return await notification.send_notification(text)
 
 
 @mcp.tool()
