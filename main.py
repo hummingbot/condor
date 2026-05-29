@@ -395,6 +395,15 @@ async def sync_server_permissions() -> None:
 
 async def post_init(application: Application) -> None:
     """Register bot commands after initialization."""
+    from handlers import scrub_all_user_agent_llm_typing_states
+
+    cleared = scrub_all_user_agent_llm_typing_states(application)
+    if cleared:
+        logger.info(
+            "Cleared %d persisted agent LLM typing state(s) from user_data",
+            cleared,
+        )
+
     from telegram import BotCommandScopeChat
 
     from utils.config import ADMIN_USER_ID
