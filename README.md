@@ -215,7 +215,8 @@ CURSOR_API_KEY=crsr_...                  # Optional, Cursor Composer via local N
 > cd condor/acp/cursor_bridge && npm install
 > ```
 >
-> Then pick **Cursor — Auto model** or **Cursor — Composer 2** in `/agent → Change LLM`.
+> Then pick **Cursor — Pick Model** in `/agent → Change LLM`. The picker fetches the
+> live Cursor catalog (including Auto/default models) and supports manual model ID entry.
 > The integration runs Cursor's **local** agent against `CONDOR_CURSOR_CWD` (defaults to repository root).
 > The same **stdio MCP configs** Condor uses for pydantic-ai/ACP (`mcp-hummingbot`, `condor`) are passed to
 > Composer as Cursor `mcpServers`. Cloud Cursor agents are unsupported for this bridge.

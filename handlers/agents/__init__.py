@@ -17,13 +17,14 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     DEFAULT_MODE,
+    format_agent_llm_label,
     load_assistant,
     get_project_dir,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from condor.acp import ACP_COMMANDS, PromptDone
-from condor.acp.cursor_sdk_client import is_cursor_sdk_model
+from condor.acp.cursor_sdk_client import cursor_runtime_ready, is_cursor_sdk_model
 from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
@@ -137,6 +138,8 @@ async def agent_callback_handler(
         # OpenRouter sentinel -> open the model picker instead of setting directly
         if llm_key == "openrouter:":
             await _handle_openrouter_picker(update, context, page=0)
+        elif llm_key == "cursor:":
+            await _handle_cursor_picker(update, context, page=0)
         else:
             await _handle_set_llm(update, context, llm_key)
     elif action.startswith("or_page:"):
@@ -152,6 +155,20 @@ async def agent_callback_handler(
     elif action == "or_type_cancel":
         await _handle_openrouter_type_cancel(update, context)
     elif action == "or_noop":
+        pass  # page indicator button — do nothing
+    elif action.startswith("cur_page:"):
+        page = int(action.split(":", 1)[1])
+        await _handle_cursor_picker(update, context, page=page)
+    elif action.startswith("cur_pick:"):
+        idx = int(action.split(":", 1)[1])
+        await _handle_cursor_pick(update, context, idx)
+    elif action == "cur_type":
+        await _handle_cursor_type_prompt(update, context)
+    elif action == "cur_type_confirm":
+        await _handle_cursor_type_confirm(update, context)
+    elif action == "cur_type_cancel":
+        await _handle_cursor_type_cancel(update, context)
+    elif action == "cur_noop":
         pass  # page indicator button — do nothing
 
     # Session management
@@ -201,7 +218,7 @@ async def _handle_mode_start(
 
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
-    llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
+    llm_label = format_agent_llm_label(agent_key)
 
     status_text = f"Starting {mode_label} session ({llm_label})..."
     if query:
@@ -272,14 +289,8 @@ async def _handle_settings(
 
     query = update.callback_query
     current_llm = context.user_data.get("agent_llm", DEFAULT_AGENT)
-    suffix = ""
-    if current_llm.startswith("cursor:") and current_llm not in AGENT_OPTIONS:
-        suffix = (
-            f"\n\nCustom Cursor model is active ({current_llm}); "
-            "it is not listed as a button."
-        )
     await query.message.edit_text(
-        "Select the LLM for new sessions:" + suffix,
+        "Select the LLM for new sessions:",
         reply_markup=_settings_keyboard(current_llm),
     )
 
@@ -288,19 +299,9 @@ async def _handle_set_llm(
     update: Update, context: ContextTypes.DEFAULT_TYPE, llm_key: str
 ) -> None:
     """Update the preferred LLM."""
-    import os
-
     query = update.callback_query
     if llm_key not in AGENT_OPTIONS:
         await query.message.edit_text("Unknown LLM option.")
-        return
-
-    if is_cursor_sdk_model(llm_key) and not os.environ.get("CURSOR_API_KEY"):
-        await query.message.edit_text(
-            "CURSOR_API_KEY is not set. Add it to your .env to use Cursor Composer, "
-            "then restart the bot.\n\n"
-            "Mint a key at https://cursor.com/dashboard/cloud-agents"
-        )
         return
 
     context.user_data["agent_llm"] = llm_key
@@ -504,6 +505,181 @@ async def _handle_openrouter_type_cancel(
     """Discard the typed slug without changing the active LLM."""
     query = update.callback_query
     context.user_data.pop("_openrouter_typed_slug", None)
+    await query.message.edit_text("Cancelled. Use /agent to continue.")
+
+
+async def _handle_cursor_picker(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int
+) -> None:
+    """Show paginated Cursor model picker."""
+    import os
+
+    from .menu import _cursor_picker_keyboard
+    from .cursor_models import fetch_models
+
+    query = update.callback_query
+
+    if not os.environ.get("CURSOR_API_KEY"):
+        await query.message.edit_text(
+            "CURSOR_API_KEY is not set. Add it to your .env to use Cursor models, "
+            "then restart the bot.\n\n"
+            "Mint a key at https://cursor.com/dashboard/cloud-agents"
+        )
+        return
+
+    if not cursor_runtime_ready():
+        await query.message.edit_text(
+            "Cursor bridge is not ready. Install Node 18+ and run "
+            "`npm install` in `condor/acp/cursor_bridge/`, then restart the bot."
+        )
+        return
+
+    if page == 0:
+        await query.message.edit_text("Loading Cursor models...")
+
+    try:
+        models = await fetch_models()
+    except Exception as e:
+        log.exception("Failed to fetch Cursor models")
+        await query.message.edit_text(f"Failed to fetch Cursor models: {e}")
+        return
+
+    if not models:
+        await query.message.edit_text(
+            "No Cursor models available. Check CURSOR_API_KEY and try again later."
+        )
+        return
+
+    context.user_data["_cursor_models"] = models
+
+    current = context.user_data.get("agent_llm", "")
+    current_id = (
+        current.split(":", 1)[1]
+        if current.startswith("cursor:") and current != "cursor:"
+        else None
+    )
+
+    keyboard = _cursor_picker_keyboard(models, page=page, current_id=current_id)
+    await query.message.edit_text(
+        f"Select a Cursor model ({len(models)} available):",
+        reply_markup=keyboard,
+    )
+
+
+async def _handle_cursor_pick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+) -> None:
+    """Resolve picker index → set agent_llm to 'cursor:<modelId>'."""
+    query = update.callback_query
+    models = context.user_data.get("_cursor_models") or []
+    if not models or idx < 0 or idx >= len(models):
+        await query.message.edit_text(
+            "Selection expired. Reopen the picker via Change LLM."
+        )
+        return
+
+    model = models[idx]
+    agent_key = f"cursor:{model.id}"
+    context.user_data["agent_llm"] = agent_key
+
+    await destroy_session(update.effective_chat.id)
+
+    await query.message.edit_text(
+        f"LLM set to Cursor — {model.name}.\n"
+        f"Model ID: {model.id}\n\n"
+        "New sessions will use this model. Use /agent to continue."
+    )
+
+
+async def _handle_cursor_type_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Arm model-id input mode: next text message is parsed as a Cursor model id."""
+    query = update.callback_query
+    context.user_data["_cursor_typing_id"] = True
+    await query.message.edit_text(
+        "Send the Cursor model ID as a message.\n"
+        "Example: auto\n\n"
+        "Send /cancel to abort."
+    )
+
+
+async def _resolve_cursor_typed_id(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
+    """Validate a typed model id; on match, prompt confirmation."""
+    from .cursor_models import fetch_models, find_model_by_id
+
+    model_id = text.strip()
+    if model_id.lower() in ("/cancel", "cancel"):
+        await update.message.reply_text("Cancelled. Use /agent to continue.")
+        return
+
+    try:
+        models = await fetch_models()
+    except Exception as e:
+        log.exception("Failed to fetch Cursor models")
+        await update.message.reply_text(f"Failed to fetch Cursor models: {e}")
+        return
+
+    model = find_model_by_id(models, model_id)
+    if not model:
+        context.user_data["_cursor_typing_id"] = True
+        await update.message.reply_text(
+            f"No Cursor model matches '{model_id}'.\n"
+            "The model ID must be exact (e.g. auto).\n"
+            "Try again, or send /cancel."
+        )
+        return
+
+    context.user_data["_cursor_typed_id"] = model.id
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Use this model", callback_data="agent:cur_type_confirm"
+                ),
+                InlineKeyboardButton(
+                    "Cancel", callback_data="agent:cur_type_cancel"
+                ),
+            ]
+        ]
+    )
+    await update.message.reply_text(
+        f"Use Cursor — {model.name}?\nModel ID: {model.id}",
+        reply_markup=keyboard,
+    )
+
+
+async def _handle_cursor_type_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Apply the typed model id as the active agent_llm."""
+    query = update.callback_query
+    model_id = context.user_data.pop("_cursor_typed_id", None)
+    if not model_id:
+        await query.message.edit_text(
+            "Selection expired. Reopen the picker via Change LLM."
+        )
+        return
+
+    context.user_data["agent_llm"] = f"cursor:{model_id}"
+
+    await destroy_session(update.effective_chat.id)
+
+    await query.message.edit_text(
+        f"LLM set to Cursor — {model_id}.\n\n"
+        "New sessions will use this model. Use /agent to continue."
+    )
+
+
+async def _handle_cursor_type_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Discard the typed model id without changing the active LLM."""
+    query = update.callback_query
+    context.user_data.pop("_cursor_typed_id", None)
     await query.message.edit_text("Cancelled. Use /agent to continue.")
 
 
@@ -837,6 +1013,11 @@ async def agent_message_handler(
     # Handle typed OpenRouter slug input
     if context.user_data.pop("_openrouter_typing_slug", None):
         await _resolve_openrouter_typed_slug(update, context, text)
+        return
+
+    # Handle typed Cursor model id input
+    if context.user_data.pop("_cursor_typing_id", None):
+        await _resolve_cursor_typed_id(update, context, text)
         return
 
     # Backward compat

@@ -87,11 +87,26 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
     # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
     "openrouter:": {"label": "OpenRouter — Pick Model"},
-    "cursor:auto": {"label": "Cursor — Auto model"},
-    "cursor:composer-2": {"label": "Cursor — Composer 2"},
+    # Sentinel — clicking this opens the Cursor model picker (handlers/agents/menu.py).
+    # The actual stored agent_llm becomes "cursor:<modelId>" once the user picks a model.
+    "cursor:": {"label": "Cursor — Pick Model"},
 }
 
 DEFAULT_AGENT = "claude-code"
+
+
+def format_agent_llm_label(agent_key: str) -> str:
+    """Human-readable LLM label for menus and session status."""
+    if agent_key.startswith("openrouter:") and agent_key != "openrouter:":
+        slug = agent_key.split(":", 1)[1]
+        return f"OpenRouter — {slug}"
+    if agent_key.startswith("cursor:") and agent_key != "cursor:":
+        model_id = agent_key.split(":", 1)[1]
+        return f"Cursor — {model_id}"
+    info = AGENT_OPTIONS.get(agent_key)
+    if info:
+        return info["label"]
+    return agent_key
 
 # -- Agent modes (auto-discovered) --
 
