@@ -6,6 +6,7 @@ import {
   ChevronRight,
   ChevronUp,
   Clock,
+  Download,
   Loader2,
   MessageSquare,
   Moon,
@@ -35,6 +36,9 @@ interface ReportBrowserProps {
   instances: RoutineInstance[];
   onClose: () => void;
 }
+
+/** Active: upstream dropdown. Set to "scroll" to restore the horizontal arrow timeline. */
+const REPORT_TIMELINE_MODE: "dropdown" | "scroll" = "dropdown";
 
 export function ReportBrowser({
   instances,
@@ -295,8 +299,10 @@ export function ReportBrowser({
     el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [activeSource]);
 
-  // Track timeline overflow for scroll arrows
+  // Track timeline overflow for scroll arrows (scroll mode only)
   useEffect(() => {
+    if (REPORT_TIMELINE_MODE !== "scroll") return;
+
     const el = timelineRef.current;
     const content = timelineContentRef.current;
     if (!el) return;
@@ -322,8 +328,10 @@ export function ReportBrowser({
     };
   }, [reports.length, activeSource]);
 
-  // Scroll active report tab into view
+  // Scroll active report tab into view (scroll mode only)
   useEffect(() => {
+    if (REPORT_TIMELINE_MODE !== "scroll") return;
+
     const el = timelineRef.current?.querySelector("[data-active-report]");
     el?.scrollIntoView({
       block: "nearest",
@@ -654,6 +662,17 @@ export function ReportBrowser({
                 </button>
               </>
             )}
+            {/* Download */}
+            {selectedReport && (
+              <a
+                href={`/reports/${selectedReport.filename}`}
+                download={selectedReport.filename}
+                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                title="Download report"
+              >
+                <Download className="h-4 w-4" />
+              </a>
+            )}
             {/* Delete */}
             {selectedReport && (
               confirmDelete ? (
@@ -765,8 +784,58 @@ export function ReportBrowser({
           </div>
         )}
 
-        {/* Report timeline strip at top */}
-        {reports.length > 1 && (
+        {/* Report timeline strip at top — toggle REPORT_TIMELINE_MODE to compare dropdown vs scroll */}
+        {reports.length > 1 && REPORT_TIMELINE_MODE === "dropdown" && (
+          <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5">
+            {reports.slice(0, 10).map((r, idx) => (
+              <button
+                key={r.id}
+                onClick={() => setSelectedReportIdx(idx)}
+                className={`shrink-0 rounded px-2 py-1 text-[10px] transition-all ${
+                  idx === selectedReportIdx
+                    ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] font-medium"
+                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+                title={r.title}
+              >
+                {formatAgo(r.created_at)}
+              </button>
+            ))}
+            {reports.length > 10 && (
+              <div className="relative shrink-0 ml-auto">
+                <select
+                  value={selectedReportIdx >= 10 ? selectedReportIdx : ""}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val !== "") setSelectedReportIdx(Number(val));
+                  }}
+                  className={`appearance-none rounded-md pl-2.5 pr-7 py-1 text-[10px] font-medium cursor-pointer transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-primary)]/40 ${
+                    selectedReportIdx >= 10
+                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)] border border-[var(--color-primary)]/30"
+                      : "bg-[var(--color-surface-hover)] text-[var(--color-text-muted)] border border-[var(--color-border)] hover:text-[var(--color-text)] hover:border-[var(--color-text-muted)]/30"
+                  }`}
+                >
+                  <option value="" disabled>
+                    +{reports.length - 10} older reports
+                  </option>
+                  {reports.slice(10).map((r, i) => (
+                    <option key={r.id} value={i + 10}>
+                      {new Date(r.created_at).toLocaleString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                      {r.title !== reports[0]?.title ? ` — ${r.title}` : ""}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--color-text-muted)]" />
+              </div>
+            )}
+          </div>
+        )}
+        {reports.length > 1 && REPORT_TIMELINE_MODE === "scroll" && (
           <div className="flex min-w-0 items-center overflow-hidden border-b border-[var(--color-border)]/50">
             {timelineOverflow && (
               <button

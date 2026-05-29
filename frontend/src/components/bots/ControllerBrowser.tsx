@@ -19,25 +19,10 @@ import yamlLib from "js-yaml";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { api, type ControllerInfo } from "@/lib/api";
+import { formatCurrencyVolume, formatCurrencyPnl } from "@/lib/formatters";
 import { setViewContext } from "@/lib/viewContext";
 
-// ── Shared formatters ──
-
-function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
-}
-
-function formatVolume(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(val) >= 1_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return "$" + val.toFixed(0);
-}
-
-function formatPnl(val: number) {
-  return (val >= 0 ? "+" : "") + formatUsd(val);
-}
+type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
 
 function pnlColor(val: number) {
   return val >= 0 ? "var(--color-green)" : "var(--color-red)";
@@ -70,6 +55,8 @@ interface ControllerBrowserProps {
   server: string;
   initialControllerKey: string;
   onClose: () => void;
+  convert: ConvertFn;
+  currencySymbol: string;
 }
 
 // Keys to strip from the YAML display (internal / read-only fields)
@@ -203,17 +190,31 @@ export function ControllerBrowser({
   server,
   initialControllerKey,
   onClose,
+  convert,
+  currencySymbol,
 }: ControllerBrowserProps) {
+  const cv = (val: number, pair: string) => {
+    const quote = pair?.split("-")[1] || "USDT";
+    return convert(val, quote).value;
+  };
+  const fmtPnl = (val: number, pair: string) => formatCurrencyPnl(cv(val, pair), currencySymbol);
+  const fmtVol = (val: number, pair: string) => formatCurrencyVolume(cv(val, pair), currencySymbol);
   const queryClient = useQueryClient();
   const [isCompact, setIsCompact] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
 
   const ctrlKey = useCallback(
-    (c: ControllerInfo) => `${c.bot_name}-${c.controller_name}`,
+    (c: ControllerInfo) => `${c.bot_name}-${c.controller_id || c.controller_name}`,
     [],
   );
 
   const [activeKey, setActiveKey] = useState(initialControllerKey);
+
+  // Sync when parent changes the initial key (e.g., clicking a different controller from the table)
+  useEffect(() => {
+    setActiveKey(initialControllerKey);
+  }, [initialControllerKey]);
+
   const activeCtrl = controllers.find((c) => ctrlKey(c) === activeKey) ?? controllers[0];
 
   const isKilled = activeCtrl?.config?.manual_kill_switch === true;
@@ -243,12 +244,15 @@ export function ControllerBrowser({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      // Skip if focus is inside CodeMirror editor (contenteditable div)
+      const inEditor = e.target instanceof HTMLElement && e.target.closest(".cm-editor");
+      if (inEditor && !e.metaKey && !e.ctrlKey) return;
       if (e.key === "ArrowUp") { goUp(); e.preventDefault(); }
       else if (e.key === "ArrowDown") { goDown(); e.preventDefault(); }
       else if (e.key === "Escape") { onClose(); e.preventDefault(); }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
   }, [goUp, goDown, onClose]);
 
   // Scroll active into view
@@ -336,7 +340,7 @@ export function ControllerBrowser({
                 <div className="flex items-center gap-2">
                   <StatusDot status={ctrlStopping ? "stopping" : killed ? "stopped" : c.status} />
                   <span className={`truncate text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
-                    {c.controller_name}
+                    {c.controller_id || c.controller_name}
                   </span>
                 </div>
                 <div className="mt-0.5 flex items-center gap-2 pl-4 text-[10px]">
@@ -344,7 +348,7 @@ export function ControllerBrowser({
                     <span className="text-[var(--color-text-muted)]">{c.trading_pair}</span>
                   )}
                   <span className="ml-auto tabular-nums font-medium" style={{ color: pnlColor(c.global_pnl_quote) }}>
-                    {formatPnl(c.global_pnl_quote)}
+                    {fmtPnl(c.global_pnl_quote, c.trading_pair)}
                   </span>
                 </div>
               </button>
@@ -402,6 +406,29 @@ export function ControllerBrowser({
             </div>
           </div>
           <div className="flex items-center gap-1.5">
+            {controllers.length > 1 && (
+              <div className="flex items-center border border-[var(--color-border)] rounded overflow-hidden mr-1">
+                <button
+                  onClick={goUp}
+                  disabled={activeIdx <= 0}
+                  className="p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] disabled:opacity-30"
+                  title="Previous controller (↑)"
+                >
+                  <ChevronUp className="h-3.5 w-3.5" />
+                </button>
+                <span className="text-[10px] tabular-nums text-[var(--color-text-muted)] px-1 border-x border-[var(--color-border)]">
+                  {activeIdx + 1}/{controllers.length}
+                </span>
+                <button
+                  onClick={goDown}
+                  disabled={activeIdx >= controllers.length - 1}
+                  className="p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] disabled:opacity-30"
+                  title="Next controller (↓)"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
             <button
               onClick={() => toggleMutation.mutate()}
               disabled={toggleMutation.isPending || isStopping}
@@ -461,6 +488,10 @@ export function ControllerBrowser({
               botName={activeCtrl.bot_name}
               deployedAt={activeCtrl.deployed_at}
               height={200}
+              tradingPair={activeCtrl.trading_pair}
+              convert={convert}
+              currencySymbol={currencySymbol}
+              controller={activeCtrl}
             />
 
             {/* PnL Breakdown - compact horizontal */}
@@ -469,19 +500,19 @@ export function ControllerBrowser({
                 <div>
                   <div className="text-[var(--color-text-muted)] text-[10px] uppercase tracking-wider mb-0.5">Realized</div>
                   <div className="font-semibold tabular-nums" style={{ color: pnlColor(activeCtrl.realized_pnl_quote) }}>
-                    {formatPnl(activeCtrl.realized_pnl_quote)}
+                    {fmtPnl(activeCtrl.realized_pnl_quote, activeCtrl.trading_pair)}
                   </div>
                 </div>
                 <div>
                   <div className="text-[var(--color-text-muted)] text-[10px] uppercase tracking-wider mb-0.5">Unrealized</div>
                   <div className="font-semibold tabular-nums" style={{ color: pnlColor(activeCtrl.unrealized_pnl_quote) }}>
-                    {formatPnl(activeCtrl.unrealized_pnl_quote)}
+                    {fmtPnl(activeCtrl.unrealized_pnl_quote, activeCtrl.trading_pair)}
                   </div>
                 </div>
                 <div>
                   <div className="text-[var(--color-text-muted)] text-[10px] uppercase tracking-wider mb-0.5">Total PnL</div>
                   <div className="font-semibold tabular-nums" style={{ color: pnlColor(activeCtrl.global_pnl_quote) }}>
-                    {formatPnl(activeCtrl.global_pnl_quote)}
+                    {fmtPnl(activeCtrl.global_pnl_quote, activeCtrl.trading_pair)}
                   </div>
                 </div>
                 {activeCtrl.global_pnl_pct !== 0 && (
@@ -495,7 +526,7 @@ export function ControllerBrowser({
                 )}
                 <div>
                   <div className="text-[var(--color-text-muted)] text-[10px] uppercase tracking-wider mb-0.5">Volume</div>
-                  <div className="font-semibold tabular-nums">{formatVolume(activeCtrl.volume_traded)}</div>
+                  <div className="font-semibold tabular-nums">{fmtVol(activeCtrl.volume_traded, activeCtrl.trading_pair)}</div>
                 </div>
               </div>
             </div>
@@ -563,18 +594,18 @@ export function ControllerBrowser({
                           <div>
                             <div className="text-[var(--color-text-muted)] mb-0.5">Realized</div>
                             <div className="font-medium tabular-nums" style={{ color: pnlColor(realizedPnl) }}>
-                              {formatPnl(realizedPnl)}
+                              {fmtPnl(realizedPnl, pair || activeCtrl.trading_pair)}
                             </div>
                           </div>
                           <div>
                             <div className="text-[var(--color-text-muted)] mb-0.5">Unrealized</div>
                             <div className="font-medium tabular-nums" style={{ color: pnlColor(unrealizedPnl) }}>
-                              {formatPnl(unrealizedPnl)}
+                              {fmtPnl(unrealizedPnl, pair || activeCtrl.trading_pair)}
                             </div>
                           </div>
                           <div>
                             <div className="text-[var(--color-text-muted)] mb-0.5">Volume</div>
-                            <div className="font-medium tabular-nums">{formatVolume(volume)}</div>
+                            <div className="font-medium tabular-nums">{fmtVol(volume, pair || activeCtrl.trading_pair)}</div>
                           </div>
                         </div>
                         {secondaryEntries.length > 0 && (

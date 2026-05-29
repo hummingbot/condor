@@ -721,6 +721,7 @@ export function ActiveBotsTab() {
           snapshots={activeSnapshots}
           controllers={controllers}
           currencySymbol={currencySymbol}
+          convert={convert}
         />
       )}
 
@@ -763,8 +764,8 @@ export function ActiveBotsTab() {
                           key={`${ctrl.bot_name}-${ctrl.controller_name}`}
                           ctrl={ctrl}
                           server={server!}
-                          isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_name}`}
-                          onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_name}`)}
+                          isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`}
+                          onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`)}
                           formatPnlValue={formatPnlValue}
                           formatValue={formatValue}
                           sparklineValues={sparklineMap[cid]}
@@ -790,6 +791,8 @@ export function ActiveBotsTab() {
           server={server}
           initialControllerKey={selectedKey}
           onClose={() => setSelectedKey(null)}
+          convert={convert}
+          currencySymbol={currencySymbol}
         />
       )}
 
