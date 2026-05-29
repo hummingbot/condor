@@ -13,7 +13,7 @@ import {
 } from "recharts";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
-import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
+import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 
 // ── Helpers ──
 
@@ -48,20 +48,37 @@ function positionQuoteValue(positions: Record<string, unknown>[]): number {
 
 // ── Aggregation ──
 
+type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
+
 interface AggPoint {
   time: number;
   realized: number;
   unrealized: number;
   total: number;
   volume: number;
-  position: number; // net position in quote currency
+  position: number;
 }
 
 function aggregate(
   snapshots: ControllerPerformanceSnapshot[],
   enabledIds: Set<string>,
+  controllers: ControllerInfo[],
+  convertFn?: ConvertFn,
 ): AggPoint[] {
   if (!snapshots || snapshots.length === 0) return [];
+
+  // Build a lookup from controller id -> trading_pair using live controller data
+  const pairByCtrl: Record<string, string> = {};
+  for (const ctrl of controllers) {
+    const cid = ctrl.controller_id || ctrl.controller_name;
+    if (ctrl.trading_pair) pairByCtrl[cid] = ctrl.trading_pair;
+  }
+
+  const cv = (val: number, pair: string) => {
+    if (!convertFn) return val;
+    const quote = pair?.split("-")[1] || "USDT";
+    return convertFn(val, quote).value;
+  };
 
   const byCtrl: Record<string, ControllerPerformanceSnapshot[]> = {};
   for (const snap of snapshots) {
@@ -93,16 +110,45 @@ function aggregate(
         cursors[cid]++;
       if (toMs(snaps[cursors[cid]].timestamp) <= t) {
         const s = snaps[cursors[cid]];
-        realized += s.realized_pnl_quote;
-        unrealized += s.unrealized_pnl_quote;
-        volume += s.volume_traded;
+        const pair = s.trading_pair || pairByCtrl[cid] || "";
+        realized += cv(s.realized_pnl_quote, pair);
+        unrealized += cv(s.unrealized_pnl_quote, pair);
+        volume += cv(s.volume_traded, pair);
         if (Array.isArray(s.positions_summary)) {
-          position += positionQuoteValue(s.positions_summary as Record<string, unknown>[]);
+          position += cv(positionQuoteValue(s.positions_summary as Record<string, unknown>[]), pair);
         }
       }
     }
     points.push({ time: t, realized, unrealized, total: realized + unrealized, volume, position });
   }
+
+  // Append a live "now" point from controllers so the graph ends at real-time values
+  const now = Date.now();
+  let liveRealized = 0, liveUnrealized = 0, liveVolume = 0, livePosition = 0;
+  let hasLive = false;
+  for (const ctrl of controllers) {
+    const cid = ctrl.controller_id || ctrl.controller_name;
+    if (!enabledIds.has(cid)) continue;
+    hasLive = true;
+    const pair = ctrl.trading_pair || "";
+    liveRealized += cv(ctrl.realized_pnl_quote, pair);
+    liveUnrealized += cv(ctrl.unrealized_pnl_quote, pair);
+    liveVolume += cv(ctrl.volume_traded, pair);
+    if (Array.isArray(ctrl.positions_summary)) {
+      livePosition += cv(positionQuoteValue(ctrl.positions_summary as Record<string, unknown>[]), pair);
+    }
+  }
+  if (hasLive) {
+    points.push({
+      time: now,
+      realized: liveRealized,
+      unrealized: liveUnrealized,
+      total: liveRealized + liveUnrealized,
+      volume: liveVolume,
+      position: livePosition,
+    });
+  }
+
   return points;
 }
 
@@ -178,9 +224,10 @@ interface Props {
   snapshots: ControllerPerformanceSnapshot[];
   controllers: ControllerInfo[];
   currencySymbol?: string;
+  convert?: ConvertFn;
 }
 
-export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$" }: Props) {
+export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$", convert }: Props) {
   const controllerIds = useMemo(() => {
     const ids: { id: string }[] = [];
     const seen = new Set<string>();
@@ -228,19 +275,23 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
     setEnabled(new Set(controllerIds.map((c) => c.id)));
   };
 
-  const data = useMemo(() => aggregate(snapshots, enabled), [snapshots, enabled]);
+  const data = useMemo(
+    () => aggregate(snapshots, enabled, controllers, convert),
+    [snapshots, enabled, controllers, convert],
+  );
+  // Latest point is the live "now" point appended by aggregate
   const latest = data.length > 0 ? data[data.length - 1] : null;
   const hasPosition = data.some((p) => p.position !== 0);
 
   if (!snapshots || snapshots.length === 0 || data.length < 2) return null;
 
-  const fmtPnl = (v: number) => `${v >= 0 ? "+" : ""}${formatCurrencyVolume(v, currencySymbol)}`;
+  const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
   const fmtAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(Math.abs(v) < 10 ? 2 : 0)}`;
   const fmtVolAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(0)}`;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
-      {/* Header */}
+      {/* Header with live stats */}
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
         <div className="flex items-center gap-4">
           <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -258,8 +309,13 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
                 U: <span style={{ color: "#f59e0b" }}>{fmtPnl(latest.unrealized)}</span>
               </span>
               <span className="text-[var(--color-text-muted)]">
-                Vol: {formatCurrencyVolume(latest.volume, currencySymbol)}
+                Vol: <span style={{ color: "#3b82f6" }}>{formatCurrencyVolume(latest.volume, currencySymbol)}</span>
               </span>
+              {latest.position !== 0 && (
+                <span className="text-[var(--color-text-muted)]">
+                  Pos: <span style={{ color: "#a78bfa" }}>{formatCurrencyVolume(latest.position, currencySymbol)}</span>
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -317,9 +373,10 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
               type="number"
               domain={["dataMin", "dataMax"]}
               tickFormatter={formatTime}
-              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
+              tick={false}
               stroke="var(--color-border)"
               tickLine={false}
+              height={1}
             />
             <YAxis
               tickFormatter={fmtAxis}
@@ -329,6 +386,16 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
               axisLine={false}
               width={52}
             />
+            {hasPosition && (
+              <YAxis
+                yAxisId="spacer"
+                orientation="right"
+                tick={false}
+                tickLine={false}
+                axisLine={false}
+                width={52}
+              />
+            )}
             <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
             <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
             <Area type="monotone" dataKey="total" stroke="none" fill="url(#aggPnlGrad)" activeDot={false} legendType="none" />
@@ -347,9 +414,9 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
       </div>
 
       {/* Volume + Position chart (bottom) */}
-      <div className="px-1 border-t border-[var(--color-border)]/30">
+      <div className="px-1">
         <ResponsiveContainer width="100%" height={120}>
-          <ComposedChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 4 }} syncId="agg">
+          <ComposedChart data={data} margin={{ top: 4, right: 12, left: 0, bottom: 4 }} syncId="agg">
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
             <XAxis
               dataKey="time"
@@ -386,13 +453,6 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
             {hasPosition && (
               <Line yAxisId="pos" type="monotone" dataKey="position" stroke="#a78bfa" strokeWidth={1.5} dot={false} />
             )}
-            <Legend
-              verticalAlign="top"
-              align="right"
-              iconType="plainline"
-              wrapperStyle={{ fontSize: 10, paddingBottom: 0 }}
-              formatter={(value: string) => <span className="text-[var(--color-text-muted)] text-[10px] capitalize">{value}</span>}
-            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
