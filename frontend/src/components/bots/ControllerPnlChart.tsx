@@ -13,8 +13,8 @@ import {
   YAxis,
 } from "recharts";
 
-import { api } from "@/lib/api";
-import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
+import { api, type ControllerInfo } from "@/lib/api";
+import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 
 function toMs(ts: string | number): number {
   if (typeof ts === "number") return ts > 1e12 ? ts : ts * 1000;
@@ -118,6 +118,8 @@ function BottomTooltip({ active, payload, label, symbol }: {
 
 // ── Component ──
 
+type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
+
 interface Props {
   server: string;
   controllerId: string;
@@ -125,9 +127,12 @@ interface Props {
   deployedAt?: string | null;
   height?: number;
   currencySymbol?: string;
+  tradingPair?: string;
+  convert?: ConvertFn;
+  controller?: ControllerInfo;
 }
 
-export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$" }: Props) {
+export function ControllerPnlChart({ server, controllerId, botName, deployedAt, height = 400, currencySymbol = "$", tradingPair, convert, controller }: Props) {
   const { data: raw, isLoading } = useQuery({
     queryKey: ["controller-perf-history", server, controllerId, deployedAt],
     queryFn: () =>
@@ -147,6 +152,9 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
   const { data, hasPosition, latest } = useMemo(() => {
     if (snapshots.length === 0) return { data: [], hasPosition: false, latest: null };
 
+    const quote = tradingPair?.split("-")[1] || "USDT";
+    const cv = (val: number) => convert ? convert(val, quote).value : val;
+
     const sorted = [...snapshots].sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
     let hasPos = false;
 
@@ -159,16 +167,33 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
 
       return {
         time: toMs(s.timestamp),
-        realized: s.realized_pnl_quote,
-        unrealized: s.unrealized_pnl_quote,
-        total: s.realized_pnl_quote + s.unrealized_pnl_quote,
-        volume: s.volume_traded,
-        position: posValue,
+        realized: cv(s.realized_pnl_quote),
+        unrealized: cv(s.unrealized_pnl_quote),
+        total: cv(s.realized_pnl_quote + s.unrealized_pnl_quote),
+        volume: cv(s.volume_traded),
+        position: cv(posValue),
       };
     });
 
+    // Append live "now" point from controller so graph ends at real-time values
+    if (controller) {
+      let livePos = 0;
+      if (Array.isArray(controller.positions_summary)) {
+        livePos = positionQuoteValue(controller.positions_summary as Record<string, unknown>[]);
+      }
+      if (livePos !== 0) hasPos = true;
+      pts.push({
+        time: Date.now(),
+        realized: cv(controller.realized_pnl_quote),
+        unrealized: cv(controller.unrealized_pnl_quote),
+        total: cv(controller.realized_pnl_quote + controller.unrealized_pnl_quote),
+        volume: cv(controller.volume_traded),
+        position: cv(livePos),
+      });
+    }
+
     return { data: pts, hasPosition: hasPos, latest: pts[pts.length - 1] || null };
-  }, [snapshots]);
+  }, [snapshots, convert, tradingPair, controller]);
 
   if (isLoading) {
     return (
@@ -191,16 +216,33 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
 
   const pnlH = Math.round(height * 0.65);
   const bottomH = height - pnlH;
+  const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
   const fmtAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(Math.abs(v) < 10 ? 2 : 0)}`;
   const fmtVolAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(0)}`;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+      {/* Header with live stats */}
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
         <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           PnL Evolution
         </p>
-        <span className="text-[10px] text-[var(--color-text-muted)]">{snapshots.length} snapshots</span>
+        {latest && (
+          <div className="flex items-center gap-3 text-xs tabular-nums">
+            <span style={{ color: pnlColor(latest.total) }} className="font-semibold">
+              {fmtPnl(latest.total)}
+            </span>
+            <span className="text-[var(--color-text-muted)]">
+              R: <span style={{ color: "var(--color-green)" }}>{fmtPnl(latest.realized)}</span>
+            </span>
+            <span className="text-[var(--color-text-muted)]">
+              U: <span style={{ color: "#f59e0b" }}>{fmtPnl(latest.unrealized)}</span>
+            </span>
+            <span className="text-[var(--color-text-muted)]">
+              Vol: <span style={{ color: "#3b82f6" }}>{formatCurrencyVolume(latest.volume, currencySymbol)}</span>
+            </span>
+          </div>
+        )}
       </div>
 
       {/* PnL chart */}
@@ -219,9 +261,10 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
               type="number"
               domain={["dataMin", "dataMax"]}
               tickFormatter={formatTime}
-              tick={{ fontSize: 10, fill: "var(--color-text-muted)" }}
+              tick={false}
               stroke="var(--color-border)"
               tickLine={false}
+              height={1}
             />
             <YAxis
               tickFormatter={fmtAxis}
@@ -231,6 +274,16 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
               axisLine={false}
               width={52}
             />
+            {hasPosition && (
+              <YAxis
+                yAxisId="spacer"
+                orientation="right"
+                tick={false}
+                tickLine={false}
+                axisLine={false}
+                width={52}
+              />
+            )}
             <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
             <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
             <Area type="monotone" dataKey="total" stroke="none" fill="url(#ctrlPnlGrad)" activeDot={false} legendType="none" />
@@ -249,9 +302,9 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
       </div>
 
       {/* Volume + Position chart */}
-      <div className="px-1 border-t border-[var(--color-border)]/30">
+      <div className="px-1">
         <ResponsiveContainer width="100%" height={bottomH}>
-          <ComposedChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 4 }} syncId="ctrl">
+          <ComposedChart data={data} margin={{ top: 4, right: 12, left: 0, bottom: 4 }} syncId="ctrl">
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
             <XAxis
               dataKey="time"
@@ -288,13 +341,6 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
             {hasPosition && (
               <Line yAxisId="pos" type="monotone" dataKey="position" stroke="#a78bfa" strokeWidth={1.5} dot={false} />
             )}
-            <Legend
-              verticalAlign="top"
-              align="right"
-              iconType="plainline"
-              wrapperStyle={{ fontSize: 10, paddingBottom: 0 }}
-              formatter={(value: string) => <span className="text-[var(--color-text-muted)] text-[10px] capitalize">{value}</span>}
-            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
