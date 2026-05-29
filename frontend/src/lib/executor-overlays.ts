@@ -1,4 +1,5 @@
 import type { ExecutorInfo } from "./api";
+import { getThemeColors, pnlHexColor, sideColor } from "./theme-colors";
 
 // ── Overlay Model ──
 
@@ -81,10 +82,6 @@ function closeTypeLabel(closeType: string): string {
   return ct ? ct.replace(/_/g, " ") : "closed";
 }
 
-function pnlColor(pnl: number): string {
-  return pnl >= 0 ? "#22c55e" : "#ef4444";
-}
-
 function isActiveStatus(status: string): boolean {
   const s = status?.toLowerCase() ?? "";
   return s === "running" || s === "active_position" || s === "active";
@@ -125,7 +122,7 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
     lines.push({
       price: slPrice,
       label: `SL (${(slPct * 100).toFixed(1)}%)`,
-      color: "#ef4444",
+      color: getThemeColors().red,
       style: "dashed",
     });
   }
@@ -137,7 +134,7 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
     lines.push({
       price: tpPrice,
       label: `TP (${(tpPct * 100).toFixed(1)}%)`,
-      color: "#22c55e",
+      color: getThemeColors().green,
       style: "dashed",
     });
   }
@@ -172,7 +169,7 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
     lines.push({
       price: closePrice,
       label: "Close",
-      color: pnlPositive ? "#22c55e" : "#ef4444",
+      color: pnlHexColor(pnlPositive ? 1 : -1),
       style: "dashed",
     });
   }
@@ -187,7 +184,7 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
       entryPrice: entry,
       exitTime: exitT,
       exitPrice: exitP,
-      color: pnlColor(executor.pnl),
+      color: pnlHexColor(executor.pnl),
     };
   }
 
@@ -198,7 +195,7 @@ function computePositionOverlay(executor: ExecutorInfo): ExecutorOverlay {
       price: entry,
       position: side === "buy" ? "belowBar" : "aboveBar",
       shape: side === "buy" ? "arrowUp" : "arrowDown",
-      color: side === "buy" ? "#22c55e" : "#ef4444",
+      color: sideColor(side),
       text: side === "buy" ? "BUY" : "SELL",
     });
   }
@@ -262,7 +259,7 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
       startPrice,
       endPrice,
       limitPrice: limitPrice > 0 ? limitPrice : undefined,
-      color: profitable ? "#22c55e" : "#ef4444",
+      color: pnlHexColor(profitable ? 1 : -1),
     };
   }
 
@@ -327,14 +324,14 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
       entryPrice: orderPrice,
       exitTime: Math.floor(Date.now() / 1000),
       exitPrice: orderPrice,
-      color: side === "buy" ? "#22c55e" : "#ef4444",
+      color: sideColor(side),
     };
 
     if (orderPrice > 0) {
       lines.push({
         price: orderPrice,
         label: descriptiveLabel,
-        color: side === "buy" ? "#22c55e" : "#ef4444",
+        color: sideColor(side),
         style: isChaser ? "dotted" : "solid",
         lineWidth: 2,
       });
@@ -349,7 +346,7 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
       price: orderPrice,
       position: side === "buy" ? "belowBar" : "aboveBar",
       shape: side === "buy" ? "arrowUp" : "arrowDown",
-      color: side === "buy" ? "#22c55e" : "#ef4444",
+      color: sideColor(side),
       text: side === "buy" ? "BUY" : "SELL",
     });
 
@@ -360,7 +357,7 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
         price: fillPrice,
         position: side === "buy" ? "aboveBar" : "belowBar",
         shape: side === "buy" ? "arrowDown" : "arrowUp",
-        color: pnlColor(executor.pnl),
+        color: pnlHexColor(executor.pnl),
         text: closeTypeLabel(executor.close_type),
       });
     }
@@ -372,7 +369,7 @@ function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
         entryPrice: orderPrice,
         exitTime: executor.close_timestamp,
         exitPrice: fillPrice,
-        color: pnlColor(executor.pnl),
+        color: pnlHexColor(executor.pnl),
       };
     }
   }
@@ -418,7 +415,7 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
   }
   if (closePrice > 0 && closePrice !== entryPrice) {
     const pnlPositive = side === "buy" ? closePrice > entryPrice : closePrice < entryPrice;
-    lines.push({ price: closePrice, label: "Close", color: pnlPositive ? "#22c55e" : "#ef4444", style: "dashed" });
+    lines.push({ price: closePrice, label: "Close", color: pnlHexColor(pnlPositive ? 1 : -1), style: "dashed" });
   }
 
   // Segment
@@ -431,7 +428,7 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
       entryPrice: entryPrice,
       exitTime: exitT,
       exitPrice: exitP,
-      color: pnlColor(executor.pnl),
+      color: pnlHexColor(executor.pnl),
     };
   }
 
@@ -441,7 +438,7 @@ function computeGenericOverlay(executor: ExecutorInfo): ExecutorOverlay {
       price: entryPrice,
       position: side === "buy" ? "belowBar" : "aboveBar",
       shape: side === "buy" ? "arrowUp" : "arrowDown",
-      color: side === "buy" ? "#22c55e" : "#ef4444",
+      color: sideColor(side),
       text: side.toUpperCase(),
     });
   }
@@ -497,7 +494,7 @@ export function computeExecutorOverlay(executor: ExecutorInfo): ExecutorOverlay 
 
 /** PnL-based color: green for profit, red for loss */
 export function getExecutorColor(_index: number, pnl?: number): string {
-  return (pnl ?? 0) >= 0 ? "#22c55e" : "#ef4444";
+  return pnlHexColor(pnl ?? 0);
 }
 
 export function computeMultiOverlays(executors: ExecutorInfo[]): ExecutorOverlay[] {

@@ -13,41 +13,18 @@ import {
   TrendingUp,
   Volume2,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
+import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { PnlSparkline } from "@/components/bots/PnlSparkline";
 
+import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type BotLogEntry, type BotSummary, type ControllerInfo } from "@/lib/api";
-
-// ── Formatters ──
-
-function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-}
-
-function formatVolume(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(val) >= 1_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return "$" + val.toFixed(0);
-}
-
-function formatPnl(val: number) {
-  const prefix = val >= 0 ? "+" : "";
-  return prefix + formatUsd(val);
-}
-
-function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
+import { api, type BotLogEntry, type BotSummary, type ControllerInfo, type ControllerPerformanceSnapshot } from "@/lib/api";
+import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
 
 function formatUptime(deployedAt: string | null): string {
   if (!deployedAt) return "—";
@@ -142,13 +119,18 @@ function StatCard({
 // ── Status Dot ──
 
 function StatusDot({ status }: { status: string }) {
+  const isStopping = status === "stopping";
   const color =
     status === "running"
       ? "text-[var(--color-green)]"
       : status === "stopped" || status === "error"
         ? "text-[var(--color-red)]"
         : "text-[var(--color-yellow)]";
-  return <Circle className={`h-2 w-2 fill-current ${color}`} />;
+  return isStopping ? (
+    <span className="h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
+  ) : (
+    <Circle className={`h-2 w-2 fill-current ${color}`} />
+  );
 }
 
 // ── Sortable Header ──
@@ -270,20 +252,29 @@ function ControllerRow({
   server,
   isSelected,
   onSelect,
+  formatPnlValue,
+  formatValue,
+  sparklineValues,
+  isBotStopping,
 }: {
   ctrl: ControllerInfo;
   server: string;
   isSelected: boolean;
   onSelect: () => void;
+  formatPnlValue: (val: number, quote: string) => string;
+  formatValue: (val: number, quote: string) => string;
+  sparklineValues?: number[];
+  isBotStopping?: boolean;
 }) {
   const queryClient = useQueryClient();
   const isKilled = ctrl.config?.manual_kill_switch === true;
+  const isStopping = ctrl.status === "stopping" || (isBotStopping && !isKilled);
 
   const toggleMutation = useMutation({
     mutationFn: () =>
       isKilled
-        ? api.startControllers(server, ctrl.bot_name, [ctrl.controller_name])
-        : api.stopControllers(server, ctrl.bot_name, [ctrl.controller_name]),
+        ? api.startControllers(server, ctrl.bot_name, [ctrl.controller_id])
+        : api.stopControllers(server, ctrl.bot_name, [ctrl.controller_id]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
     },
@@ -310,48 +301,66 @@ function ControllerRow({
         {ctrl.connector || "—"}
       </td>
       <td className="px-4 py-2.5 text-sm">{ctrl.trading_pair || "—"}</td>
-      <td
-        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-        style={{ color: pnlColor(ctrl.realized_pnl_quote) }}
-      >
-        {formatPnl(ctrl.realized_pnl_quote)}
-      </td>
-      <td
-        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-        style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}
-      >
-        {formatPnl(ctrl.unrealized_pnl_quote)}
-      </td>
-      <td
-        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-        style={{ color: pnlColor(ctrl.global_pnl_quote) }}
-      >
-        {formatPnl(ctrl.global_pnl_quote)}
-      </td>
-      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-        {formatVolume(ctrl.volume_traded)}
-      </td>
+      {(() => {
+        const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+        return (
+          <>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.realized_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.realized_pnl_quote, quote)}
+            </td>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.unrealized_pnl_quote, quote)}
+            </td>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.global_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.global_pnl_quote, quote)}
+            </td>
+            <td className="px-2 py-2.5">
+              <div className="flex justify-center">
+                {sparklineValues && sparklineValues.length >= 2 ? (
+                  <PnlSparkline values={sparklineValues} />
+                ) : (
+                  <span className="text-[10px] text-[var(--color-text-muted)]">—</span>
+                )}
+              </div>
+            </td>
+            <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+              {formatValue(ctrl.volume_traded, quote)}
+            </td>
+          </>
+        );
+      })()}
       <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
         {formatUptime(ctrl.deployed_at)}
       </td>
       <td className="px-4 py-2.5">
         <div className="flex items-center gap-1.5 justify-center">
-          <StatusDot status={isKilled ? "stopped" : ctrl.status} />
+          <StatusDot status={isKilled ? "stopped" : isStopping ? "stopping" : ctrl.status} />
         </div>
       </td>
       <td className="px-4 py-2.5">
         <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => toggleMutation.mutate()}
-            disabled={toggleMutation.isPending}
+            disabled={toggleMutation.isPending || isStopping}
             className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
-              isKilled
-                ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
-                : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
+              isStopping
+                ? "text-[var(--color-yellow)]"
+                : isKilled
+                  ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
+                  : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
             }`}
-            title={isKilled ? "Start controller" : "Pause controller"}
+            title={isStopping ? "Stopping..." : isKilled ? "Start controller" : "Pause controller"}
           >
-            {toggleMutation.isPending ? (
+            {toggleMutation.isPending || isStopping ? (
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
             ) : isKilled ? (
               <Play className="h-3.5 w-3.5" />
@@ -367,16 +376,23 @@ function ControllerRow({
 
 // ── Bots Collapsible Section ──
 
-function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
+function BotRow({ bot, server, onStopInitiated, onStopSettled }: { bot: BotSummary; server: string; onStopInitiated?: (botName: string) => void; onStopSettled?: (botName: string) => void }) {
   const [showLogs, setShowLogs] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
   const queryClient = useQueryClient();
+  const isStopping = bot.status === "stopping";
 
   const stopMutation = useMutation({
-    mutationFn: () => api.stopBot(server, bot.bot_name),
+    mutationFn: () => {
+      onStopInitiated?.(bot.bot_name);
+      return api.stopBot(server, bot.bot_name);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bots", server] });
       setConfirmStop(false);
+    },
+    onSettled: () => {
+      onStopSettled?.(bot.bot_name);
     },
   });
 
@@ -418,7 +434,12 @@ function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
         <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
           {formatUptime(bot.deployed_at)}
         </span>
-        {confirmStop ? (
+        {isStopping ? (
+            <div className="flex items-center gap-1.5 text-[var(--color-yellow)]" onClick={(e) => e.stopPropagation()}>
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              <span className="text-xs font-medium">Stopping</span>
+            </div>
+          ) : confirmStop ? (
             <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => stopMutation.mutate()}
@@ -459,7 +480,7 @@ function BotRow({ bot, server }: { bot: BotSummary; server: string }) {
   );
 }
 
-function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
+function BotsSection({ bots, server, onStopInitiated, onStopSettled }: { bots: BotSummary[]; server: string; onStopInitiated?: (botName: string) => void; onStopSettled?: (botName: string) => void }) {
   const [expanded, setExpanded] = useState(true);
   const Chevron = expanded ? ChevronDown : ChevronRight;
 
@@ -476,7 +497,7 @@ function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
       {expanded && (
         <div className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border)]/30">
           {bots.map((bot) => (
-            <BotRow key={bot.bot_name} bot={bot} server={server} />
+            <BotRow key={bot.bot_name} bot={bot} server={server} onStopInitiated={onStopInitiated} onStopSettled={onStopSettled} />
           ))}
         </div>
       )}
@@ -486,7 +507,7 @@ function BotsSection({ bots, server }: { bots: BotSummary[]; server: string }) {
 
 // ── Main Page ──
 
-const BOTS_WS_CHANNELS = ["bots"];
+const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
 
 export function ActiveBotsTab() {
   const { server } = useServer();
@@ -494,6 +515,18 @@ export function ActiveBotsTab() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [showDeploy, setShowDeploy] = useState(false);
+  const [pendingStopBots, setPendingStopBots] = useState<Set<string>>(new Set());
+
+  const onStopInitiated = useCallback((botName: string) => {
+    setPendingStopBots((prev) => new Set(prev).add(botName));
+  }, []);
+  const onStopSettled = useCallback((botName: string) => {
+    setPendingStopBots((prev) => {
+      const next = new Set(prev);
+      next.delete(botName);
+      return next;
+    });
+  }, []);
 
   // Subscribe to real-time bots updates via WS
   useCondorWebSocket(BOTS_WS_CHANNELS, server);
@@ -505,6 +538,33 @@ export function ActiveBotsTab() {
     refetchInterval: 30000, // Slower polling since WS handles real-time updates
   });
 
+  // Compute earliest deploy time from active bots for filtering perf history
+  const earliestDeploy = useMemo(() => {
+    if (!data?.bots?.length) return undefined;
+    let earliest: number | undefined;
+    for (const bot of data.bots) {
+      if (bot.deployed_at) {
+        const ms = Date.parse(bot.deployed_at);
+        if (!isNaN(ms) && (earliest === undefined || ms < earliest)) earliest = ms;
+      }
+    }
+    return earliest ? new Date(earliest).toISOString() : undefined;
+  }, [data?.bots]);
+
+  // Fetch performance history for sparklines (all controllers at once)
+  const { data: perfHistory } = useQuery({
+    queryKey: ["controller-perf-history-all", server, earliestDeploy],
+    queryFn: () =>
+      api.getControllerPerformanceHistory(server!, {
+        interval: "5m",
+        limit: 1000,
+        start_time: earliestDeploy,
+      }),
+    enabled: !!server && (data?.controllers?.length ?? 0) > 0,
+    refetchInterval: 120_000,
+    staleTime: 60_000,
+  });
+
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
@@ -514,25 +574,83 @@ export function ActiveBotsTab() {
     }
   };
 
-  const controllers = data?.controllers ?? [];
   const bots = data?.bots ?? [];
 
-  // Aggregate logs per bot for the overlay
-  const allLogsByBot = useMemo(() => {
-    const map: Record<string, BotLogEntry[]> = {};
+  // Track which bots are stopping (server-side status + optimistic pending mutations)
+  const stoppingBotNames = useMemo(() => {
+    const names = new Set(pendingStopBots);
     for (const bot of bots) {
-      map[bot.bot_name] = [
-        ...(bot.error_logs || []).map((l) => ({ ...l, log_category: "error" as const })),
-        ...(bot.general_logs || []).map((l) => ({ ...l, log_category: "general" as const })),
-      ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      if (bot.status === "stopping") names.add(bot.bot_name);
     }
-    return map;
-  }, [bots]);
+    return names;
+  }, [bots, pendingStopBots]);
+
+  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
+  const controllers = useMemo(() => {
+    const raw = data?.controllers ?? [];
+    const seen = new Map<string, ControllerInfo>();
+    for (const ctrl of raw) {
+      const key = `${ctrl.bot_name}:${ctrl.controller_id || ctrl.controller_name}`;
+      seen.set(key, ctrl); // last wins (most recent data)
+    }
+    return Array.from(seen.values());
+  }, [data?.controllers]);
 
   const sortedControllers = useMemo(
     () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
     [controllers, sortKey, sortDir],
   );
+
+  // Filter performance snapshots to only active controllers and current run
+  const activeSnapshots = useMemo(() => {
+    if (!perfHistory?.snapshots || controllers.length === 0) return [];
+
+    // Build set of active controller IDs and their deploy times
+    const activeControllers = new Map<string, number>(); // id -> deployedAt ms
+    for (const ctrl of controllers) {
+      const cid = ctrl.controller_id || ctrl.controller_name;
+      const deployMs = ctrl.deployed_at ? Date.parse(ctrl.deployed_at) : 0;
+      activeControllers.set(cid, deployMs);
+    }
+
+    return perfHistory.snapshots.filter((snap) => {
+      const key = snap.controller_id || snap.controller_name;
+      if (!key || !activeControllers.has(key)) return false;
+      const deployMs = activeControllers.get(key)!;
+      if (!deployMs) return true; // no deploy time known, keep it
+      const snapMs = Date.parse(snap.timestamp) || 0;
+      return snapMs >= deployMs;
+    });
+  }, [perfHistory, controllers]);
+
+  // Build a map: controller_id -> sorted pnl values for sparklines
+  const sparklineMap = useMemo(() => {
+    const map: Record<string, number[]> = {};
+    if (activeSnapshots.length === 0) return map;
+    // Group by controller_id
+    const grouped: Record<string, ControllerPerformanceSnapshot[]> = {};
+    for (const snap of activeSnapshots) {
+      const key = snap.controller_id || snap.controller_name;
+      if (!key) continue;
+      (grouped[key] ??= []).push(snap);
+    }
+    for (const [key, snaps] of Object.entries(grouped)) {
+      const sorted = snaps.sort((a, b) => {
+        const ta = Date.parse(a.timestamp) || 0;
+        const tb = Date.parse(b.timestamp) || 0;
+        return ta - tb;
+      });
+      map[key] = sorted.map((s) => s.global_pnl_quote);
+    }
+    return map;
+  }, [activeSnapshots]);
+
+  // Currency conversion
+  const quoteCurrencies = useMemo(
+    () => controllers.map((c) => c.trading_pair?.split("-")[1] || "USDT"),
+    [controllers],
+  );
+  const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
 
   if (!server) {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
@@ -547,9 +665,16 @@ export function ActiveBotsTab() {
 
   const serverOnline = data?.server_online !== false;
   const errorHint = data?.error_hint;
-  const totalPnl = data?.total_pnl ?? 0;
-  const totalVolume = data?.total_volume ?? 0;
-  const activeBots = bots.filter((b) => b.status === "running").length;
+  const activeBots = bots.filter((b) => b.status === "running" || b.status === "stopping").length;
+
+  // Compute totals with currency conversion
+  let totalPnl = 0;
+  let totalVolume = 0;
+  for (const ctrl of controllers) {
+    const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+    totalPnl += convert(ctrl.global_pnl_quote, quote).value;
+    totalVolume += convert(ctrl.volume_traded, quote).value;
+  }
 
   const isEmpty = controllers.length === 0 && bots.length === 0;
 
@@ -574,11 +699,11 @@ export function ActiveBotsTab() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]">
         <StatCard
           label="Total PnL"
-          value={formatPnl(totalPnl)}
+          value={(totalPnl >= 0 ? "+" : "") + formatCurrencyVolume(totalPnl, currencySymbol)}
           icon={TrendingUp}
           valueColor={pnlColor(totalPnl)}
         />
-        <StatCard label="Volume" value={formatVolume(totalVolume)} icon={Volume2} />
+        <StatCard label="Volume" value={formatCurrencyVolume(totalVolume, currencySymbol)} icon={Volume2} />
         <StatCard label="Active Bots" value={String(activeBots)} icon={Bot} />
         <StatCard label="Controllers" value={String(controllers.length)} icon={Layers} />
         <button
@@ -589,6 +714,16 @@ export function ActiveBotsTab() {
           Deploy Bot
         </button>
       </div>
+
+      {/* Aggregated PnL chart */}
+      {activeSnapshots.length > 0 && (
+        <AggregatedPnlChart
+          snapshots={activeSnapshots}
+          controllers={controllers}
+          currencySymbol={currencySymbol}
+          convert={convert}
+        />
+      )}
 
       {isEmpty ? (
         <div className="flex flex-col items-center gap-2 py-16 text-[var(--color-text-muted)]">
@@ -610,6 +745,9 @@ export function ActiveBotsTab() {
                       <SortHeader label="Realized" sortKey="realized_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Unrealized" sortKey="unrealized_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Total PnL" sortKey="global_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                      <th className="px-2 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)] text-center">
+                        Trend
+                      </th>
                       <SortHeader label="Volume" sortKey="volume_traded" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Age" sortKey="deployed_at" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
                       <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="center" />
@@ -619,15 +757,22 @@ export function ActiveBotsTab() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedControllers.map((ctrl) => (
-                      <ControllerRow
-                        key={`${ctrl.bot_name}-${ctrl.controller_name}`}
-                        ctrl={ctrl}
-                        server={server!}
-                        isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_name}`}
-                        onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_name}`)}
-                      />
-                    ))}
+                    {sortedControllers.map((ctrl) => {
+                      const cid = ctrl.controller_id || ctrl.controller_name;
+                      return (
+                        <ControllerRow
+                          key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                          ctrl={ctrl}
+                          server={server!}
+                          isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`}
+                          onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`)}
+                          formatPnlValue={formatPnlValue}
+                          formatValue={formatValue}
+                          sparklineValues={sparklineMap[cid]}
+                          isBotStopping={stoppingBotNames.has(ctrl.bot_name)}
+                        />
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -635,7 +780,7 @@ export function ActiveBotsTab() {
           )}
 
           {/* Bots collapsible section */}
-          {bots.length > 0 && <BotsSection bots={bots} server={server} />}
+          {bots.length > 0 && <BotsSection bots={bots} server={server} onStopInitiated={onStopInitiated} onStopSettled={onStopSettled} />}
         </>
       )}
 
@@ -645,8 +790,9 @@ export function ActiveBotsTab() {
           controllers={sortedControllers}
           server={server}
           initialControllerKey={selectedKey}
-          allLogs={allLogsByBot}
           onClose={() => setSelectedKey(null)}
+          convert={convert}
+          currencySymbol={currencySymbol}
         />
       )}
 

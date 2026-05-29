@@ -126,6 +126,7 @@ class AgentDetail(BaseModel):
     description: str
     agent_md: str
     config: dict[str, Any] = {}
+    defaults: dict[str, Any] = {}
     default_trading_context: str = ""
     learnings: str = ""
     status: str = "idle"
@@ -169,6 +170,20 @@ class StartAgentRequest(BaseModel):
     user_id: int | None = None  # Override user_id (for internal/MCP calls)
 
 
+class AgentDefaultsResponse(BaseModel):
+    default_config: dict[str, Any] = {}
+    default_trading_context: str = ""
+    agent_key: str = ""
+    model_base_url: str = ""
+
+
+class UpdateAgentDefaultsRequest(BaseModel):
+    default_config: dict[str, Any] | None = None
+    default_trading_context: str | None = None
+    agent_key: str | None = None
+    model_base_url: str | None = None
+
+
 # ── Helpers ──
 
 
@@ -184,6 +199,22 @@ def _get_strategy_by_slug(slug: str):
     if not strategy:
         raise HTTPException(status_code=404, detail=f"Agent '{slug}' not found")
     return strategy
+
+
+def _build_agent_defaults(strategy) -> dict[str, Any]:
+    """Return editable defaults from strategy frontmatter."""
+    from condor.trading_agent.config import AgentConfig, sanitize_config_dict
+
+    default_config = sanitize_config_dict(dict(strategy.default_config or {}))
+    core = AgentConfig.from_dict(default_config)
+    merged = core.model_dump()
+    merged.update({k: v for k, v in default_config.items() if k not in merged})
+    return {
+        "default_config": merged,
+        "default_trading_context": strategy.default_trading_context or "",
+        "agent_key": strategy.agent_key or "",
+        "model_base_url": merged.get("model_base_url") or "",
+    }
 
 
 def _get_running_engine(slug: str):
@@ -617,6 +648,25 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
     return results
 
 
+@router.get("/config-schema")
+async def get_agent_config_schema(user: WebUser = Depends(get_current_user)):
+    """Return JSON schema for editable agent session defaults."""
+    from condor.trading_agent.config import AgentConfig
+
+    schema = AgentConfig.model_json_schema()
+    schema["properties"]["default_trading_context"] = {
+        "type": "string",
+        "description": "Default natural language trading context for new sessions",
+        "default": "",
+    }
+    schema["properties"]["agent_key"] = {
+        "type": "string",
+        "description": "LLM model (e.g. claude-code, cursor:composer-2). Empty = platform default.",
+        "default": "",
+    }
+    return schema
+
+
 @router.get("/{slug}", response_model=AgentDetail)
 async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     """Get agent detail."""
@@ -701,6 +751,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         description=strategy.description,
         agent_md=agent_md,
         config=config_dict,
+        defaults=_build_agent_defaults(strategy),
         default_trading_context=strategy.default_trading_context,
         learnings=learnings,
         status=status,
@@ -766,12 +817,43 @@ async def update_agent_config(
 ):
     """Update agent config."""
     strategy = _get_strategy_by_slug(slug)
-    from condor.trading_agent.config import load_full_config, save_full_config
+    from condor.trading_agent.config import load_full_config, save_full_config, sanitize_config_dict
 
     config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
     config_dict.update(req.config)
-    save_full_config(strategy.agent_dir, config_dict)
+    save_full_config(strategy.agent_dir, sanitize_config_dict(config_dict))
     return {"updated": True, "config": config_dict}
+
+
+@router.get("/{slug}/defaults", response_model=AgentDefaultsResponse)
+async def get_agent_defaults(slug: str, user: WebUser = Depends(get_current_user)):
+    """Get editable session defaults from agent.md frontmatter."""
+    strategy = _get_strategy_by_slug(slug)
+    return AgentDefaultsResponse(**_build_agent_defaults(strategy))
+
+
+@router.put("/{slug}/defaults", response_model=AgentDefaultsResponse)
+async def update_agent_defaults(
+    slug: str, req: UpdateAgentDefaultsRequest, user: WebUser = Depends(get_current_user)
+):
+    """Persist session defaults to agent.md frontmatter."""
+    store = _get_store()
+    patch: dict[str, Any] = {}
+    if req.default_config is not None:
+        patch["default_config"] = req.default_config
+    if req.model_base_url is not None:
+        patch.setdefault("default_config", {})
+        patch["default_config"]["model_base_url"] = req.model_base_url
+
+    strategy = store.update_defaults(
+        slug,
+        default_config=patch.get("default_config"),
+        default_trading_context=req.default_trading_context,
+        agent_key=req.agent_key,
+    )
+    if not strategy:
+        raise HTTPException(status_code=404, detail=f"Agent '{slug}' not found")
+    return AgentDefaultsResponse(**_build_agent_defaults(strategy))
 
 
 @router.delete("/{slug}")

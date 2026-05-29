@@ -21,70 +21,23 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useNavigate } from "react-router-dom";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
+import { useRates } from "@/hooks/useRates";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useServer } from "@/hooks/useServer";
 import { api, type ExecutorInfo } from "@/lib/api";
-
-// ── Formatters ──
-
-export function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-}
-
-export function formatVolume(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(1) + "M";
-  if (Math.abs(val) >= 1_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return "$" + val.toFixed(0);
-}
-
-export function formatPnl(val: number) {
-  const prefix = val >= 0 ? "+" : "";
-  return prefix + formatUsd(val);
-}
-
-export function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
-
-export function formatAge(timestamp: number): string {
-  if (!timestamp) return "\u2014";
-  try {
-    const now = Date.now();
-    const diffMs = now - timestamp * 1000;
-    if (diffMs < 0) return "\u2014";
-    const days = Math.floor(diffMs / 86400000);
-    const hours = Math.floor((diffMs % 86400000) / 3600000);
-    if (days > 0) return `${days}d ${hours}h`;
-    const mins = Math.floor((diffMs % 3600000) / 60000);
-    if (hours > 0) return `${hours}h ${mins}m`;
-    if (mins > 0) return `${mins}m`;
-    return "<1m";
-  } catch {
-    return "\u2014";
-  }
-}
-
-export function formatPrice(val: number): string {
-  if (!val) return "\u2014";
-  if (val >= 1000) return val.toLocaleString("en-US", { maximumFractionDigits: 2 });
-  if (val >= 1) return val.toFixed(4);
-  return val.toPrecision(4);
-}
-
-export function formatPct(val: number): string {
-  if (!val) return "\u2014";
-  return (val >= 0 ? "+" : "") + (val * 100).toFixed(2) + "%";
-}
-
-export function isExecutorActive(status: string) {
-  return status === "active" || status === "running";
-}
+import {
+  formatUsd,
+  formatVolume,
+  formatPnl,
+  pnlColor,
+  formatAge,
+  formatPrice,
+  formatPct,
+  isExecutorActive,
+  formatCurrency,
+  formatCurrencyPnl,
+  formatCurrencyVolume,
+} from "@/lib/formatters";
 
 // ── Multi-select dropdown ──
 
@@ -337,6 +290,9 @@ export function ExecutorTable({
   selectedExecutorId,
   onStop,
   stoppingIds,
+  rateFormatPnl,
+  rateFormatValue,
+  rateFormatDetailed,
 }: {
   executors: ExecutorInfo[];
   sortKey: SortKey;
@@ -350,11 +306,18 @@ export function ExecutorTable({
   selectedExecutorId: string | null;
   onStop: (id: string) => void;
   stoppingIds: Set<string>;
+  rateFormatPnl?: (val: number, quote: string) => string;
+  rateFormatValue?: (val: number, quote: string) => string;
+  rateFormatDetailed?: (val: number, quote: string) => string;
 }) {
   const sorted = useMemo(
     () => [...executors].sort((a, b) => compareExecutors(a, b, sortKey, sortDir)),
     [executors, sortKey, sortDir],
   );
+
+  const fmtPnl = rateFormatPnl ?? ((val: number) => formatPnl(val));
+  const fmtVol = rateFormatValue ?? ((val: number) => formatVolume(val));
+  const fmtDet = rateFormatDetailed ?? ((val: number) => formatUsd(val));
 
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
@@ -390,6 +353,7 @@ export function ExecutorTable({
               const isChecked = selectedIds.has(ex.id);
               const side = ex.side.toUpperCase();
               const pnlBorder = ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
+              const quote = ex.trading_pair?.split("-")[1] || "USDT";
               return (
                 <tr
                   key={ex.id}
@@ -431,7 +395,7 @@ export function ExecutorTable({
                     className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
                     style={{ color: pnlColor(ex.pnl) }}
                   >
-                    {formatPnl(ex.pnl)}
+                    {fmtPnl(ex.pnl, quote)}
                   </td>
                   <td
                     className="px-4 py-2.5 text-sm text-right tabular-nums"
@@ -440,10 +404,10 @@ export function ExecutorTable({
                     {formatPct(ex.net_pnl_pct)}
                   </td>
                   <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-                    {formatVolume(ex.volume)}
+                    {fmtVol(ex.volume, quote)}
                   </td>
                   <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-                    {ex.cum_fees_quote ? formatUsd(ex.cum_fees_quote) : "\u2014"}
+                    {ex.cum_fees_quote ? fmtDet(ex.cum_fees_quote, quote) : "\u2014"}
                   </td>
                   <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
                     {ex.close_type || "\u2014"}
@@ -484,12 +448,18 @@ export function DetailPanel({
   onClose,
   onStop,
   stopping,
+  rateFormatPnl,
+  rateFormatValue,
+  rateFormatDetailed,
 }: {
   executor: ExecutorInfo;
   server: string;
   onClose: () => void;
   onStop: (id: string) => void;
   stopping: boolean;
+  rateFormatPnl?: (val: number, quote: string) => string;
+  rateFormatValue?: (val: number, quote: string) => string;
+  rateFormatDetailed?: (val: number, quote: string) => string;
 }) {
   const navigate = useNavigate();
   const [panelWidth, setPanelWidth] = useState(480);
@@ -536,6 +506,11 @@ export function DetailPanel({
     }
     return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   })();
+
+  const quote = executor.trading_pair?.split("-")[1] || "USDT";
+  const fmtPnl = rateFormatPnl ? (v: number) => rateFormatPnl(v, quote) : formatPnl;
+  const fmtVal = rateFormatValue ? (v: number) => rateFormatValue(v, quote) : formatUsd;
+  const fmtDet = rateFormatDetailed ? (v: number) => rateFormatDetailed(v, quote) : formatUsd;
 
   return (
       <div
@@ -656,7 +631,7 @@ export function DetailPanel({
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Net PnL</div>
                 <div className="font-medium tabular-nums" style={{ color: pnlColor(executor.pnl) }}>
-                  {formatPnl(executor.pnl)}
+                  {fmtPnl(executor.pnl)}
                 </div>
               </div>
               <div>
@@ -670,12 +645,12 @@ export function DetailPanel({
               </div>
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Volume</div>
-                <div className="font-medium tabular-nums">{formatVolume(executor.volume)}</div>
+                <div className="font-medium tabular-nums">{fmtVal(executor.volume)}</div>
               </div>
               <div>
                 <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Fees</div>
                 <div className="font-medium tabular-nums">
-                  {executor.cum_fees_quote ? formatUsd(executor.cum_fees_quote) : "\u2014"}
+                  {executor.cum_fees_quote ? fmtDet(executor.cum_fees_quote) : "\u2014"}
                 </div>
               </div>
             </div>
@@ -713,7 +688,7 @@ export function DetailPanel({
                 {config.total_amount_quote != null && (
                   <div>
                     <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Amount</div>
-                    <div className="font-medium tabular-nums">{formatUsd(Number(config.total_amount_quote))}</div>
+                    <div className="font-medium tabular-nums">{fmtDet(Number(config.total_amount_quote))}</div>
                   </div>
                 )}
               </div>
@@ -754,7 +729,7 @@ export function DetailPanel({
                 {config.total_amount_quote != null && (
                   <div>
                     <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Amount</div>
-                    <div className="font-medium tabular-nums">{formatUsd(Number(config.total_amount_quote))}</div>
+                    <div className="font-medium tabular-nums">{fmtDet(Number(config.total_amount_quote))}</div>
                   </div>
                 )}
                 {tripleBarrier.take_profit != null && (
@@ -1015,8 +990,8 @@ export function Executors() {
     trading_pair: "",
     controller_ids: [] as string[],
   });
-  const [maxPages, setMaxPages] = useState<number>(40); // 40 * 50 = 2000 cap by default
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 500;
+  const [maxPages, setMaxPages] = useState<number>(4); // 4 * 500 = 2000 cap by default
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -1108,6 +1083,13 @@ export function Executors() {
   );
   const reachedCap = loadedPages >= maxPages && hasNextPage;
 
+  // Currency conversion
+  const quoteCurrencies = useMemo(
+    () => executors.map((ex) => ex.trading_pair?.split("-")[1] || "USDT"),
+    [executors],
+  );
+  const { convert, formatPnlValue, formatValue, formatValueDetailed, currencySymbol } = useRates(quoteCurrencies);
+
   const executorTypes = useMemo(() => {
     const types = new Set(executors.map((ex) => ex.type));
     return Array.from(types).sort();
@@ -1147,8 +1129,8 @@ export function Executors() {
   );
 
   // Aggregate stats (archived only for win rate), filtered by kpiPeriod
-  const activePnl = useMemo(() => activeExecutors.reduce((s, ex) => s + ex.pnl, 0), [activeExecutors]);
-  const activeVolume = useMemo(() => activeExecutors.reduce((s, ex) => s + ex.volume, 0), [activeExecutors]);
+  const activePnl = useMemo(() => activeExecutors.reduce((s, ex) => s + convert(ex.pnl, ex.trading_pair?.split("-")[1] || "USDT").value, 0), [activeExecutors, convert]);
+  const activeVolume = useMemo(() => activeExecutors.reduce((s, ex) => s + convert(ex.volume, ex.trading_pair?.split("-")[1] || "USDT").value, 0), [activeExecutors, convert]);
 
   const periodFilteredArchived = useMemo(() => {
     const now = Date.now() / 1000;
@@ -1159,9 +1141,9 @@ export function Executors() {
     return archivedExecutors.filter((ex) => ex.timestamp >= cutoff);
   }, [archivedExecutors, kpiPeriod]);
 
-  const archivedPnl = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + ex.pnl, 0), [periodFilteredArchived]);
-  const archivedVolume = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + ex.volume, 0), [periodFilteredArchived]);
-  const archivedFees = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + ex.cum_fees_quote, 0), [periodFilteredArchived]);
+  const archivedPnl = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + convert(ex.pnl, ex.trading_pair?.split("-")[1] || "USDT").value, 0), [periodFilteredArchived, convert]);
+  const archivedVolume = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + convert(ex.volume, ex.trading_pair?.split("-")[1] || "USDT").value, 0), [periodFilteredArchived, convert]);
+  const archivedFees = useMemo(() => periodFilteredArchived.reduce((s, ex) => s + convert(ex.cum_fees_quote, ex.trading_pair?.split("-")[1] || "USDT").value, 0), [periodFilteredArchived, convert]);
   const winRate = useMemo(() => {
     if (periodFilteredArchived.length === 0) return 0;
     return periodFilteredArchived.filter((ex) => ex.pnl > 0).length / periodFilteredArchived.length;
@@ -1249,7 +1231,7 @@ export function Executors() {
         </span>
         {reachedCap && (
           <button
-            onClick={() => setMaxPages((p) => p + 40)}
+            onClick={() => setMaxPages((p) => p + 4)}
             className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
           >
             Load more
@@ -1303,7 +1285,7 @@ export function Executors() {
                   <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">Total PnL</span>
                 </div>
                 <p className="text-xl font-bold tabular-nums" style={{ color: pnlColor(archivedPnl) }}>
-                  {formatPnl(archivedPnl)}
+                  {formatCurrencyPnl(archivedPnl, currencySymbol)}
                 </p>
               </div>
               <div className="flex-1 px-4 py-3">
@@ -1320,14 +1302,14 @@ export function Executors() {
                   <Volume2 className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
                   <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">Total Volume</span>
                 </div>
-                <p className="text-xl font-bold tabular-nums">{formatVolume(archivedVolume)}</p>
+                <p className="text-xl font-bold tabular-nums">{formatCurrencyVolume(archivedVolume, currencySymbol)}</p>
               </div>
               <div className="flex-1 px-4 py-3">
                 <div className="flex items-center gap-2 mb-1">
                   <Layers className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
                   <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">Total Fees</span>
                 </div>
-                <p className="text-xl font-bold tabular-nums">{archivedFees > 0 ? formatUsd(archivedFees) : "\u2014"}</p>
+                <p className="text-xl font-bold tabular-nums">{archivedFees > 0 ? formatCurrency(archivedFees, currencySymbol) : "\u2014"}</p>
               </div>
               <div className="flex items-center px-3 shrink-0">
                 <div className="flex gap-0.5 rounded-md border border-[var(--color-border)] p-0.5 bg-[var(--color-bg)]">
@@ -1360,12 +1342,12 @@ export function Executors() {
                   </h3>
                   {activePnl !== 0 && (
                     <span className="text-sm font-medium tabular-nums" style={{ color: pnlColor(activePnl) }}>
-                      {formatPnl(activePnl)}
+                      {formatCurrencyPnl(activePnl, currencySymbol)}
                     </span>
                   )}
                   {activeVolume > 0 && (
                     <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
-                      {formatVolume(activeVolume)} vol
+                      {formatCurrencyVolume(activeVolume, currencySymbol)} vol
                     </span>
                   )}
                 </div>
@@ -1383,6 +1365,9 @@ export function Executors() {
                 selectedExecutorId={selectedExecutor?.id ?? null}
                 onStop={handleStopOne}
                 stoppingIds={stoppingIds}
+                rateFormatPnl={formatPnlValue}
+                rateFormatValue={formatValue}
+                rateFormatDetailed={formatValueDetailed}
               />
             </div>
           )}
@@ -1408,7 +1393,7 @@ export function Executors() {
                   History ({archivedExecutors.length})
                 </h3>
                 <span className="text-sm font-medium tabular-nums" style={{ color: pnlColor(archivedPnl) }}>
-                  {formatPnl(archivedPnl)}
+                  {formatCurrencyPnl(archivedPnl, currencySymbol)}
                 </span>
                 {winRate > 0 && (
                   <span className="text-xs text-[var(--color-text-muted)]">
@@ -1431,6 +1416,9 @@ export function Executors() {
                   selectedExecutorId={selectedExecutor?.id ?? null}
                   onStop={handleStopOne}
                   stoppingIds={stoppingIds}
+                  rateFormatPnl={formatPnlValue}
+                  rateFormatValue={formatValue}
+                  rateFormatDetailed={formatValueDetailed}
                 />
               )}
             </div>
@@ -1449,6 +1437,9 @@ export function Executors() {
           onClose={() => setSelectedExecutor(null)}
           onStop={handleStopOne}
           stopping={stoppingIds.has(selectedExecutor.id)}
+          rateFormatPnl={formatPnlValue}
+          rateFormatValue={formatValue}
+          rateFormatDetailed={formatValueDetailed}
         />
       )}
 

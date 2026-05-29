@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +28,65 @@ from condor.web.models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bots"])
+
+# ── Transitional state store ──
+# Tracks bots/controllers that have been sent a stop command but haven't
+# finished shutting down yet. Auto-expires after TTL seconds.
+
+_TRANSITIONAL_TTL = 300  # 5 minutes max
+
+# { "server:bot_name" -> timestamp }
+_stopping_bots: dict[str, float] = {}
+# { "server:bot_name:controller_id" -> timestamp }
+_stopping_controllers: dict[str, float] = {}
+
+
+def mark_bot_stopping(server: str, bot_name: str) -> None:
+    _stopping_bots[f"{server}:{bot_name}"] = time.monotonic()
+
+
+def mark_controllers_stopping(server: str, bot_name: str, controller_ids: list[str]) -> None:
+    now = time.monotonic()
+    for cid in controller_ids:
+        _stopping_controllers[f"{server}:{bot_name}:{cid}"] = now
+
+
+def clear_bot_stopping(server: str, bot_name: str) -> None:
+    _stopping_bots.pop(f"{server}:{bot_name}", None)
+
+
+def get_stopping_bots(server: str) -> set[str]:
+    """Return bot names currently in stopping state for a server."""
+    now = time.monotonic()
+    result = set()
+    expired = []
+    for key, ts in _stopping_bots.items():
+        if now - ts > _TRANSITIONAL_TTL:
+            expired.append(key)
+            continue
+        srv, bot = key.split(":", 1)
+        if srv == server:
+            result.add(bot)
+    for key in expired:
+        _stopping_bots.pop(key, None)
+    return result
+
+
+def get_stopping_controllers(server: str) -> set[str]:
+    """Return 'bot_name:controller_id' keys currently in stopping state."""
+    now = time.monotonic()
+    result = set()
+    expired = []
+    for key, ts in _stopping_controllers.items():
+        if now - ts > _TRANSITIONAL_TTL:
+            expired.append(key)
+            continue
+        parts = key.split(":", 2)
+        if len(parts) == 3 and parts[0] == server:
+            result.add(f"{parts[1]}:{parts[2]}")
+    for key in expired:
+        _stopping_controllers.pop(key, None)
+    return result
 
 
 def _parse_bot(bot: dict) -> BotInfo:
@@ -76,6 +136,29 @@ def _extract_bots_list(result: Any) -> list[dict]:
     return []
 
 
+def _extract_perf_snapshots(result: Any) -> list[dict]:
+    """Normalize controller performance API response into a list of snapshot dicts."""
+    if isinstance(result, list):
+        return [s for s in result if isinstance(s, dict)]
+    if isinstance(result, dict):
+        data = result.get("data", result.get("snapshots", result.get("records", [])))
+        if isinstance(data, list):
+            return [s for s in data if isinstance(s, dict)]
+        if isinstance(data, dict):
+            out = []
+            for key, val in data.items():
+                if isinstance(val, dict):
+                    val.setdefault("controller_id", key)
+                    out.append(val)
+                elif isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict):
+                            item.setdefault("controller_id", key)
+                            out.append(item)
+            return out
+    return []
+
+
 @router.get("/servers/{name}/bots", response_model=BotsPageResponse)
 async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
     cm = get_config_manager()
@@ -99,7 +182,7 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
             error_hint="Unable to reach server",
         )
 
-    # Still need a client for bot_runs (not cached)
+    # Get client for enrichment calls
     try:
         client = await cm.get_client(name)
     except Exception:
@@ -108,14 +191,14 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
     bots_list = _extract_bots_list(result)
     logger.info("Server '%s': found %d bot(s)", name, len(bots_list))
 
-    # Pre-fetch controller configs AND bot runs concurrently
+    # Pre-fetch controller configs, bot runs, AND latest controller performance concurrently
     ctrl_configs: dict[str, dict] = {}
     bot_runs: dict[str, str] = {}
+    latest_perf: dict[str, dict] = {}  # keyed by controller_id
 
     if client is not None:
         import asyncio
 
-        # Fetch all bot controller configs concurrently
         async def _fetch_ctrl_configs() -> dict[str, dict]:
             configs_map: dict[str, dict] = {}
             bot_names = [b.get("bot_name", "") for b in bots_list if b.get("bot_name")]
@@ -164,8 +247,22 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 pass
             return runs
 
-        ctrl_configs, bot_runs = await asyncio.gather(
-            _fetch_ctrl_configs(), _fetch_bot_runs()
+        async def _fetch_latest_perf() -> dict[str, dict]:
+            """Fetch latest controller performance snapshots from DB."""
+            perf_map: dict[str, dict] = {}
+            try:
+                perf_result = await client.bot_orchestration.get_latest_controller_performance()
+                snapshots = _extract_perf_snapshots(perf_result)
+                for snap in snapshots:
+                    cid = snap.get("controller_id", "")
+                    if cid:
+                        perf_map[cid] = snap
+            except Exception:
+                logger.debug("Latest controller performance not available for '%s'", name)
+            return perf_map
+
+        ctrl_configs, bot_runs, latest_perf = await asyncio.gather(
+            _fetch_ctrl_configs(), _fetch_bot_runs(), _fetch_latest_perf()
         )
 
     controllers: list[ControllerInfo] = []
@@ -193,37 +290,52 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
 
                 num_controllers += 1
                 ctrl_status = ctrl_info.get("status", "running")
-                ctrl_perf = ctrl_info.get("performance", {})
-
-                if not isinstance(ctrl_perf, dict):
-                    ctrl_perf = {}
-
-                realized = float(ctrl_perf.get("realized_pnl_quote", 0) or 0)
-                unrealized = float(ctrl_perf.get("unrealized_pnl_quote", 0) or 0)
-                global_pnl = realized + unrealized
-                global_pnl_pct = float(ctrl_perf.get("global_pnl_pct", 0) or 0)
-                volume = float(ctrl_perf.get("volume_traded", 0) or 0)
-                close_types = ctrl_perf.get("close_type_counts", {})
-                if not isinstance(close_types, dict):
-                    close_types = {}
-                positions = ctrl_perf.get("positions_summary", [])
-                if not isinstance(positions, list):
-                    positions = []
 
                 # Get config from pre-fetched configs
                 ctrl_config = ctrl_configs.get(ctrl_name, {})
+                config_id = ctrl_config.get("id") or ctrl_config.get("controller_id", ctrl_name)
+
+                # Use latest DB performance if available, fallback to live bot status
+                db_snap = latest_perf.get(config_id) or latest_perf.get(ctrl_name)
+                if db_snap:
+                    db_perf = db_snap.get("performance", db_snap)
+                    if not isinstance(db_perf, dict):
+                        db_perf = {}
+                else:
+                    db_perf = {}
+
+                # Live performance from bot status (always available)
+                live_perf = ctrl_info.get("performance", {})
+                if not isinstance(live_perf, dict):
+                    live_perf = {}
+
+                # Merge: prefer live data for real-time fields, DB for historical consistency
+                realized = float(live_perf.get("realized_pnl_quote", 0) or db_perf.get("realized_pnl_quote", 0) or 0)
+                unrealized = float(live_perf.get("unrealized_pnl_quote", 0) or db_perf.get("unrealized_pnl_quote", 0) or 0)
+                global_pnl = realized + unrealized
+                global_pnl_pct = float(live_perf.get("global_pnl_pct", 0) or db_perf.get("global_pnl_pct", 0) or 0)
+                volume = float(live_perf.get("volume_traded", 0) or db_perf.get("volume_traded", 0) or 0)
+                close_types = live_perf.get("close_type_counts") or db_perf.get("close_type_counts", {})
+                if not isinstance(close_types, dict):
+                    close_types = {}
+                positions = live_perf.get("positions_summary") or db_perf.get("positions_summary", [])
+                if not isinstance(positions, list):
+                    positions = []
 
                 # Primary: config dict (correct keys)
                 connector = ctrl_config.get("connector_name", "")
                 trading_pair = ctrl_config.get("trading_pair", "")
 
-                # Fallback: try to parse connector/pair from controller name
-                # e.g. "binance_perpetual_SOL-USDT_pmm_simple"
+                # Fallback: try DB snapshot, then parse from controller name
+                if not connector:
+                    connector = db_perf.get("connector", db_perf.get("connector_name", ""))
+                if not trading_pair:
+                    trading_pair = db_perf.get("trading_pair", "")
+
                 if not connector or not trading_pair:
                     parts = ctrl_name.split("_")
                     for i, part in enumerate(parts):
                         if "-" in part and part[0].isupper():
-                            # Looks like a trading pair (e.g. SOL-USDT)
                             if not trading_pair:
                                 trading_pair = part
                             if not connector and i > 0:
@@ -233,9 +345,7 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 total_pnl += global_pnl
                 total_volume += volume
 
-                # Use human-readable controller_name from config if available
                 config_cname = ctrl_config.get("controller_name", "")
-                config_id = ctrl_config.get("id") or ctrl_config.get("controller_id", "")
                 display_name = config_cname or ctrl_name
                 display_id = config_id or ctrl_name
 
@@ -271,6 +381,33 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
             )
         )
 
+    # Overlay transitional "stopping" state
+    stopping_bot_names = get_stopping_bots(name)
+    stopping_ctrl_keys = get_stopping_controllers(name)
+
+    for bot in bots:
+        if bot.bot_name in stopping_bot_names:
+            # Bot is no longer in the active list from API → it actually stopped
+            if bot.status not in ("running",):
+                clear_bot_stopping(name, bot.bot_name)
+            else:
+                bot.status = "stopping"
+
+    # Clear stopping bots that are no longer in the response at all
+    active_bot_names = {b.bot_name for b in bots}
+    for sbn in list(stopping_bot_names):
+        if sbn not in active_bot_names:
+            clear_bot_stopping(name, sbn)
+
+    for ctrl in controllers:
+        key = f"{ctrl.bot_name}:{ctrl.controller_id}"
+        if key in stopping_ctrl_keys:
+            # If kill switch is already on, the stop landed → clear
+            if ctrl.config.get("manual_kill_switch") is True:
+                _stopping_controllers.pop(f"{name}:{key}", None)
+            else:
+                ctrl.status = "stopping"
+
     return BotsPageResponse(
         controllers=controllers,
         bots=bots,
@@ -289,36 +426,44 @@ async def get_bot(name: str, bot_id: str, user: WebUser = Depends(get_current_us
 
     client = await cm.get_client(name)
 
-    # Fetch status, config, and performance concurrently
-    async def _get_status():
-        return await client.bot_orchestration.get_bot_status(bot_id)
-
-    async def _get_config():
-        try:
-            r = await client.bot_orchestration.get_bot_config(bot_id)
-            return r if isinstance(r, dict) else {}
-        except Exception:
-            return {}
-
-    async def _get_perf():
-        try:
-            r = await client.bot_orchestration.get_bot_performance(bot_id)
-            return r if isinstance(r, dict) else {}
-        except Exception:
-            return {}
-
     try:
-        result, config, performance = await asyncio.gather(
-            _get_status(), _get_config(), _get_perf()
-        )
+        result = await client.bot_orchestration.get_bot_status(bot_id)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     if not isinstance(result, dict):
         raise HTTPException(status_code=404, detail="Bot not found")
 
-    bot = _parse_bot(result)
-    return BotDetailResponse(bot=bot, config=config, performance=performance)
+    # Extract nested data from the status response
+    data = result.get("data", result)
+    if not isinstance(data, dict):
+        data = result
+
+    # Extract performance from status response (keyed by controller_id)
+    performance = data.get("performance", {})
+    if not isinstance(performance, dict):
+        performance = {}
+
+    # Flatten controller performance into a single merged dict for display
+    flat_perf: dict = {}
+    for ctrl_name, ctrl_info in performance.items():
+        if isinstance(ctrl_info, dict):
+            perf = ctrl_info.get("performance", {})
+            if isinstance(perf, dict):
+                flat_perf = perf
+                break  # Single-controller bot: use first controller's performance
+
+    # Fetch controller config concurrently
+    config: dict = {}
+    try:
+        configs = await client.controllers.get_bot_controller_configs(bot_id)
+        if isinstance(configs, list) and configs:
+            config = configs[0] if isinstance(configs[0], dict) else {}
+    except Exception:
+        pass
+
+    bot = _parse_bot(data)
+    return BotDetailResponse(bot=bot, config=config, performance=flat_perf)
 
 
 @router.get(
@@ -449,6 +594,8 @@ async def update_controller_config(
             merged = {**existing, **body}
 
         merged["id"] = config_id  # ensure id stays consistent
+        # Strip internal fields like _config_name that cause Pydantic validation errors
+        merged = {k: v for k, v in merged.items() if not k.startswith("_")}
 
         result = await client.controllers.create_or_update_controller_config(
             config_id, merged
@@ -588,8 +735,10 @@ async def create_controller_config(
 
     client = await cm.get_client(name)
     try:
+        # Strip internal fields like _config_name that cause Pydantic validation errors
+        clean_body = {k: v for k, v in body.items() if not k.startswith("_")}
         result = await client.controllers.create_or_update_controller_config(
-            config_id, body
+            config_id, clean_body
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -674,6 +823,9 @@ async def stop_bot_endpoint(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    # Mark as stopping immediately so UI reflects it
+    mark_bot_stopping(name, bot_name)
+
     client = await cm.get_client(name)
 
     from mcp_servers.hummingbot_api.tools.bot_management import manage_bot_execution
@@ -685,6 +837,7 @@ async def stop_bot_endpoint(
             action="stop_bot",
         )
     except Exception as e:
+        clear_bot_stopping(name, bot_name)
         raise HTTPException(status_code=502, detail=str(e))
 
     return result
@@ -697,6 +850,9 @@ async def stop_controllers_endpoint(
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
+
+    # Mark controllers as stopping immediately
+    mark_controllers_stopping(name, bot_name, body.controller_names)
 
     client = await cm.get_client(name)
 
@@ -738,3 +894,41 @@ async def start_controllers_endpoint(
         raise HTTPException(status_code=502, detail=str(e))
 
     return result
+
+
+@router.put("/servers/{name}/bots/{bot_name}/controllers/{config_id}/config")
+async def update_bot_controller_config_endpoint(
+    name: str,
+    bot_name: str,
+    config_id: str,
+    body: dict[str, Any],
+    user: WebUser = Depends(get_current_user),
+):
+    """Update a controller config inside a running bot in real-time."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+
+    try:
+        # Fetch current bot controller config to merge partial updates
+        current_configs = await client.controllers.get_bot_controller_configs(bot_name)
+        existing = next((c for c in current_configs if c.get("id") == config_id), None)
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Controller '{config_id}' not found in bot '{bot_name}'")
+
+        merged = {**existing, **body}
+        merged["id"] = config_id
+        # Strip internal fields like _config_name that cause Pydantic validation errors
+        merged = {k: v for k, v in merged.items() if not k.startswith("_")}
+
+        result = await client.controllers.update_bot_controller_config(
+            bot_name, config_id, merged
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"updated": True, "config_id": config_id, "bot_name": bot_name, "result": result}

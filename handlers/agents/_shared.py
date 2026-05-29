@@ -101,9 +101,9 @@ DEFAULT_MODE = "condor"
 
 def reload_assistants() -> None:
     """Re-scan assistants/ folder. Call after adding/removing .md files."""
-    global AGENT_MODES
     _assistant_cache.clear()
-    AGENT_MODES = discover_assistants()
+    AGENT_MODES.clear()
+    AGENT_MODES.update(discover_assistants())
 
 
 # -- Mode context builders --
@@ -295,6 +295,7 @@ def _condor_mcp_args(
 def build_mcp_servers_for_session(
     user_id: int, chat_id: int | str, user_data: dict | None = None,
     execution_mode: str = "loop",
+    server_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -307,8 +308,9 @@ def build_mcp_servers_for_session(
 
     cm = get_config_manager()
 
-    # Resolve which hummingbot server to use (respects user preferences)
-    server_name = get_effective_server(chat_id, user_data)
+    # Resolve which hummingbot server to use (explicit override > user preferences)
+    if not server_name:
+        server_name = get_effective_server(chat_id, user_data)
     if not server_name:
         accessible = cm.get_accessible_servers(user_id)
         server_name = accessible[0] if accessible else None
@@ -405,7 +407,7 @@ def build_mcp_servers_for_agent(
     return [mcp_hummingbot, condor]
 
 
-def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram") -> str:
+def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram", server_name: str | None = None) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from config_manager import ServerPermission, get_config_manager, get_effective_server
     from condor.acp.cursor_sdk_client import is_cursor_sdk_model
@@ -417,8 +419,8 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
     system_prompt = _build_system_prompt(platform)
     sections: list[str] = [system_prompt]
 
-    # Resolve active server (respects user preferences)
-    active_name = get_effective_server(chat_id, user_data)
+    # Resolve active server (explicit override > user preferences)
+    active_name = server_name or get_effective_server(chat_id, user_data)
     accessible = cm.get_accessible_servers(user_id)
     if not active_name:
         active_name = accessible[0] if accessible else None
@@ -465,7 +467,6 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
                 "mcp__condor__trading_agent_journal_write",
                 "mcp__condor__send_notification",
                 "mcp__condor__manage_notes",
-                "mcp__condor__manage_skills",
             ]
             tool_preload_hint = (
                 "IMPORTANT: At the very start of the session (before your first response), "

@@ -257,7 +257,10 @@ def build_tick_prompt(
         "frequency_sec",
         "execution_mode",  # noise / internal
     }
-    config_lines = ["[CURRENT CONFIG]"]
+    config_lines = [
+        "[CURRENT CONFIG]",
+        "These are the ACTIVE values for this session. If the strategy instructions mention different defaults, IGNORE them and use these values instead.",
+    ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:
             continue
@@ -278,7 +281,7 @@ def build_tick_prompt(
     )
     risk_lines = [
         "[RISK STATE]",
-        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
+        f"Total Exposure: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
         f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
         f"Drawdown: {dd_display}",
         f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}",

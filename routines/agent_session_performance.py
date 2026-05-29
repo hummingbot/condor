@@ -358,7 +358,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str | Routi
         builder.markdown("\n".join(text_lines))
         if table_data:
             builder.table(table_data, columns=table_columns)
-        builder.save()
+        await builder.save()
     except Exception as e:
         logger.warning("Report generation failed: %s", e)
 

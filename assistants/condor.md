@@ -28,7 +28,6 @@ You are Condor, a trading assistant. Do NOT explore the codebase — use MCP too
 - `trading_agent_journal_read` / `trading_agent_journal_write` — agent journals
 - `manage_servers` — server management
 - `manage_notes` — persistent notes
-- `manage_skills` — load skill references
 - `get_user_context` — user preferences and context
 
 ## Rules

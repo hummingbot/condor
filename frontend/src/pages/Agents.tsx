@@ -5,6 +5,7 @@ import {
   CircleDot,
   Pause,
   Plus,
+  Trash2,
   Zap,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -29,7 +30,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function AgentCard({ agent, onClick }: { agent: AgentSummary; onClick: () => void }) {
+function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick: () => void; onDelete: () => void }) {
   const totalPnl = agent.total_pnl ?? 0;
   const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
   const dayPnl = agent.daily_pnl ?? 0;
@@ -57,7 +58,22 @@ function AgentCard({ agent, onClick }: { agent: AgentSummary; onClick: () => voi
               <h3 className="text-sm font-semibold text-[var(--color-text)]">{agent.name}</h3>
             </div>
           </div>
-          <StatusBadge status={agent.status} />
+          <div className="flex items-center gap-2">
+            <StatusBadge status={agent.status} />
+            {!isLive && (
+              <div
+                className="opacity-0 transition-opacity group-hover:opacity-100"
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onDelete(); } }}
+                role="button"
+                tabIndex={0}
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-md border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </span>
+              </div>
+            )}
+          </div>
         </div>
 
         {agent.description && (
@@ -273,9 +289,61 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
   );
 }
 
+function DeleteAgentDialog({
+  agent,
+  onClose,
+}: {
+  agent: AgentSummary | null;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteAgent(agent!.slug),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      onClose();
+    },
+  });
+
+  if (!agent) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="mb-2 text-lg font-semibold text-[var(--color-text)]">Delete Agent</h2>
+        <p className="mb-6 text-sm text-[var(--color-text-muted)]">
+          Delete <strong className="text-[var(--color-text)]">{agent.name}</strong>? This cannot be undone.
+        </p>
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => deleteMutation.mutate()}
+            disabled={deleteMutation.isPending}
+            className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-red-600 disabled:opacity-40"
+          >
+            {deleteMutation.isPending ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+        {deleteMutation.isError && (
+          <p className="mt-3 text-xs text-red-400">Failed to delete agent. It may be running.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Agents() {
   const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AgentSummary | null>(null);
 
   const { data: agents = [], isLoading } = useQuery({
     queryKey: ["agents"],
@@ -393,6 +461,7 @@ export function Agents() {
                     key={agent.slug}
                     agent={agent}
                     onClick={() => navigate(`/agents/${agent.slug}`)}
+                    onDelete={() => setDeleteTarget(agent)}
                   />
                 ))}
               </div>
@@ -414,6 +483,7 @@ export function Agents() {
                     key={agent.slug}
                     agent={agent}
                     onClick={() => navigate(`/agents/${agent.slug}`)}
+                    onDelete={() => setDeleteTarget(agent)}
                   />
                 ))}
               </div>
@@ -423,6 +493,7 @@ export function Agents() {
       )}
 
       <CreateAgentDialog open={showCreate} onClose={() => setShowCreate(false)} />
+      <DeleteAgentDialog agent={deleteTarget} onClose={() => setDeleteTarget(null)} />
     </div>
   );
 }

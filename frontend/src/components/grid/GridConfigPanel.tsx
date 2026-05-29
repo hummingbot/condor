@@ -16,6 +16,7 @@ interface GridConfigPanelProps {
   dispatch: React.Dispatch<GridAction>;
   currentPrice: number | null;
   isSpot?: boolean;
+  quoteCurrency?: string;
 }
 
 function PriceField({
@@ -193,7 +194,7 @@ function SectionHeader({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false }: GridConfigPanelProps) {
+export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false, quoteCurrency = "USDT" }: GridConfigPanelProps) {
   const validation = useMemo(() => {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -361,22 +362,22 @@ export function GridConfigPanel({ state, dispatch, currentPrice, isSpot = false 
       <div className="space-y-2.5">
         <SectionHeader>Grid Structure</SectionHeader>
         <NumberField
-          label="Total Amount (quote)"
+          label={`Total Amount (${quoteCurrency})`}
           value={state.total_amount_quote}
           field="total_amount_quote"
           dispatch={dispatch}
           step={10}
           min={0}
-          suffix="USDT"
+          suffix={quoteCurrency}
         />
         <NumberField
-          label="Min Order Amount"
+          label={`Min Order Amount (${quoteCurrency})`}
           value={state.min_order_amount_quote}
           field="min_order_amount_quote"
           dispatch={dispatch}
           step={1}
           min={0}
-          suffix="USDT"
+          suffix={quoteCurrency}
         />
         <NumberField
           label="Min Spread Between Orders"

@@ -131,6 +131,7 @@ class WebSocketManager:
         self._bots_ws_tasks: dict[str, asyncio.Task] = {}
         self._positions_ws_tasks: dict[str, asyncio.Task] = {}
         self._performance_ws_tasks: dict[str, asyncio.Task] = {}
+        self._controller_perf_tasks: dict[str, asyncio.Task] = {}
         self._sds_listener_registered = False
         # Track SDS subscriptions: channel -> CacheKey
         self._sds_subscriptions: dict[str, Any] = {}
@@ -245,6 +246,11 @@ class WebSocketManager:
                 task.cancel()
         self._performance_ws_tasks.clear()
 
+        for task in self._controller_perf_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._controller_perf_tasks.clear()
+
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
             self._cleanup_task = None
@@ -299,6 +305,8 @@ class WebSocketManager:
                     self._maybe_stop_positions_ws_stream(channel)
                 elif channel.startswith("performance_ws:"):
                     self._maybe_stop_performance_ws_stream(channel)
+                elif channel.startswith("controller_perf:"):
+                    self._maybe_stop_controller_perf_stream(channel)
                 else:
                     self._maybe_unsub_sds(channel)
 
@@ -366,6 +374,10 @@ class WebSocketManager:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
                 self._ensure_performance_ws_stream(channel)
+            elif channel.startswith("controller_perf:"):
+                if channel in self._last_data:
+                    await self._send(conn, channel, self._last_data[channel])
+                self._ensure_controller_perf_stream(channel)
             else:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
@@ -387,6 +399,8 @@ class WebSocketManager:
                 self._maybe_stop_positions_ws_stream(channel)
             elif channel.startswith("performance_ws:"):
                 self._maybe_stop_performance_ws_stream(channel)
+            elif channel.startswith("controller_perf:"):
+                self._maybe_stop_controller_perf_stream(channel)
             else:
                 self._maybe_unsub_sds(channel)
 
@@ -676,6 +690,44 @@ class WebSocketManager:
             "server_online": True,
         }
 
+    @staticmethod
+    def _overlay_stopping_state(server_name: str, data: dict) -> None:
+        """Apply transitional 'stopping' state to WS broadcast data."""
+        from condor.web.routes.bots import (
+            clear_bot_stopping,
+            get_stopping_bots,
+            get_stopping_controllers,
+            _stopping_controllers,
+        )
+
+        stopping_bot_names = get_stopping_bots(server_name)
+        stopping_ctrl_keys = get_stopping_controllers(server_name)
+
+        if not stopping_bot_names and not stopping_ctrl_keys:
+            return
+
+        active_bot_names = set()
+        for bot in data.get("bots", []):
+            active_bot_names.add(bot.get("bot_name", ""))
+            if bot.get("bot_name") in stopping_bot_names:
+                if bot.get("status") in ("running",):
+                    bot["status"] = "stopping"
+                else:
+                    clear_bot_stopping(server_name, bot["bot_name"])
+
+        # Clear stopping entries for bots that disappeared (fully stopped)
+        for sbn in list(stopping_bot_names):
+            if sbn not in active_bot_names:
+                clear_bot_stopping(server_name, sbn)
+
+        for ctrl in data.get("controllers", []):
+            key = f"{ctrl.get('bot_name')}:{ctrl.get('controller_id')}"
+            if key in stopping_ctrl_keys:
+                if ctrl.get("config", {}).get("manual_kill_switch") is True:
+                    _stopping_controllers.pop(f"{server_name}:{key}", None)
+                else:
+                    ctrl["status"] = "stopping"
+
     def _on_data_update(self, server_name: str, cache_key: str, data_type: Any, value: Any) -> None:
         """Called by SDS when cache is updated. Maps to WS channels and broadcasts."""
         dt_name = data_type.name if hasattr(data_type, "name") else str(data_type)
@@ -697,10 +749,23 @@ class WebSocketManager:
         if not has_subscribers:
             return
 
+        # Skip SDS-triggered broadcast for channels with active WS streams
+        # (the WS stream handler already broadcasts directly)
+        if dt_name == "BOTS_STATUS" and channel in self._bots_ws_tasks:
+            task = self._bots_ws_tasks.get(channel)
+            if task and not task.done():
+                return
+        if dt_name == "EXECUTORS" and channel in self._executor_ws_tasks:
+            task = self._executor_ws_tasks.get(channel)
+            if task and not task.done():
+                return
+
         # Transform raw data to match REST endpoint response shapes
         if dt_name == "BOTS_STATUS":
             try:
                 value = self._transform_bots(value)
+                # Overlay transitional "stopping" state from Condor's in-memory store
+                self._overlay_stopping_state(server_name, value)
             except Exception as e:
                 logger.debug("Failed to transform bots data for WS: %s", e)
                 return
@@ -1199,10 +1264,10 @@ class WebSocketManager:
         cm = get_config_manager()
         backoff = 5
 
-        # Try SDS cache first (pre-warmed by auto_subscribe_servers on startup)
-        if channel not in self._last_data:
-            from condor.server_data_service import ServerDataType, get_server_data_service
+        # Try SDS cache first (pre-warmed by auto_subscribe_servers or REST prefetch)
+        from condor.server_data_service import ServerDataType, get_server_data_service
 
+        if channel not in self._last_data:
             sds = get_server_data_service()
             cached = sds.get(server_name, ServerDataType.EXECUTORS)
             if cached is not None:
@@ -1213,6 +1278,23 @@ class WebSocketManager:
                         "Executor SDS cache hit: %d executors for %s",
                         len(executors), channel,
                     )
+
+        # Wait briefly for SDS to be populated by a concurrent REST request
+        # (usePrefetchData fires getExecutors which calls get_or_fetch on SDS)
+        if channel not in self._last_data:
+            sds = get_server_data_service()
+            for _ in range(6):  # up to 3 seconds
+                await asyncio.sleep(0.5)
+                cached = sds.get(server_name, ServerDataType.EXECUTORS)
+                if cached is not None:
+                    executors = self._transform_executors(cached)
+                    if executors:
+                        await self.broadcast(channel, executors)
+                        logger.info(
+                            "Executor SDS cache populated during wait: %d executors for %s",
+                            len(executors), channel,
+                        )
+                    break
 
         # Progressive pre-fetch only if we still have no data
         if channel not in self._last_data:
@@ -1272,12 +1354,13 @@ class WebSocketManager:
                 async with client.ws.executors() as ws:
                     await ws.subscribe_executors(update_interval=2.0)
                     logger.info("Executor WS subscribed: %s", channel)
-                    backoff = 5  # Reset on successful connection
+                    got_message = False
                     async for msg in ws:
                         if not any(channel in c.channels for c in self._connections):
                             logger.info("No subscribers for %s, closing executor stream", channel)
                             return
 
+                        got_message = True
                         msg_type = msg.get("type")
                         if msg_type == "executors":
                             raw_data = msg.get("data", [])
@@ -1289,6 +1372,14 @@ class WebSocketManager:
                             error_msg = msg.get("message", "unknown error")
                             logger.warning("Executor stream error for %s: %s", channel, error_msg)
                             break
+
+                    # Connection closed cleanly — apply backoff if it was short-lived
+                    if got_message:
+                        backoff = 5
+                    else:
+                        logger.warning("Executor stream closed immediately for %s, reconnecting in %ds...", channel, backoff)
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 60)
 
             except asyncio.CancelledError:
                 return
@@ -1376,6 +1467,7 @@ class WebSocketManager:
                             get_server_data_service().put(server_name, ServerDataType.BOTS_STATUS, raw_data)
                             try:
                                 data = self._transform_bots(raw_data)
+                                self._overlay_stopping_state(server_name, data)
                                 await self._broadcast_update(channel, data)
                             except Exception as e:
                                 logger.debug("Failed to transform bots WS data: %s", e)
@@ -1529,6 +1621,78 @@ class WebSocketManager:
                 logger.warning("Performance WS stream error for %s: %s, reconnecting in %ds...", channel, e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+
+    # -- Controller Performance polling stream --
+
+    def _ensure_controller_perf_stream(self, channel: str) -> None:
+        if channel in self._controller_perf_tasks and not self._controller_perf_tasks[channel].done():
+            return
+        self._controller_perf_tasks[channel] = asyncio.create_task(
+            self._controller_perf_stream(channel)
+        )
+        logger.info("Started controller performance stream for %s", channel)
+
+    def _maybe_stop_controller_perf_stream(self, channel: str) -> None:
+        for conn in self._connections:
+            if channel in conn.channels:
+                return
+        task = self._controller_perf_tasks.pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info("Stopped controller performance stream for %s", channel)
+
+    async def _controller_perf_stream(self, channel: str) -> None:
+        """Poll latest controller performance every 30s and broadcast snapshots."""
+        parts = channel.split(":")
+        if len(parts) < 2:
+            return
+        server_name = parts[1]
+
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+
+        while True:
+            try:
+                if not any(channel in c.channels for c in self._connections):
+                    logger.info("No subscribers for %s, stopping controller perf stream", channel)
+                    self._controller_perf_tasks.pop(channel, None)
+                    return
+
+                client = await cm.get_client(server_name)
+                result = await client.bot_orchestration.get_latest_controller_performance()
+
+                # Normalize to list of snapshots
+                snapshots = []
+                if isinstance(result, list):
+                    snapshots = result
+                elif isinstance(result, dict):
+                    data = result.get("data", result.get("snapshots", result.get("records", [])))
+                    if isinstance(data, list):
+                        snapshots = data
+                    elif isinstance(data, dict):
+                        for key, val in data.items():
+                            if isinstance(val, dict):
+                                val.setdefault("controller_id", key)
+                                snapshots.append(val)
+
+                if snapshots:
+                    await self._broadcast_update(channel, {"snapshots": snapshots})
+                    backoff = 5
+
+                await asyncio.sleep(30)
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(
+                    "Controller perf stream error for %s: %s, retrying in %ds...",
+                    channel, e, backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
 
 
 # -- Singleton --

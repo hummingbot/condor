@@ -234,6 +234,40 @@ class StrategyStore:
     def update(self, strategy: Strategy) -> None:
         self._save(strategy)
 
+    def update_defaults(
+        self,
+        slug: str,
+        *,
+        default_config: dict[str, Any] | None = None,
+        default_trading_context: str | None = None,
+        agent_key: str | None = None,
+    ) -> Strategy | None:
+        """Merge and persist session defaults in agent.md frontmatter."""
+        from condor.trading_agent.config import sanitize_config_dict
+
+        strategy = self.get_by_slug(slug)
+        if not strategy:
+            return None
+
+        if default_config is not None:
+            merged = dict(strategy.default_config)
+            for key, value in default_config.items():
+                if key == "risk_limits" and isinstance(value, dict):
+                    risk = dict(merged.get("risk_limits") or {})
+                    risk.update(value)
+                    merged["risk_limits"] = sanitize_config_dict({"risk_limits": risk})["risk_limits"]
+                else:
+                    merged[key] = value
+            strategy.default_config = sanitize_config_dict(merged)
+
+        if default_trading_context is not None:
+            strategy.default_trading_context = default_trading_context
+        if agent_key is not None:
+            strategy.agent_key = agent_key
+
+        self._save(strategy)
+        return strategy
+
     def delete(self, strategy_id: str) -> bool:
         strategy = self.get(strategy_id)
         if not strategy:

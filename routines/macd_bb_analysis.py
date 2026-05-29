@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes
 
 from config_manager import get_client
 from routines.base import RoutineResult
-from routines.hl_candles import fetch_hl_candles
+from routines.lib.hl_candles import fetch_hl_candles
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +219,7 @@ async def run(
         builder.table([table_row], columns=table_columns)
         builder.markdown("### Entry Rules Check")
         builder.table(conditions_rows, columns=conditions_columns)
-        builder.save()
+        await builder.save()
     except Exception as e:
         logger.warning(f"Report generation failed: {e}")
 

@@ -19,6 +19,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
 
 from handlers import clear_all_input_states
+import condor.reports
 from condor.routine_store import get_routine_store
 from routines.base import discover_routines, get_routine, get_routine_by_state, normalize_result
 from utils.auth import restricted
@@ -100,6 +101,19 @@ def _get_routine_instances(
 def _generate_instance_id() -> str:
     """Generate a short unique instance ID."""
     return hashlib.md5(f"{time.time()}{id(object())}".encode()).hexdigest()[:6]
+
+
+def _sync_instance_to_store(instance_id: str, inst_meta: dict) -> None:
+    """Sync a Telegram instance's state to the shared RoutineStore."""
+    try:
+        store = get_routine_store()
+        existing = store._instances.get(instance_id)
+        if existing:
+            existing.update(inst_meta)
+        else:
+            store.add_instance(instance_id, inst_meta.copy())
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -234,11 +248,11 @@ async def _execute_routine(
     config_dict: dict,
     chat_id: int,
     active_server: str | None = None,
-) -> tuple[str, float]:
-    """Execute a routine and return (result, duration)."""
+) -> tuple[str, float, str | None]:
+    """Execute a routine and return (result, duration, report_id)."""
     routine = get_routine(routine_name)
     if not routine:
-        return "Routine not found", 0
+        return "Routine not found", 0, None
 
     start = time.time()
 
@@ -252,6 +266,9 @@ async def _execute_routine(
         user_data.setdefault("preferences", {}).setdefault("general", {})["active_server"] = active_server
     context._user_data = user_data
 
+    # Reset report capture before execution
+    condor.reports._last_report_id = None
+
     try:
         config = routine.config_class(**config_dict)
         raw_result = await routine.run_fn(config, context)
@@ -263,6 +280,7 @@ async def _execute_routine(
         logger.error(f"Routine {routine_name}[{instance_id}] failed: {e}")
 
     duration = time.time() - start
+    report_id = condor.reports._last_report_id
 
     # Bridge to shared store so web dashboard can see Telegram-triggered results
     if rich_result:
@@ -272,7 +290,7 @@ async def _execute_routine(
         except Exception:
             pass
 
-    return result_text, duration
+    return result_text, duration, report_id
 
 
 async def _run_continuous_routine(
@@ -325,6 +343,10 @@ async def _run_continuous_routine(
     instances = application.user_data.get(chat_id, {}).get("routine_instances", {})
     if instance_id in instances:
         del instances[instance_id]
+    try:
+        get_routine_store().remove_instance(instance_id)
+    except Exception:
+        pass
 
 
 async def _interval_job_callback(context: CallbackContext) -> None:
@@ -343,7 +365,7 @@ async def _interval_job_callback(context: CallbackContext) -> None:
         logger.warning(f"Instance {instance_id} no longer exists, skipping execution")
         return
 
-    result, duration = await _execute_routine(
+    result, duration, report_id = await _execute_routine(
         context, instance_id, routine_name, config_dict, chat_id,
         active_server=data.get("active_server"),
     )
@@ -362,6 +384,9 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     run_count = instances[instance_id].get("run_count", 0) + 1
     instances[instance_id]["run_count"] = run_count
 
+    # Sync to shared store
+    _sync_instance_to_store(instance_id, instances[instance_id])
+
     # Send result message for scheduled one-shot routines
     schedule = instances[instance_id].get("schedule", {})
     interval_str = _format_schedule(schedule)
@@ -372,8 +397,14 @@ async def _interval_job_callback(context: CallbackContext) -> None:
         f"```\n{result[:400]}\n```"
     )
     try:
+        keyboard = None
+        if report_id:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📤 Share Report", callback_data=f"routines:share:{report_id}"),
+            ]])
         await context.bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="MarkdownV2"
+            chat_id=chat_id, text=text, parse_mode="MarkdownV2",
+            reply_markup=keyboard,
         )
     except Exception as e:
         logger.error(f"Failed to send interval result: {e}")
@@ -393,7 +424,7 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     msg_id = data.get("msg_id")
     background = data.get("background", False)
 
-    result, duration = await _execute_routine(
+    result, duration, report_id = await _execute_routine(
         context, instance_id, routine_name, config_dict, chat_id,
         active_server=data.get("active_server"),
     )
@@ -404,6 +435,10 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     )
     if instance_id in instances:
         del instances[instance_id]
+        try:
+            get_routine_store().remove_instance(instance_id)
+        except Exception:
+            pass
 
     if background:
         # Send result as new message
@@ -414,15 +449,21 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
             f"```\n{result[:400]}\n```"
         )
         try:
+            keyboard = None
+            if report_id:
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📤 Share Report", callback_data=f"routines:share:{report_id}"),
+                ]])
             await context.bot.send_message(
-                chat_id=chat_id, text=text, parse_mode="MarkdownV2"
+                chat_id=chat_id, text=text, parse_mode="MarkdownV2",
+                reply_markup=keyboard,
             )
         except Exception as e:
             logger.error(f"Failed to send result: {e}")
     elif msg_id:
         # Update the detail view
         await _refresh_detail_msg(
-            context, chat_id, msg_id, routine_name, result, duration
+            context, chat_id, msg_id, routine_name, result, duration, report_id
         )
 
 
@@ -434,7 +475,7 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     config_dict = data["config_dict"]
     chat_id = data["chat_id"]
 
-    result, duration = await _execute_routine(
+    result, duration, report_id = await _execute_routine(
         context, instance_id, routine_name, config_dict, chat_id,
         active_server=data.get("active_server"),
     )
@@ -450,6 +491,8 @@ async def _daily_job_callback(context: CallbackContext) -> None:
         instances[instance_id]["run_count"] = (
             instances[instance_id].get("run_count", 0) + 1
         )
+        # Sync to shared store
+        _sync_instance_to_store(instance_id, instances[instance_id])
 
     # Send notification
     icon = "✅" if not result.startswith("Error") else "❌"
@@ -458,8 +501,14 @@ async def _daily_job_callback(context: CallbackContext) -> None:
         f"```\n{result[:400]}\n```"
     )
     try:
+        keyboard = None
+        if report_id:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📤 Share Report", callback_data=f"routines:share:{report_id}"),
+            ]])
         await context.bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="MarkdownV2"
+            chat_id=chat_id, text=text, parse_mode="MarkdownV2",
+            reply_markup=keyboard,
         )
     except Exception as e:
         logger.error(f"Failed to send daily result: {e}")
@@ -573,17 +622,25 @@ def _create_continuous_instance(
 
     # Store instance
     instances = _get_instances(context)
-    instances[instance_id] = {
+    inst_meta = {
         "routine_name": routine_name,
         "config": config_dict.copy(),
         "schedule": {"type": "continuous"},
         "status": "running",
+        "source": "telegram",
         "created_at": time.time(),
         "last_run_at": None,
         "last_result": None,
         "last_duration": None,
         "run_count": 0,
     }
+    instances[instance_id] = inst_meta
+
+    # Sync to shared store for web/MCP visibility
+    try:
+        get_routine_store().add_instance(instance_id, inst_meta.copy())
+    except Exception:
+        pass
 
     # Create and store asyncio task (copy config to isolate from draft changes)
     frozen_config = config_dict.copy()
@@ -958,6 +1015,36 @@ async def _show_daily_menu(
     await _edit_or_send(update, text, InlineKeyboardMarkup(keyboard))
 
 
+async def _share_report(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, report_id: str
+) -> None:
+    """Send a report HTML file as a Telegram document."""
+    from condor.reports import CHARTS_DIR, get_report
+
+    chat_id = update.effective_chat.id
+    entry = get_report(report_id)
+    if not entry:
+        await update.callback_query.answer("Report not found", show_alert=True)
+        return
+
+    file_path = CHARTS_DIR / entry["filename"]
+    if not file_path.exists():
+        await update.callback_query.answer("Report file missing", show_alert=True)
+        return
+
+    try:
+        with open(file_path, "rb") as f:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                filename=f"{entry['title']}.html",
+                caption=f"📊 {entry['title']}",
+            )
+    except Exception as e:
+        logger.error(f"Failed to share report {report_id}: {e}")
+        await update.callback_query.answer(f"Error: {e}", show_alert=True)
+
+
 async def _show_help(
     update: Update, context: ContextTypes.DEFAULT_TYPE, routine_name: str
 ) -> None:
@@ -995,6 +1082,7 @@ async def _refresh_detail_msg(
     routine_name: str,
     result: str | None = None,
     duration: float | None = None,
+    report_id: str | None = None,
 ) -> None:
     """Refresh the routine detail message after execution."""
     routine = get_routine(routine_name)
@@ -1078,6 +1166,15 @@ async def _refresh_detail_msg(
                     f"⏹ Stop All ({len(running)})",
                     callback_data=f"routines:stopall:{routine_name}",
                 )
+            ]
+        )
+
+    if report_id:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📤 Share Report", callback_data=f"routines:share:{report_id}"
+                ),
             ]
         )
 
@@ -1519,6 +1616,10 @@ async def routines_callback_handler(
         await query.answer(f"⏹ Stopped {count}")
         await _show_tasks(update, context)
 
+    elif action == "share" and len(parts) >= 3:
+        await query.answer()
+        await _share_report(update, context, parts[2])
+
     elif action == "help" and len(parts) >= 3:
         await query.answer()
         await _show_help(update, context, parts[2])
@@ -1619,6 +1720,7 @@ async def restore_scheduled_jobs(application) -> int:
                         )
                     )
                     _continuous_tasks[instance_id] = task
+                    _sync_instance_to_store(instance_id, inst)
                     restored += 1
                     logger.info(
                         f"Restored continuous routine {instance_id}: {routine_name}"
@@ -1651,6 +1753,7 @@ async def restore_scheduled_jobs(application) -> int:
                         name=job_name_str,
                         chat_id=chat_id,
                     )
+                    _sync_instance_to_store(instance_id, inst)
                     restored += 1
                     logger.info(
                         f"Restored interval job {instance_id} for {routine_name} (every {interval}s)"
@@ -1666,6 +1769,7 @@ async def restore_scheduled_jobs(application) -> int:
                         name=job_name_str,
                         chat_id=chat_id,
                     )
+                    _sync_instance_to_store(instance_id, inst)
                     restored += 1
                     logger.info(
                         f"Restored daily job {instance_id} for {routine_name} (at {time_str})"

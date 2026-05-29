@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/lib/auth";
-import type { BotsPageResponse, ControllerInfo } from "@/lib/api";
+import type { BotsPageResponse, ControllerInfo, ControllerPerformanceHistoryResponse, ControllerPerformanceSnapshot } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import { CondorWebSocket } from "@/lib/websocket";
 
@@ -67,16 +67,19 @@ export function useCondorWebSocket(
           if (!incoming?.controllers) return old ?? data;
           if (!old?.controllers?.length) return incoming;
 
+          // Key by controller_id (stable) — controller_name may differ between REST and WS
           const oldMap = new Map<string, ControllerInfo>();
           for (const c of old.controllers) {
-            oldMap.set(`${c.bot_name}-${c.controller_name}`, c);
+            const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
+            oldMap.set(key, c);
           }
           const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
 
           return {
             ...incoming,
             controllers: incoming.controllers.map((c) => {
-              const prev = oldMap.get(`${c.bot_name}-${c.controller_name}`);
+              const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
+              const prev = oldMap.get(key);
               if (!prev) return c;
               return {
                 ...c,
@@ -96,6 +99,24 @@ export function useCondorWebSocket(
         });
       } else if (prefix === "executors") {
         queryClient.setQueryData(["executors", server, ""], data);
+        // Also update any filtered executor queries (e.g. ["executors", server, "main", pair])
+        const allExecs = data as { controller_id?: string; trading_pair?: string }[];
+        if (Array.isArray(allExecs)) {
+          const cache = queryClient.getQueryCache().findAll({ queryKey: ["executors", server] });
+          for (const entry of cache) {
+            const key = entry.queryKey as string[];
+            // Skip the unfiltered key (already set above)
+            if (key.length <= 3 && key[2] === "") continue;
+            // key format: ["executors", server, controllerId, pair]
+            if (key.length === 4) {
+              const [, , cid, tp] = key;
+              const filtered = allExecs.filter(
+                (ex) => (!cid || ex.controller_id === cid) && (!tp || ex.trading_pair === tp),
+              );
+              queryClient.setQueryData(key, filtered);
+            }
+          }
+        }
         const execs = data as unknown[];
         if (Array.isArray(execs)) {
           queryClient.setQueryData(
@@ -111,6 +132,58 @@ export function useCondorWebSocket(
               return { ...old, pages: [nextFirst, ...old.pages.slice(1)] };
             },
           );
+        }
+      } else if (prefix === "controller_perf") {
+        // Update the "all controllers" sparkline cache
+        const incoming = data as { snapshots?: ControllerPerformanceSnapshot[] };
+        if (incoming?.snapshots) {
+          queryClient.setQueryData(
+            ["controller-perf-history-all", server],
+            (old: ControllerPerformanceHistoryResponse | undefined) => {
+              if (!old) return old;
+              // Append new snapshots and deduplicate by controller_id+timestamp
+              const existing = old.snapshots ?? [];
+              const merged = [...existing];
+              const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+              for (const snap of incoming.snapshots!) {
+                const key = `${snap.controller_id}:${snap.timestamp}`;
+                if (!seen.has(key)) {
+                  merged.push(snap);
+                  seen.add(key);
+                }
+              }
+              return { ...old, snapshots: merged };
+            },
+          );
+
+          // Also update per-controller history caches
+          const byController = new Map<string, ControllerPerformanceSnapshot[]>();
+          for (const snap of incoming.snapshots) {
+            const cid = snap.controller_id || snap.controller_name;
+            if (!cid) continue;
+            const arr = byController.get(cid) ?? [];
+            arr.push(snap);
+            byController.set(cid, arr);
+          }
+          for (const [cid, snaps] of byController) {
+            queryClient.setQueryData(
+              ["controller-perf-history", server, cid],
+              (old: ControllerPerformanceHistoryResponse | undefined) => {
+                if (!old) return old;
+                const existing = old.snapshots ?? [];
+                const merged = [...existing];
+                const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+                for (const snap of snaps) {
+                  const key = `${snap.controller_id}:${snap.timestamp}`;
+                  if (!seen.has(key)) {
+                    merged.push(snap);
+                    seen.add(key);
+                  }
+                }
+                return { ...old, snapshots: merged };
+              },
+            );
+          }
         }
       } else if (prefix === "orderbook") {
         const parts = channel.split(":");
@@ -146,9 +219,14 @@ export function useCondorWebSocket(
   // ── Effect 2: Diff channels — subscribe/unsubscribe without reconnecting ──
   useEffect(() => {
     const ws = wsRef.current;
-    if (!ws) return;
+    if (!ws || !server) return;
 
-    const newSet = new Set(nonCandleChannels(channels));
+    // Bare channel names (e.g. "bots") need server prefix ("bots:local")
+    // to match the backend broadcast channel format.
+    const resolved = nonCandleChannels(channels).map((ch) =>
+      ch.includes(":") ? ch : `${ch}:${server}`,
+    );
+    const newSet = new Set(resolved);
     const oldSet = prevChannelsRef.current;
 
     // Subscribe new channels
@@ -161,7 +239,7 @@ export function useCondorWebSocket(
     }
 
     prevChannelsRef.current = newSet;
-  }, [channels.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [channels.join(","), server]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { wsRef, wsVersion };
 }

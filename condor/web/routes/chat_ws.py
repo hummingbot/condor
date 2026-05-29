@@ -49,6 +49,9 @@ _pending_permissions: dict[str, asyncio.Future] = {}
 # Track which session slots exist per user: user_id -> [slot_id, ...]
 _user_slots: dict[int, list[str]] = {}
 
+# Track active prompt tasks per slot: "user_id:slot_id" -> asyncio.Task
+_active_prompt_tasks: dict[str, asyncio.Task] = {}
+
 PERMISSION_TIMEOUT = 120  # seconds
 MAX_SESSIONS_PER_USER = 5
 
@@ -71,6 +74,7 @@ def _get_user_sessions(user_id: int) -> list[dict]:
                 "agent_key": session.agent_key,
                 "mode": session.mode,
                 "is_busy": session.is_busy,
+                "server_name": session.server_name,
             })
     return result
 
@@ -172,6 +176,8 @@ async def chat_websocket(ws: WebSocket, token: str = Query(...)):
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
                 _handle_resolve_permission(msg)
+            elif action == "abort_prompt":
+                _spawn(_handle_abort_prompt(ws, user_id, msg))
             else:
                 await _send(ws, {"event": "error", "message": f"Unknown action: {action}"})
 
@@ -192,6 +198,7 @@ async def _handle_start_session(
 ) -> None:
     agent_key = msg.get("agent_key", DEFAULT_AGENT)
     mode = msg.get("mode", DEFAULT_MODE)
+    server_name = msg.get("server_name")  # From frontend's selected server
 
     # Check slot limit
     slots = _user_slots.get(user_id, [])
@@ -222,6 +229,7 @@ async def _handle_start_session(
             mode=mode,
             platform="web",
             lazy_context=True,  # Don't block — inject context on first message
+            server_name=server_name,
         )
 
         # Append mode-specific assistant context (e.g. agent_builder instructions)
@@ -237,6 +245,7 @@ async def _handle_start_session(
             "slot_id": slot_id,
             "agent_key": agent_key,
             "mode": mode,
+            "server_name": session.server_name,
         })
     except Exception as e:
         log.exception("Failed to start chat session for user %d", user_id)
@@ -259,12 +268,23 @@ async def _handle_send_message(
     session = get_session(session_key)
 
     if not session or not session.client.alive:
-        await _send(ws, {"event": "error", "message": "Session not found. Create a new one."})
+        # Session died — clean up and notify frontend
+        await destroy_session(session_key)
+        slots = _user_slots.get(user_id, [])
+        if slot_id in slots:
+            slots.remove(slot_id)
+        await _send(ws, {"event": "error", "slot_id": slot_id, "message": "Session ended. Start a new one."})
+        await _send(ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": True})
         return
 
     if session.is_busy:
         await _send(ws, {"event": "error", "message": "Agent is busy"})
         return
+
+    task_key = f"{user_id}:{slot_id}"
+    task = asyncio.current_task()
+    if task:
+        _active_prompt_tasks[task_key] = task
 
     try:
         async for event in session.prompt_stream(text):
@@ -299,11 +319,46 @@ async def _handle_send_message(
                     "slot_id": slot_id,
                     "stop_reason": event.stop_reason,
                 })
+    except asyncio.CancelledError:
+        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
     except RuntimeError as e:
         await _send(ws, {"event": "error", "slot_id": slot_id, "message": str(e)})
+        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"})
     except Exception:
         log.exception("Error streaming prompt for user %d", user_id)
         await _send(ws, {"event": "error", "slot_id": slot_id, "message": "Stream error"})
+        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"})
+    finally:
+        _active_prompt_tasks.pop(task_key, None)
+
+
+async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
+    slot_id = msg.get("slot_id", "")
+    if not slot_id:
+        await _send(ws, {"event": "error", "message": "No slot_id"})
+        return
+
+    # Abort the ACP-level prompt so stale events don't leak into the next message.
+    # session.abort() sets an event flag that makes prompt_stream break out on the
+    # next iteration, triggering its finally block to release the lock properly.
+    session_key = _session_key(user_id, slot_id)
+    session = get_session(session_key)
+    if session:
+        session.abort()
+
+    task_key = f"{user_id}:{slot_id}"
+    task = _active_prompt_tasks.get(task_key)
+    if task and not task.done():
+        task.cancel()
+        # Wait briefly for the task to finish so the lock is released
+        # before the next message can acquire it.
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+    else:
+        # No active task to cancel — send prompt_done directly so the frontend resets
+        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
 
 
 async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> None:
@@ -314,6 +369,10 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
 
     session_key = _session_key(user_id, slot_id)
     destroyed = await destroy_session(session_key)
+
+    # Clean up active prompt task to prevent memory leaks
+    task_key = f"{user_id}:{slot_id}"
+    _active_prompt_tasks.pop(task_key, None)
 
     # Remove from user slots
     slots = _user_slots.get(user_id, [])

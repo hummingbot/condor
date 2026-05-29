@@ -14,16 +14,32 @@ from pydantic import BaseModel, Field
 
 
 class RiskLimitsConfig(BaseModel):
-    max_position_size_quote: float = Field(default=500.0, description="Max total position size in quote currency")
     max_open_executors: int = Field(default=5, description="Max simultaneous executors")
     max_drawdown_pct: float = Field(default=-1.0, description="Max drawdown percentage; -1 = disabled")
+
+
+def strip_legacy_risk_limits(risk_limits: dict[str, Any] | None) -> dict[str, Any]:
+    """Remove deprecated persisted fields from risk_limits dict."""
+    if not risk_limits:
+        return {}
+    cleaned = dict(risk_limits)
+    cleaned.pop("max_position_size_quote", None)
+    return cleaned
+
+
+def sanitize_config_dict(config: dict[str, Any]) -> dict[str, Any]:
+    """Strip deprecated keys before persisting agent/session config."""
+    result = dict(config)
+    if "risk_limits" in result and isinstance(result["risk_limits"], dict):
+        result["risk_limits"] = strip_legacy_risk_limits(result["risk_limits"])
+    return result
 
 
 class AgentConfig(BaseModel):
     server_name: str = Field(default="local", description="Hummingbot API server name")
     agent_key: str = Field(default="", description="LLM model to use (e.g. 'claude-code', 'ollama:llama3.1'). Empty = use strategy default.")
     model_base_url: str = Field(default="", description="Custom base URL for OpenAI-compatible endpoints (LM Studio, vLLM). Leave empty for standard providers.")
-    total_amount_quote: float = Field(default=100.0, description="Total capital budget for this session in quote currency")
+    total_amount_quote: float = Field(default=100.0, description="Per-position notional budget in quote currency (USDT)")
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
     trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
     execution_mode: Literal["dry_run", "run_once", "loop"] = Field(default="loop", description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)")
@@ -43,6 +59,8 @@ class AgentConfig(BaseModel):
     def from_dict(cls, d: dict[str, Any]) -> AgentConfig:
         """Create from a raw dict (e.g. strategy.default_config)."""
         cleaned = {k: v for k, v in d.items() if k in cls.model_fields}
+        if isinstance(cleaned.get("risk_limits"), dict):
+            cleaned["risk_limits"] = strip_legacy_risk_limits(cleaned["risk_limits"])
         # Translate dry_run shorthand → execution_mode
         if d.get("dry_run") and "execution_mode" not in d:
             cleaned["execution_mode"] = "dry_run"

@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
+import { computeMaxTotalExposure } from "@/components/agent/AgentSessionConfigFields";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
@@ -76,6 +77,11 @@ export function MarkdownEditor({
 
 export function InstanceCard({ instance }: { instance: import("@/lib/api").RunningInstance }) {
   const riskLimits = (instance.risk_limits || {}) as Record<string, unknown>;
+  const maxExecutors = Number(riskLimits.max_open_executors ?? 0);
+  const maxTotalExposure = computeMaxTotalExposure(instance.total_amount_quote, maxExecutors);
+  const displayRiskLimits = Object.entries(riskLimits).filter(
+    ([key]) => key !== "max_position_size_quote",
+  );
   const statusColor = instance.status === "running" ? "text-emerald-400" : instance.status === "paused" ? "text-amber-400" : "text-[var(--color-text-muted)]";
   const mode = instance.execution_mode || "loop";
   const modeBadge = mode === "dry_run"
@@ -129,7 +135,13 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
           <span className="text-[var(--color-text-muted)]">frequency</span>
           <span className="text-[var(--color-text)]">{instance.frequency_sec}s</span>
         </div>
-        {Object.entries(riskLimits).map(([k, v]) => (
+        {maxTotalExposure > 0 && (
+          <div className="flex justify-between">
+            <span className="text-[var(--color-text-muted)]">max exposure</span>
+            <span className="text-[var(--color-text)]">${maxTotalExposure.toFixed(0)}</span>
+          </div>
+        )}
+        {displayRiskLimits.map(([k, v]) => (
           <div key={k} className="flex justify-between">
             <span className="text-[var(--color-text-muted)]">{k.replace("max_", "").replace(/_/g, " ")}</span>
             <span className="text-[var(--color-text)]">{String(v)}</span>
