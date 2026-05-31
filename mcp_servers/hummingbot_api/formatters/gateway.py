@@ -128,6 +128,61 @@ def format_gateway_swap_result(action: str, result: dict[str, Any]) -> str:
     return f"Gateway Swap Result: {result}"
 
 
+def _extract_transaction_hash(result: dict[str, Any]) -> str | None:
+    return (
+        result.get("transaction_hash")
+        or result.get("tx_hash")
+        or result.get("txHash")
+        or result.get("signature")
+        or result.get("txSignature")
+    )
+
+
+def format_gateway_clmm_result(action: str, result: dict[str, Any]) -> str:
+    """Format Gateway CLMM position management results into a human-readable string."""
+    if action in ["open_position", "close_position", "collect_fees"]:
+        payload = result.get("result", {}) if isinstance(result, dict) else {}
+        if not isinstance(payload, dict):
+            return f"Gateway CLMM {action}: {payload}"
+
+        tx_hash = _extract_transaction_hash(payload)
+        position_address = (
+            payload.get("position_address")
+            or result.get("position_address")
+            or payload.get("nft_id")
+        )
+
+        lines = [f"Gateway CLMM {action.replace('_', ' ').title()} Result:"]
+        if position_address:
+            lines.append(f"Position: {position_address}")
+        if tx_hash:
+            lines.append(f"Transaction: {tx_hash}")
+        if not position_address and not tx_hash:
+            lines.append(str(payload))
+        return "\n".join(lines)
+
+    if action == "get_positions":
+        positions = result.get("result", [])
+        count = len(positions) if isinstance(positions, list) else 0
+        return f"Gateway CLMM Positions ({count} found):\n\n{positions}"
+
+    if action == "search":
+        search_result = result.get("result", {})
+        positions = search_result.get("data", []) if isinstance(search_result, dict) else []
+        pagination = result.get("pagination", {})
+        filters = result.get("filters", {})
+        return (
+            f"Gateway CLMM Position Search Result:\n"
+            f"Total Positions Found: {len(positions)}\n"
+            f"Limit: {pagination.get('limit', 'N/A')}, Offset: {pagination.get('offset', 'N/A')}\n"
+            f"Refresh: {pagination.get('refresh', False)}\n"
+            f"Filters: {filters if filters else 'None'}\n\n"
+            f"Positions: {positions}"
+        )
+
+    return f"Gateway CLMM Result: {result}"
+
+
 def format_gateway_clmm_pool_result(action: str, result: dict[str, Any]) -> str:
     """Format gateway CLMM pool exploration results into a human-readable string."""
     if action == "list_pools" and "pools_table" in result:

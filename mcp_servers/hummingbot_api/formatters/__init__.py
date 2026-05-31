@@ -39,6 +39,7 @@ from .bots import format_active_bots_as_table, format_bot_logs_as_table
 
 # Gateway formatters
 from .gateway import (
+    format_gateway_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_container_result,
@@ -76,6 +77,7 @@ __all__ = [
     "format_gateway_container_result",
     "format_gateway_config_result",
     "format_gateway_swap_result",
+    "format_gateway_clmm_result",
     "format_gateway_clmm_pool_result",
     # Base utilities
     "format_currency",
