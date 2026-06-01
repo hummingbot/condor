@@ -24,10 +24,13 @@ async def _notify_admin_new_user(
         return
 
     try:
+        from utils.telegram_formatters import escape_markdown_v2
+
+        username_display = escape_markdown_v2(f"@{username}" if username else "N/A")
         message = (
             f"👤 *New Access Request*\n\n"
             f"User ID: `{user_id}`\n"
-            f"Username: @{username or 'N/A'}\n\n"
+            f"Username: {username_display}\n\n"
             f"Use /start \\> Admin Panel to approve or reject\\."
         )
         await context.bot.send_message(
