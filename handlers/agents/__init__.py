@@ -7,6 +7,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from handlers import clear_all_input_states
+from handlers import clear_agent_llm_typing_states as _clear_agent_llm_typing_states
 from utils.auth import restricted
 
 from ._shared import (
@@ -30,6 +31,33 @@ from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
 
 log = logging.getLogger(__name__)
+
+
+def _is_cancel_message(text: str) -> bool:
+    slug = text.strip().lower()
+    if slug in ("/cancel", "cancel"):
+        return True
+    return slug.split("@", 1)[0] in ("/cancel", "cancel")
+
+
+def _looks_like_openrouter_slug_input(text: str) -> bool:
+    """True when text plausibly is a model slug, not a chat question."""
+    if _is_cancel_message(text):
+        return True
+    candidate = text.strip()
+    if not candidate or " " in candidate or len(candidate) > 120:
+        return False
+    return "/" in candidate
+
+
+def _looks_like_cursor_model_input(text: str) -> bool:
+    if _is_cancel_message(text):
+        return True
+    candidate = text.strip()
+    if not candidate or " " in candidate or len(candidate) > 120:
+        return False
+    return True
+
 
 # Cache CLI availability checks so we only hit the filesystem once per key
 _cli_available_cache: dict[str, bool] = {}
@@ -427,7 +455,8 @@ async def _resolve_openrouter_typed_slug(
     from .openrouter_models import fetch_models, find_model_by_slug
 
     slug = text.strip()
-    if slug.lower() in ("/cancel", "cancel"):
+    if _is_cancel_message(slug):
+        _clear_agent_llm_typing_states(context)
         await update.message.reply_text("Cancelled. Use /agent to continue.")
         return
 
@@ -504,7 +533,7 @@ async def _handle_openrouter_type_cancel(
 ) -> None:
     """Discard the typed slug without changing the active LLM."""
     query = update.callback_query
-    context.user_data.pop("_openrouter_typed_slug", None)
+    _clear_agent_llm_typing_states(context)
     await query.message.edit_text("Cancelled. Use /agent to continue.")
 
 
@@ -611,7 +640,8 @@ async def _resolve_cursor_typed_id(
     from .cursor_models import fetch_models, find_model_by_id
 
     model_id = text.strip()
-    if model_id.lower() in ("/cancel", "cancel"):
+    if _is_cancel_message(model_id):
+        _clear_agent_llm_typing_states(context)
         await update.message.reply_text("Cancelled. Use /agent to continue.")
         return
 
@@ -679,7 +709,7 @@ async def _handle_cursor_type_cancel(
 ) -> None:
     """Discard the typed model id without changing the active LLM."""
     query = update.callback_query
-    context.user_data.pop("_cursor_typed_id", None)
+    _clear_agent_llm_typing_states(context)
     await query.message.edit_text("Cancelled. Use /agent to continue.")
 
 
@@ -1002,6 +1032,7 @@ async def agent_message_handler(
         session = get_session(chat_id)
         if session:
             await destroy_session(chat_id)
+        _clear_agent_llm_typing_states(context)
         await update.message.reply_text("Session reset. Send a message to start fresh.")
         return
 
@@ -1012,13 +1043,17 @@ async def agent_message_handler(
 
     # Handle typed OpenRouter slug input
     if context.user_data.pop("_openrouter_typing_slug", None):
-        await _resolve_openrouter_typed_slug(update, context, text)
-        return
+        if _looks_like_openrouter_slug_input(text):
+            await _resolve_openrouter_typed_slug(update, context, text)
+            return
+        _clear_agent_llm_typing_states(context)
 
     # Handle typed Cursor model id input
     if context.user_data.pop("_cursor_typing_id", None):
-        await _resolve_cursor_typed_id(update, context, text)
-        return
+        if _looks_like_cursor_model_input(text):
+            await _resolve_cursor_typed_id(update, context, text)
+            return
+        _clear_agent_llm_typing_states(context)
 
     # Backward compat
     mode = context.user_data.get("agent_mode", DEFAULT_MODE)

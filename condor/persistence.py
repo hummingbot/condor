@@ -33,6 +33,14 @@ EPHEMERAL_KEYS = frozenset(
         "_bots_cache",
         "_executors_cache",
         "token_cache",
+        # Agent LLM picker typing modes (transient UI; must not survive restart)
+        "_openrouter_typing_slug",
+        "_openrouter_typed_slug",
+        "_cursor_typing_id",
+        "_cursor_typed_id",
+        "_openrouter_models",
+        "_cursor_models",
+        "agent_compact_custom",
         # Portfolio snapshots (large data, rebuilt on /portfolio)
         "portfolio_balances",
         "portfolio_accounts_distribution",

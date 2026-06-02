@@ -4,6 +4,31 @@ Command handlers for Condor Telegram bot
 
 from telegram.ext import ContextTypes
 
+# Transient agent LLM picker states — must not survive restarts or normal chat.
+AGENT_LLM_TYPING_KEYS = (
+    "_openrouter_typing_slug",
+    "_openrouter_typed_slug",
+    "_cursor_typing_id",
+    "_cursor_typed_id",
+)
+
+
+def clear_agent_llm_typing_states(context: ContextTypes.DEFAULT_TYPE) -> None:
+    for key in AGENT_LLM_TYPING_KEYS:
+        context.user_data.pop(key, None)
+
+
+def scrub_all_user_agent_llm_typing_states(application) -> int:
+    """Remove persisted slug/model-id typing flags loaded from pickle."""
+    cleared = 0
+    for user_data in application.user_data.values():
+        if not isinstance(user_data, dict):
+            continue
+        for key in AGENT_LLM_TYPING_KEYS:
+            if user_data.pop(key, None) is not None:
+                cleared += 1
+    return cleared
+
 
 def is_gateway_network(connector_name: str) -> bool:
     """
@@ -151,6 +176,7 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     # agent_state is no longer used for routing (agent is the default fallback).
     context.user_data.pop("agent_compact_custom", None)
     context.user_data.pop("agent_chat_target", None)
+    clear_agent_llm_typing_states(context)
 
     # Routines states
     context.user_data.pop("routines_state", None)

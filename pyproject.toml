@@ -30,3 +30,8 @@ dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
 [tool.isort]
 profile = "black"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: live Telegram API tests (set RUN_TELEGRAM_INTEGRATION=1)",
+]
