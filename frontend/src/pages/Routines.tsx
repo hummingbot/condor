@@ -16,6 +16,7 @@ import { useSearchParams } from "react-router-dom";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
+import { formatInterval } from "@/lib/routineUtils";
 
 type SourceTypeFilter = "all" | "routine" | "agent" | string;
 
@@ -243,7 +244,7 @@ export function Routines() {
                         {inst.schedule?.type === "interval" && (
                           <span className="flex items-center gap-0.5">
                             <Clock className="h-2 w-2" />
-                            {inst.schedule.interval_sec as number}s
+                            {formatInterval(inst.schedule.interval_sec as number)}
                           </span>
                         )}
                         {inst.run_count > 0 && <span>{inst.run_count} runs</span>}

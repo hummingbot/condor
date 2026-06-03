@@ -60,6 +60,15 @@ export function formatAgo(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+// Format a schedule interval (in seconds) into a compact label, e.g. 86400 -> "1d"
+export function formatInterval(sec: number): string {
+  if (sec % 604800 === 0) return `${sec / 604800}w`;
+  if (sec % 86400 === 0) return `${sec / 86400}d`;
+  if (sec % 3600 === 0) return `${sec / 3600}h`;
+  if (sec % 60 === 0) return `${sec / 60}m`;
+  return `${sec}s`;
+}
+
 // ── Query invalidation ──
 
 export function invalidateRoutineQueries(

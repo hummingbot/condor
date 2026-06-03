@@ -23,7 +23,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInstance, api } from "@/lib/api";
-import { buildConfigValues, formatAgo, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
 import { useServer } from "@/hooks/useServer";
 import { RoutineConfigForm } from "./RoutineConfigForm";
@@ -499,7 +499,7 @@ export function ReportBrowser({
                     <span className="text-emerald-400 capitalize">{inst.status}</span>
                     {inst.schedule?.type === "interval" && (
                       <span className="text-[var(--color-text-muted)]">
-                        <Clock className="inline h-2.5 w-2.5" /> {inst.schedule.interval_sec as number}s
+                        <Clock className="inline h-2.5 w-2.5" /> {formatInterval(inst.schedule.interval_sec as number)}
                       </span>
                     )}
                     <span className="text-[var(--color-text-muted)]">{inst.run_count} runs</span>

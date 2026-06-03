@@ -8,6 +8,8 @@ const PRESETS = [
   { label: "30m", sec: 1800 },
   { label: "1h", sec: 3600 },
   { label: "6h", sec: 21600 },
+  { label: "1d", sec: 86400 },
+  { label: "1w", sec: 604800 },
 ];
 
 interface Props {

@@ -2,6 +2,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, Clock, Trash2 } from "lucide-
 import { useState } from "react";
 
 import { type RoutineInstance } from "@/lib/api";
+import { formatInterval } from "@/lib/routineUtils";
 
 interface RoutineInstancesProps {
   instances: RoutineInstance[];
@@ -74,7 +75,7 @@ function InstanceCard({
           {inst.schedule?.type === "interval" && (
             <span className="flex items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
               <Clock className="h-3 w-3" />
-              every {inst.schedule.interval_sec as number}s
+              every {formatInterval(inst.schedule.interval_sec as number)}
             </span>
           )}
           <span className="text-[10px] text-[var(--color-text-muted)]">
