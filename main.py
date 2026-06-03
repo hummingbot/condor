@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError
@@ -61,7 +62,8 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     token = create_login_token(user.id, user.username or "", user.first_name or "")
 
     url = f"{WEB_URL}/login?token={token}"
-    is_localhost = "localhost" in WEB_URL or "127.0.0.1" in WEB_URL
+    _hostname = urlparse(WEB_URL).hostname or ""
+    is_localhost = "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
 
     if is_localhost:
         await update.message.reply_text(
