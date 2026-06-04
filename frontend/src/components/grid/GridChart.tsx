@@ -81,6 +81,14 @@ export function GridChart({
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
   const initializedRef = useRef(false);
   const crosshairPriceRef = useRef<number | null>(null);
+  // Exact price under the pointer (not snapped to candle close) — used by the measure tool
+  const cursorPriceRef = useRef<number | null>(null);
+  const crosshairTimeRef = useRef<number | null>(null);
+  // ── Measure tool (Shift+click anchor → live % of range) ──
+  const measureAnchorRef = useRef<{ price: number; time: number } | null>(null);
+  const measureBadgeRef = useRef<HTMLDivElement>(null);
+  // Measure box is a DOM overlay (not a chart series) so it never triggers a relayout
+  const measureBoxRef = useRef<HTMLDivElement>(null);
   const overlaysRef = useRef<ExecutorOverlay[]>([]);
   const lastZoomedIdRef = useRef<string | null>(null);
   const convertValueRef = useRef(convertValue);
@@ -186,7 +194,11 @@ export function GridChart({
       chart.subscribeCrosshairMove((param) => {
         if (!param.point || !param.seriesData) {
           crosshairPriceRef.current = null;
+          crosshairTimeRef.current = null;
           if (tooltipRef.current) tooltipRef.current.style.display = "none";
+          // Leave the measure box/badge frozen at their last position — a
+          // measurement persists until cleared (click / Esc), so moving off
+          // the pane edge doesn't make it vanish.
           return;
         }
         const data = param.seriesData.get(series);
@@ -196,6 +208,63 @@ export function GridChart({
           const price = series.coordinateToPrice(param.point.y);
           if (price !== null) {
             crosshairPriceRef.current = price as number;
+          }
+        }
+        // Exact pointer price (measure tool needs sub-candle precision)
+        const cursorP = param.point.y !== undefined ? series.coordinateToPrice(param.point.y) : null;
+        cursorPriceRef.current = cursorP !== null && cursorP !== undefined ? (cursorP as number) : crosshairPriceRef.current;
+        crosshairTimeRef.current = typeof param.time === "number" ? param.time : null;
+
+        // ── Measure tool: live % of range from the anchor to the cursor ──
+        const anchor = measureAnchorRef.current;
+        const badge = measureBadgeRef.current;
+        const mbox = measureBoxRef.current;
+        if (anchor && badge && mbox && containerRef.current) {
+          const curPrice = cursorPriceRef.current;
+          // The box is drawn purely from pixels, so it works anywhere on the
+          // pane — even past the last candle where param.time is undefined.
+          if (curPrice != null) {
+            const diff = curPrice - anchor.price;
+            const pct = anchor.price !== 0 ? (diff / anchor.price) * 100 : 0;
+            const up = diff >= 0;
+            const clr = up ? getThemeColors().green : getThemeColors().red;
+
+            // Draw the box as a pixel overlay — no chart series, so no relayout/flicker
+            const ax = chart.timeScale().timeToCoordinate(anchor.time as import("lightweight-charts").UTCTimestamp);
+            const ay = series.priceToCoordinate(anchor.price);
+            const cx = param.point.x;
+            const cy = param.point.y;
+            if (ax !== null && ay !== null) {
+              mbox.style.left = `${Math.min(ax, cx)}px`;
+              mbox.style.top = `${Math.min(ay, cy)}px`;
+              mbox.style.width = `${Math.abs(cx - ax)}px`;
+              mbox.style.height = `${Math.abs(cy - ay)}px`;
+              mbox.style.borderColor = clr;
+              mbox.style.background = up ? "rgba(34,197,94,0.10)" : "rgba(239,68,68,0.10)";
+              mbox.style.display = "block";
+            }
+
+            // Duration needs a time; fall back to the time at the cursor pixel,
+            // and omit it if the cursor is beyond the data range.
+            const curTime = crosshairTimeRef.current
+              ?? (chart.timeScale().coordinateToTime(cx) as number | null);
+            const durStr = curTime != null
+              ? (() => {
+                  const d = Math.abs(curTime - anchor.time);
+                  return d >= 86400 ? `${(d / 86400).toFixed(1)}d` : d >= 3600 ? `${(d / 3600).toFixed(1)}h` : d >= 60 ? `${Math.round(d / 60)}m` : `${d}s`;
+                })()
+              : null;
+            const absDiff = Math.abs(diff);
+            const diffStr = absDiff >= 1 ? absDiff.toFixed(2) : absDiff.toPrecision(4);
+            badge.innerHTML = `<div style="font-weight:700;font-size:14px;color:${clr};font-family:monospace">${up ? "+" : "-"}${Math.abs(pct).toFixed(2)}%</div><div style="font-size:10px;color:#6b7994;font-family:monospace">Δ ${up ? "+" : "-"}${diffStr}${durStr ? ` · ${durStr}` : ""}</div>`;
+            badge.style.display = "block";
+            const mRect = containerRef.current.getBoundingClientRect();
+            let bLeft = mRect.left + param.point.x + 16;
+            let bTop = mRect.top + param.point.y - 44;
+            if (bLeft + 150 > window.innerWidth - 4) bLeft = mRect.left + param.point.x - 150 - 16;
+            if (bTop < 4) bTop = mRect.top + param.point.y + 16;
+            badge.style.left = `${bLeft}px`;
+            badge.style.top = `${bTop}px`;
           }
         }
 
@@ -371,6 +440,7 @@ export function GridChart({
         extraLinesRef.current = [];
         overlayPriceLinesRef.current = [];
         positionLinesRef.current = [];
+        measureAnchorRef.current = null;
       }
     };
   }, []);
@@ -787,8 +857,35 @@ export function GridChart({
     }
   }, [positions]);
 
-  // ── Click-to-set price / deselect executor ──
-  const handleClick = () => {
+  // ── Measure tool helpers ──
+  const clearMeasure = () => {
+    measureAnchorRef.current = null;
+    if (measureBoxRef.current) measureBoxRef.current.style.display = "none";
+    if (measureBadgeRef.current) measureBadgeRef.current.style.display = "none";
+  };
+
+  // Esc clears an active measurement
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") clearMeasure(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ── Click-to-set price / deselect executor / measure ──
+  const handleClick = (e: React.MouseEvent) => {
+    // Shift+click drops the measure anchor; move the mouse to see the % of the range
+    if (e.shiftKey) {
+      if (cursorPriceRef.current != null && crosshairTimeRef.current != null) {
+        clearMeasure();
+        measureAnchorRef.current = { price: cursorPriceRef.current, time: crosshairTimeRef.current };
+      }
+      return;
+    }
+    // A plain click clears an active measurement first
+    if (measureAnchorRef.current) {
+      clearMeasure();
+      return;
+    }
     if (activePickField && crosshairPriceRef.current !== null) {
       onPriceSet(activePickField, crosshairPriceRef.current);
       return;
@@ -818,6 +915,16 @@ export function GridChart({
           style={{ cursor: activePickField ? "crosshair" : "default" }}
           onClick={handleClick}
         />
+        {/* Measure box overlay — pure DOM, never touches chart series */}
+        <div
+          ref={measureBoxRef}
+          className="pointer-events-none absolute z-10"
+          style={{ display: "none", border: "1px dashed", borderRadius: 2 }}
+        />
+        {/* Measure-tool discoverability hint */}
+        <div className="pointer-events-none absolute bottom-1 left-2 z-10 text-[9px] text-[var(--color-text-muted)] opacity-60">
+          ⇧+click: measure range
+        </div>
         {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
         {createPortal(
           <div
@@ -839,6 +946,29 @@ export function GridChart({
               lineHeight: 1.4,
               backdropFilter: "blur(12px)",
               boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+            }}
+          />,
+          document.body,
+        )}
+        {/* Measure badge — floats near cursor showing % of range */}
+        {createPortal(
+          <div
+            ref={measureBadgeRef}
+            style={{
+              display: "none",
+              position: "fixed",
+              top: 0,
+              left: 0,
+              zIndex: 9999,
+              pointerEvents: "none",
+              background: "var(--color-surface)",
+              border: "1px solid var(--color-border)",
+              borderRadius: 6,
+              padding: "4px 8px",
+              textAlign: "right",
+              lineHeight: 1.25,
+              backdropFilter: "blur(12px)",
+              boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
             }}
           />,
           document.body,
