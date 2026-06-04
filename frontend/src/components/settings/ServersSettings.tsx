@@ -20,7 +20,7 @@ interface ServerForm {
   password: string;
 }
 
-const EMPTY_FORM: ServerForm = { name: "", host: "", port: 443, username: "", password: "" };
+const EMPTY_FORM: ServerForm = { name: "", host: "", port: 8000, username: "", password: "" };
 
 export function ServersSettings() {
   const qc = useQueryClient();
