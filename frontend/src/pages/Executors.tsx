@@ -1159,17 +1159,19 @@ export function Executors() {
     });
   }, []);
 
-  const currentTableExecutors = useMemo(() => archivedExecutors, [archivedExecutors]);
-
-  const allSelected = currentTableExecutors.length > 0 && currentTableExecutors.every((ex) => selectedIds.has(ex.id));
-
-  const selectAll = useCallback(() => {
-    if (allSelected) {
-      setSelectedIds(new Set());
-    } else {
-      setSelectedIds(new Set(currentTableExecutors.map((ex) => ex.id)));
-    }
-  }, [allSelected, currentTableExecutors]);
+  // Toggle select-all for a specific table's executors, preserving selections in the other table.
+  const toggleSelectAll = useCallback((tableExecutors: ExecutorInfo[]) => {
+    setSelectedIds((prev) => {
+      const allSel = tableExecutors.length > 0 && tableExecutors.every((ex) => prev.has(ex.id));
+      const next = new Set(prev);
+      if (allSel) {
+        tableExecutors.forEach((ex) => next.delete(ex.id));
+      } else {
+        tableExecutors.forEach((ex) => next.add(ex.id));
+      }
+      return next;
+    });
+  }, []);
 
   const handleBulkStop = useCallback(() => {
     const activeIds = Array.from(selectedIds).filter((id) => {
@@ -1359,7 +1361,7 @@ export function Executors() {
                 onSort={handleSort}
                 selectedIds={selectedIds}
                 onToggleSelect={toggleSelect}
-                onSelectAll={selectAll}
+                onSelectAll={() => toggleSelectAll(activeExecutors)}
                 allSelected={activeExecutors.length > 0 && activeExecutors.every((ex) => selectedIds.has(ex.id))}
                 onRowClick={setSelectedExecutor}
                 selectedExecutorId={selectedExecutor?.id ?? null}
@@ -1410,8 +1412,8 @@ export function Executors() {
                   onSort={handleSort}
                   selectedIds={selectedIds}
                   onToggleSelect={toggleSelect}
-                  onSelectAll={selectAll}
-                  allSelected={allSelected}
+                  onSelectAll={() => toggleSelectAll(archivedExecutors)}
+                  allSelected={archivedExecutors.length > 0 && archivedExecutors.every((ex) => selectedIds.has(ex.id))}
                   onRowClick={setSelectedExecutor}
                   selectedExecutorId={selectedExecutor?.id ?? null}
                   onStop={handleStopOne}

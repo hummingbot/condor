@@ -11,6 +11,7 @@ Controller-specific code (defaults, fields, charts) is in handlers/bots/controll
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from condor.cache import DEFAULT_CACHE_TTL
@@ -180,14 +181,46 @@ def set_controller_config(context, config: Dict[str, Any]) -> None:
     context.user_data["controller_config_params"] = config
 
 
+# Matches stringified enum values like "PositionMode.ONEWAY", "OrderType.LIMIT",
+# "TradeType.BUY" or the colon variant "PositionMode:ONEWAY". The class name is
+# PascalCase and the member starts with an uppercase letter, which avoids matching
+# legitimate values such as trading times ("09:30") or token symbols ("USDC.e").
+_ENUM_STR_RE = re.compile(r"^[A-Z][A-Za-z0-9_]*[.:][A-Z][A-Za-z0-9_]*$")
+
+
+def normalize_enum_value(value: Any) -> Any:
+    """Strip the enum-class prefix from stringified enum values.
+
+    Controller config templates expose enum defaults as strings like
+    "PositionMode.ONEWAY". Saving them verbatim breaks downstream controller
+    validation, which expects the plain member name ("ONEWAY"). This recurses
+    into dicts and lists so nested config values are normalized too.
+    """
+    if isinstance(value, str) and _ENUM_STR_RE.match(value):
+        return re.split(r"[.:]", value, maxsplit=1)[1]
+    if isinstance(value, dict):
+        return {k: normalize_enum_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [normalize_enum_value(v) for v in value]
+    return value
+
+
 def clean_config_for_save(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip internal fields (e.g. _config_name) before saving to backend.
+    """Strip internal fields and normalize stringified enum values before saving.
 
     The backend adds _config_name to YAML files, but Pydantic models with
     extra='forbid' reject it on reload. Strip any underscore-prefixed keys
     that aren't part of the controller config schema.
+
+    Enum fields (e.g. position_mode, side, take_profit_order_type) can arrive as
+    prefixed strings like "PositionMode.ONEWAY"; normalize them to the plain
+    member name so deploy/backtest validation accepts them.
     """
-    return {k: v for k, v in config.items() if not k.startswith("_")}
+    return {
+        k: normalize_enum_value(v)
+        for k, v in config.items()
+        if not k.startswith("_")
+    }
 
 
 def init_new_controller_config(
