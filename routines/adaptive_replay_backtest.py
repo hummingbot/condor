@@ -12,7 +12,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
@@ -28,9 +28,29 @@ _REPORTS_INDEX_PATH = _REPORTS_DIR / "reports_index.json"
 
 _TICK_RE = re.compile(r"- tick#(\d+)\s+\|\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+\|")
 _DECISION_RE = re.compile(r"- \*\*#(\d+)\*\*.*")
+_DECISION_TICK_RE = re.compile(r"tick=(\d+)")
 _MACD_PAIRS_RE = re.compile(r"macd_pairs=([A-Z0-9:-]+(?:,[A-Z0-9:-]+)*)")
 _NEUTRAL_STREAK_RE = re.compile(r"neutral_pressure_streak=(\d+)")
 _ENTRY_CLASS_RE = re.compile(r"entry_class=([a-zA-Z0-9_]+)")
+_REVIEWED_MACD_LIST_RE = re.compile(
+    r"reviewed 5 MACD 1h(?: pairs)?:\s*([A-Za-z0-9,\sk]+?)\s*(?:—| - |\.|$)",
+    re.IGNORECASE,
+)
+_PAREN_MACD_REVIEWS_RE = re.compile(
+    r"five 1h reviews?\s*\(([A-Za-z0-9,\sk/]+)\)",
+    re.IGNORECASE,
+)
+_TICK_SUMMARY_ENTRY_RE = re.compile(
+    r"\*\*Tick #\d+ —\s*(HOLD|OPENED LONG(?:\s+[A-Z0-9:-]+)?|OPENED SHORT(?:\s+[A-Z0-9:-]+)?)",
+    re.IGNORECASE,
+)
+_TICK_STREAK_RE = re.compile(
+    r"neutral_pressure_streak(?:`|')?(?:=| reaches | is )[\s*]*(\d+)",
+    re.IGNORECASE,
+)
+_TICK_STREAK_ALT_RE = re.compile(r"Adaptive streak \*\*(\d+)\*\*", re.IGNORECASE)
+_TICK_STREAK_PAREN_RE = re.compile(r"\(streak (\d+)\)", re.IGNORECASE)
+_SYMBOL_USD_RE = re.compile(r"\b([A-Z][A-Z0-9]*-USD)\b")
 
 _PAIR_TITLE_RE = re.compile(r"MACD\+BB:\s+([A-Z0-9:-]+)\s+\((1h|4h)\)")
 _FIRST_TABLE_ROW_RE = re.compile(r"<tbody><tr>(.*?)</tr></tbody>", re.DOTALL)
@@ -39,10 +59,85 @@ _COND_ROW_RE = re.compile(
     r"<tr><td>([^<]+)</td><td>([^<]+)</td><td>(True|False)</td></tr>", re.DOTALL
 )
 
+_PRESET_OVERRIDES: dict[str, dict[str, float | int]] = {
+    "safe": {
+        "activation_ticks": 8,
+        "adaptive_long_bb_pos_max": 46.0,
+        "adaptive_short_bb_pos_min": 74.0,
+        "adaptive_strong_long_bb_pos_max": 33.0,
+        "adaptive_strong_short_bb_pos_min": 87.0,
+        "adaptive_min_macd_gap_ratio": 0.10,
+        "adaptive_min_hist_ratio": 0.16,
+        "adaptive_score_open_min": 2.55,
+        "adaptive_score_open_min_extreme": 2.30,
+        "adaptive_hist_sign_bonus": 0.35,
+        "adaptive_hist_sign_penalty": 0.40,
+        "adaptive_momentum_bonus": 0.15,
+        "adaptive_momentum_penalty": 0.15,
+    },
+    "balanced": {
+        "activation_ticks": 6,
+        "adaptive_long_bb_pos_max": 48.0,
+        "adaptive_short_bb_pos_min": 72.0,
+        "adaptive_strong_long_bb_pos_max": 35.0,
+        "adaptive_strong_short_bb_pos_min": 85.0,
+        "adaptive_min_macd_gap_ratio": 0.08,
+        "adaptive_min_hist_ratio": 0.12,
+        "adaptive_score_open_min": 2.40,
+        "adaptive_score_open_min_extreme": 2.15,
+        "adaptive_hist_sign_bonus": 0.35,
+        "adaptive_hist_sign_penalty": 0.35,
+        "adaptive_momentum_bonus": 0.20,
+        "adaptive_momentum_penalty": 0.10,
+    },
+    "opportunistic": {
+        "activation_ticks": 4,
+        "adaptive_long_bb_pos_max": 55.0,
+        "adaptive_short_bb_pos_min": 65.0,
+        "adaptive_strong_long_bb_pos_max": 30.0,
+        "adaptive_strong_short_bb_pos_min": 90.0,
+        "adaptive_min_macd_gap_ratio": 0.06,
+        "adaptive_min_hist_ratio": 0.09,
+        "adaptive_score_open_min": 2.10,
+        "adaptive_score_open_min_extreme": 1.85,
+        "adaptive_hist_sign_bonus": 0.30,
+        "adaptive_hist_sign_penalty": 0.30,
+        "adaptive_momentum_bonus": 0.25,
+        "adaptive_momentum_penalty": 0.05,
+    },
+    # Looser thresholds for replay sanity checks (HTML report scores run lower than live journal).
+    "replay_probe": {
+        "activation_ticks": 4,
+        "time_window_min": 90,
+        "adaptive_long_bb_pos_max": 90.0,
+        "adaptive_short_bb_pos_min": 55.0,
+        "adaptive_strong_long_bb_pos_max": 30.0,
+        "adaptive_strong_short_bb_pos_min": 90.0,
+        "adaptive_min_macd_gap_ratio": 0.06,
+        "adaptive_min_hist_ratio": 0.09,
+        "adaptive_score_open_min": 1.00,
+        "adaptive_score_open_min_extreme": 0.75,
+        "adaptive_hist_sign_bonus": 0.30,
+        "adaptive_hist_sign_penalty": 0.30,
+        "adaptive_momentum_bonus": 0.25,
+        "adaptive_momentum_penalty": 0.05,
+    },
+}
+
 
 class Config(BaseModel):
     """Replay adaptive strategy outcomes from saved routine reports with configurable thresholds."""
 
+    preset: Literal["custom", "safe", "balanced", "opportunistic", "replay_probe"] = (
+        Field(
+            default="balanced",
+            description=(
+                "Preset profile for adaptive thresholds. "
+                "'custom' uses explicitly provided values. "
+                "'replay_probe' uses looser gates so replay can produce sample trades."
+            ),
+        )
+    )
     strategy_slug: str = Field(
         default="macdbb_scanner_aggressive_hl",
         description="Strategy folder under trading_agents/",
@@ -188,6 +283,18 @@ class SimTrade:
     entry_neutral_streak: int
 
 
+def _resolve_config_with_preset(config: Config) -> Config:
+    if config.preset == "custom":
+        return config
+    overrides = _PRESET_OVERRIDES.get(config.preset)
+    if not overrides:
+        return config
+    # Preset defaults first; explicit caller fields (exclude_unset) win.
+    return Config(
+        **{**overrides, **config.model_dump(exclude_unset=True), "preset": config.preset}
+    )
+
+
 def _parse_dt(value: str) -> dt.datetime:
     if "T" in value:
         return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
@@ -215,18 +322,92 @@ def _parse_session_selector(session_selector: str, sessions_dir: Path) -> list[i
     return sorted(set(parsed_numbers))
 
 
+def _normalize_journal_pair_token(raw: str) -> str:
+    token = raw.strip()
+    if not token or token.lower() in {"all", "none", "hold"}:
+        return ""
+    if token.endswith("-USD"):
+        return token
+    return f"{token}-USD"
+
+
+def _normalize_journal_pair_list(raw: str) -> list[str]:
+    pairs: list[str] = []
+    for part in re.split(r"[,/]", raw):
+        normalized = _normalize_journal_pair_token(part)
+        if normalized and normalized not in pairs:
+            pairs.append(normalized)
+    return pairs
+
+
+def _extract_pairs_from_tick_narrative(line: str) -> list[str]:
+    for pattern in (_REVIEWED_MACD_LIST_RE, _PAREN_MACD_REVIEWS_RE):
+        match = pattern.search(line)
+        if match:
+            pairs = _normalize_journal_pair_list(match.group(1))
+            if len(pairs) >= 2:
+                return pairs
+    pairs: list[str] = []
+    for symbol_match in _SYMBOL_USD_RE.finditer(line):
+        pair = symbol_match.group(1)
+        if pair not in pairs:
+            pairs.append(pair)
+    # Avoid treating a lone near-miss mention as the full reviewed set.
+    if len(pairs) >= 3:
+        return pairs[:8]
+    return []
+
+
+def _extract_streak_from_tick_narrative(line: str) -> int | None:
+    for pattern in (
+        _NEUTRAL_STREAK_RE,
+        _TICK_STREAK_RE,
+        _TICK_STREAK_ALT_RE,
+        _TICK_STREAK_PAREN_RE,
+    ):
+        match = pattern.search(line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _extract_entry_class_from_tick_narrative(line: str) -> str | None:
+    entry_class_match = _ENTRY_CLASS_RE.search(line)
+    if entry_class_match:
+        return entry_class_match.group(1)
+    summary_match = _TICK_SUMMARY_ENTRY_RE.search(line)
+    if not summary_match:
+        return None
+    summary = summary_match.group(1).upper()
+    if summary.startswith("OPENED LONG"):
+        return "opened_long"
+    if summary.startswith("OPENED SHORT"):
+        return "opened_short"
+    return "hold"
+
+
 def _parse_journal_ticks(journal_text: str) -> dict[int, TickMeta]:
     tick_time_map: dict[int, dt.datetime] = {}
-    for match in _TICK_RE.finditer(journal_text):
-        tick_number = int(match.group(1))
-        tick_time_map[tick_number] = _parse_dt(match.group(2))
+    tick_header_lines: dict[int, str] = {}
+    for line in journal_text.splitlines():
+        tick_match = _TICK_RE.match(line)
+        if not tick_match:
+            continue
+        tick_number = int(tick_match.group(1))
+        tick_time_map[tick_number] = _parse_dt(tick_match.group(2))
+        tick_header_lines[tick_number] = line
 
     tick_meta_map: dict[int, TickMeta] = {}
     for line in journal_text.splitlines():
         decision_match = _DECISION_RE.match(line)
         if not decision_match:
             continue
-        tick_number = int(decision_match.group(1))
+        tick_field_match = _DECISION_TICK_RE.search(line)
+        tick_number = (
+            int(tick_field_match.group(1))
+            if tick_field_match
+            else int(decision_match.group(1))
+        )
         if tick_number not in tick_time_map:
             continue
         pairs_match = _MACD_PAIRS_RE.search(line)
@@ -242,6 +423,33 @@ def _parse_journal_ticks(journal_text: str) -> dict[int, TickMeta]:
             else None,
             entry_class=entry_class_match.group(1) if entry_class_match else None,
         )
+
+    # Ticks 1..N are logged under "## Ticks"; structured "## Decisions" rows are newer.
+    for tick_number, line in tick_header_lines.items():
+        if tick_number in tick_meta_map:
+            continue
+        tick_meta_map[tick_number] = TickMeta(
+            tick=tick_number,
+            timestamp=tick_time_map[tick_number],
+            macd_pairs=_extract_pairs_from_tick_narrative(line),
+            neutral_pressure_streak=_extract_streak_from_tick_narrative(line),
+            entry_class=_extract_entry_class_from_tick_narrative(line),
+        )
+
+    last_pairs: list[str] = []
+    for tick_number in sorted(tick_meta_map):
+        meta = tick_meta_map[tick_number]
+        if len(meta.macd_pairs) >= 3:
+            last_pairs = meta.macd_pairs
+            continue
+        if len(last_pairs) >= 3:
+            tick_meta_map[tick_number] = TickMeta(
+                tick=meta.tick,
+                timestamp=meta.timestamp,
+                macd_pairs=list(last_pairs),
+                neutral_pressure_streak=meta.neutral_pressure_streak,
+                entry_class=meta.entry_class,
+            )
     return tick_meta_map
 
 
@@ -752,6 +960,7 @@ def _simulate_session(
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str | RoutineResult:
+    config = _resolve_config_with_preset(config)
     strategy_dir = _TRADING_AGENTS_DIR / config.strategy_slug
     sessions_dir = strategy_dir / "sessions"
     if not sessions_dir.is_dir():
@@ -902,6 +1111,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str | Routi
 
     summary_lines = [
         f"Adaptive replay backtest — {config.strategy_slug}",
+        f"Preset: {config.preset}",
         f"Sessions: {', '.join(str(value) for value in selected_sessions)}",
         f"Ticks replayed: {len(all_tick_rows)} | Pair snapshots: {sum(1 for row in all_pair_rows if row.get('match_ok') == 1)}",
         f"Sim trades: {total_trades} | Win rate: {total_win_rate:.1%} | Sim PnL: ${total_pnl:+.2f}",
