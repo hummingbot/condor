@@ -1,4 +1,4 @@
-import { AlertCircle, ArrowLeft, Check, Info, Loader2, Wallet } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, Loader2, Wallet } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
@@ -15,12 +15,14 @@ import {
 type Phase =
   | "select-wallet"
   | "connecting"
+  | "switch-chain"
   | "approve-agent"
   | "approve-builder"
   | "saving"
   | "done";
 
 const STEP_LABEL: Record<ConnectStep, string> = {
+  "switch-chain": "Approve the switch to Arbitrum One in your wallet…",
   "approve-agent": "Sign in your wallet to authorize the Condor agent wallet…",
   "approve-builder": `Sign in your wallet to approve the Condor builder code (${BUILDER_FEE_BPS} bps)…`,
 };
@@ -39,6 +41,7 @@ export function ConnectHyperliquid({
   const [accountName, setAccountName] = useState("");
   const [phase, setPhase] = useState<Phase>("select-wallet");
   const [error, setError] = useState<string | null>(null);
+  const [partial, setPartial] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -54,12 +57,14 @@ export function ConnectHyperliquid({
 
   const busy =
     phase === "connecting" ||
+    phase === "switch-chain" ||
     phase === "approve-agent" ||
     phase === "approve-builder" ||
     phase === "saving";
 
   async function handleConnect(wallet: DiscoveredWallet) {
     setError(null);
+    setPartial(null);
     setPhase("connecting");
     try {
       const mainAddress = await connectWallet(wallet.provider);
@@ -71,14 +76,34 @@ export function ConnectHyperliquid({
         onStep: (step: ConnectStep) => setPhase(step),
       });
 
+      // One agent + one set of approvals authorizes both connectors. Register them in parallel
+      // and tolerate a partial failure — hummingbot-api validates each connector by spinning up a
+      // full trading connector, which can take up to a minute and occasionally fails for one side.
       setPhase("saving");
-      const creds = buildHyperliquidCredentials(conn);
-      for (const [connectorName, credentials] of Object.entries(creds)) {
-        await api.addCredential(server, { connector_name: connectorName, credentials });
+      const entries = Object.entries(buildHyperliquidCredentials(conn));
+      const results = await Promise.allSettled(
+        entries.map(([connectorName, credentials]) =>
+          api.addCredential(server, { connector_name: connectorName, credentials }),
+        ),
+      );
+      const failed = entries
+        .map(([name], i) => ({ name, result: results[i] }))
+        .filter((x) => x.result.status === "rejected");
+
+      if (failed.length === entries.length) {
+        const reason = (failed[0].result as PromiseRejectedResult).reason as { message?: string };
+        throw new Error(reason?.message || "Failed to save Hyperliquid credentials.");
+      }
+      if (failed.length > 0) {
+        const reason = (failed[0].result as PromiseRejectedResult).reason as { message?: string };
+        setPartial(
+          `Connected, but ${failed.map((f) => f.name).join(", ")} could not be saved ` +
+            `(${reason?.message || "validation failed"}). Retry it from the API Keys list — no re-signing needed.`,
+        );
       }
 
       setPhase("done");
-      window.setTimeout(onDone, 900);
+      window.setTimeout(onDone, failed.length > 0 ? 3500 : 900);
     } catch (e) {
       const err = e as { code?: number; message?: string };
       setError(
@@ -109,18 +134,10 @@ export function ConnectHyperliquid({
         </p>
       </div>
 
-      <div className="flex items-start gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs text-[var(--color-text-muted)]">
-        <Info className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
-        <span>
-          Ensure your Hyperliquid account has funds before connecting. You'll sign two messages:
-          one to authorize the agent wallet, one to approve Condor's builder code ({BUILDER_FEE_BPS} bps).
-        </span>
-      </div>
-
       {/* Account name (used as the on-chain agent wallet name) */}
       <div>
         <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-          Agent name <span className="text-[var(--color-text-muted)]/60">(optional)</span>
+          Agent name <span className="text-[var(--color-text-muted)]/60">(optional — the date is appended, e.g. condor-20260604)</span>
         </label>
         <input
           value={accountName}
@@ -133,13 +150,21 @@ export function ConnectHyperliquid({
 
       {/* Done state */}
       {phase === "done" ? (
-        <div className="flex items-center gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">
-          <Check className="h-4 w-4 text-[var(--color-primary)]" /> Hyperliquid connected.
+        <div
+          className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
+            partial
+              ? "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
+              : "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 text-[var(--color-text)]"
+          }`}
+        >
+          <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+          <span>{partial ?? "Hyperliquid connected."}</span>
         </div>
       ) : busy ? (
         <div className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-sm text-[var(--color-text)]">
           <Loader2 className="h-4 w-4 animate-spin text-[var(--color-primary)]" />
           {phase === "connecting" && "Connecting to your wallet…"}
+          {phase === "switch-chain" && STEP_LABEL["switch-chain"]}
           {phase === "approve-agent" && STEP_LABEL["approve-agent"]}
           {phase === "approve-builder" && STEP_LABEL["approve-builder"]}
           {phase === "saving" && "Saving credentials…"}
@@ -181,7 +206,22 @@ export function ConnectHyperliquid({
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-[var(--color-red)]/30 bg-red-500/5 p-2.5 text-xs text-[var(--color-red)]">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{error}</span>
+          <span>
+            {error}
+            {/funded on Hyperliquid/i.test(error) && (
+              <>
+                {" "}
+                <a
+                  href="https://app.hyperliquid.xyz/trade"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-[var(--color-primary)] underline"
+                >
+                  Deposit on Hyperliquid →
+                </a>
+              </>
+            )}
+          </span>
         </div>
       )}
 

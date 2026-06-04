@@ -94,12 +94,56 @@ export async function connectWallet(provider: Eip1193Provider): Promise<string> 
   return accounts[0].toLowerCase();
 }
 
+const ARBITRUM_PARAMS = {
+  chainId: HL_SIGNATURE_CHAIN_ID, // 0xa4b1
+  chainName: "Arbitrum One",
+  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+  rpcUrls: ["https://arb1.arbitrum.io/rpc"],
+  blockExplorerUrls: ["https://arbiscan.io"],
+};
+
+/**
+ * Hyperliquid mainnet actions are signed against the Arbitrum One domain (chainId 42161).
+ * Wallets like Rabby reject EIP-712 typed data whose domain chainId differs from the wallet's
+ * current chain ("chainId should be same as current chainId"), so switch to Arbitrum (adding it
+ * if unknown) before signing.
+ */
+export async function ensureArbitrum(provider: Eip1193Provider): Promise<void> {
+  const current = (await provider.request({ method: "eth_chainId" })) as string;
+  if (current?.toLowerCase() === HL_SIGNATURE_CHAIN_ID) return;
+  try {
+    await provider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: HL_SIGNATURE_CHAIN_ID }],
+    });
+  } catch (e) {
+    // 4902 = chain not added to the wallet yet; add it (most wallets switch on add).
+    if ((e as { code?: number }).code === 4902) {
+      await provider.request({ method: "wallet_addEthereumChain", params: [ARBITRUM_PARAMS] });
+    } else {
+      throw e;
+    }
+  }
+}
+
 // Strictly increasing epoch-ms nonces (mirrors the connector's _NonceManager).
 let lastNonce = 0;
 function nextNonce(): number {
   const now = Date.now();
   lastNonce = now > lastNonce ? now : lastNonce + 1;
   return lastNonce;
+}
+
+// Hyperliquid caps agent ("API wallet") names at 16 chars, so append the creation date (YYYYMMDD)
+// to a recognizable base, e.g. "condor-20260604" (15 chars). Same-day reconnects reuse the name and
+// replace the prior agent, which is fine — the latest agent key is the one stored as the credential.
+const MAX_AGENT_NAME = 16;
+
+/** Local creation date YYYYMMDD (8 chars). */
+function creationStamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
 }
 
 function buildApproveAgentTypedData(agentAddress: string, agentName: string, nonce: number) {
@@ -136,6 +180,21 @@ function buildApproveBuilderFeeTypedData(nonce: number) {
   };
 }
 
+/** Turn a raw Hyperliquid error string into actionable guidance for known cases. */
+export function friendlyHyperliquidError(detail: string): string {
+  const d = (detail || "").trim();
+  if (/must deposit before performing actions/i.test(d)) {
+    return (
+      "This wallet isn't funded on Hyperliquid yet. Deposit USDC to Hyperliquid from this wallet, " +
+      "then reconnect — Hyperliquid requires a deposit before it will authorize an agent wallet or builder code."
+    );
+  }
+  if (/extra agents? are not allowed|too many agents/i.test(d)) {
+    return "This wallet has reached Hyperliquid's API/agent-wallet limit. Remove an unused API wallet in the Hyperliquid app, then reconnect.";
+  }
+  return `Hyperliquid rejected the request: ${d}`;
+}
+
 async function signAndSubmit(
   provider: Eip1193Provider,
   userAddress: string,
@@ -159,11 +218,11 @@ async function signAndSubmit(
   if (!res.ok || data.status !== "ok") {
     const detail =
       typeof data.response === "string" ? data.response : data.status || `HTTP ${res.status}`;
-    throw new Error(`Hyperliquid rejected the request: ${detail}`);
+    throw new Error(friendlyHyperliquidError(detail));
   }
 }
 
-export type ConnectStep = "approve-agent" | "approve-builder";
+export type ConnectStep = "switch-chain" | "approve-agent" | "approve-builder";
 
 export interface HyperliquidConnection {
   mainAddress: string;
@@ -183,7 +242,16 @@ export async function connectHyperliquid(opts: {
   onStep?: (step: ConnectStep) => void;
 }): Promise<HyperliquidConnection> {
   const { provider, mainAddress, onStep } = opts;
-  const agentName = (opts.agentName?.trim() || DEFAULT_AGENT_NAME).slice(0, 64);
+  // Append the creation date (e.g. "condor-20260604") to differentiate agents and match the
+  // "Valid Until" entry on Hyperliquid, staying within the venue's 16-char agent-name limit.
+  const stamp = creationStamp(); // YYYYMMDD, 8 chars
+  const rawBase = (opts.agentName?.trim() || DEFAULT_AGENT_NAME).replace(/[^a-zA-Z0-9]/g, "");
+  const base = (rawBase || DEFAULT_AGENT_NAME).slice(0, MAX_AGENT_NAME - stamp.length - 1);
+  const agentName = `${base}-${stamp}`.slice(0, MAX_AGENT_NAME);
+
+  // Hyperliquid mainnet signing uses the Arbitrum One domain; make sure the wallet is on it.
+  onStep?.("switch-chain");
+  await ensureArbitrum(provider);
 
   const agentPrivateKey = generatePrivateKey();
   const agentAddress = privateKeyToAccount(agentPrivateKey).address;
