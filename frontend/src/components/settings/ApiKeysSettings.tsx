@@ -12,8 +12,11 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { type ConnectorInfo, type CredentialInfo, api } from "@/lib/api";
+import { ConnectHyperliquid } from "./ConnectHyperliquid";
 
-type Step = "list" | "select-type" | "select-exchange" | "fill-fields";
+type Step = "list" | "select-type" | "select-exchange" | "fill-fields" | "connect-hyperliquid";
+
+const isHyperliquid = (name: string) => name.startsWith("hyperliquid");
 
 interface AddFlowState {
   step: Step;
@@ -158,7 +161,35 @@ export function ApiKeysSettings() {
             </button>
           ))}
         </div>
+
+        <button
+          onClick={() =>
+            setFlow({ ...INITIAL_FLOW, step: "connect-hyperliquid", connectorName: "hyperliquid_perpetual" })
+          }
+          className="flex w-full items-center justify-between rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-4 text-left transition-colors hover:border-[var(--color-primary)]/60"
+        >
+          <span>
+            <span className="text-sm font-medium text-[var(--color-text)]">Connect Hyperliquid</span>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+              Wallet connect — authorize a trade-only agent (perp + spot). No private key needed.
+            </p>
+          </span>
+          <Key className="h-4 w-4 text-[var(--color-primary)]" />
+        </button>
       </div>
+    );
+  }
+
+  if (flow.step === "connect-hyperliquid") {
+    return (
+      <ConnectHyperliquid
+        server={server}
+        onBack={() => setFlow({ ...INITIAL_FLOW, step: "select-type" })}
+        onDone={() => {
+          invalidate();
+          setFlow(INITIAL_FLOW);
+        }}
+      />
     );
   }
 
@@ -189,7 +220,12 @@ export function ApiKeysSettings() {
                   key={c.name}
                   disabled={alreadyConnected}
                   onClick={() =>
-                    setFlow({ ...flow, step: "fill-fields", connectorName: c.name, values: {} })
+                    setFlow({
+                      ...flow,
+                      step: isHyperliquid(c.name) ? "connect-hyperliquid" : "fill-fields",
+                      connectorName: c.name,
+                      values: {},
+                    })
                   }
                   className={`rounded-md border px-3 py-2 text-left text-sm transition-colors ${
                     alreadyConnected
