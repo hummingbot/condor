@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from config_manager import get_config_manager
 from condor.web.auth import get_current_user
+from handlers.bots._shared import clean_config_for_save
 import yaml
 
 from condor.web.models import (
@@ -735,8 +736,9 @@ async def create_controller_config(
 
     client = await cm.get_client(name)
     try:
-        # Strip internal fields like _config_name that cause Pydantic validation errors
-        clean_body = {k: v for k, v in body.items() if not k.startswith("_")}
+        # Strip internal fields like _config_name and normalize stringified enum
+        # values (e.g. "PositionMode.ONEWAY" -> "ONEWAY") before saving.
+        clean_body = clean_config_for_save(body)
         result = await client.controllers.create_or_update_controller_config(
             config_id, clean_body
         )

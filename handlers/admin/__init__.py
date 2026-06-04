@@ -10,6 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from config_manager import (
+    ServerPermission,
     UserRole,
     get_config_manager,
 )
@@ -113,6 +114,13 @@ async def admin_callback_handler(
     elif action.startswith("approve_"):
         user_id = int(action.replace("approve_", ""))
         await _approve_user(query, context, user_id)
+    elif action.startswith("grantdone_"):
+        user_id = int(action.replace("grantdone_", ""))
+        await _show_grant_servers_done(query, context, user_id)
+    elif action.startswith("grant_"):
+        rest = action.replace("grant_", "")
+        uid_str, idx_str = rest.rsplit("_", 1)
+        await _toggle_grant_server(query, context, int(uid_str), int(idx_str))
     elif action.startswith("reject_"):
         user_id = int(action.replace("reject_", ""))
         await _reject_user(query, context, user_id)
@@ -374,10 +382,110 @@ async def _approve_user(
             logger.warning(f"Failed to notify user {user_id} of approval: {e}")
 
         await query.answer("User approved!", show_alert=True)
+        # Let the admin grant server access right away
+        await _show_grant_servers(query, context, user_id)
     else:
         await query.answer("Failed to approve user", show_alert=True)
+        # Refresh pending list
+        await _show_pending_users(query, context)
 
-    # Refresh pending list
+
+async def _show_grant_servers(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> None:
+    """Show server access toggles for a freshly-approved user."""
+    cm = get_config_manager()
+    user = cm.get_user(user_id)
+    username = (user.get("username") if user else None) or "N/A"
+    servers = list(cm.list_servers().keys())
+
+    message = (
+        "🖥️ *Grant Server Access*\n\n"
+        f"`{user_id}` \\(@{escape_markdown_v2(username)}\\) is now approved\\.\n\n"
+    )
+
+    keyboard = []
+    if not servers:
+        message += (
+            "No servers are configured yet\\.\n"
+            "You can share servers with this user later via /servers\\."
+        )
+    else:
+        message += "Tap a server to toggle this user's access:"
+        for idx, name in enumerate(servers):
+            granted = cm.get_server_permission(user_id, name) is not None
+            mark = "✅" if granted else "⬜"
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"{mark} {name}",
+                        callback_data=f"admin:grant_{user_id}_{idx}",
+                    )
+                ]
+            )
+
+    keyboard.append(
+        [InlineKeyboardButton("✅ Done", callback_data=f"admin:grantdone_{user_id}")]
+    )
+
+    await query.edit_message_text(
+        message, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def _toggle_grant_server(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int, index: int
+) -> None:
+    """Toggle a single server's access for a user, then re-render."""
+    cm = get_config_manager()
+    admin_id = query.from_user.id
+    servers = list(cm.list_servers().keys())
+
+    if index < 0 or index >= len(servers):
+        await query.answer("Server not found", show_alert=True)
+        await _show_grant_servers(query, context, user_id)
+        return
+
+    server_name = servers[index]
+    granted = cm.get_server_permission(user_id, server_name) is not None
+
+    if granted:
+        if cm.revoke_server_access(server_name, admin_id, user_id):
+            await query.answer(f"Revoked access to {server_name}")
+        else:
+            await query.answer("Failed to revoke access", show_alert=True)
+    else:
+        cm.ensure_server_registered(server_name, admin_id)
+        if cm.share_server(server_name, admin_id, user_id, ServerPermission.TRADER):
+            await query.answer(f"Granted access to {server_name}")
+        else:
+            await query.answer("Failed to grant access", show_alert=True)
+
+    await _show_grant_servers(query, context, user_id)
+
+
+async def _show_grant_servers_done(
+    query, context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> None:
+    """Finish the grant flow: notify the user of their server access and return."""
+    cm = get_config_manager()
+    accessible = cm.get_shared_servers(user_id)
+
+    if accessible:
+        names = ", ".join(escape_markdown_v2(name) for name, _ in accessible)
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🖥️ *Server Access Granted*\n\n"
+                    f"You now have access to: {names}\n"
+                    "Use /servers to select your default server\\."
+                ),
+                parse_mode="MarkdownV2",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to notify user {user_id} of server access: {e}")
+
     await _show_pending_users(query, context)
 
 
