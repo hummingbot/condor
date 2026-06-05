@@ -20,7 +20,7 @@ import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
-import { GridChart } from "@/components/grid/GridChart";
+import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
 import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
@@ -551,7 +551,7 @@ export function CreateExecutor() {
         {/* Chart + Bottom Pane */}
         <div className="min-w-0 flex-1 flex flex-col">
           <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
-            <GridChart
+            <TradeChart
               key={`${connector}:${pair}:${gridState.interval}`}
               server={server}
               connector={connector}
