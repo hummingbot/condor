@@ -13,6 +13,25 @@ interface PairSelectorProps {
 
 const MAX_VISIBLE = 50;
 
+// Quote-asset display priority. Ranking by raw 24h volume alone mixes currencies (a fiat-quoted
+// pair like USDT-IDR has a huge numeric quote volume), so we group by quote first, then sort by
+// volume within each group. Single-quote exchanges (e.g. Hyperliquid, all USDC) become pure
+// volume ranking.
+const QUOTE_PRIORITY = ["USDT", "USDC", "USD", "BTC", "ETH"];
+
+function quoteRank(pair: string): number {
+  const q = pair.split("-").pop() ?? "";
+  const i = QUOTE_PRIORITY.indexOf(q);
+  return i === -1 ? QUOTE_PRIORITY.length : i;
+}
+
+function formatVolume(v: number): string {
+  if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(0)}K`;
+  return `${Math.round(v)}`;
+}
+
 export function PairSelector({
   server,
   connector,
@@ -33,10 +52,37 @@ export function PairSelector({
     staleTime: 5 * 60 * 1000,
   });
 
-  const pairs = useMemo(
-    () => rulesData?.rules?.map((r) => r.trading_pair).sort() ?? [],
-    [rulesData],
-  );
+  // 24h quote volume per pair, for ranking + hiding untraded markets. Empty/unsupported → falls
+  // back to an alphabetical list.
+  const { data: volData } = useQuery({
+    queryKey: ["pair-volumes", server, connector],
+    queryFn: () => api.getPairVolumes(server, connector),
+    enabled: !!server && !!connector,
+    staleTime: 60 * 1000,
+  });
+
+  const pairs = useMemo(() => {
+    const all = rulesData?.rules?.map((r) => r.trading_pair) ?? [];
+    const volumes = volData?.volumes ?? {};
+    const hasVolume = Object.keys(volumes).length > 0;
+    if (!hasVolume) return [...all].sort();
+
+    return all
+      // Hide listed-but-untraded markets (24h volume exactly 0, e.g. Hyperliquid's tokenized
+      // equities like AAPL-USDC). Keep the active pair and any pair with unknown volume.
+      .filter((p) => volumes[p] !== 0 || p === value)
+      .sort((a, b) => {
+        const qr = quoteRank(a) - quoteRank(b);
+        if (qr !== 0) return qr;
+        // Unknown volume (not in the map, e.g. HIP-3 perps) sorts after known volume.
+        const va = volumes[a] ?? -1;
+        const vb = volumes[b] ?? -1;
+        if (vb !== va) return vb - va;
+        return a.localeCompare(b);
+      });
+  }, [rulesData, volData, value]);
+
+  const volumes = volData?.volumes ?? {};
 
   // Group pairs by quote asset
   const quoteGroups = useMemo(() => {
@@ -203,6 +249,11 @@ export function PairSelector({
                     }`}
                   >
                     <span><span className="font-medium">{base}</span><span className="text-[var(--color-text-muted)]">-{quote}</span></span>
+                    {volumes[p] > 0 && (
+                      <span className="ml-auto text-xs tabular-nums text-[var(--color-text-muted)]">
+                        {formatVolume(volumes[p])}
+                      </span>
+                    )}
                   </button>
                 );
               })

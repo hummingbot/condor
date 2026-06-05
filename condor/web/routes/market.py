@@ -153,6 +153,35 @@ async def get_trading_rules(
     return TradingRulesResponse(connector=connector, rules=rules)
 
 
+@router.get("/servers/{name}/market/pair-volumes")
+async def get_pair_volumes(
+    name: str,
+    connector: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    """24h quote volume per trading pair, used to rank/curate the pair selector.
+
+    Returns {"connector": str, "volumes": {trading_pair: quote_volume_24h}}. A value of 0.0
+    marks a listed-but-untraded market. Only supported on some exchanges (hyperliquid, binance,
+    okx and their perp variants); returns an empty map for the rest so the caller falls back to
+    an alphabetical list.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    client = await cm.get_client(name)
+    try:
+        result = await client.market_data.get_24h_volumes(connector)
+    except Exception as e:
+        # Unsupported connector (400) or upstream error — degrade to alphabetical ordering.
+        logger.info(f"pair-volumes unavailable for {connector}: {e}")
+        return {"connector": connector, "volumes": {}}
+
+    volumes = result.get("volumes", {}) if isinstance(result, dict) else {}
+    return {"connector": connector, "volumes": volumes}
+
+
 @router.get("/servers/{name}/market/order-book", response_model=OrderBookResponse)
 async def get_order_book(
     name: str,
