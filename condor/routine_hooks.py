@@ -165,9 +165,20 @@ async def dispatch(
     # Send the raw interactive report HTML (live Plotly charts), or a minimal
     # fallback when the routine produced no report.
     html, filename = _resolve_report_html(report_id, result)
-    summary = (getattr(result, "text", "") or "Completed")[:300]
+
+    # Caption = the report's title (falls back to the routine name).
+    report_title = None
+    if report_id:
+        try:
+            from condor.reports import get_report
+
+            entry = get_report(report_id)
+            if entry:
+                report_title = entry.get("title")
+        except Exception:  # noqa: BLE001
+            pass
     status = "❌ Failed" if failed else "✅ Completed"
-    caption = f"{status} — {routine_name}\n\n{summary}"
+    caption = f"{status} — {report_title or routine_name}"
 
     doc_bytes = html.encode("utf-8")
     for chat_id in tg_cfg["chat_ids"]:
