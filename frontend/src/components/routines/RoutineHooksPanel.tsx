@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Check, ChevronDown, Loader2, Mail, Plus, Send, X } from "lucide-react";
+import { Bell, Check, ChevronDown, Loader2, Plus, Send, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { type RoutineHooks, api } from "@/lib/api";
@@ -11,7 +11,6 @@ interface Props {
 }
 
 const EMPTY: RoutineHooks = {
-  email: { enabled: false, recipients: [] },
   telegram: { enabled: false, chat_ids: [] },
   trigger: "success",
 };
@@ -123,12 +122,6 @@ function HooksForm({ routineName }: { routineName: string }) {
   const qc = useQueryClient();
   const [hooks, setHooks] = useState<RoutineHooks>(EMPTY);
 
-  const { data: status } = useQuery({
-    queryKey: ["hooks-status"],
-    queryFn: () => api.getHooksStatus(),
-    staleTime: 60_000,
-  });
-
   const { data: saved } = useQuery({
     queryKey: ["routine-hooks", routineName],
     queryFn: () => api.getRoutineHooks(routineName),
@@ -146,43 +139,11 @@ function HooksForm({ routineName }: { routineName: string }) {
     },
   });
 
-  const smtpOff = status?.smtp_configured === false;
-
   return (
     <div className="space-y-4">
       <p className="text-[11px] text-[var(--color-text-muted)]">
-        Send the report to these destinations after the routine runs.
+        Send the report to these Telegram chats after the routine runs.
       </p>
-
-      {/* Email */}
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-2">
-          <Mail className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-          <span className="text-xs font-medium text-[var(--color-text)]">Email</span>
-          <div className="ml-auto">
-            <Toggle
-              on={hooks.email.enabled}
-              onClick={() =>
-                !smtpOff &&
-                setHooks((h) => ({ ...h, email: { ...h.email, enabled: !h.email.enabled } }))
-              }
-            />
-          </div>
-        </div>
-        {smtpOff ? (
-          <p className="text-[11px] text-[var(--color-text-muted)]">
-            SMTP not configured. Set SMTP_HOST / SMTP_USER in the server .env to enable email.
-          </p>
-        ) : (
-          <TagsInput
-            values={hooks.email.recipients}
-            onChange={(v) => setHooks((h) => ({ ...h, email: { ...h.email, recipients: v } }))}
-            placeholder="alice@example.com"
-            hint="Add multiple recipients — press Enter, comma, or Add after each one."
-            validate={(v) => v.includes("@") && (v.split("@")[1]?.includes(".") ?? false)}
-          />
-        )}
-      </div>
 
       {/* Telegram */}
       <div className="space-y-1.5">
@@ -210,40 +171,38 @@ function HooksForm({ routineName }: { routineName: string }) {
         />
       </div>
 
-      {/* Trigger */}
+      {/* Trigger + Save (compact row) */}
       <div className="space-y-1.5">
         <span className="text-xs font-medium text-[var(--color-text)]">Send when</span>
-        <div className="relative">
-          <select
-            value={hooks.trigger}
-            onChange={(e) =>
-              setHooks((h) => ({ ...h, trigger: e.target.value as RoutineHooks["trigger"] }))
-            }
-            className="w-full appearance-none rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 pr-8 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <select
+              value={hooks.trigger}
+              onChange={(e) =>
+                setHooks((h) => ({ ...h, trigger: e.target.value as RoutineHooks["trigger"] }))
+              }
+              className="w-full appearance-none rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 pr-8 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
+            >
+              <option value="success">On success only</option>
+              <option value="always">Always (success or error)</option>
+              <option value="failure">On error only</option>
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--color-text-muted)]" />
+          </div>
+          <button
+            type="button"
+            disabled={saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+            className="flex shrink-0 items-center gap-1.5 rounded bg-[var(--color-primary)] px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
           >
-            <option value="success">On success only</option>
-            <option value="always">Always (success or error)</option>
-            <option value="failure">On error only</option>
-          </select>
-          <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--color-text-muted)]" />
+            {saveMutation.isPending ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : saveMutation.isSuccess ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : null}
+            Save
+          </button>
         </div>
-      </div>
-
-      {/* Save */}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          disabled={saveMutation.isPending}
-          onClick={() => saveMutation.mutate()}
-          className="flex items-center gap-1.5 rounded bg-[var(--color-primary)] px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
-        >
-          {saveMutation.isPending ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : saveMutation.isSuccess ? (
-            <Check className="h-3.5 w-3.5" />
-          ) : null}
-          Save
-        </button>
         {saveMutation.isError && (
           <span className="text-xs text-[var(--color-red)]">
             {(saveMutation.error as Error).message}

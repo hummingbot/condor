@@ -45,18 +45,12 @@ class ScheduleRequestV2(BaseModel):
     interval_sec: int = 300
 
 
-class HookEmail(BaseModel):
-    enabled: bool = False
-    recipients: list[str] = []
-
-
 class HookTelegram(BaseModel):
     enabled: bool = False
     chat_ids: list[str] = []
 
 
 class HooksRequest(BaseModel):
-    email: HookEmail = HookEmail()
     telegram: HookTelegram = HookTelegram()
     trigger: str = "success"
 
@@ -189,12 +183,6 @@ async def stop_instance(instance_id: str, user: WebUser = Depends(get_current_us
     if not store.stop(instance_id):
         raise HTTPException(404, "Instance not found")
     return {"stopped": True}
-
-
-@router.get("/hooks/status")
-async def hooks_status(user: WebUser = Depends(get_current_user)):
-    """Report whether SMTP (email channel) is configured via env vars."""
-    return {"smtp_configured": routine_hooks.smtp_configured()}
 
 
 @router.get("/{routine_name:path}/hooks")

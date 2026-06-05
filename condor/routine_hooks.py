@@ -1,8 +1,8 @@
 """Persistent per-routine post-execution hooks.
 
-After a routine finishes, its report can be distributed to extra destinations:
-    - Email (SMTP) — the full HTML report inline + attached.
-    - Telegram — the .html report as a document to arbitrary chat ids / groups.
+After a routine finishes, its report can be delivered to extra destinations:
+    - Telegram — the raw interactive .html report as a document to arbitrary
+      chat ids / groups.
 
 Config is a persistent preset per routine name, stored in
 ``data/routine_hooks.json``, keyed by the routine name as known to each engine
@@ -63,7 +63,6 @@ def _write_all(data: dict[str, dict]) -> None:
 
 def _default_config() -> dict:
     return {
-        "email": {"enabled": False, "recipients": []},
         "telegram": {"enabled": False, "chat_ids": []},
         "trigger": "success",
     }
@@ -78,14 +77,6 @@ def save_hooks(routine_name: str, cfg: dict) -> dict:
     """Validate and persist the hook config for a routine. Returns the stored config."""
     clean = _default_config()
 
-    email = cfg.get("email") or {}
-    recipients = [
-        str(e).strip() for e in (email.get("recipients") or []) if str(e).strip()
-    ]
-    # Light validation: keep entries that look like an email address.
-    recipients = [e for e in recipients if "@" in e and "." in e.split("@")[-1]]
-    clean["email"] = {"enabled": bool(email.get("enabled")), "recipients": recipients}
-
     tg = cfg.get("telegram") or {}
     chat_ids = [str(c).strip() for c in (tg.get("chat_ids") or []) if str(c).strip()]
     # Light validation: chat ids are integers (may be negative for groups).
@@ -96,24 +87,13 @@ def save_hooks(routine_name: str, cfg: dict) -> dict:
     clean["trigger"] = trigger if trigger in _TRIGGERS else "success"
 
     data = _read_all()
-    # If everything is empty/disabled, drop the entry to keep the file tidy.
-    if (
-        not clean["email"]["enabled"]
-        and not clean["telegram"]["enabled"]
-        and not recipients
-        and not chat_ids
-    ):
+    # If nothing is enabled/configured, drop the entry to keep the file tidy.
+    if not clean["telegram"]["enabled"] and not chat_ids:
         data.pop(routine_name, None)
     else:
         data[routine_name] = clean
     _write_all(data)
     return clean
-
-
-def smtp_configured() -> bool:
-    from utils.email_sender import smtp_configured as _sc
-
-    return _sc()
 
 
 # ── Dispatch ──
@@ -131,14 +111,14 @@ def _should_fire(trigger: str, failed: bool) -> bool:
 def _resolve_report_html(report_id: str | None, result) -> tuple[str, str]:
     """Return (html_content, filename) for the report.
 
-    Falls back to a minimal HTML document built from the result text when the
-    routine produced no report.
+    Uses the raw interactive report HTML, falling back to a minimal HTML
+    document built from the result text when the routine produced no report.
     """
     if report_id:
         try:
-            from condor.reports import get_report_html_for_email
+            from condor.reports import get_report_raw_html
 
-            found = get_report_html_for_email(report_id)
+            found = get_report_raw_html(report_id)
             if found:
                 return found
         except Exception as e:  # noqa: BLE001
@@ -165,10 +145,10 @@ async def dispatch(
     failed: bool,
     bot: Any | None,
 ) -> None:
-    """Fire the configured post-execution hooks for a routine.
+    """Send the configured Telegram notification for a routine.
 
-    Never raises — each channel is isolated so one failure can't break the
-    other channel or the routine run itself.
+    Never raises — failures are logged so a broken notification can't break the
+    routine run itself.
     """
     cfg = load_hooks(routine_name)
     if not cfg:
@@ -178,49 +158,30 @@ async def dispatch(
     if not _should_fire(trigger, failed):
         return
 
-    html_content, filename = _resolve_report_html(report_id, result)
+    tg_cfg = cfg.get("telegram") or {}
+    if not (tg_cfg.get("enabled") and tg_cfg.get("chat_ids") and bot is not None):
+        return
+
+    # Send the raw interactive report HTML (live Plotly charts), or a minimal
+    # fallback when the routine produced no report.
+    html, filename = _resolve_report_html(report_id, result)
     summary = (getattr(result, "text", "") or "Completed")[:300]
     status = "❌ Failed" if failed else "✅ Completed"
     caption = f"{status} — {routine_name}\n\n{summary}"
 
-    # ── Email ──
-    # The full report is sent inline in the body; charts travel as inline PNG
-    # images (CID), so they render directly in the email client.
-    email_cfg = cfg.get("email") or {}
-    if email_cfg.get("enabled") and email_cfg.get("recipients"):
+    doc_bytes = html.encode("utf-8")
+    for chat_id in tg_cfg["chat_ids"]:
         try:
-            from utils.email_sender import send_report
+            import io
 
-            subject = f"[Condor] {routine_name} — {'failed' if failed else 'report'}"
-            # Body renders inline (charts as CID images); the same report is also
-            # attached as a self-contained .html (charts as data: URIs) so it can
-            # be saved/opened standalone in a browser.
-            await send_report(
-                recipients=list(email_cfg["recipients"]),
-                subject=subject,
-                html_body=html_content,
-                attachment_name=filename,
-                attachment_bytes=html_content.encode("utf-8"),
+            buf = io.BytesIO(doc_bytes)
+            buf.name = filename
+            await bot.send_document(
+                chat_id=int(chat_id),
+                document=buf,
+                caption=caption[:1024],
             )
         except Exception as e:  # noqa: BLE001
-            logger.error("Email hook failed for %s: %s", routine_name, e)
-
-    # ── Telegram ──
-    tg_cfg = cfg.get("telegram") or {}
-    if tg_cfg.get("enabled") and tg_cfg.get("chat_ids") and bot is not None:
-        doc_bytes = html_content.encode("utf-8")
-        for chat_id in tg_cfg["chat_ids"]:
-            try:
-                import io
-
-                buf = io.BytesIO(doc_bytes)
-                buf.name = filename
-                await bot.send_document(
-                    chat_id=int(chat_id),
-                    document=buf,
-                    caption=caption[:1024],
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.error(
-                    "Telegram hook failed for %s -> %s: %s", routine_name, chat_id, e
-                )
+            logger.error(
+                "Telegram hook failed for %s -> %s: %s", routine_name, chat_id, e
+            )

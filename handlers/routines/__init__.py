@@ -300,9 +300,9 @@ async def _execute_routine(
         except Exception:
             pass
 
-    # Fire post-execution hooks (email / telegram notifications).
+    # Fire post-execution hooks (Telegram notification).
     # On failure rich_result is None — pass the error text so the notification
-    # body reflects the failure instead of a misleading "Completed".
+    # reflects the failure instead of a misleading "Completed".
     failed = rich_result is None
     hook_result = rich_result if rich_result is not None else normalize_result(result_text)
     try:

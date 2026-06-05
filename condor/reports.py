@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -126,121 +125,20 @@ window.addEventListener('resize', function() {{
 </html>
 """
 
-# Marker around each Plotly chart in saved HTML, so the email renderer can find
-# and convert charts to static images in-process (no second file persisted).
-_CHART_OPEN = "<!--CONDOR_CHART-->"
-_CHART_CLOSE = "<!--/CONDOR_CHART-->"
-_CHART_RE = re.compile(
-    re.escape(_CHART_OPEN) + r".*?" + re.escape(_CHART_CLOSE), re.DOTALL
-)
-_CDN_SCRIPT = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
 
+def get_report_raw_html(report_id: str) -> tuple[str, str] | None:
+    """Return (raw_html, filename) of the report exactly as saved on disk.
 
-def _scan_balanced(
-    s: str, start: int, open_ch: str, close_ch: str
-) -> tuple[str | None, int]:
-    """Return the balanced substring starting at s[start] (an opener), JSON-aware."""
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        c = s[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
-            elif c == '"':
-                in_str = False
-        else:
-            if c == '"':
-                in_str = True
-            elif c == open_ch:
-                depth += 1
-            elif c == close_ch:
-                depth -= 1
-                if depth == 0:
-                    return s[start : i + 1], i + 1
-    return None, len(s)
-
-
-def _newplot_to_png_b64(block: str) -> str | None:
-    """Reconstruct the figure from a Plotly.newPlot(...) call and render a PNG."""
-    idx = block.find("Plotly.newPlot(")
-    if idx == -1:
-        return None
-    s = block[idx:]
-    db = s.find("[")
-    if db == -1:
-        return None
-    data, end = _scan_balanced(s, db, "[", "]")
-    if data is None:
-        return None
-    lb = s.find("{", end)
-    if lb == -1:
-        return None
-    layout, _ = _scan_balanced(s, lb, "{", "}")
-    if layout is None:
-        return None
-    try:
-        import plotly.io as pio
-
-        fig = pio.from_json(f'{{"data": {data}, "layout": {layout}}}')
-        png = fig.to_image(format="png", scale=2)
-        return base64.b64encode(png).decode("ascii")
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Email chart render failed: %s", e)
-        return None
-
-
-def get_report_html_for_email(report_id: str) -> tuple[str, str] | None:
-    """Return (html, attachment_filename) for emailing a report.
-
-    Converts each interactive Plotly chart into a static <img> in-process and
-    drops the Plotly CDN script, so the report renders in any email client.
-    Done on demand at send time — nothing extra is persisted to disk.
+    This is the interactive report (live Plotly charts via CDN), suitable for
+    opening in a real browser.
     """
     entry = get_report(report_id)
     if not entry:
         return None
-    filename = entry["filename"]
-    path = CHARTS_DIR / filename
+    path = CHARTS_DIR / entry["filename"]
     if not path.exists():
         return None
-    html = path.read_text()
-
-    def _repl(m: re.Match) -> str:
-        b64 = _newplot_to_png_b64(m.group(0))
-        if not b64:
-            return m.group(0)  # leave interactive markup if render fails
-        return (
-            '<div class="section plotly-chart">'
-            f'<img src="data:image/png;base64,{b64}" '
-            'style="max-width:100%;height:auto;border:1px solid var(--border);border-radius:8px;"/>'
-            "</div>"
-        )
-
-    html = _CHART_RE.sub(_repl, html)
-    html = html.replace(_CDN_SCRIPT, "")
-    html = _inline_css_vars(html)
-    return html, filename
-
-
-def _inline_css_vars(html: str) -> str:
-    """Replace CSS var() references with resolved dark-theme values for email clients."""
-    _VAR_MAP = {
-        "var(--bg)": "#0d1117",
-        "var(--surface)": "#161b22",
-        "var(--border)": "#30363d",
-        "var(--text)": "#e6edf3",
-        "var(--text-muted)": "#8b949e",
-        "var(--green)": "#3fb950",
-        "var(--red)": "#f85149",
-        "var(--blue)": "#58a6ff",
-    }
-    for var, val in _VAR_MAP.items():
-        html = html.replace(var, val)
-    return html
+    return path.read_text(), entry["filename"]
 
 
 def _md_to_html(text: str) -> str:
@@ -553,10 +451,8 @@ class ReportBuilder:
                 )
                 i += 1
             elif sec["type"] == "plotly":
-                # Wrap in markers so the email renderer can locate and convert
-                # the chart to a static image in-process at send time.
                 parts.append(
-                    f'{_CHART_OPEN}<div class="section plotly-chart">{sec["content"]}</div>{_CHART_CLOSE}'
+                    f'<div class="section plotly-chart">{sec["content"]}</div>'
                 )
                 i += 1
             elif sec["type"] == "table":

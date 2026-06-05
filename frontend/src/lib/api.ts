@@ -473,7 +473,6 @@ export interface RoutineInstance {
 }
 
 export interface RoutineHooks {
-  email: { enabled: boolean; recipients: string[] };
   telegram: { enabled: boolean; chat_ids: string[] };
   trigger: "success" | "always" | "failure";
 }
@@ -1122,9 +1121,6 @@ export const api = {
     apiFetch<{ options: string[] }>(
       `/api/v1/routines/options/${encodeURIComponent(source)}?server=${encodeURIComponent(server)}`,
     ),
-
-  getHooksStatus: () =>
-    apiFetch<{ smtp_configured: boolean }>(`/api/v1/routines/hooks/status`),
 
   getRoutineHooks: (name: string) =>
     apiFetch<RoutineHooks>(`/api/v1/routines/${encodeURIComponent(name)}/hooks`),
