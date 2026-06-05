@@ -74,10 +74,6 @@ def load_hooks(routine_name: str) -> dict | None:
     return _read_all().get(routine_name)
 
 
-def list_all_hooks() -> dict[str, dict]:
-    return _read_all()
-
-
 def save_hooks(routine_name: str, cfg: dict) -> dict:
     """Validate and persist the hook config for a routine. Returns the stored config."""
     clean = _default_config()
@@ -188,19 +184,23 @@ async def dispatch(
     caption = f"{status} — {routine_name}\n\n{summary}"
 
     # ── Email ──
+    # The full report is sent inline in the body; charts travel as inline PNG
+    # images (CID), so they render directly in the email client.
     email_cfg = cfg.get("email") or {}
     if email_cfg.get("enabled") and email_cfg.get("recipients"):
         try:
             from utils.email_sender import send_report
 
             subject = f"[Condor] {routine_name} — {'failed' if failed else 'report'}"
-            # No attachment: the email body already renders the full report
-            # (charts inline). An HTML attachment only shows as source in some
-            # mail clients, so we skip it.
+            # Body renders inline (charts as CID images); the same report is also
+            # attached as a self-contained .html (charts as data: URIs) so it can
+            # be saved/opened standalone in a browser.
             await send_report(
                 recipients=list(email_cfg["recipients"]),
                 subject=subject,
                 html_body=html_content,
+                attachment_name=filename,
+                attachment_bytes=html_content.encode("utf-8"),
             )
         except Exception as e:  # noqa: BLE001
             logger.error("Email hook failed for %s: %s", routine_name, e)

@@ -222,7 +222,25 @@ def get_report_html_for_email(report_id: str) -> tuple[str, str] | None:
 
     html = _CHART_RE.sub(_repl, html)
     html = html.replace(_CDN_SCRIPT, "")
+    html = _inline_css_vars(html)
     return html, filename
+
+
+def _inline_css_vars(html: str) -> str:
+    """Replace CSS var() references with resolved dark-theme values for email clients."""
+    _VAR_MAP = {
+        "var(--bg)": "#0d1117",
+        "var(--surface)": "#161b22",
+        "var(--border)": "#30363d",
+        "var(--text)": "#e6edf3",
+        "var(--text-muted)": "#8b949e",
+        "var(--green)": "#3fb950",
+        "var(--red)": "#f85149",
+        "var(--blue)": "#58a6ff",
+    }
+    for var, val in _VAR_MAP.items():
+        html = html.replace(var, val)
+    return html
 
 
 def _md_to_html(text: str) -> str:
