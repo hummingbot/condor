@@ -10,7 +10,7 @@ import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 type PickField = "start" | "end" | "limit" | null;
 
-interface GridChartProps {
+interface TradeChartProps {
   server: string;
   connector: string;
   pair: string;
@@ -50,7 +50,7 @@ function getChartColors() {
   };
 }
 
-export function GridChart({
+export function TradeChart({
   server,
   connector,
   pair,
@@ -73,7 +73,7 @@ export function GridChart({
   convertValue,
   convertPnl,
   onExecutorDeselect,
-}: GridChartProps) {
+}: TradeChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
