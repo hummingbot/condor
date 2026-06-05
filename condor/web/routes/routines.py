@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from condor import routine_hooks
 from condor.reports import list_reports
 from condor.routine_store import get_routine_store
 from condor.web.auth import get_current_user
@@ -44,6 +45,22 @@ class ScheduleRequestV2(BaseModel):
     interval_sec: int = 300
 
 
+class HookEmail(BaseModel):
+    enabled: bool = False
+    recipients: list[str] = []
+
+
+class HookTelegram(BaseModel):
+    enabled: bool = False
+    chat_ids: list[str] = []
+
+
+class HooksRequest(BaseModel):
+    email: HookEmail = HookEmail()
+    telegram: HookTelegram = HookTelegram()
+    trigger: str = "success"
+
+
 # ── Routes ──
 
 
@@ -72,7 +89,9 @@ async def get_instance(instance_id: str, user: WebUser = Depends(get_current_use
 
 
 @router.get("/instances/{instance_id}/image")
-async def get_instance_image(instance_id: str, user: WebUser = Depends(get_current_user)):
+async def get_instance_image(
+    instance_id: str, user: WebUser = Depends(get_current_user)
+):
     """Serve the chart PNG for an instance result."""
     store = get_routine_store()
     result = store.get_result(instance_id)
@@ -172,6 +191,29 @@ async def stop_instance(instance_id: str, user: WebUser = Depends(get_current_us
     return {"stopped": True}
 
 
+@router.get("/hooks/status")
+async def hooks_status(user: WebUser = Depends(get_current_user)):
+    """Report whether SMTP (email channel) is configured via env vars."""
+    return {"smtp_configured": routine_hooks.smtp_configured()}
+
+
+@router.get("/{routine_name:path}/hooks")
+async def get_hooks(routine_name: str, user: WebUser = Depends(get_current_user)):
+    """Get the post-execution hook config for a routine."""
+    cfg = routine_hooks.load_hooks(routine_name)
+    return cfg if cfg is not None else routine_hooks._default_config()
+
+
+@router.put("/{routine_name:path}/hooks")
+async def put_hooks(
+    routine_name: str,
+    body: HooksRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Save the post-execution hook config for a routine."""
+    return routine_hooks.save_hooks(routine_name, body.model_dump())
+
+
 @router.get("/options/{source}")
 async def get_field_options(
     source: str,
@@ -182,6 +224,7 @@ async def get_field_options(
     if source == "controller_configs":
         try:
             from config_manager import get_config_manager
+
             cm = get_config_manager()
             client = await cm.get_client(server)
             if not client:

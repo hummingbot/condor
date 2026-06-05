@@ -15,7 +15,15 @@ from typing import Any
 
 from pathlib import Path
 
-from routines.base import RoutineResult, discover_routines, discover_routines_from_path, get_routine, normalize_result
+import condor.reports as reports
+from condor import routine_hooks
+from routines.base import (
+    RoutineResult,
+    discover_routines,
+    discover_routines_from_path,
+    get_routine,
+    normalize_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +33,16 @@ class _HttpBot:
 
     def __init__(self):
         import os
-        self._token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN", "")
+
+        self._token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get(
+            "TELEGRAM_TOKEN", ""
+        )
 
     async def _post(self, method: str, data: dict, files: dict | None = None):
         if not self._token:
             return None
         import httpx
+
         url = f"https://api.telegram.org/bot{self._token}/{method}"
         async with httpx.AsyncClient(timeout=30) as client:
             if files:
@@ -65,12 +77,17 @@ class _HttpBot:
         data = {"chat_id": chat_id}
         if kw.get("caption"):
             data["caption"] = kw["caption"]
-        files = {"document": ("file", document, "application/octet-stream")} if document else None
+        files = (
+            {"document": ("file", document, "application/octet-stream")}
+            if document
+            else None
+        )
         return await self._post("sendDocument", data, files=files)
 
     async def edit_message_text(self, *a, **kw):
         data = {k: v for k, v in kw.items() if v is not None}
         return await self._post("editMessageText", data)
+
 
 _http_bot = _HttpBot()
 
@@ -117,7 +134,9 @@ class RoutineStore:
                 if not routines_path.is_dir():
                     continue
                 slug = agent_dir.name
-                agent_routines = discover_routines_from_path(routines_path, agent_slug=slug)
+                agent_routines = discover_routines_from_path(
+                    routines_path, agent_slug=slug
+                )
                 for rname, rinfo in agent_routines.items():
                     prefixed = f"{slug}/{rname}"
                     rinfo.name = prefixed
@@ -129,6 +148,7 @@ class RoutineStore:
         """Get report count per routine source_name."""
         try:
             from condor.reports import list_reports
+
             reports, _ = list_reports(limit=1000)
             counts: dict[str, int] = {}
             for r in reports:
@@ -144,15 +164,18 @@ class RoutineStore:
         report_counts = self._get_report_counts()
         out = []
         for name, info in all_routines.items():
-            out.append({
-                "name": name,
-                "description": info.description,
-                "is_continuous": info.is_continuous,
-                "category": info.category,
-                "source": info.source,
-                "fields": info.get_fields(),
-                "report_count": report_counts.get(name, 0) or report_counts.get(name.split("/")[-1], 0),
-            })
+            out.append(
+                {
+                    "name": name,
+                    "description": info.description,
+                    "is_continuous": info.is_continuous,
+                    "category": info.category,
+                    "source": info.source,
+                    "fields": info.get_fields(),
+                    "report_count": report_counts.get(name, 0)
+                    or report_counts.get(name.split("/")[-1], 0),
+                }
+            )
         return out
 
     # ── Instances ──
@@ -203,6 +226,27 @@ class RoutineStore:
     def _gen_id(self) -> str:
         return hashlib.md5(f"{time.time()}{id(object())}".encode()).hexdigest()[:8]
 
+    async def _fire_hooks(
+        self, instance_id: str, result, report_id: str | None, failed: bool
+    ) -> None:
+        """Dispatch post-execution hooks for a stored instance. Never raises."""
+        meta = self._instances.get(instance_id)
+        routine_name = meta.get("routine_name") if meta else None
+        if not routine_name:
+            return
+        try:
+            await routine_hooks.dispatch(
+                routine_name,
+                result,
+                report_id,
+                failed=failed,
+                bot=(self._bot or _http_bot),
+            )
+        except Exception as e:
+            logger.error(
+                f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
+            )
+
     def _resolve_routine(self, routine_name: str):
         """Resolve a routine by name, supporting 'agent_slug/routine_name' format."""
         # Try global first
@@ -212,7 +256,12 @@ class RoutineStore:
         # Try agent format: slug/name
         if "/" in routine_name:
             slug, rname = routine_name.split("/", 1)
-            agents_dir = Path(__file__).resolve().parent.parent / "trading_agents" / slug / "routines"
+            agents_dir = (
+                Path(__file__).resolve().parent.parent
+                / "trading_agents"
+                / slug
+                / "routines"
+            )
             agent_routines = discover_routines_from_path(agents_dir, agent_slug=slug)
             return agent_routines.get(rname)
         return None
@@ -250,16 +299,26 @@ class RoutineStore:
         self._tasks[instance_id] = task
         return instance_id
 
-    async def _run_oneshot(self, instance_id: str, routine, config: dict, server_name: str, user_id: int = 0) -> None:
+    async def _run_oneshot(
+        self,
+        instance_id: str,
+        routine,
+        config: dict,
+        server_name: str,
+        user_id: int = 0,
+    ) -> None:
         ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
         start = time.time()
+        reports._last_report_id = None
         try:
             cfg = routine.config_class(**config)
             raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except Exception as e:
             tb = traceback.format_exc()
-            logger.error(f"Web routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}")
+            logger.error(
+                f"Web routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
+            )
             error_msg = f"{type(e).__name__}: {e}"
             result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
             failed = True
@@ -268,17 +327,22 @@ class RoutineStore:
             failed = False
 
         duration = time.time() - start
+        report_id = reports._last_report_id
         self._results[instance_id] = result
 
         if instance_id in self._instances:
-            self._instances[instance_id].update({
-                "status": "failed" if failed else "completed",
-                "last_run_at": time.time(),
-                "last_result": result.text[:500],
-                "last_duration": duration,
-                "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                "error": error_msg,
-            })
+            self._instances[instance_id].update(
+                {
+                    "status": "failed" if failed else "completed",
+                    "last_run_at": time.time(),
+                    "last_result": result.text[:500],
+                    "last_duration": duration,
+                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                    "error": error_msg,
+                }
+            )
+
+        await self._fire_hooks(instance_id, result, report_id, failed)
 
     async def start_continuous(
         self,
@@ -292,7 +356,9 @@ class RoutineStore:
         if not routine:
             raise ValueError(f"Routine '{routine_name}' not found")
         if not routine.is_continuous:
-            raise ValueError(f"Routine '{routine_name}' is not continuous — use execute() instead")
+            raise ValueError(
+                f"Routine '{routine_name}' is not continuous — use execute() instead"
+            )
 
         instance_id = self._gen_id()
         self._instances[instance_id] = {
@@ -315,7 +381,14 @@ class RoutineStore:
         self._tasks[instance_id] = task
         return instance_id
 
-    async def _run_continuous(self, instance_id: str, routine, config: dict, server_name: str, user_id: int = 0) -> None:
+    async def _run_continuous(
+        self,
+        instance_id: str,
+        routine,
+        config: dict,
+        server_name: str,
+        user_id: int = 0,
+    ) -> None:
         ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
         start = time.time()
         try:
@@ -326,20 +399,24 @@ class RoutineStore:
             result = RoutineResult(text="Stopped by user")
         except Exception as e:
             tb = traceback.format_exc()
-            logger.error(f"Continuous routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}")
+            logger.error(
+                f"Continuous routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
+            )
             result = RoutineResult(text=f"Error: {type(e).__name__}: {e}\n\n{tb}")
 
         duration = time.time() - start
         self._results[instance_id] = result
 
         if instance_id in self._instances:
-            self._instances[instance_id].update({
-                "status": "stopped",
-                "last_run_at": time.time(),
-                "last_result": result.text[:500],
-                "last_duration": duration,
-                "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-            })
+            self._instances[instance_id].update(
+                {
+                    "status": "stopped",
+                    "last_run_at": time.time(),
+                    "last_result": result.text[:500],
+                    "last_duration": duration,
+                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                }
+            )
 
     async def schedule(
         self,
@@ -371,25 +448,36 @@ class RoutineStore:
         }
 
         task = asyncio.create_task(
-            self._run_scheduled(instance_id, routine, config, server_name, interval_sec, user_id)
+            self._run_scheduled(
+                instance_id, routine, config, server_name, interval_sec, user_id
+            )
         )
         self._tasks[instance_id] = task
         return instance_id
 
     async def _run_scheduled(
-        self, instance_id: str, routine, config: dict, server_name: str, interval_sec: int, user_id: int = 0
+        self,
+        instance_id: str,
+        routine,
+        config: dict,
+        server_name: str,
+        interval_sec: int,
+        user_id: int = 0,
     ) -> None:
         try:
             while instance_id in self._instances:
                 ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
                 start = time.time()
+                reports._last_report_id = None
                 try:
                     cfg = routine.config_class(**config)
                     raw = await routine.run_fn(cfg, ctx)
                     result = normalize_result(raw)
                 except Exception as e:
                     tb = traceback.format_exc()
-                    logger.error(f"Scheduled routine {routine.name}[{instance_id}] error: {type(e).__name__}: {e}\n{tb}")
+                    logger.error(
+                        f"Scheduled routine {routine.name}[{instance_id}] error: {type(e).__name__}: {e}\n{tb}"
+                    )
                     error_msg = f"{type(e).__name__}: {e}"
                     result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
                     run_failed = True
@@ -398,17 +486,25 @@ class RoutineStore:
                     run_failed = False
 
                 duration = time.time() - start
+                report_id = reports._last_report_id
                 self._results[instance_id] = result
 
                 if instance_id in self._instances:
-                    self._instances[instance_id].update({
-                        "status": "scheduled",
-                        "last_run_at": time.time(),
-                        "last_result": result.text[:500],
-                        "last_duration": duration,
-                        "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                        "error": error_msg,
-                    })
+                    self._instances[instance_id].update(
+                        {
+                            "status": "scheduled",
+                            "last_run_at": time.time(),
+                            "last_result": result.text[:500],
+                            "last_duration": duration,
+                            "run_count": self._instances[instance_id].get(
+                                "run_count", 0
+                            )
+                            + 1,
+                            "error": error_msg,
+                        }
+                    )
+
+                await self._fire_hooks(instance_id, result, report_id, run_failed)
 
                 await asyncio.sleep(interval_sec)
         except asyncio.CancelledError:
