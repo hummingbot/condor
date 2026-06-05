@@ -448,9 +448,68 @@ fi
 
 echo ""
 
-# ── Step 2: Hummingbot API ──────────────────────────
+# ── Step 2: Email Notifications (optional) ──────────
 
-echo -e "${BOLD}Step 2: Hummingbot API${RESET}"
+echo -e "${BOLD}Step 2: Email Notifications (optional)${RESET}"
+echo ""
+
+# Source existing .env to detect prior config
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    source "$ENV_FILE" 2>/dev/null
+    set +a
+fi
+
+if [ -n "${SMTP_HOST:-}" ] && [ -n "${SMTP_USER:-}" ]; then
+    msg_ok "Email (SMTP) already configured"
+else
+    msg_info "Routines can email their report (with charts) when they finish."
+    msg_info "Recipients are chosen per-routine from the web dashboard."
+    echo ""
+    prompt_visible "Configure email sending now? [y/N]" "N" "want_email"
+    if [[ "${want_email:-}" =~ ^[Yy]$ ]]; then
+        echo ""
+        msg_info "For Gmail use an App Password (not your normal password)."
+        msg_info "Create one: $(make_link 'https://myaccount.google.com/apppasswords')"
+        msg_info "(Requires 2-Step Verification enabled on your Google account.)"
+        echo ""
+
+        prompt_visible "SMTP host" "smtp.gmail.com" "smtp_host"
+        prompt_visible "SMTP port" "587" "smtp_port"
+        while true; do
+            prompt_visible "SMTP user (your email address)" "" "smtp_user"
+            [ -n "$smtp_user" ] && break
+            msg_warn "Email cannot be empty"
+        done
+        while true; do
+            prompt_secret "SMTP password / app password" "" "smtp_password"
+            [ -n "$smtp_password" ] && break
+            msg_warn "Password cannot be empty"
+        done
+
+        # Write/update SMTP_* in .env (SMTP_FROM defaults to SMTP_USER, so omit)
+        for pair in "SMTP_HOST=$smtp_host" "SMTP_PORT=$smtp_port" \
+                    "SMTP_USER=$smtp_user" "SMTP_PASSWORD=$smtp_password"; do
+            key="${pair%%=*}"; val="${pair#*=}"
+            if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+                sed -i.bak "s|^${key}=.*|${key}=$(escape_env_value "$val")|" "$ENV_FILE"
+                rm -f "$ENV_FILE.bak"
+            else
+                echo "${key}=$(escape_env_value "$val")" >> "$ENV_FILE"
+            fi
+        done
+
+        msg_ok "Email configured ($smtp_user via $smtp_host)"
+    else
+        msg_ok "Skipped email setup (you can add SMTP_* to .env later)"
+    fi
+fi
+
+echo ""
+
+# ── Step 3: Hummingbot API ──────────────────────────
+
+echo -e "${BOLD}Step 3: Hummingbot API${RESET}"
 echo ""
 
 hb_api_deployed=false
@@ -585,9 +644,9 @@ fi
 
 echo ""
 
-# ── Step 3: Create/Update config.yml ─────────────────
+# ── Step 4: Create/Update config.yml ─────────────────
 
-echo -e "${BOLD}Step 3: Configuration Files${RESET}"
+echo -e "${BOLD}Step 4: Configuration Files${RESET}"
 echo ""
 
 # Get current date
@@ -682,13 +741,13 @@ fi
 
 echo ""
 
-# ── Step 4: Data directory ──────────────────────────
+# ── Step 5: Data directory ──────────────────────────
 
 if [ ! -d "$DATA_DIR" ]; then
     mkdir -p "$DATA_DIR"
 fi
 
-# ── Step 5: Summary ────────────────────────────────
+# ── Step 6: Summary ────────────────────────────────
 
 # Source nvm to make node/npm available in current shell
 if [ -s "$HOME/.nvm/nvm.sh" ]; then
@@ -704,6 +763,10 @@ echo -e "    • tmux:       $(command_exists tmux && tmux -V 2>/dev/null || ech
 echo -e "    • node:       $(command_exists node && node --version 2>/dev/null || echo 'not found')"
 echo -e "    • npm:        $(command_exists npm && npm --version 2>/dev/null || echo 'not found')"
 echo -e "    • typescript: $(command_exists tsc && tsc --version 2>/dev/null || echo 'not installed')"
+echo ""
+echo -e "  ${BOLD}Configuration:${RESET}"
+echo -e "    • Telegram:   $([ -n "${TELEGRAM_TOKEN:-}" ] && echo 'configured' || echo 'not set')"
+echo -e "    • Email:      $([ -n "${SMTP_HOST:-}" ] && [ -n "${SMTP_USER:-}" ] && echo "configured (${SMTP_USER})" || echo 'not set (optional)')"
 echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"
