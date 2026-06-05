@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import NetworkError
@@ -27,6 +28,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Suppress httpx INFO-level request logging — python-telegram-bot embeds the
+# bot token in the request path (api.telegram.org/bot<TOKEN>/getUpdates), and
+# httpx's default INFO logs the full URL on every call. With long-poll firing
+# every ~10s, the token ends up in every log handler (journald, files, etc.),
+# which makes safe log sharing impossible. Suppressing to WARNING preserves
+# real HTTP errors while removing the token leak.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _get_start_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
@@ -223,6 +232,7 @@ def reload_handlers():
         "handlers.config.api_keys",
         "handlers.config.gateway",
         "handlers.config.user_preferences",
+        "routines.base",
         "handlers.routines",
         "handlers.agents",
         "handlers.agents.menu",
@@ -232,7 +242,6 @@ def reload_handlers():
         "handlers.agents._shared",
         "handlers.admin",
         "handlers.admin.update",
-        "routines.base",
         "utils.auth",
         "utils.telegram_formatters",
         "config_manager",
@@ -252,12 +261,7 @@ def reload_handlers():
     except Exception as e:
         logger.warning(f"Failed to re-register SDS fetches: {e}")
 
-    try:
-        from condor.data_manager import register_default_fetches
-
-        register_default_fetches()
-    except Exception as e:
-        logger.warning(f"Failed to re-register DataManager fetches: {e}")
+    # DataManager register_default_fetches is now a no-op (SDS handles registrations)
 
 
 def register_handlers(application: Application) -> None:
@@ -390,6 +394,12 @@ async def post_init(application: Application) -> None:
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 
+    # Preload Whisper model in background so first voice message is fast
+    import asyncio
+    from utils.transcribe import _get_model, DEFAULT_MODEL
+
+    asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
+
     # Clear any previously set commands for all scopes to avoid stale overrides
     from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeDefault
 
@@ -441,6 +451,11 @@ async def post_init(application: Application) -> None:
 
     await restore_scheduled_jobs(application)
 
+    # Inject Telegram bot into routine store so web-triggered routines can send messages
+    from condor.routine_store import get_routine_store
+
+    get_routine_store().set_bot(application.bot)
+
     # Start ServerDataService (unified server-centric cache)
     from condor.server_data_service import get_server_data_service
     from condor.server_data_service import register_default_fetches as sds_register
@@ -450,10 +465,9 @@ async def post_init(application: Application) -> None:
     sds.start()
     await sds.auto_subscribe_servers()
 
-    # Start DataManager (legacy, delegates to SDS)
-    from condor.data_manager import get_data_manager, register_default_fetches
+    # DataManager legacy wrapper — kept for any unmigrated code
+    from condor.data_manager import get_data_manager
 
-    register_default_fetches()
     get_data_manager().start()
 
     # Start agent session health monitor
@@ -470,6 +484,7 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(watch_and_reload(application))
 
 
+
 async def watch_and_reload(application: Application) -> None:
     """Watch for file changes and reload handlers automatically."""
     try:
@@ -482,11 +497,20 @@ async def watch_and_reload(application: Application) -> None:
 
     handlers_path = Path(__file__).parent / "handlers"
     routines_path = Path(__file__).parent / "routines"
-    logger.info(f"👀 Watching for changes in: {handlers_path}, {routines_path}")
+    assistants_path = Path(__file__).parent / "assistants"
+    watch_paths = [handlers_path, routines_path]
+    if assistants_path.exists():
+        watch_paths.append(assistants_path)
+    logger.info(f"👀 Watching for changes in: {', '.join(str(p) for p in watch_paths)}")
 
-    async for changes in awatch(handlers_path, routines_path):
+    async for changes in awatch(*watch_paths):
         logger.info(f"📝 Detected changes: {changes}")
         try:
+            # Reload assistants if any .md file in assistants/ changed
+            if any(str(assistants_path) in str(path) for _, path in changes):
+                from handlers.agents._shared import reload_assistants
+                reload_assistants()
+                logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
             logger.info("✅ Auto-reloaded handlers successfully")
@@ -626,6 +650,17 @@ async def _run_dual(application: Application) -> None:
 
     # Start WebSocket manager
     get_ws_manager().start()
+
+    # Notify admin that Condor has started
+    from utils.config import ADMIN_USER_ID
+    if ADMIN_USER_ID:
+        try:
+            await application.bot.send_message(
+                chat_id=int(ADMIN_USER_ID),
+                text="Condor is online and ready.",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification to admin: {e}")
 
     logger.info("Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT)
 

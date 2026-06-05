@@ -2,7 +2,6 @@ import { useMemo, useReducer } from "react";
 import { Sparkles } from "lucide-react";
 
 import {
-  AdvancedSection,
   AmountField,
   LeverageField,
   NumberField,
@@ -27,7 +26,6 @@ export interface OrderState {
   chaser_refresh_threshold: number;
   position_action: string;
   activePickField: string | null;
-  showAdvanced: boolean;
 }
 
 type OrderAction =
@@ -41,11 +39,10 @@ const DEFAULTS: OrderState = {
   execution_strategy: "LIMIT",
   price: 0,
   leverage: 1,
-  chaser_distance: 0.001,
-  chaser_refresh_threshold: 0.0005,
+  chaser_distance: 0.0005,
+  chaser_refresh_threshold: 0.001,
   position_action: "OPEN",
   activePickField: null,
-  showAdvanced: false,
 };
 
 const STORAGE_KEY = "condor_order_defaults";
@@ -213,6 +210,15 @@ export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false
           options={STRATEGY_OPTIONS}
         />
         <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
+        {!isSpot && (
+          <SelectField
+            label="Position Action"
+            value={state.position_action}
+            field="position_action"
+            dispatch={d}
+            options={POSITION_ACTION_OPTIONS}
+          />
+        )}
       </div>
 
       {/* Price (for LIMIT strategies) */}
@@ -268,20 +274,6 @@ export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false
           </p>
         </div>
       )}
-
-      {/* Advanced */}
-      <AdvancedSection
-        open={state.showAdvanced}
-        onToggle={() => d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })}
-      >
-        <SelectField
-          label="Position Action"
-          value={state.position_action}
-          field="position_action"
-          dispatch={d}
-          options={POSITION_ACTION_OPTIONS}
-        />
-      </AdvancedSection>
 
       <ValidationMessages errors={validation.errors} />
     </div>

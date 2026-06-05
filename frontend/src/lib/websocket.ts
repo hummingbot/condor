@@ -1,10 +1,13 @@
 type MessageHandler = (channel: string, data: unknown, ts: number) => void;
+type ConnectHandler = () => void;
 
 export class CondorWebSocket {
   private ws: WebSocket | null = null;
   private url: string;
   private handlers: Set<MessageHandler> = new Set();
+  private connectHandlers: Set<ConnectHandler> = new Set();
   private channels: Set<string> = new Set();
+  private _channelExtras: Map<string, Record<string, unknown> | undefined> = new Map();
   private reconnectDelay = 1000;
   private maxReconnectDelay = 30000;
   private shouldConnect = false;
@@ -27,20 +30,35 @@ export class CondorWebSocket {
     this.ws = null;
   }
 
-  subscribe(channel: string) {
+  subscribe(channel: string, extras?: Record<string, unknown>) {
     this.channels.add(channel);
-    this._send({ action: "subscribe", channel });
+    this._channelExtras.set(channel, extras);
+    this._send({ action: "subscribe", channel, ...extras });
   }
 
   unsubscribe(channel: string) {
     this.channels.delete(channel);
+    this._channelExtras.delete(channel);
     this._send({ action: "unsubscribe", channel });
+  }
+
+  /** Send a duration update for a candle channel without re-subscribing. */
+  setCandleDuration(channel: string, duration: number) {
+    this._send({ action: "set_candle_duration", channel, duration });
   }
 
   onMessage(handler: MessageHandler) {
     this.handlers.add(handler);
     return () => {
       this.handlers.delete(handler);
+    };
+  }
+
+  /** Register a callback fired immediately on each (re)connect. */
+  onConnect(handler: ConnectHandler) {
+    this.connectHandlers.add(handler);
+    return () => {
+      this.connectHandlers.delete(handler);
     };
   }
 
@@ -52,9 +70,14 @@ export class CondorWebSocket {
     this.ws.onopen = () => {
       this.reconnectDelay = 1000;
       this.version++;
-      // Re-subscribe to all channels
+      // Re-subscribe to all channels (with original extras like duration)
       for (const ch of this.channels) {
-        this._send({ action: "subscribe", channel: ch });
+        const extras = this._channelExtras.get(ch);
+        this._send({ action: "subscribe", channel: ch, ...extras });
+      }
+      // Notify connect listeners (triggers React state update for dependents)
+      for (const handler of this.connectHandlers) {
+        handler();
       }
     };
 

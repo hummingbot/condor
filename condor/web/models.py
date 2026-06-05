@@ -98,6 +98,7 @@ class BotDetailResponse(BaseModel):
 
 class ControllerInfo(BaseModel):
     controller_name: str
+    controller_id: str = ""
     bot_name: str
     status: str = "unknown"
     connector: str = ""
@@ -119,6 +120,8 @@ class BotSummary(BaseModel):
     num_controllers: int = 0
     error_count: int = 0
     deployed_at: Optional[str] = None
+    error_logs: list[dict[str, Any]] = []
+    general_logs: list[dict[str, Any]] = []
 
 
 class BotsPageResponse(BaseModel):
@@ -126,6 +129,65 @@ class BotsPageResponse(BaseModel):
     bots: list[BotSummary] = []
     total_pnl: float = 0.0
     total_volume: float = 0.0
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+# ── Bot Runs ──
+
+
+class BotRunInfo(BaseModel):
+    bot_name: str
+    bot_run_id: Optional[int] = None
+    account_name: str = ""
+    strategy_type: str = ""
+    strategy_name: str = ""
+    run_status: str = ""
+    deployment_status: str = ""
+    created_at: Optional[str] = None
+    stopped_at: Optional[str] = None
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    volume_traded: float = 0.0
+    num_controllers: int = 0
+
+
+class BotRunsResponse(BaseModel):
+    runs: list[BotRunInfo] = []
+    total: int = 0
+
+
+# ── Controller Performance ──
+
+
+class ControllerPerformanceSnapshot(BaseModel):
+    timestamp: str = ""
+    bot_name: str = ""
+    controller_id: str = ""
+    controller_name: str = ""
+    connector: str = ""
+    trading_pair: str = ""
+    realized_pnl_quote: float = 0.0
+    unrealized_pnl_quote: float = 0.0
+    global_pnl_quote: float = 0.0
+    global_pnl_pct: float = 0.0
+    volume_traded: float = 0.0
+    close_type_counts: dict[str, int] = {}
+    positions_summary: list[dict[str, Any]] = []
+    custom_info: dict[str, Any] = {}
+
+
+class ControllerPerformanceLatestResponse(BaseModel):
+    snapshots: list[ControllerPerformanceSnapshot] = []
+    server_online: bool = True
+    error_hint: Optional[str] = None
+
+
+class ControllerPerformanceHistoryResponse(BaseModel):
+    snapshots: list[ControllerPerformanceSnapshot] = []
+    next_cursor: Optional[str] = None
+    interval: str = "5m"
     server_online: bool = True
     error_hint: Optional[str] = None
 
@@ -242,3 +304,130 @@ class DeployBotRequest(BaseModel):
     image: str = "hummingbot/hummingbot:latest"
     max_global_drawdown_quote: float | None = None
     max_controller_drawdown_quote: float | None = None
+
+
+class ControllerActionRequest(BaseModel):
+    controller_names: list[str]
+
+
+# ── Archived Bots ──
+
+
+class ArchivedBotSummary(BaseModel):
+    bot_name: str
+    db_path: str
+    total_trades: int = 0
+    total_orders: int = 0
+    trading_pairs: list[str] = []
+    exchanges: list[str] = []
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+
+
+class PnlPoint(BaseModel):
+    timestamp: float
+    pnl: float
+
+
+class NormalizedExecutor(BaseModel):
+    id: str = ""
+    type: str = ""
+    connector: str = ""
+    trading_pair: str = ""
+    side: str = ""
+    status: str = ""
+    close_type: str = ""
+    pnl: float = 0.0
+    volume: float = 0.0
+    timestamp: float = 0.0
+    close_timestamp: float = 0.0
+    entry_price: float = 0.0
+    current_price: float = 0.0
+    cum_fees_quote: float = 0.0
+    net_pnl_pct: float = 0.0
+    controller_id: str = ""
+    custom_info: dict[str, Any] = {}
+    config: dict[str, Any] = {}
+
+
+class ArchivedBotPerformance(BaseModel):
+    bot_name: str
+    db_path: str
+    total_pnl: float = 0.0
+    total_fees: float = 0.0
+    total_volume: float = 0.0
+    trade_count: int = 0
+    buy_count: int = 0
+    sell_count: int = 0
+    pnl_by_pair: dict[str, float] = {}
+    cumulative_pnl: list[PnlPoint] = []
+    trading_pairs: list[str] = []
+    exchanges: list[str] = []
+    executors: list[NormalizedExecutor] = []
+    primary_connector: str = ""
+    primary_trading_pair: str = ""
+    executor_count: int = 0
+
+
+class PaginatedExecutors(BaseModel):
+    executors: list[NormalizedExecutor]
+    total: int
+    offset: int
+    limit: int
+
+
+# ── Reports ──
+
+
+class ReportSummary(BaseModel):
+    id: str
+    title: str
+    filename: str
+    created_at: str
+    source_type: str = ""
+    source_name: str = ""
+    tags: list[str] = []
+
+
+class ReportsListResponse(BaseModel):
+    reports: list[ReportSummary]
+    total: int
+
+
+# ── Settings ──
+
+
+class AddServerRequest(BaseModel):
+    name: str
+    host: str
+    port: int
+    username: str
+    password: str
+
+
+class UpdateServerRequest(BaseModel):
+    host: Optional[str] = None
+    port: Optional[int] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+
+class GatewayStartRequest(BaseModel):
+    image: str = "hummingbot/gateway:latest"
+    passphrase: str
+    port: int = 15888
+    dev_mode: bool = True
+
+
+class CredentialInfo(BaseModel):
+    connector_name: str
+    connector_type: str = ""
+
+
+class GatewayPullRequest(BaseModel):
+    image: str = "hummingbot/gateway:latest"
+
+
+class AddCredentialRequest(BaseModel):
+    connector_name: str
+    credentials: dict[str, Any]

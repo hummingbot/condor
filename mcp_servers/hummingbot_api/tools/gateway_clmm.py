@@ -121,7 +121,9 @@ async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -
     Supported CLMM Connectors:
     - meteora (Solana): DLMM pools
     - raydium (Solana): CLMM pools
+    - orca (Solana): Whirlpools
     - uniswap (Ethereum/EVM): V3 pools
+    - pancakeswap (BSC/EVM): V3 pools
     """
     # ============================================
     # LIST POOLS - Browse available pools

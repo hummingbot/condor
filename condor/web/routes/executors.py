@@ -6,55 +6,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 logger = logging.getLogger(__name__)
 
-# Safety cap to avoid runaway pagination loops
-MAX_EXECUTORS_FETCH = 5000
-EXECUTORS_PAGE_SIZE = 500
-
-
-async def fetch_all_executors(client, max_items: int = MAX_EXECUTORS_FETCH, **filters) -> list[dict]:
-    """Fetch all executors via cursor-based pagination.
-
-    The underlying hummingbot-api-client defaults to limit=50, so without
-    pagination we'd only ever see the 50 most recent executors across the
-    whole server. This walks the cursor until exhausted or a safety cap.
-    """
-    all_items: list[dict] = []
-    cursor: str | None = None
-    while True:
-        remaining = max_items - len(all_items)
-        if remaining <= 0:
-            break
-        page_size = min(EXECUTORS_PAGE_SIZE, remaining)
-        kwargs = {**filters, "limit": page_size}
-        if cursor:
-            kwargs["cursor"] = cursor
-        result = await client.executors.search_executors(**kwargs)
-        page = _extract_executors_list(result)
-        all_items.extend(page)
-
-        # Detect next cursor from common shapes; stop if none or page short.
-        next_cursor = None
-        if isinstance(result, dict):
-            next_cursor = result.get("next_cursor") or result.get("cursor")
-            pagination = result.get("pagination")
-            if not next_cursor and isinstance(pagination, dict):
-                next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
-        # Continue while the backend advertises a next cursor, even if the page
-        # is short (some backends silently cap page size below what we requested).
-        if not next_cursor:
-            if len(page) < page_size:
-                break
-            # No cursor but a full page: nothing more to fetch safely.
-            break
-        if len(all_items) >= max_items:
-            break
-        cursor = next_cursor
-    return all_items
 
 from config_manager import get_config_manager
 from condor.web.auth import get_current_user
 from condor.web.models import CreateExecutorRequest, ExecutorInfo, WebUser
-from handlers.executors._shared import get_executor_pnl, get_executor_volume, get_executor_type, get_executor_fees
+from condor.fetchers.executors import (
+    fetch_all_executors,
+    extract_executors_list as _extract_executors_list,
+    get_executor_pnl,
+    get_executor_volume,
+    get_executor_type,
+    get_executor_fees,
+    MAX_EXECUTORS_FETCH,
+)
 
 router = APIRouter(tags=["executors"])
 
@@ -78,18 +42,24 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
     custom_info = ex.get("custom_info") or {}
 
     # Entry price: top-level > config > custom_info (position executors store it there)
-    entry_price = float(
-        config.get("entry_price")
-        or ex.get("entry_price")
-        or custom_info.get("current_position_average_price")
-        or 0
-    )
-    # Current/close price: top-level > custom_info.close_price
-    current_price = float(
-        ex.get("current_price")
-        or custom_info.get("close_price")
-        or 0
-    )
+    # Use explicit > 0 checks so that a valid 0.0 doesn't skip to the next fallback
+    _cfg_entry = float(config.get("entry_price") or 0)
+    _top_entry = float(ex.get("entry_price") or 0)
+    _ci_entry = float(custom_info.get("current_position_average_price") or 0)
+    entry_price = _cfg_entry if _cfg_entry > 0 else (_top_entry if _top_entry > 0 else (_ci_entry if _ci_entry > 0 else 0.0))
+
+    # Current/close price: top-level > custom_info.close_price > held_position_orders fill price
+    _top_cur = float(ex.get("current_price") or 0)
+    _ci_close = float(custom_info.get("close_price") or 0)
+    # Extract fill price from held_position_orders (order executors store fills there)
+    _held_price = 0.0
+    held_orders = custom_info.get("held_position_orders")
+    if isinstance(held_orders, list) and held_orders:
+        try:
+            _held_price = float(held_orders[-1].get("price") or 0)
+        except (TypeError, ValueError, AttributeError):
+            pass
+    current_price = _top_cur if _top_cur > 0 else (_ci_close if _ci_close > 0 else (_held_price if _held_price > 0 else 0.0))
 
     return ExecutorInfo(
         id=str(ex.get("id") or ex.get("executor_id") or ""),
@@ -112,16 +82,6 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
         config=ex.get("config", {}),
     )
 
-
-def _extract_executors_list(result) -> list[dict]:
-    """Extract executor list from various API response shapes."""
-    if isinstance(result, list):
-        return result
-    if isinstance(result, dict):
-        for key in ("executors", "data", "results", "items"):
-            if key in result and isinstance(result[key], list):
-                return result[key]
-    return []
 
 
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
@@ -299,7 +259,7 @@ async def create_executor_endpoint(
     # Inject executor type into config
     config = {**body.config, "type": body.executor_type}
 
-    from handlers.executors._shared import create_executor
+    from condor.fetchers.executors import create_executor
 
     result = await create_executor(client, config, account_name=body.account_name)
     if isinstance(result, dict) and result.get("status") == "error":
@@ -323,7 +283,7 @@ async def stop_executor_endpoint(
 
     client = await cm.get_client(name)
 
-    from handlers.executors._shared import stop_executor
+    from condor.fetchers.executors import stop_executor
 
     result = await stop_executor(client, executor_id, keep_position=keep_position)
     if isinstance(result, dict) and result.get("status") == "error":

@@ -1,5 +1,7 @@
 """Monitor price and alert on threshold."""
 
+CATEGORY = "Monitoring"
+
 import asyncio
 import logging
 import time
@@ -61,10 +63,30 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     except Exception as e:
         logger.error(f"Failed to send start message: {e}")
 
+    # Live report setup
+    try:
+        from condor.reports import LiveReport
+
+        report = LiveReport(
+            f"Price Monitor: {config.trading_pair}",
+            source_name="price_monitor",
+            tags=["monitoring", "live"],
+        )
+    except Exception:
+        report = None
+
+    history = []
+
     try:
         # Main monitoring loop
         while True:
             try:
+                # Re-acquire client each iteration to avoid stale sessions
+                client = await get_client(chat_id, context=context)
+                if not client:
+                    await asyncio.sleep(config.interval_sec)
+                    continue
+
                 # Get current price
                 prices = await client.market_data.get_prices(
                     connector_name=config.connector, trading_pairs=config.trading_pair
@@ -115,6 +137,35 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
                 # Update last price
                 state["last_price"] = current_price
+
+                # Update live report
+                if report:
+                    try:
+                        from datetime import datetime, timezone
+
+                        history.append({
+                            "Time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                            "Price": f"${current_price:,.2f}",
+                            "Change": f"{change_from_last:+.2f}%",
+                        })
+
+                        elapsed = int(time.time() - state["start_time"])
+                        mins, secs = divmod(elapsed, 60)
+                        change_total = ((current_price - state["initial_price"]) / state["initial_price"]) * 100
+
+                        report.clear()
+                        report.builder.manual_order()
+                        report.builder.kpi("Current Price", f"${current_price:,.2f}")
+                        report.builder.kpi("High", f"${state['high_price']:,.2f}", trend="up")
+                        report.builder.kpi("Low", f"${state['low_price']:,.2f}", trend="down")
+                        report.builder.kpi("Change", f"{change_total:+.2f}%",
+                                           trend="up" if change_total > 0 else "down")
+                        report.builder.kpi("Runtime", f"{mins}m {secs}s")
+                        report.builder.kpi("Alerts", str(state["alerts_sent"]))
+                        report.builder.table(history[-50:])
+                        await report.update()
+                    except Exception as e:
+                        logger.debug(f"Report update failed: {e}")
 
             except asyncio.CancelledError:
                 raise  # Re-raise to exit the loop

@@ -45,6 +45,10 @@ from mcp_servers.hummingbot_api.tools.gateway_clmm import explore_gateway_clmm_p
 from mcp_servers.hummingbot_api.tools.gateway_swap import manage_gateway_swaps as manage_gateway_swaps_impl
 from mcp_servers.hummingbot_api.tools.geckoterminal import explore_geckoterminal as explore_geckoterminal_impl
 from mcp_servers.hummingbot_api.tools import history as history_tools
+from mcp_servers.hummingbot_api.tools.backtesting import (
+    manage_backtest_tasks as manage_backtest_tasks_impl,
+    run_backtest as run_backtest_impl,
+)
 
 # Configure root logger
 logging.basicConfig(
@@ -124,31 +128,28 @@ async def configure_server(
         username: API username
         password: API password
     """
-    from mcp_servers.hummingbot_api.settings import ServerConfig, _load_server_config, save_server_config
+    from mcp_servers.hummingbot_api.settings import ServerConfig, save_server_config
 
-    # No params → show active server
+    # No params → show active server (use in-memory settings which include CLI overrides)
     if name is None and host is None and port is None and username is None and password is None:
-        current = _load_server_config()
         return (
             f"Active Server:\n\n"
-            f"  Name: {current.name}\n"
-            f"  URL: {current.url}\n"
-            f"  Username: {current.username}\n"
+            f"  Name: {settings.server_name}\n"
+            f"  URL: {settings.api_url}\n"
+            f"  Username: {settings.api_username}\n"
         )
 
-    # Build new config with partial updates
-    current = _load_server_config()
-
+    # Build new config with partial updates (use in-memory settings, not disk)
     from urllib.parse import urlparse
-    parsed = urlparse(current.url)
+    parsed = urlparse(settings.api_url)
     current_host = parsed.hostname or "localhost"
     current_port = parsed.port or 8000
 
-    final_name = name if name is not None else current.name
+    final_name = name if name is not None else settings.server_name
     final_host = host if host is not None else current_host
     final_port = port if port is not None else current_port
-    final_username = username if username is not None else current.username
-    final_password = password if password is not None else current.password
+    final_username = username if username is not None else settings.api_username
+    final_password = password if password is not None else settings.api_password
 
     new_config = ServerConfig(
         name=final_name,
@@ -797,7 +798,7 @@ async def explore_dex_pools(
 
     Args:
         action: Action to perform on CLMM pools.
-        connector: CLMM connector name (e.g., 'meteora', 'raydium', 'uniswap'). Required.
+        connector: CLMM connector name (e.g., 'meteora', 'raydium', 'orca', 'uniswap', 'pancakeswap'). Required.
         network: Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta'). Required for get_pool_info.
         pool_address: Pool contract address (required for get_pool_info).
         page: Page number for list_pools (default: 0).
@@ -891,6 +892,84 @@ async def explore_geckoterminal(
         token=token,
         limit=limit,
         trade_volume_filter=trade_volume_filter,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@mcp.tool()
+@handle_errors("run backtest")
+async def run_backtest(
+        config_name: str,
+        start_time: int,
+        end_time: int,
+        backtesting_resolution: str = "1m",
+        trade_cost: float = 0.0002,
+) -> str:
+    """Run a synchronous backtest on a saved controller config.
+
+    Resolves the config name to its full configuration, then runs a backtest
+    over the specified time range. Returns performance metrics immediately.
+
+    Args:
+        config_name: Name of a saved controller config (e.g., 'my_grid_config').
+            Use manage_controllers(action='list') to see available configs.
+        start_time: Start timestamp in seconds (Unix epoch)
+        end_time: End timestamp in seconds (Unix epoch)
+        backtesting_resolution: Candle resolution for the backtest. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
+        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
+    """
+    client = await hummingbot_client.get_client()
+    result = await run_backtest_impl(
+        client=client,
+        config_name=config_name,
+        start_time=start_time,
+        end_time=end_time,
+        backtesting_resolution=backtesting_resolution,
+        trade_cost=trade_cost,
+    )
+    return result.get("formatted_output", str(result))
+
+
+@mcp.tool()
+@handle_errors("manage backtest tasks")
+async def manage_backtest_tasks(
+        action: Literal["submit", "list", "get", "delete"],
+        config_name: str | None = None,
+        task_id: str | None = None,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        backtesting_resolution: str = "1m",
+        trade_cost: float = 0.0002,
+) -> str:
+    """Manage async backtesting tasks: submit background jobs, check status, get results, or delete.
+
+    Use this for long-running backtests that you don't want to wait for synchronously.
+
+    Actions:
+    - submit: Queue a new backtest task (requires config_name, start_time, end_time)
+    - list: List all backtest tasks with their status
+    - get: Get a specific task's status and results (requires task_id)
+    - delete: Cancel/delete a task (requires task_id)
+
+    Args:
+        action: Task action to perform
+        config_name: Controller config name (required for submit). Use manage_controllers(action='list') to see options.
+        task_id: Task ID returned from submit (required for get/delete)
+        start_time: Start timestamp in seconds (required for submit)
+        end_time: End timestamp in seconds (required for submit)
+        backtesting_resolution: Candle resolution. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
+        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
+    """
+    client = await hummingbot_client.get_client()
+    result = await manage_backtest_tasks_impl(
+        client=client,
+        action=action,
+        config_name=config_name,
+        task_id=task_id,
+        start_time=start_time,
+        end_time=end_time,
+        backtesting_resolution=backtesting_resolution,
+        trade_cost=trade_cost,
     )
     return result.get("formatted_output", str(result))
 

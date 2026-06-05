@@ -16,16 +16,26 @@ router = APIRouter(tags=["positions"])
 
 def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
     """Normalize a position dict to a common shape with source info."""
+    amount = pos.get("net_amount_base") or pos.get("amount") or 0
+    entry_price = pos.get("buy_breakeven_price") or pos.get("entry_price") or 0
+    try:
+        notional_value = abs(float(amount)) * float(entry_price)
+    except (ValueError, TypeError):
+        notional_value = 0
     return {
         "connector_name": pos.get("connector_name") or pos.get("connector") or "",
         "trading_pair": pos.get("trading_pair") or "",
         "position_side": pos.get("position_side") or pos.get("side") or "",
-        "amount": pos.get("net_amount_base") or pos.get("amount") or 0,
-        "entry_price": pos.get("buy_breakeven_price") or pos.get("entry_price") or 0,
+        "amount": amount,
+        "entry_price": entry_price,
+        "notional_value": notional_value,
         "current_price": pos.get("current_price") or 0,
         "unrealized_pnl": pos.get("unrealized_pnl_quote") or pos.get("unrealized_pnl") or 0,
         "leverage": pos.get("leverage") or 1,
         "controller_id": pos.get("controller_id") or "",
+        "realized_pnl": pos.get("realized_pnl_quote") or 0,
+        "cum_fees": pos.get("cum_fees_quote") or 0,
+        "executor_count": pos.get("executor_count") or 0,
         "source": source,
         "source_name": source_name,
     }
@@ -114,6 +124,37 @@ async def get_consolidated_positions(
         _normalize_position(pos, "bot", source_name)
         for pos, source_name in bot_raw
     ]
+
+    # Enrich positions missing current_price (the positions_summary endpoint doesn't provide it)
+    all_positions = executor_positions + bot_positions
+    pairs_needing_price = {}
+    for pos in all_positions:
+        if pos["current_price"] == 0 and pos["connector_name"] and pos["trading_pair"]:
+            key = (pos["connector_name"], pos["trading_pair"])
+            pairs_needing_price[key] = None
+
+    if pairs_needing_price:
+        try:
+            client = await cm.get_client(name)
+            price_tasks = [
+                client.market_data.get_prices(connector_name=conn, trading_pairs=pair)
+                for conn, pair in pairs_needing_price
+            ]
+            results = await asyncio.gather(*price_tasks, return_exceptions=True)
+            for (conn, pair), result in zip(pairs_needing_price, results):
+                if isinstance(result, dict):
+                    price = result.get("prices", {}).get(pair)
+                    if price:
+                        pairs_needing_price[(conn, pair)] = float(price)
+
+            for pos in all_positions:
+                if pos["current_price"] == 0:
+                    key = (pos["connector_name"], pos["trading_pair"])
+                    price = pairs_needing_price.get(key)
+                    if price:
+                        pos["current_price"] = price
+        except Exception as e:
+            logger.warning("Failed to enrich positions with current prices: %s", e)
 
     return {
         "executor_positions": executor_positions,

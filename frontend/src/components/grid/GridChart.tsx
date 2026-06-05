@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
-import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api, type CandleData } from "@/lib/api";
+import { useCandleStore } from "@/hooks/useCandleStore";
+import { api, type ConsolidatedPosition } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
+import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 type PickField = "start" | "end" | "limit" | null;
 
@@ -19,11 +21,22 @@ interface GridChartProps {
   limitPrice: number;
   side: 1 | 2;
   minSpread: number;
+  totalAmountQuote?: number;
+  minOrderAmountQuote?: number;
   activePickField: PickField;
   onPriceSet: (field: "start" | "end" | "limit", price: number) => void;
   pricePrecision?: number;
   extraLines?: ExtraLine[];
   executorOverlays?: ExecutorOverlay[];
+  positions?: ConsolidatedPosition[];
+  selectedExecutorId?: string | null;
+  /** Convert a value from the pair's quote currency to display currency */
+  convertValue?: (val: number) => string;
+  convertPnl?: (val: number) => string;
+  /** Callback when user clicks an executor in the list that's outside candle range */
+  onRequestCandleRange?: (startTime: number) => void;
+  /** Callback when user clicks chart background to deselect executor */
+  onExecutorDeselect?: () => void;
 }
 
 function getChartColors() {
@@ -48,18 +61,33 @@ export function GridChart({
   limitPrice,
   side,
   minSpread,
+  totalAmountQuote,
+  minOrderAmountQuote,
   activePickField,
   onPriceSet,
   pricePrecision,
   extraLines,
   executorOverlays,
+  positions,
+  selectedExecutorId,
+  convertValue,
+  convertPnl,
+  onExecutorDeselect,
 }: GridChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Candlestick"> | null>(null);
   const initializedRef = useRef(false);
   const crosshairPriceRef = useRef<number | null>(null);
+  const overlaysRef = useRef<ExecutorOverlay[]>([]);
+  const lastZoomedIdRef = useRef<string | null>(null);
+  const convertValueRef = useRef(convertValue);
+  const convertPnlRef = useRef(convertPnl);
+  convertValueRef.current = convertValue;
+  convertPnlRef.current = convertPnl;
+  const [chartReady, setChartReady] = useState(false);
 
   // Price line refs
   const startLineRef = useRef<import("lightweight-charts").IPriceLine | null>(null);
@@ -68,23 +96,57 @@ export function GridChart({
   const gridLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const extraLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
   const overlaySeriesRef = useRef<import("lightweight-charts").ISeriesApi<"Line">[]>([]);
+  const overlayPriceLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
+  const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
 
-  const channel = `candles:${server}:${connector}:${pair}:${interval}`;
-  const channels = useMemo(() => [channel], [channel]);
-  const { wsRef, wsVersion } = useCondorWebSocket(channels, server);
+  // ── Candle data from the singleton store (WS live + cached) ──
+  const { candles, mergeCandles, setDuration } = useCandleStore(server, connector, pair, interval);
 
-  const startTime = useMemo(
-    () => Math.floor(Date.now() / 1000) - lookbackSeconds,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [lookbackSeconds, pair, interval],
-  );
+  // ── Filter executor overlays to those within candle time range ──
+  const filteredOverlays = useMemo(() => {
+    if (!executorOverlays?.length) return executorOverlays;
+    if (!candles.length) return executorOverlays; // no candles yet → show all
+    const minTime = candles[0].timestamp;
+    return executorOverlays.filter((o) => {
+      const s = o.status?.toLowerCase();
+      if (s === "running" || s === "active") return true;
+      if (selectedExecutorId && o.executorId === selectedExecutorId) return true;
+      const end = o.timeRange.end > 1e12 ? o.timeRange.end / 1000 : o.timeRange.end;
+      return end >= minTime;
+    });
+  }, [executorOverlays, candles, selectedExecutorId]);
 
-  const { data: candles } = useQuery({
-    queryKey: ["candles", server, connector, pair, interval, lookbackSeconds],
-    queryFn: () => api.getCandles(server, connector, pair, interval, 5000, startTime),
-  });
+  // ── REST backfill on pair/interval/lookback change ──
+  const backfillKeyRef = useRef("");
+  useEffect(() => {
+    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}`;
+    if (backfillKey === backfillKeyRef.current) return;
+    backfillKeyRef.current = backfillKey;
 
-  // Initialize chart
+    setDuration(lookbackSeconds);
+
+    let cancelled = false;
+    const startTime = Math.floor(Date.now() / 1000) - lookbackSeconds;
+
+    const fetchWithRetry = (attempt: number) => {
+      if (cancelled) return;
+      api
+        .getCandles(server, connector, pair, interval, 5000, startTime)
+        .then((fetched) => {
+          if (!cancelled && fetched?.length) mergeCandles(fetched);
+        })
+        .catch(() => {
+          if (!cancelled && attempt < 2) {
+            setTimeout(() => fetchWithRetry(attempt + 1), 2000 * (attempt + 1));
+          }
+        });
+    };
+    fetchWithRetry(0);
+
+    return () => { cancelled = true; };
+  }, [server, connector, pair, interval, lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Initialize chart ONCE ──
   useEffect(() => {
     let cancelled = false;
     import("lightweight-charts").then((mod) => {
@@ -102,9 +164,7 @@ export function GridChart({
           vertLines: { color: colors.grid },
           horzLines: { color: colors.grid },
         },
-        crosshair: {
-          mode: mod.CrosshairMode.Normal,
-        },
+        crosshair: { mode: mod.CrosshairMode.Normal },
         timeScale: { timeVisible: true, secondsVisible: false },
       });
       chartRef.current = chart;
@@ -120,27 +180,186 @@ export function GridChart({
         }),
       });
       seriesRef.current = series;
+      setChartReady(true);
 
-      // Track crosshair price
+      // Track crosshair price for click-to-set + executor tooltip
       chart.subscribeCrosshairMove((param) => {
         if (!param.point || !param.seriesData) {
           crosshairPriceRef.current = null;
+          if (tooltipRef.current) tooltipRef.current.style.display = "none";
           return;
         }
         const data = param.seriesData.get(series);
         if (data && "close" in data) {
           crosshairPriceRef.current = (data as { close: number }).close;
         } else if (param.point.y !== undefined) {
-          // Use coordinate-to-price conversion
           const price = series.coordinateToPrice(param.point.y);
           if (price !== null) {
             crosshairPriceRef.current = price as number;
           }
         }
+
+        // Executor tooltip
+        const tooltip = tooltipRef.current;
+        if (!tooltip || !containerRef.current) return;
+
+        const crosshairTime = typeof param.time === "number" ? param.time : 0;
+        if (!crosshairTime || !param.point || param.point.x < 0 || param.point.y < 0) {
+          tooltip.style.display = "none";
+          return;
+        }
+
+        const cursorY = param.point.y;
+        let bestOverlay: ExecutorOverlay | null = null;
+        let bestDist = Infinity;
+
+        for (const overlay of overlaysRef.current) {
+          const box = overlay.gridBox;
+          if (box) {
+            const t1 = box.startTime > 1e12 ? Math.floor(box.startTime / 1000) : box.startTime;
+            const t2 = box.endTime > 1e12 ? Math.floor(box.endTime / 1000) : box.endTime;
+            if (crosshairTime < t1 - 60 || crosshairTime > t2 + 60) continue;
+            const topY = series.priceToCoordinate(Math.max(box.startPrice, box.endPrice));
+            const botY = series.priceToCoordinate(Math.min(box.startPrice, box.endPrice));
+            if (topY === null || botY === null) continue;
+            const minY = Math.min(topY, botY);
+            const maxY = Math.max(topY, botY);
+            const dist = cursorY >= minY && cursorY <= maxY ? 0 : Math.min(Math.abs(cursorY - minY), Math.abs(cursorY - maxY));
+            if (dist < bestDist && dist < 30) {
+              bestDist = dist;
+              bestOverlay = overlay;
+            }
+            continue;
+          }
+
+          const seg = overlay.segment;
+          if (!seg) continue;
+          const entryT = seg.entryTime > 1e12 ? Math.floor(seg.entryTime / 1000) : seg.entryTime;
+          const exitT = seg.exitTime > 1e12 ? Math.floor(seg.exitTime / 1000) : seg.exitTime;
+          if (crosshairTime < entryT - 60 || crosshairTime > exitT + 60) continue;
+          const tFrac = exitT === entryT ? 0.5 : (crosshairTime - entryT) / (exitT - entryT);
+          const expectedPrice = seg.entryPrice + tFrac * (seg.exitPrice - seg.entryPrice);
+          const priceY = series.priceToCoordinate(expectedPrice);
+          if (priceY === null) continue;
+          const dist = Math.abs(cursorY - priceY);
+          if (dist < bestDist && dist < 30) {
+            bestDist = dist;
+            bestOverlay = overlay;
+          }
+        }
+
+        if (!bestOverlay) {
+          tooltip.style.display = "none";
+          return;
+        }
+
+        const o = bestOverlay;
+        const pnlClr = pnlHexColor(o.pnl);
+        const _cvtPnl = convertPnlRef.current;
+        const _cvtVal = convertValueRef.current;
+        const pnlStr = _cvtPnl ? _cvtPnl(o.pnl) : (Math.abs(o.pnl) >= 1000 ? `${o.pnl >= 0 ? "+" : ""}$${(o.pnl / 1000).toFixed(1)}K` : `${o.pnl >= 0 ? "+" : ""}$${o.pnl.toFixed(2)}`);
+        const pctStr = o.pnlPct !== 0 ? `${o.pnlPct > 0 ? "+" : ""}${(o.pnlPct * 100).toFixed(2)}%` : "";
+        const volStr = _cvtVal ? _cvtVal(o.volume) : (Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`);
+        const feesStr = o.fees ? (_cvtVal ? _cvtVal(o.fees) : `$${o.fees.toFixed(2)}`) : "";
+
+        const sideClr = sideColor(o.side);
+        const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
+        const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
+          ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
+        const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
+          ? getThemeColors().green : "#9ca3af";
+
+        // Build config detail rows
+        const cfg = o.config || {};
+        const tripleBarrier: Record<string, unknown> = (() => {
+          const raw = cfg.triple_barrier_config;
+          if (!raw) return {};
+          if (typeof raw === "string") { try { return JSON.parse(raw); } catch { return {}; } }
+          return typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+        })();
+
+        let detailRows = "";
+        const fmtPrice = (p: number) => {
+          if (p === 0) return "—";
+          if (Math.abs(p) >= 1000) return p.toFixed(2);
+          if (Math.abs(p) >= 1) return p.toFixed(4);
+          return p.toPrecision(6);
+        };
+        const fmtUsd = (v: number) => {
+          if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
+          if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
+          return "$" + v.toFixed(2);
+        };
+
+        const addRow = (label: string, value: string, color?: string) => {
+          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${value}</span></div>`;
+        };
+
+        // Grid-specific details
+        if (o.type === "grid" && o.gridBox) {
+          addRow("Start Price", fmtPrice(o.gridBox.startPrice));
+          addRow("End Price", fmtPrice(o.gridBox.endPrice));
+          if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
+        } else if (o.entryPrice && o.entryPrice > 0) {
+          addRow("Entry", fmtPrice(o.entryPrice));
+          if (o.exitPrice && o.exitPrice > 0 && o.exitPrice !== o.entryPrice) {
+            addRow(o.status?.toLowerCase() === "running" ? "Current" : "Close", fmtPrice(o.exitPrice));
+          }
+        }
+
+        if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
+        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : fmtUsd(Number(cfg.total_amount_quote)));
+        else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
+
+        const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
+        if (tp > 0 && tp !== -1) addRow("Take Profit", `${(tp * 100).toFixed(2)}%`, getThemeColors().green);
+        const sl = Number(cfg.stop_loss);
+        if (sl > 0 && sl !== -1) addRow("Stop Loss", `${(sl * 100).toFixed(2)}%`, getThemeColors().red);
+        if (cfg.keep_position != null) addRow("Keep Position", String(cfg.keep_position) === "true" ? "Yes" : "No");
+
+        tooltip.innerHTML = `
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="font-weight:700;font-size:12px;font-family:monospace">${o.executorId.slice(0, 10)}\u2026</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${o.side}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${o.status}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
+            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${o.type.toUpperCase()}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${o.closeType}</span>` : ""}
+          </div>
+          <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">PnL %</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pctStr || "—"}</div></div>
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Volume</div><div style="font-family:monospace;font-size:11px">${volStr}</div></div>
+            <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Fees</div><div style="font-family:monospace;font-size:11px">${feesStr || "—"}</div></div>
+          </div>
+          ${detailRows ? `<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:6px;font-size:11px;display:flex;flex-direction:column;gap:3px">${detailRows}</div>` : ""}
+        `;
+        tooltip.style.display = "block";
+
+        // Position tooltip using viewport-fixed coords (rendered via portal)
+        const containerRect = containerRef.current.getBoundingClientRect();
+        const tooltipW = 280;
+        const tooltipH = tooltip.offsetHeight || 200;
+        const cursorInRightHalf = param.point.x > containerRect.width / 2;
+        let left = cursorInRightHalf
+          ? containerRect.left + param.point.x - tooltipW - 16
+          : containerRect.left + param.point.x + 16;
+        if (left < 4) left = 4;
+        if (left + tooltipW > window.innerWidth - 4) left = window.innerWidth - tooltipW - 4;
+        let top = containerRect.top + param.point.y - 10;
+        if (top + tooltipH > window.innerHeight - 4) {
+          top = window.innerHeight - tooltipH - 4;
+        }
+        if (top < 4) top = 4;
+
+        tooltip.style.left = `${left}px`;
+        tooltip.style.top = `${top}px`;
       });
     });
     return () => {
       cancelled = true;
+      setChartReady(false);
       if (chartRef.current) {
         chartRef.current.remove();
         chartRef.current = null;
@@ -150,83 +369,79 @@ export function GridChart({
         limitLineRef.current = null;
         gridLinesRef.current = [];
         extraLinesRef.current = [];
+        overlayPriceLinesRef.current = [];
+        positionLinesRef.current = [];
       }
     };
   }, []);
 
-  // Handle WebSocket candle data (both bulk history and live updates)
+  // ── Re-apply chart colors on theme change ──
   useEffect(() => {
-    const currentWs = wsRef.current;
-    if (!currentWs) return;
-
-    const removeHandler = currentWs.onMessage((msgChannel: string, data: unknown) => {
-      if (msgChannel !== channel || !seriesRef.current) return;
-
-      const payload = data as {
-        type: string;
-        candle?: CandleData;
-        data?: CandleData[];
-      };
-
-      if (payload.type === "candle_update" && payload.candle) {
-        const c = payload.candle;
-        const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-        seriesRef.current.update({
-          time: ts as import("lightweight-charts").UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        });
-      } else if (payload.type === "candles" && payload.data?.length) {
-        // Bulk candle data (pre-fetch broadcast or batch update)
-        const mapped = payload.data.map((c) => {
-          const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-          return {
-            time: ts as import("lightweight-charts").UTCTimestamp,
-            open: c.open,
-            high: c.high,
-            low: c.low,
-            close: c.close,
-          };
-        });
-        // Always use update() for WS messages to avoid replacing REST data
-        for (const bar of mapped) {
-          seriesRef.current.update(bar);
-        }
-      }
+    if (!chartRef.current || !chartModuleRef.current) return;
+    const chart = chartRef.current;
+    const mod = chartModuleRef.current;
+    const observer = new MutationObserver(() => {
+      const colors = getChartColors();
+      chart.applyOptions({
+        layout: {
+          background: { type: mod.ColorType.Solid, color: colors.bg },
+          textColor: colors.text,
+        },
+        grid: {
+          vertLines: { color: colors.grid },
+          horzLines: { color: colors.grid },
+        },
+      });
     });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, [chartReady]);
 
-    return removeHandler;
-  }, [channel, wsVersion]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Set initial candle data from REST query
+  // ── Push candle data to chart ──
   useEffect(() => {
-    if (!seriesRef.current || !candles?.length || !chartModuleRef.current) return;
+    if (!chartReady || !seriesRef.current || !candles.length) return;
 
-    const mapped = candles.map((c) => {
-      const ts = c.timestamp > 1e12 ? c.timestamp / 1000 : c.timestamp;
-      return {
-        time: ts as import("lightweight-charts").UTCTimestamp,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-      };
-    });
+    const mapped = candles.map((c) => ({
+      time: c.timestamp as import("lightweight-charts").UTCTimestamp,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    }));
     seriesRef.current.setData(mapped);
+
     if (!initializedRef.current) {
       chartRef.current?.timeScale().fitContent();
       initializedRef.current = true;
     }
-  }, [candles]);
+  }, [candles, chartReady]);
 
-  // Reset on pair/interval change
+  // ── Real-time last candle update via candle store listener ──
+  useEffect(() => {
+    if (!chartReady || !seriesRef.current) return;
+    const key = `candles:${server}:${connector}:${pair}:${interval}`;
+
+    const removeListener = candleStore.onUpdate(key, (updated) => {
+      if (!seriesRef.current || !updated.length) return;
+      const last = updated[updated.length - 1];
+      seriesRef.current.update({
+        time: last.timestamp as import("lightweight-charts").UTCTimestamp,
+        open: last.open,
+        high: last.high,
+        low: last.low,
+        close: last.close,
+      });
+    });
+
+    return removeListener;
+  }, [chartReady, server, connector, pair, interval]);
+
+  // ── Reset auto-fit on pair/interval/range change ──
   useEffect(() => {
     initializedRef.current = false;
-  }, [pair, interval]);
+  }, [pair, interval, lookbackSeconds]);
 
-  // Update price precision when it changes
+  // ── Update price precision ──
   useEffect(() => {
     if (!seriesRef.current || pricePrecision == null) return;
     seriesRef.current.applyOptions({
@@ -234,7 +449,7 @@ export function GridChart({
     });
   }, [pricePrecision]);
 
-  // Update price lines
+  // ── Price lines (start/end/limit/grid levels/extras) ──
   useEffect(() => {
     const series = seriesRef.current;
     const mod = chartModuleRef.current;
@@ -249,11 +464,10 @@ export function GridChart({
     }
     gridLinesRef.current = [];
 
-    // Start price line
     if (startPrice > 0) {
       startLineRef.current = series.createPriceLine({
         price: startPrice,
-        color: activePickField === "start" ? "#22c55e" : "#16a34a",
+        color: getThemeColors().green,
         lineWidth: 2,
         lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
@@ -261,11 +475,10 @@ export function GridChart({
       });
     }
 
-    // End price line
     if (endPrice > 0) {
       endLineRef.current = series.createPriceLine({
         price: endPrice,
-        color: activePickField === "end" ? "#22c55e" : "#16a34a",
+        color: getThemeColors().green,
         lineWidth: 2,
         lineStyle: mod.LineStyle.Dashed,
         axisLabelVisible: true,
@@ -273,9 +486,8 @@ export function GridChart({
       });
     }
 
-    // Limit price line
     if (limitPrice > 0) {
-      const limitColor = side === 1 ? "#ef4444" : "#f97316";
+      const limitColor = side === 1 ? getThemeColors().red : "#f97316";
       limitLineRef.current = series.createPriceLine({
         price: limitPrice,
         color: activePickField === "limit" ? "#fbbf24" : limitColor,
@@ -292,32 +504,30 @@ export function GridChart({
     }
     extraLinesRef.current = [];
 
-    // Grid level preview lines
-    if (startPrice > 0 && endPrice > 0 && minSpread > 0 && startPrice < endPrice) {
-      const range = endPrice - startPrice;
-      const stepSize = startPrice * minSpread;
-      if (stepSize > 0) {
-        const numLevels = Math.floor(range / stepSize);
-        // Only draw grid lines if there's a reasonable number (2-200)
-        // Skip if too many (would clutter) or too few
-        if (numLevels >= 2 && numLevels <= 200) {
-          const maxDraw = Math.min(numLevels, 50);
-          // If more levels than we can draw, sample evenly
-          const drawStep = numLevels > maxDraw ? numLevels / maxDraw : 1;
-          for (let idx = 0; idx < maxDraw; idx++) {
-            const i = Math.round((idx + 1) * drawStep);
-            const levelPrice = startPrice + stepSize * i;
-            if (levelPrice >= endPrice) break;
-            const gl = series.createPriceLine({
-              price: levelPrice,
-              color: "rgba(34, 197, 94, 0.15)",
-              lineWidth: 1,
-              lineStyle: mod.LineStyle.Dotted,
-              axisLabelVisible: false,
-              title: "",
-            });
-            gridLinesRef.current.push(gl);
-          }
+    // Grid level preview lines (mirrors _generate_grid_levels logic)
+    if (startPrice > 0 && endPrice > 0 && startPrice < endPrice) {
+      const range = (endPrice - startPrice) / startPrice;
+      const levelsBySpread = minSpread > 0 ? Math.floor(range / minSpread) : Infinity;
+      const levelsByAmount = (totalAmountQuote && minOrderAmountQuote && minOrderAmountQuote > 0)
+        ? Math.floor(totalAmountQuote / minOrderAmountQuote)
+        : Infinity;
+      const numLevels = Math.max(1, Math.min(levelsBySpread, levelsByAmount));
+      if (numLevels >= 2 && numLevels <= 200) {
+        const maxDraw = Math.min(numLevels, 50);
+        const drawStep = numLevels > maxDraw ? numLevels / maxDraw : 1;
+        for (let idx = 0; idx < maxDraw; idx++) {
+          const i = Math.round(idx * drawStep);
+          const levelPrice = startPrice + (endPrice - startPrice) * (i / (numLevels - 1));
+          if (levelPrice <= startPrice || levelPrice >= endPrice) continue;
+          const gl = series.createPriceLine({
+            price: levelPrice,
+            color: "rgba(34, 197, 94, 0.15)",
+            lineWidth: 1,
+            lineStyle: mod.LineStyle.Dotted,
+            axisLabelVisible: false,
+            title: "",
+          });
+          gridLinesRef.current.push(gl);
         }
       }
     }
@@ -342,31 +552,52 @@ export function GridChart({
         extraLinesRef.current.push(pl);
       }
     }
-  }, [startPrice, endPrice, limitPrice, side, minSpread, activePickField, extraLines]);
+  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines]);
 
-  // Render executor overlays as line series
+  // ── Executor overlays ──
   useEffect(() => {
     const chart = chartRef.current;
+    const series = seriesRef.current;
     const mod = chartModuleRef.current;
     if (!chart || !mod) return;
 
-    // Clean up old overlay series
     for (const s of overlaySeriesRef.current) {
       try { chart.removeSeries(s); } catch { /* ok */ }
     }
     overlaySeriesRef.current = [];
 
-    if (!executorOverlays?.length) return;
+    if (series) {
+      for (const pl of overlayPriceLinesRef.current) {
+        try { series.removePriceLine(pl); } catch { /* ok */ }
+      }
+    }
+    overlayPriceLinesRef.current = [];
 
-    const isMulti = executorOverlays.length > 1;
+    if (!filteredOverlays?.length) return;
 
-    executorOverlays.forEach((overlay, idx) => {
-      const color = isMulti ? getExecutorColor(idx, overlay.pnl) : undefined;
+    const hasSelection = !!selectedExecutorId;
+    const isMulti = filteredOverlays.length > 1;
 
-      // Grid executor → draw a box
+    filteredOverlays.forEach((overlay, idx) => {
+      const isSelectedOverlay = hasSelection && overlay.executorId === selectedExecutorId;
+      const isDimmed = hasSelection && !isSelectedOverlay;
+      // When selected: use bright color and thicker lines; when dimmed: reduce opacity
+      const baseColor = isMulti ? getExecutorColor(idx, overlay.pnl) : undefined;
+      const dimAlpha = 0.2;
+
+      function applyDim(c: string): string {
+        if (!isDimmed) return c;
+        // Add alpha to hex colors
+        if (c.startsWith("#") && c.length === 7) return c + "33";
+        if (c.startsWith("#") && c.length === 4) return c + "3";
+        if (c.startsWith("rgba")) return c.replace(/[\d.]+\)$/, `${dimAlpha})`);
+        return c;
+      }
+
       const box = overlay.gridBox;
       if (box) {
-        const boxColor = color ?? box.color;
+        const boxColor = applyDim(baseColor ?? box.color);
+        const lineW = (isSelectedOverlay ? 3 : 2) as import("lightweight-charts").LineWidth;
         const t1 = box.startTime > 1e12 ? Math.floor(box.startTime / 1000) : box.startTime;
         const t2 = box.endTime > 1e12 ? Math.floor(box.endTime / 1000) : box.endTime;
         type TS = import("lightweight-charts").UTCTimestamp;
@@ -374,7 +605,7 @@ export function GridChart({
         const span = t2 - t1;
         if (span < 4) {
           const seg = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 2,
+            color: boxColor, lineWidth: lineW,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           seg.setData([
@@ -386,9 +617,8 @@ export function GridChart({
         }
 
         try {
-          // Top edge
           const top = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 2,
+            color: boxColor, lineWidth: lineW,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           top.setData([
@@ -397,9 +627,8 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(top);
 
-          // Bottom edge — dashed
           const bottom = chart.addSeries(mod.LineSeries, {
-            color: boxColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
+            color: boxColor, lineWidth: lineW, lineStyle: mod.LineStyle.Dashed,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
           });
           bottom.setData([
@@ -408,7 +637,6 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(bottom);
 
-          // Left edge
           const left = chart.addSeries(mod.LineSeries, {
             color: boxColor, lineWidth: 1,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -419,7 +647,6 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(left);
 
-          // Right edge
           const right = chart.addSeries(mod.LineSeries, {
             color: boxColor, lineWidth: 1,
             priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -430,10 +657,9 @@ export function GridChart({
           ]);
           overlaySeriesRef.current.push(right);
 
-          // Limit price line
           if (box.limitPrice) {
             const limit = chart.addSeries(mod.LineSeries, {
-              color: "#ef4444", lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
+              color: applyDim(getThemeColors().red), lineWidth: 1, lineStyle: mod.LineStyle.Dotted,
               priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
             });
             limit.setData([
@@ -446,16 +672,19 @@ export function GridChart({
         return;
       }
 
-      // Position/generic executor → dashed segment line
       const seg = overlay.segment;
       if (!seg) return;
 
-      const segColor = color ?? seg.color;
+      const segColor = applyDim(baseColor ?? seg.color);
       const entryT = seg.entryTime > 1e12 ? Math.floor(seg.entryTime / 1000) : seg.entryTime;
       const exitT = seg.exitTime > 1e12 ? Math.floor(seg.exitTime / 1000) : seg.exitTime;
 
+      const isOrderActive = overlay.type === "order" && (overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active");
+      const lineStyle = isOrderActive ? mod.LineStyle.Solid : mod.LineStyle.Dashed;
+      const lineW = (isSelectedOverlay ? 3 : 2) as import("lightweight-charts").LineWidth;
+
       const lineSeries = chart.addSeries(mod.LineSeries, {
-        color: segColor, lineWidth: 2, lineStyle: mod.LineStyle.Dashed,
+        color: segColor, lineWidth: lineW, lineStyle,
         priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
       });
       lineSeries.setData([
@@ -464,34 +693,157 @@ export function GridChart({
       ]);
       overlaySeriesRef.current.push(lineSeries);
     });
-  }, [executorOverlays]);
 
-  // Handle click-to-set price
+    // Full-width price lines for active or selected executor
+    if (series && filteredOverlays?.length) {
+      const styleMap: Record<string, number> = {
+        solid: mod.LineStyle.Solid,
+        dashed: mod.LineStyle.Dashed,
+        dotted: mod.LineStyle.Dotted,
+      };
+      for (const overlay of filteredOverlays) {
+        const isRunning = overlay.status?.toLowerCase() === "running" || overlay.status?.toLowerCase() === "active";
+        const isSelectedOverlay = overlay.executorId === selectedExecutorId;
+        // Show price lines for active executors, and always for the selected one
+        if (!isRunning && !isSelectedOverlay) continue;
+        for (const pl of overlay.priceLines) {
+          if (pl.price <= 0) continue;
+          const priceLine = series.createPriceLine({
+            price: pl.price,
+            color: pl.color,
+            lineWidth: (pl.lineWidth ?? 1) as import("lightweight-charts").LineWidth,
+            lineStyle: styleMap[pl.style] ?? mod.LineStyle.Solid,
+            axisLabelVisible: true,
+            title: pl.label,
+          });
+          overlayPriceLinesRef.current.push(priceLine);
+        }
+      }
+    }
+  }, [filteredOverlays, selectedExecutorId]);
+
+  // ── Zoom to selected executor (one-time action) ──
+  useEffect(() => {
+    if (!selectedExecutorId || !chartRef.current || !filteredOverlays?.length) return;
+    // Only zoom once per selection — don't re-zoom on overlay data refresh
+    if (lastZoomedIdRef.current === selectedExecutorId) return;
+    const overlay = filteredOverlays.find((o) => o.executorId === selectedExecutorId);
+    if (!overlay) return;
+
+    lastZoomedIdRef.current = selectedExecutorId;
+
+    const toSec = (ts: number) => (ts > 1e12 ? Math.floor(ts / 1000) : ts);
+    const start = toSec(overlay.timeRange.start);
+    const end = toSec(overlay.timeRange.end);
+    const padding = Math.max((end - start) * 0.3, 300);
+
+    chartRef.current.timeScale().setVisibleRange({
+      from: (start - padding) as import("lightweight-charts").UTCTimestamp,
+      to: (end + padding) as import("lightweight-charts").UTCTimestamp,
+    });
+  }, [selectedExecutorId, filteredOverlays]);
+
+  // Reset zoom tracking when executor is deselected
+  useEffect(() => {
+    if (!selectedExecutorId) lastZoomedIdRef.current = null;
+  }, [selectedExecutorId]);
+
+  // Keep overlaysRef in sync for tooltip
+  useEffect(() => {
+    overlaysRef.current = filteredOverlays ?? [];
+  }, [filteredOverlays]);
+
+  // ── Position hold lines ──
+  useEffect(() => {
+    const series = seriesRef.current;
+    const mod = chartModuleRef.current;
+    if (!series || !mod) return;
+
+    for (const pl of positionLinesRef.current) {
+      try { series.removePriceLine(pl); } catch { /* ok */ }
+    }
+    positionLinesRef.current = [];
+
+    if (!positions?.length) return;
+
+    for (const pos of positions) {
+      if (pos.entry_price <= 0) continue;
+      const isLong = pos.position_side?.toUpperCase() === "LONG";
+      const pnl = pos.unrealized_pnl ?? 0;
+      const _cvtPnl2 = convertPnlRef.current;
+      const pnlStr = _cvtPnl2 ? _cvtPnl2(pnl) : (Math.abs(pnl) >= 1000 ? `${pnl >= 0 ? "+" : ""}$${(pnl / 1000).toFixed(1)}K` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
+      const amt = Math.abs(pos.amount);
+      const color = pnlHexColor(pnl);
+      const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
+      const pl = series.createPriceLine({
+        price: pos.entry_price,
+        color,
+        lineWidth: 1,
+        lineStyle: mod.LineStyle.Solid,
+        axisLabelVisible: true,
+        title: label,
+      });
+      positionLinesRef.current.push(pl);
+    }
+  }, [positions]);
+
+  // ── Click-to-set price / deselect executor ──
   const handleClick = () => {
-    if (!activePickField || crosshairPriceRef.current === null) return;
-    onPriceSet(activePickField, crosshairPriceRef.current);
+    if (activePickField && crosshairPriceRef.current !== null) {
+      onPriceSet(activePickField, crosshairPriceRef.current);
+      return;
+    }
+    // Click on chart background deselects executor
+    if (selectedExecutorId && onExecutorDeselect) {
+      onExecutorDeselect();
+    }
   };
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
-        <p className="text-[10px] text-[var(--color-text-muted)]">
-          {activePickField
-            ? `Click on chart to set ${activePickField} price`
-            : "Grid executor chart"}
-        </p>
-        {activePickField && (
+      {activePickField && (
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
+          <p className="text-[10px] text-[var(--color-text-muted)]">
+            Click on chart to set {activePickField} price
+          </p>
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
             Pick mode: {activePickField}
           </span>
+        </div>
+      )}
+      <div className="relative flex-1">
+        <div
+          ref={containerRef}
+          className="absolute inset-0"
+          style={{ cursor: activePickField ? "crosshair" : "default" }}
+          onClick={handleClick}
+        />
+        {/* Executor tooltip overlay — rendered via portal to escape overflow-hidden */}
+        {createPortal(
+          <div
+            ref={tooltipRef}
+            style={{
+              display: "none",
+              position: "fixed",
+              top: 0,
+              left: 0,
+              zIndex: 9999,
+              pointerEvents: "none",
+              background: "var(--color-surface)",
+              border: "1px solid var(--color-border)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              fontSize: 11,
+              color: "var(--color-text)",
+              width: 280,
+              lineHeight: 1.4,
+              backdropFilter: "blur(12px)",
+              boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+            }}
+          />,
+          document.body,
         )}
       </div>
-      <div
-        ref={containerRef}
-        className="flex-1"
-        style={{ cursor: activePickField ? "crosshair" : "default" }}
-        onClick={handleClick}
-      />
     </div>
   );
 }

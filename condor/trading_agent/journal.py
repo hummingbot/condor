@@ -80,10 +80,18 @@ No ticks yet.
 LEARNINGS_TEMPLATE = """\
 # Learnings
 
-## Active Insights
+## Market Observations
+
+## Execution Notes
 
 ## Retired Insights
 """
+
+LEARNING_CATEGORIES = {
+    "market": "Market Observations",
+    "execution": "Execution Notes",
+}
+DEFAULT_LEARNING_CATEGORY = "market"
 
 SNAPSHOT_TEMPLATE = """\
 # Snapshot #{tick} — {timestamp}
@@ -103,11 +111,9 @@ SNAPSHOT_TEMPLATE = """\
 ## Agent Response
 {response_text}
 
-<details><summary>Tool Calls ({tool_count})</summary>
+## Tool Calls ({tool_count})
 
 {tool_calls}
-
-</details>
 
 ## Stats
 Duration: {duration:.1f}s
@@ -176,11 +182,9 @@ Model: {agent_key}
 ## Agent Response
 {response_text}
 
-<details><summary>Tool Calls ({tool_count})</summary>
+## Tool Calls ({tool_count})
 
 {tool_calls}
-
-</details>
 
 ## Stats
 Duration: {duration:.1f}s
@@ -225,7 +229,7 @@ def save_experiment_snapshot(
             input_str = json.dumps(tc["input"], indent=2) if isinstance(tc["input"], dict) else str(tc["input"])
             tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
         if tc.get("output"):
-            output_str = str(tc["output"])[:500]
+            output_str = str(tc["output"])[:2000]
             tool_parts.append(f"**Output:**\n```\n{output_str}\n```")
         tool_parts.append("")
 
@@ -309,51 +313,73 @@ class JournalManager:
         return None
 
     def read_learnings(self) -> str:
-        """Return the learnings content (cross-session)."""
+        """Return the learnings content (cross-session), grouped by category."""
         path = self._learnings_path()
         if path and path.exists():
             text = path.read_text()
-            # Extract Active Insights section
+            parts = []
+            # Read each category section
+            for cat_key, cat_header in LEARNING_CATEGORIES.items():
+                m = re.search(rf"^## {re.escape(cat_header)}\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+                if m and m.group(1).strip():
+                    parts.append(f"**{cat_header}:**\n{m.group(1).strip()}")
+            if parts:
+                return "\n\n".join(parts)
+            # Legacy fallback: try Active Insights
             m = re.search(r"^## Active Insights\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
             if m:
                 return m.group(1).strip()
-            # Fallback: return everything after the header
             lines = text.strip().splitlines()
             content = [l for l in lines if not l.startswith("# ")]
             return "\n".join(content).strip()
         # Fallback: read from journal Learnings section (legacy)
         return self._get_section("Learnings")
 
-    def append_learning(self, text_content: str) -> None:
-        """Add a learning, deduplicating against existing ones."""
+    def append_learning(self, text_content: str, category: str = "") -> None:
+        """Add a learning under a category, deduplicating against existing ones.
+
+        Args:
+            text_content: The learning text.
+            category: "market" or "execution". Defaults to "market".
+        """
         path = self._learnings_path()
         if not path:
-            # Fallback to journal section
             self._append_learning_to_journal(text_content)
             return
 
         if not path.exists():
             path.write_text(LEARNINGS_TEMPLATE)
 
+        # Resolve category to section header
+        cat = category if category in LEARNING_CATEGORIES else DEFAULT_LEARNING_CATEGORY
+        section_header = LEARNING_CATEGORIES[cat]
+
         full_text = path.read_text()
 
-        # Extract existing learnings from Active Insights
-        m = re.search(r"(^## Active Insights\n)(.*?)(?=^## |\Z)", full_text, re.MULTILINE | re.DOTALL)
+        # Extract existing learnings from the target section
+        pattern = rf"(^## {re.escape(section_header)}\n)(.*?)(?=^## |\Z)"
+        m = re.search(pattern, full_text, re.MULTILINE | re.DOTALL)
         if m:
-            section_header = m.group(1)
             section_content = m.group(2).strip()
             existing_lines = [l for l in section_content.splitlines() if l.startswith("- ")]
         else:
             existing_lines = []
 
-        # Deduplicate
+        # Deduplicate against ALL category sections (not just the target)
         normalized_new = _normalize(text_content)
-        for line in existing_lines:
-            existing_text = re.sub(r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?", "", line)
-            if _normalize(existing_text) == normalized_new:
-                return
-            if _word_overlap(normalized_new, _normalize(existing_text)) > 0.5:
-                return
+        for cat_header in LEARNING_CATEGORIES.values():
+            cat_pattern = rf"^## {re.escape(cat_header)}\n(.*?)(?=^## |\Z)"
+            cm = re.search(cat_pattern, full_text, re.MULTILINE | re.DOTALL)
+            if not cm:
+                continue
+            for line in cm.group(1).strip().splitlines():
+                if not line.startswith("- "):
+                    continue
+                existing_text = re.sub(r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?", "", line)
+                if _normalize(existing_text) == normalized_new:
+                    return
+                if _word_overlap(normalized_new, _normalize(existing_text)) > 0.5:
+                    return
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         existing_lines.append(f"- [{now}] {text_content}")
@@ -365,7 +391,7 @@ class JournalManager:
         if m:
             new_text = full_text[:m.start(2)] + new_section + "\n\n" + full_text[m.end(2):]
         else:
-            new_text = full_text.rstrip() + f"\n\n## Active Insights\n{new_section}\n"
+            new_text = full_text.rstrip() + f"\n\n## {section_header}\n{new_section}\n"
         path.write_text(new_text)
 
     def _append_learning_to_journal(self, text_content: str) -> None:
@@ -481,7 +507,7 @@ class JournalManager:
                 input_str = json.dumps(tc["input"], indent=2) if isinstance(tc["input"], dict) else str(tc["input"])
                 tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
             if tc.get("output"):
-                output_str = str(tc["output"])[:500]
+                output_str = str(tc["output"])[:2000]
                 tool_parts.append(f"**Output:**\n```\n{output_str}\n```")
             tool_parts.append("")
 

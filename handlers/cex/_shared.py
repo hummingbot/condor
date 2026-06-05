@@ -82,27 +82,7 @@ def invalidates(*groups: str):
 # ============================================
 
 
-def is_cex_connector(connector_name: str) -> bool:
-    """Check if a connector is a CEX (not DEX/on-chain).
-
-    Args:
-        connector_name: Name of the connector
-
-    Returns:
-        True if it's a CEX connector
-    """
-    connector_lower = connector_name.lower()
-    # Filter out on-chain/DEX connectors
-    dex_prefixes = [
-        "solana",
-        "ethereum",
-        "polygon",
-        "arbitrum",
-        "base",
-        "optimism",
-        "avalanche",
-    ]
-    return not any(connector_lower.startswith(prefix) for prefix in dex_prefixes)
+from condor.fetchers.connectors import is_cex_connector  # noqa: F811 — canonical source
 
 
 def get_cex_connectors(connectors: Dict[str, Any]) -> List[str]:
@@ -122,58 +102,7 @@ def get_cex_connectors(connectors: Dict[str, Any]) -> List[str]:
 # ============================================
 
 
-async def fetch_cex_balances(
-    client, account_name: str, refresh: bool = False
-) -> Dict[str, List[Dict[str, Any]]]:
-    """Fetch balances for all CEX connectors.
-
-    Args:
-        client: API client
-        account_name: Account name to fetch balances for
-        refresh: If True, force fresh fetch from exchange (slow). Default False uses cached data.
-
-    Returns:
-        Dict of connector_name -> list of balances
-    """
-    try:
-        # Get connectors with credentials configured for this account
-        configured_connectors = await client.accounts.list_account_credentials(
-            account_name
-        )
-
-        # Filter to CEX only (list_account_credentials returns List[str])
-        cex_connectors = [c for c in configured_connectors if is_cex_connector(c)]
-
-        if not cex_connectors:
-            logger.warning("No CEX connectors found")
-            return {}
-
-        # Fetch balances using portfolio.get_state
-        try:
-            portfolio_state = await client.portfolio.get_state(
-                account_names=[account_name],
-                connector_names=cex_connectors,
-                refresh=refresh,
-            )
-
-            # portfolio.get_state returns {account_name: {connector_name: [balances]}}
-            account_data = portfolio_state.get(account_name, {})
-
-            # Filter to only connectors with non-empty balances
-            balances = {}
-            for connector_name, balance_list in account_data.items():
-                if balance_list:
-                    balances[connector_name] = balance_list
-
-            return balances
-
-        except Exception as e:
-            logger.warning(f"Failed to fetch portfolio state: {e}")
-            return {}
-
-    except Exception as e:
-        logger.error(f"Error fetching CEX balances: {e}", exc_info=True)
-        return {}
+from condor.fetchers.portfolio import fetch_cex_balances  # noqa: F811 — canonical source
 
 
 async def get_cex_balances(
@@ -206,31 +135,7 @@ async def get_cex_balances(
 # ============================================
 
 
-async def fetch_positions(client, connector_name: str = None) -> List[Dict[str, Any]]:
-    """Fetch positions, optionally filtered by connector.
-
-    Args:
-        client: API client
-        connector_name: Optional connector name to filter by
-
-    Returns:
-        List of position dictionaries
-    """
-    try:
-        result = await client.trading.get_positions(limit=100)
-        positions = result.get("data", [])
-
-        # Filter by connector if specified
-        if connector_name and positions:
-            positions = [
-                p for p in positions if p.get("connector_name") == connector_name
-            ]
-
-        return positions
-
-    except Exception as e:
-        logger.error(f"Error fetching positions: {e}", exc_info=True)
-        return []
+from condor.fetchers.positions import fetch_positions  # noqa: F811 — canonical source
 
 
 async def get_positions(
@@ -258,26 +163,7 @@ async def get_positions(
 # ============================================
 
 
-async def fetch_trading_rules(client, connector_name: str) -> Dict[str, Dict[str, Any]]:
-    """Fetch trading rules for a connector.
-
-    Args:
-        client: API client
-        connector_name: Name of the connector
-
-    Returns:
-        Dict of trading_pair -> rules
-    """
-    try:
-        result = await client.connectors.get_trading_rules(
-            connector_name=connector_name
-        )
-        return result if result else {}
-    except Exception as e:
-        logger.error(
-            f"Error fetching trading rules for {connector_name}: {e}", exc_info=True
-        )
-        return {}
+from condor.fetchers.trading_rules import fetch_trading_rules  # noqa: F811 — canonical source
 
 
 async def get_trading_rules(
@@ -424,28 +310,7 @@ def format_trading_rules_info(
 # ============================================
 
 
-async def fetch_available_cex_connectors(
-    client, account_name: str = "master_account"
-) -> List[str]:
-    """Fetch list of available CEX connectors with credentials configured.
-
-    Args:
-        client: API client
-        account_name: Account name to check credentials for
-
-    Returns:
-        List of available CEX connector names
-    """
-    try:
-        # Get connectors with credentials configured for this account
-        configured_connectors = await client.accounts.list_account_credentials(
-            account_name
-        )
-        # Filter to CEX only
-        return [c for c in configured_connectors if is_cex_connector(c)]
-    except Exception as e:
-        logger.error(f"Error fetching connectors: {e}", exc_info=True)
-        return []
+from condor.fetchers.connectors import fetch_available_cex_connectors  # noqa: F811 — canonical source
 
 
 async def get_available_cex_connectors(

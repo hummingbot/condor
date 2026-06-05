@@ -51,7 +51,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     model_lower = model_name.lower()
 
     # Cloud providers always get full access (they're powerful enough)
-    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:"]):
+    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
 
@@ -92,12 +92,13 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Model prefix → pydantic-ai model string mapping
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
-PYDANTIC_AI_PREFIXES = frozenset({"ollama", "openai", "groq", "anthropic", "google", "lmstudio"})
+PYDANTIC_AI_PREFIXES = frozenset({"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"})
 
-# Default base URLs for local model providers
+# Default base URLs for local model providers and OpenRouter
 DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
 }
 
 
@@ -120,6 +121,7 @@ class PydanticAIClient:
       - "openai:my-model"  → with base_url, uses any OpenAI-compatible API (LM Studio, vLLM, etc.)
       - "groq:llama-3.3-70b-versatile" → uses Groq cloud
       - "anthropic:claude-sonnet-4-6" → uses Anthropic API
+      - "openrouter:anthropic/claude-sonnet-4-5" → uses OpenRouter (requires OPENROUTER_API_KEY)
     """
 
     def __init__(
@@ -140,6 +142,7 @@ class PydanticAIClient:
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
         self._exit_stack: AsyncExitStack | None = None
+        self._mcp_ctx: Any = None
         self._agent: Any = None
 
     def _build_model(self) -> Any:
@@ -150,16 +153,39 @@ class PydanticAIClient:
         environment variables like OLLAMA_BASE_URL.
 
         Resolution:
-          - ollama:model    → OpenAI-compat at localhost:11434/v1 (or custom base_url)
-          - lmstudio:model  → OpenAI-compat at localhost:1234/v1 (or custom base_url)
-          - openai:model    → OpenAI API (or custom base_url for vLLM, etc.)
-          - groq/anthropic  → standard pydantic-ai resolution
+          - ollama:model     → OpenAI-compat at localhost:11434/v1 (or custom base_url)
+          - lmstudio:model   → OpenAI-compat at localhost:1234/v1 (or custom base_url)
+          - openrouter:model → OpenAI-compat at https://openrouter.ai/api/v1,
+                               requires OPENROUTER_API_KEY; model id must be
+                               explicit (e.g. "openrouter:anthropic/claude-sonnet-4-5").
+          - openai:model     → OpenAI API (or custom base_url for vLLM, etc.)
+          - groq/anthropic   → standard pydantic-ai resolution
         """
         from pydantic_ai.models.openai import OpenAIModel
         from pydantic_ai.providers.openai import OpenAIProvider
 
         prefix, _, model_id = self.model_name.partition(":")
         base_url = self.base_url
+
+        # OpenRouter: OpenAI-compatible cloud gateway, requires API key.
+        # Handled before the generic DEFAULT_BASE_URLS branch because that branch
+        # uses api_key="not-needed", which OpenRouter rejects.
+        if prefix == "openrouter":
+            if not model_id:
+                raise RuntimeError(
+                    "OpenRouter requires an explicit model id, e.g. "
+                    "'openrouter:openai/gpt-4o' or 'openrouter:anthropic/claude-sonnet-4-5'."
+                )
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "OPENROUTER_API_KEY is not set. Add it to your .env to use openrouter:* models."
+                )
+            provider = OpenAIProvider(
+                base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
+                api_key=api_key,
+            )
+            return OpenAIModel(model_id, provider=provider)
 
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
@@ -255,7 +281,11 @@ class PydanticAIClient:
         return None
 
     async def start(self) -> None:
-        """Initialize MCP servers and create the pydantic-ai agent."""
+        """Initialize MCP servers and create the pydantic-ai agent.
+
+        MCP servers are entered into the exit stack here so they are properly
+        cleaned up when stop() is called, even if prompt_stream() errors out.
+        """
         from pydantic_ai import Agent
         from pydantic_ai.mcp import MCPServerStdio
 
@@ -263,10 +293,6 @@ class PydanticAIClient:
 
         # Build MCP server instances from configs
         # Each config has: name, command, args, env
-        # Don't use deferred loading - it adds unnecessary complexity:
-        # - Cloud models can handle all tools easily
-        # - Local models struggle with the search_tools workflow
-        # Just show all tools upfront for best results
         toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
@@ -284,7 +310,6 @@ class PydanticAIClient:
                 env=env if env else None,
             )
 
-            # Add MCP server directly (no deferred loading)
             toolsets.append(mcp_server)
             self._mcp_servers.append(mcp_server)
 
@@ -295,6 +320,17 @@ class PydanticAIClient:
             toolsets=toolsets,
         )
 
+        # Enter MCP servers into the exit stack so stop() cleans them up.
+        # This uses the agent's run_mcp_servers() context manager which
+        # properly starts and stops all MCP subprocess servers.
+        try:
+            self._mcp_ctx = self._agent.run_mcp_servers()
+            await self._exit_stack.enter_async_context(self._mcp_ctx)
+        except Exception:
+            # MCP server startup failed -- clean up to prevent orphan subprocesses
+            await self.stop()
+            raise
+
         log.info(
             "PydanticAI client ready: model=%s, mcp_servers=%d",
             self.model_name,
@@ -302,9 +338,12 @@ class PydanticAIClient:
         )
 
     async def stop(self) -> None:
-        """Clean up MCP server connections."""
+        """Clean up MCP server subprocesses."""
         if self._exit_stack:
-            await self._exit_stack.aclose()
+            try:
+                await self._exit_stack.aclose()
+            except Exception:
+                log.exception("Error closing MCP server exit stack")
             self._exit_stack = None
         self._mcp_servers.clear()
         self._agent = None
@@ -326,6 +365,8 @@ class PydanticAIClient:
 
         Uses pydantic-ai's streaming run with MCP tools.
         Tool calls go through the permission callback for risk checking.
+        MCP servers are already running (started in start()), so we
+        call iter() directly without run_mcp_servers().
         """
         assert self._agent is not None, "Client not started"
 
@@ -333,71 +374,81 @@ class PydanticAIClient:
 
         try:
             from pydantic_ai.agent import CallToolsNode, ModelRequestNode
-            from pydantic_ai.messages import TextPart, ToolCallPart
+            from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
             from pydantic_graph import End
 
-            async with self._agent.run_mcp_servers():
-                async with self._agent.iter(text) as run:
-                    async for node in run:
-                        if isinstance(node, End):
-                            # Final result -- extract text from the result
-                            if hasattr(node, "data") and node.data:
-                                result_data = node.data
-                                if hasattr(result_data, "data"):
-                                    yield TextChunk(text=str(result_data.data))
-                            break
+            async with self._agent.iter(text) as run:
+                async for node in run:
+                    if isinstance(node, End):
+                        # Final result -- extract text from the result
+                        if hasattr(node, "data") and node.data:
+                            result_data = node.data
+                            if hasattr(result_data, "data"):
+                                yield TextChunk(text=str(result_data.data))
+                        break
 
-                        if isinstance(node, ModelRequestNode):
-                            elapsed = time.monotonic() - start_time
-                            yield Heartbeat(elapsed_seconds=elapsed)
-
-                        elif isinstance(node, CallToolsNode):
-                            # Emit text and tool-call events from model response
-                            for part in node.model_response.parts:
-                                if isinstance(part, TextPart) and part.content:
-                                    yield TextChunk(text=part.content)
-
-                                elif isinstance(part, ToolCallPart):
-                                    tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
-                                    tool_name = part.tool_name
-
-                                    # Risk check via permission callback
-                                    if self.permission_callback:
-                                        tool_call_info = {
-                                            "tool": tool_name,
-                                            "title": tool_name,
-                                            "input": part.args if isinstance(part.args, dict) else {},
-                                        }
-                                        options = [
-                                            {"optionId": "allow", "kind": "allow_once"},
-                                            {"optionId": "deny", "kind": "deny"},
-                                        ]
-                                        result = await self.permission_callback(
-                                            tool_call_info, options
-                                        )
-                                        outcome = result.get("outcome", {})
-                                        if isinstance(outcome, dict) and outcome.get("outcome") == "cancelled":
-                                            yield ToolCallEvent(
-                                                tool_call_id=tool_id,
-                                                title=tool_name,
-                                                status="blocked",
-                                                kind="mcp",
-                                                input=part.args if isinstance(part.args, dict) else None,
-                                            )
-                                            continue
-
-                                    yield ToolCallEvent(
-                                        tool_call_id=tool_id,
-                                        title=tool_name,
-                                        status="in_progress",
-                                        kind="mcp",
-                                        input=part.args if isinstance(part.args, dict) else None,
-                                    )
-
+                    if isinstance(node, ModelRequestNode):
+                        elapsed = time.monotonic() - start_time
+                        yield Heartbeat(elapsed_seconds=elapsed)
+                        # Extract tool return results from request parts
+                        if hasattr(node, 'request') and node.request:
+                            for part in node.request.parts:
+                                if isinstance(part, ToolReturnPart):
+                                    content = part.content
+                                    output_str = content if isinstance(content, str) else str(content)
                                     yield ToolCallUpdate(
-                                        tool_call_id=tool_id,
+                                        tool_call_id=part.tool_call_id or "",
                                         status="completed",
+                                        output=output_str,
                                     )
+
+                    elif isinstance(node, CallToolsNode):
+                        # Emit text and tool-call events from model response
+                        for part in node.model_response.parts:
+                            if isinstance(part, TextPart) and part.content:
+                                yield TextChunk(text=part.content)
+
+                            elif isinstance(part, ToolCallPart):
+                                tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
+                                tool_name = part.tool_name
+
+                                # Risk check via permission callback
+                                if self.permission_callback:
+                                    tool_call_info = {
+                                        "tool": tool_name,
+                                        "title": tool_name,
+                                        "input": part.args if isinstance(part.args, dict) else {},
+                                    }
+                                    options = [
+                                        {"optionId": "allow", "kind": "allow_once"},
+                                        {"optionId": "deny", "kind": "deny"},
+                                    ]
+                                    result = await self.permission_callback(
+                                        tool_call_info, options
+                                    )
+                                    outcome = result.get("outcome", {})
+                                    if isinstance(outcome, dict) and outcome.get("outcome") == "cancelled":
+                                        yield ToolCallEvent(
+                                            tool_call_id=tool_id,
+                                            title=tool_name,
+                                            status="blocked",
+                                            kind="mcp",
+                                            input=part.args if isinstance(part.args, dict) else None,
+                                        )
+                                        continue
+
+                                yield ToolCallEvent(
+                                    tool_call_id=tool_id,
+                                    title=tool_name,
+                                    status="in_progress",
+                                    kind="mcp",
+                                    input=part.args if isinstance(part.args, dict) else None,
+                                )
+
+                                yield ToolCallUpdate(
+                                    tool_call_id=tool_id,
+                                    status="completed",
+                                )
 
             yield PromptDone(stop_reason="end_turn")
 
@@ -405,5 +456,45 @@ class PydanticAIClient:
             yield PromptDone(stop_reason="timeout")
         except Exception as e:
             log.exception("PydanticAI prompt error: %s", e)
-            yield TextChunk(text=f"(error: {e})")
+            yield TextChunk(text=self._format_error(e))
             yield PromptDone(stop_reason="error")
+
+    def _format_error(self, e: Exception) -> str:
+        """Translate provider HTTP errors into actionable user-facing text.
+
+        Falls back to the raw exception string for anything we don't recognize.
+        """
+        try:
+            from pydantic_ai.exceptions import ModelHTTPError
+        except ImportError:
+            return f"(error: {e})"
+
+        if not isinstance(e, ModelHTTPError):
+            return f"(error: {e})"
+
+        is_openrouter = self.model_name.startswith("openrouter:")
+        status = getattr(e, "status_code", None)
+
+        if is_openrouter and status == 402:
+            return (
+                "OpenRouter rejected the request: insufficient credits.\n\n"
+                "Either top up at https://openrouter.ai/settings/credits, or "
+                "switch to a free model with /agent → Change LLM → OpenRouter "
+                "→ Enter model manually → openrouter/free."
+            )
+        if is_openrouter and status == 401:
+            return (
+                "OpenRouter rejected the API key (401). Check OPENROUTER_API_KEY "
+                "in your .env and confirm the key is on the account that holds your credits."
+            )
+        if is_openrouter and status == 429:
+            return (
+                "OpenRouter rate-limited the request (429). Free models share a "
+                "tighter quota — wait a moment and retry, or switch to a paid model."
+            )
+        if is_openrouter and status and 500 <= status < 600:
+            return (
+                f"OpenRouter upstream error ({status}). The selected provider may "
+                "be down — try again, or switch models with /agent → Change LLM."
+            )
+        return f"(error: {e})"

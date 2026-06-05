@@ -1,11 +1,16 @@
 ### LP Executor
 **This is the standard way to manage LP positions on CLMM DEXs.**
 
-Manages liquidity provider positions on CLMM DEXs (Meteora, Raydium).
-Opens positions within price bounds, monitors range status, tracks fees.
+Manages liquidity provider positions on CLMM DEXs.
+Opens positions within price bounds, monitors range status, tracks fees,
+and auto-closes when price crosses configurable limit prices.
+
+**Supported DEXs:**
+- **Solana:** Meteora (DLMM), Raydium (CLMM), Orca (Whirlpools)
+- **EVM:** Uniswap V3 (Ethereum, Arbitrum, Base, etc.), PancakeSwap V3 (BSC, Ethereum)
 
 **Use when:**
-- Providing liquidity on Solana DEXs
+- Providing liquidity on Solana or EVM DEXs
 - Want automated position monitoring and fee tracking
 - Earning trading fees from LP positions
 
@@ -14,82 +19,115 @@ Opens positions within price bounds, monitors range status, tracks fees.
 - Want directional exposure only
 - Not familiar with impermanent loss risks
 
+#### Setup Workflow
+
+**If user provides pool_address:** Skip to step 3 (get pool info directly)
+
+1. **Find pools** (skip if pool_address provided):
+   - Use `explore_dex_pools` with `action="list_pools"` and a DEX `connector` (`meteora`, `raydium`, `orca`, `uniswap`, `pancakeswap`)
+   - Filter by `search_term` (e.g., "SOL", "ETH", "USDC") to find relevant pools
+   - Sort by `volume` or `tvl` to find active pools
+
+2. **Select pool**: User picks from list or provides address directly
+
+3. **Get pool info**:
+   - Use `explore_dex_pools` with `action="get_pool_info"`, DEX `connector`, `network`, and `pool_address`
+   - **Networks:** `solana-mainnet-beta` (Solana), `ethereum-mainnet`, `arbitrum-one`, `base-mainnet`, `binance-smart-chain` (EVM)
+   - Get current price, bin_step, trading_pair for position setup
+
+4. **Determine position parameters**:
+   - Ask user for amount(s) and range preference
+   - Calculate `lower_price` / `upper_price` based on current price and user preference
+   - Set `side` based on which tokens user is providing (1=BUY/quote-only, 2=SELL/base-only, 3=RANGE/both)
+
+5. **Create executor**:
+   - Use `manage_executors` with `action="create"`, `executor_type="lp_executor"`
+   - Required params: `connector_name` (network), `lp_provider` (DEX), `trading_pair`, `pool_address`, `lower_price`, `upper_price`, `side`, plus at least one of `base_amount` / `quote_amount`
+
 #### State Machine
 
 ```
 NOT_ACTIVE → OPENING → IN_RANGE ↔ OUT_OF_RANGE → CLOSING → COMPLETE
+                                                       ↘ SWAPPING → COMPLETE
 ```
 
+Any state may transition to `FAILED` if max retries are exhausted (open / close / swap) or if `early_stop` is called while still `OPENING`.
+
 - **NOT_ACTIVE**: Initial state, no position yet
-- **OPENING**: Transaction submitted to open position
+- **OPENING**: `add_liquidity` submitted, waiting for confirmation
 - **IN_RANGE**: Position active, current price within bounds
 - **OUT_OF_RANGE**: Position active but price outside bounds (no fees earned)
-- **CLOSING**: Transaction submitted to close position
-- **COMPLETE**: Position closed, executor finished
+- **CLOSING**: `remove_liquidity` submitted, waiting for confirmation
+- **SWAPPING**: Close-out swap in progress (only when `keep_position=False`, to return to the original quote asset)
+- **COMPLETE**: Position closed permanently
+- **FAILED**: Max retries reached or invalid config; manual intervention required
 
 #### Key Parameters
 
 **Required:**
-- `connector_name`: CLMM connector in `connector/clmm` format (e.g., `meteora/clmm`, `raydium/clmm`)
-  - **IMPORTANT:** Must include the `/clmm` suffix — using just `meteora` will fail
+- `connector_name`: **Chain-network identifier** — e.g., `"solana-mainnet-beta"`, `"ethereum-mainnet"`, `"arbitrum-one"`, `"base-mainnet"`, `"binance-smart-chain"`
+  - **IMPORTANT:** This is the network, NOT the DEX. Do not pass `meteora/clmm` here — the API rejects it with `"Invalid network format"`.
+- `lp_provider`: DEX + trading type in `dex/trading_type` format — used for pool ops, add/remove liquidity
+  - **Solana:** `meteora/clmm`, `raydium/clmm`, `orca/clmm`
+  - **EVM:** `uniswap/clmm`, `pancakeswap/clmm`
 - `trading_pair`: Token pair (e.g., `SOL-USDC`)
 - `pool_address`: Pool contract address
 - `lower_price` / `upper_price`: Price range bounds
+- `side`: Position side as a `TradeType` enum value — `1`=BUY (quote-only), `2`=SELL (base-only), `3`=RANGE (both/double-sided)
 
-**Liquidity:**
-- `base_amount`: Amount of base token to provide (default: 0)
-- `quote_amount`: Amount of quote token to provide (default: 0)
-- `side`: Position side (0=BOTH, 1=BUY/quote-only, 2=SELL/base-only)
+**Optional:**
+- `swap_provider`: Swap provider for close-out swaps when `keep_position=False` (e.g., `jupiter/router`). If not provided, the network default is auto-resolved.
+- `base_amount`: Amount of base token to provide (default: `0`)
+- `quote_amount`: Amount of quote token to provide (default: `0`)
+- `extra_params`: Connector-specific params, e.g., `{"strategyType": 0}` for Meteora
+- `keep_position`: Default `True` — keep the net token change as a held spot position when closed. Set `False` to swap back to the original quote asset on close.
 
-**Auto-Close (Limit Range Orders):**
-- `auto_close_above_range_seconds`: Close when price >= upper_price for this many seconds
-- `auto_close_below_range_seconds`: Close when price <= lower_price for this many seconds
-- Set to `null` (default) to disable auto-close
+**Limit Prices (auto-close triggers, grid-executor style):**
+- `upper_limit_price`: Close when current price ≥ this value (default `None` = no upper limit)
+- `lower_limit_price`: Close when current price ≤ this value (default `None` = no lower limit)
+- Both checks fire only when the position is `OUT_OF_RANGE`. When triggered, the executor closes with `CloseType.POSITION_HOLD` if `keep_position=True`, otherwise `CloseType.EARLY_STOP` (followed by a close-out swap).
 
 #### Single-Sided vs Double-Sided Positions
 
 **Single-sided (one asset only):**
-- **Base token only** (e.g., 0.2 SOL): Creates a SELL position (`side=2`) with range ABOVE current price
+- **Base token only** (e.g., 0.2 SOL when SOL is the base): `side=2` (SELL) with range ABOVE current price
   - Position starts out-of-range, enters range when price rises
-  - SOL converts to USDC as price moves up through the range
-- **Quote token only** (e.g., 50 USDC): Creates a BUY position (`side=1`) with range BELOW current price
+  - Base converts to quote as price moves up through the range
+- **Quote token only** (e.g., 50 USDC, or 1 SOL when SOL is the quote): `side=1` (BUY) with range BELOW current price
   - Position starts out-of-range, enters range when price falls
-  - USDC converts to SOL as price moves down through the range
+  - Quote converts to base as price moves down through the range
 
 **Double-sided (both assets):**
 - When user specifies both `base_amount` and `quote_amount`, ask:
-  1. **Centered range** around current price? (±50% of position width above/below current price)
+  1. **Centered range** around current price? (±X% above/below current price)
   2. **Custom range**? (user specifies exact lower/upper bounds)
-- Set `side=0` (BOTH) for double-sided positions
+- Set `side=3` (RANGE) for double-sided positions
 
-**Position Management:**
-- `keep_position=false` (default): Close LP position when executor stops
-- `keep_position=true`: Leave position open on-chain, stop monitoring only
-- `position_offset_pct`: Offset from current price for single-sided positions (default: 0.01%)
+#### Limit Price Orders (Auto-Close Feature)
 
-#### Limit Range Orders (Auto-Close Feature)
+Use `upper_limit_price` and `lower_limit_price` to create limit-order-style LP positions that automatically close when price moves beyond your target range.
 
-Use `auto_close_above_range_seconds` and `auto_close_below_range_seconds` to create limit-order-style LP positions that automatically close when price moves through the range.
-
-**SELL Limit (Take Profit on Long):**
+**SELL Limit (take profit on long, single-sided base):**
 ```
 side=2, base_amount=X, quote_amount=0
-lower_price > current_price (range above current price)
-auto_close_above_range_seconds=60
+lower_price > current_price                      # range above current price
+upper_limit_price = upper_price * (1 + buffer)   # close trigger above range top
 ```
 - Position starts OUT_OF_RANGE (price below range)
 - When price rises into range: base → quote conversion, fees earned
-- When price rises above range for 60s: position auto-closes with quote tokens
+- When price ≥ `upper_limit_price`: position auto-closes (mostly quote tokens)
 
-**BUY Limit (Accumulate on Dip):**
+**BUY Limit (accumulate on dip, single-sided quote):**
 ```
 side=1, base_amount=0, quote_amount=X
-upper_price < current_price (range below current price)
-auto_close_below_range_seconds=60
+upper_price < current_price                      # range below current price
+lower_limit_price = lower_price * (1 - buffer)   # close trigger below range bottom
 ```
 - Position starts OUT_OF_RANGE (price above range)
 - When price falls into range: quote → base conversion, fees earned
-- When price falls below range for 60s: position auto-closes with base tokens
+- When price ≤ `lower_limit_price`: position auto-closes (mostly base tokens)
+
+**Always set both limits when you want a closed strategy**, even on single-sided positions — otherwise the position will sit out-of-range indefinitely on the unprotected side.
 
 **Key Benefits:**
 - Earn LP fees while price moves through your target range
@@ -102,11 +140,35 @@ auto_close_below_range_seconds=60
 - `1`: **Curve** — Concentrated around current price
 - `2`: **Bid-Ask** — Liquidity at range edges
 
+#### Example: Single-sided SOL into a memecoin/SOL pool
+
+```python
+manage_executors(
+    action="create",
+    executor_type="lp_executor",
+    executor_config={
+        "connector_name": "solana-mainnet-beta",   # network, NOT the DEX
+        "lp_provider": "meteora/clmm",             # DEX + trading type
+        "trading_pair": "BONK-SOL",
+        "pool_address": "<pool_address>",
+        "lower_price": price * 0.80,
+        "upper_price": price,                      # range entirely below current price
+        "upper_limit_price": price * 1.10,         # close if price rallies 10% above range top
+        "lower_limit_price": price * 0.80 * 0.90,  # close if price drops 10% below range bottom
+        "side": 1,                                 # BUY = single-sided quote-only (SOL is quote)
+        "base_amount": 0,
+        "quote_amount": 1.0,
+        "keep_position": False,                    # swap memecoin → SOL on close
+    },
+)
+```
+
 #### Important: Managing Positions
 
 **Always use the executor tool (`manage_executors`) to open and close LP positions.**
 
 - Use `manage_executors` with `action="stop"` to properly close positions and update executor status
+- `manage_executors(action="stop")` accepts its own `keep_position` flag (separate from the config field) — MCP default is `False`, which closes the on-chain position and swaps back to the original quote asset. Pass `keep_position=True` to close the LP position but retain the net token change as a held spot position.
 - If a position is closed externally (via DEX UI), manually mark the executor as `TERMINATED` in the database
 
 **Verifying position status:**

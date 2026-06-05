@@ -1,6 +1,6 @@
 # Condor
 
-A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
+A Telegram bot for monitoring and trading with Hummingbot via the **Hummingbot Backend API**.
 
 ## Features
 
@@ -8,37 +8,69 @@ A Telegram bot for monitoring and trading with Hummingbot via the Backend API.
 - **Bot Monitoring** - Track active Hummingbot trading bots with real-time status and metrics
 - **CLOB Trading** - Place orders on centralized exchanges (Binance, Bybit, etc.) with interactive menus
 - **DEX Trading** - Swap tokens and manage CLMM liquidity positions via Gateway
-- **Configuration** - Manage API servers and exchange credentials through Telegram
-- **AI Assistant** - Natural language queries via GPT-4o + MCP (coming soon)
+- **Configuration** - Manage API servers, exchange credentials, and Gateway through Telegram (`/servers`, `/keys`, `/gateway`)
+- **AI Assistant** - Natural language trading help via **`/agent`** (optional OpenAI or OpenRouter keys; MCP tools when configured)
 
-## Quick Start
+## What you need
 
-**Prerequisites:** Python 3.12+, [uv](https://docs.astral.sh/uv/), Hummingbot Backend API running, Telegram Bot Token
+- A **Mac** or **Linux** computer (Windows users: install **WSL2** with Ubuntu, then use Terminal inside Ubuntu).
+- The **Terminal** app open.
+- A **stable internet** connection.
+- For **Hummingbot API** (the API-only install below, or if you choose to add the API during Condor setup): **[Docker Desktop](https://www.docker.com/products/docker-desktop/)** (Mac/Windows) or Docker on Linux, **installed and running** on that machine before you run the command.
+
+---
+
+## Install Condor (start here)
+
+Open Terminal, go to an **empty folder** where you are happy to create files (for example your home folder, or `cd Desktop` first), then paste:
 
 ```bash
-git clone https://github.com/hummingbot/condor.git
-cd condor
-
-# Option 1: Local Python
-make install     # Interactive setup + uv deps + AI CLI tools
-make run         # Start the bot
-
-# Option 2: Docker
-make setup       # Interactive configuration
-make deploy      # Start with Docker Compose
+curl -fsSL https://raw.githubusercontent.com/hummingbot/deploy/main/setup.sh | bash
 ```
+
+The installer walks you through setup—for example your **Telegram** bot token and your **Telegram user id**—and can also install **Hummingbot API** on the **same machine** if you choose that when it asks. When it finishes, continue to **After installation** below.
+
+---
+
+## Install only Hummingbot API
+
+Use this when you are deploying **Hummingbot API** on its own machine (for example a **VPS** or another **remote server**), or any time you **only** need the API and database stack and **not** Condor. **Docker** must be installed and running on that server before you run the command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hummingbot/deploy/main/setup.sh | bash -s -- --hummingbot-api
+```
+
+---
+
+## After installation
+
+The following applies after **Install Condor**. If you used **Install only Hummingbot API**, use your API host’s health checks and client docs instead; point Condor (or other clients) at that API’s base URL when you connect them.
+
+- Open the **Telegram** chat with your Condor bot. When startup succeeds, admins receive a message such as **"Condor is online and ready."**
+- **Logs:** Condor runs in a **tmux** session named `condor`. Attach with `tmux attach -t condor`. Detach without stopping the bot: **Ctrl+B**, then **D**. To stop Condor completely: `tmux kill-session -t condor`.
+- In Telegram, use **`/servers`** for Hummingbot Backend API URLs and auth, **`/keys`** for exchange credentials, and **`/gateway`** for DEX setup (or **`/start`** for the setup shortcuts) so commands like `/portfolio` and `/trade` can reach your stack.
+- If something fails, see **Troubleshooting** below.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
+| `/start` | Welcome, access requests, and shortcuts to servers, keys, and Gateway |
 | `/portfolio` | Portfolio dashboard with PNL indicators, holdings, and graphs |
-| `/bots` | All active bots with status and metrics |
-| `/trade` | CEX trading menu (spot & perpetual orders, positions) |
-| `/swap` | DEX swap trading (quotes, execution, history) |
+| `/bots` | Active bots with status and metrics |
+| `/new_bot` | Create bot configurations |
+| `/executors` | Deploy and manage trading executors |
+| `/trade` | CEX and DEX trading menu (spot & perpetual orders, positions, swaps) |
+| `/swap` | Same trading flow as `/trade` (convenient alias) |
 | `/lp` | DEX liquidity pool management (positions, pools) |
 | `/routines` | Auto-discoverable Python scripts with scheduling |
-| `/config` | Configuration menu (servers, API keys, Gateway, admin) |
+| `/agent` | AI trading assistant (optional LLM keys in `.env`) |
+| `/servers` | Hummingbot Backend API servers (add, edit, default, status) |
+| `/keys` | Exchange API credentials per account |
+| `/gateway` | Gateway configuration for DEX |
+| `/web` | Time-limited link to the web dashboard |
+| `/admin` | Admin panel: users and access (admin role only) |
+| `/update` | Check for updates and restart (admin role only) |
 
 ## Architecture
 
@@ -69,14 +101,14 @@ condor/
 │   │   ├── swap.py             # Quote, execute, history
 │   │   ├── liquidity.py        # LP positions management
 │   │   └── pools.py            # Pool info and discovery
-│   ├── config/                 # Configuration module (/config)
+│   ├── config/                 # Configuration module (/servers, /keys, /gateway)
 │   │   ├── __init__.py         # Main command
 │   │   ├── servers.py          # API server management
 │   │   ├── api_keys.py         # Exchange credentials
 │   │   └── gateway/            # Gateway configuration
 │   ├── routines/               # Routines module (/routines)
 │   │   └── __init__.py         # Script discovery and execution
-│   └── admin/                  # Admin panel (via /config)
+│   └── admin/                  # Admin panel (/admin)
 ├── routines/                   # User-defined automation scripts
 ├── utils/                      # Utilities
 │   ├── auth.py                 # @restricted, @admin_required decorators
@@ -125,15 +157,16 @@ condor/
 - **Continuous Scripts** - Long-running tasks with start/stop control
 - **Multi-instance** - Run multiple instances with different configs
 
-### Configuration (`/config`)
-- **API Servers** - Add, modify, delete Hummingbot Backend API servers
+### Configuration (`/servers`, `/keys`, `/gateway`)
+- **API Servers** (`/servers`) - Add, modify, delete Hummingbot Backend API servers
   - Real-time status checking (online/offline/auth error)
   - Set default server
   - Progressive form for adding servers
-- **API Keys** - Manage exchange credentials per account
+- **API Keys** (`/keys`) - Manage exchange credentials per account
   - View connected exchanges
   - Add new credentials (field-by-field input)
   - Delete credentials with confirmation
+- **Gateway** (`/gateway`) - DEX connector settings and Gateway status
 
 ## User Preferences
 
@@ -157,8 +190,14 @@ Preferences are automatically saved and persist across sessions:
 ```bash
 TELEGRAM_TOKEN=your_bot_token
 ADMIN_USER_ID=123456789
-OPENAI_API_KEY=sk-...  # Optional, for AI features
+OPENAI_API_KEY=sk-...                    # Optional, for AI features
+OPENROUTER_API_KEY=sk-or-...             # Optional, unlocks the OpenRouter LLM picker
 ```
+
+> **OpenRouter:** Add `OPENROUTER_API_KEY` to `.env`, then in `/agent → Change LLM`
+> select **OpenRouter — Pick Model**. The picker fetches the live catalog and shows
+> only models that support tool-calling. Get a key at
+> [openrouter.ai/keys](https://openrouter.ai/keys).
 
 ### `config.yml` (auto-created on first run)
 ```yaml
@@ -176,6 +215,57 @@ chat_defaults: {}
 audit_log: []
 ```
 
+## Secure Connection via Tailscale
+
+[Tailscale](https://tailscale.com) creates a private WireGuard network (tailnet) so Condor can reach Hummingbot API securely without exposing port 8000 publicly.
+
+Use this when:
+- Hummingbot API is running on a remote server or VPS
+- You want an encrypted private connection without opening firewall ports
+
+### Prerequisites: Get a Tailscale auth key
+
+1. Create a free account at [tailscale.com](https://tailscale.com)
+2. Go to **Settings → Keys**: [tailscale.com/admin/settings/keys](https://tailscale.com/admin/settings/keys)
+3. Click **Generate auth key** — check **Reusable** for multiple deployments
+4. Copy the key (starts with `tskey-auth-`)
+
+### Setup
+
+Run `make setup` — the wizard supports two Tailscale scenarios:
+
+**Scenario A — Deploy Hummingbot API locally with Tailscale**
+
+Choose `Y` to deploy Hummingbot API locally, then `y` when asked about Tailscale. The wizard will:
+- Clone and start `hummingbot-api` with a Tailscale sidecar container
+- Install Tailscale on this machine and connect with hostname `condor`
+- Update `config.yml` to reach the API at `http://hummingbot-api:8000`
+
+**Scenario B — Connect to a remote Hummingbot API via Tailscale**
+
+Choose `N` to skip local deployment, enter the remote API URL, then `y` when asked about Tailscale. The wizard will:
+- Install Tailscale on this machine and connect with hostname `condor`
+- Update `config.yml` to use the Tailscale MagicDNS hostname of the remote API
+
+The remote machine must be running [hummingbot-api-tailscale](https://github.com/hummingbot/hummingbot-api) on the same tailnet.
+
+### Network layout
+
+```
+[Condor]  tailnet: condor  ──WireGuard──►  [API]  tailnet: hummingbot-api
+                           http://hummingbot-api:8000
+```
+
+Both machines must be on the same Tailscale account.
+
+### Verify the connection
+
+```bash
+tailscale status
+```
+
+Both `condor` and `hummingbot-api` should appear as connected peers.
+
 ## Troubleshooting
 
 | Issue | Solution |
@@ -186,21 +276,28 @@ audit_log: []
 | Connection refused | Check server host:port in `/config` |
 | Auth error | Verify server credentials |
 | DEX features unavailable | Ensure Gateway is configured and running |
-
-## Docker Deployment
-
-```bash
-# Setup and run with Docker
-make setup       # Interactive configuration
-docker compose up -d
-```
-
-Volumes mounted:
-- `condor_bot_data.pickle` - User preferences and state
-- `config.yml` - Server and permission configuration
-- `routines/` - Custom automation scripts
+| Tailscale: can't reach API | Run `tailscale status` — confirm both peers are connected |
+| Tailscale: auth key rejected | Key must start with `tskey-auth-`, check expiry in Tailscale admin |
 
 ## Development
+
+### Run from source
+
+For local development or manual setup without the [deploy installer](https://github.com/hummingbot/deploy):
+
+```bash
+git clone https://github.com/hummingbot/condor.git
+cd condor
+make install     # Interactive setup + uv deps + AI CLI tools
+make run         # Start the bot
+```
+
+To run **Hummingbot API** locally with Docker (for example from a sibling clone of [hummingbot-api](https://github.com/hummingbot/hummingbot-api)):
+
+```bash
+cd ../hummingbot-api
+docker compose up -d
+```
 
 ### Flow Documentation
 See `flows/` directory for detailed command flow documentation:

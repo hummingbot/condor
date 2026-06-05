@@ -46,6 +46,11 @@ GENERAL:
 
 JOURNAL:
 - Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
+- Learnings must specify a category: "market" or "execution".
+  trading_agent_journal_write(entry_type="learning", category="market|execution", text="...")
+  - market: band behavior, volatility regimes, S/R patterns, routine observations.
+  - execution: executor errors, schema issues, fill problems, timing.
+- Keep learnings factual and short (1 line). No speculation.
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
 - Do NOT call trading_agent_journal_read — context is already in this prompt.
 
@@ -190,7 +195,10 @@ def build_tick_prompt(
         "trading_context", "risk_limits",  # shown in dedicated sections
         "agent_key", "server_name", "frequency_sec", "execution_mode",  # noise / internal
     }
-    config_lines = ["[CURRENT CONFIG]"]
+    config_lines = [
+        "[CURRENT CONFIG]",
+        "These are the ACTIVE values for this session. If the strategy instructions mention different defaults, IGNORE them and use these values instead.",
+    ]
     for k, v in config.items():
         if k in _CONFIG_EXCLUDE:
             continue

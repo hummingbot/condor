@@ -1,0 +1,807 @@
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Circle,
+  Layers,
+  Pause,
+  Play,
+  Rocket,
+  Square,
+  TrendingUp,
+  Volume2,
+} from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+
+import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
+import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
+import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { PnlSparkline } from "@/components/bots/PnlSparkline";
+
+import { useRates } from "@/hooks/useRates";
+import { useServer } from "@/hooks/useServer";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import { api, type BotLogEntry, type BotSummary, type ControllerInfo, type ControllerPerformanceSnapshot } from "@/lib/api";
+import { formatCurrencyVolume, pnlColor } from "@/lib/formatters";
+
+function formatUptime(deployedAt: string | null): string {
+  if (!deployedAt) return "—";
+  try {
+    const deployed = new Date(deployedAt);
+    const now = new Date();
+    const diffMs = now.getTime() - deployed.getTime();
+    if (diffMs < 0) return "—";
+    const days = Math.floor(diffMs / 86400000);
+    const hours = Math.floor((diffMs % 86400000) / 3600000);
+    if (days > 0) return `${days}d ${hours}h`;
+    const mins = Math.floor((diffMs % 3600000) / 60000);
+    if (hours > 0) return `${hours}h ${mins}m`;
+    return `${mins}m`;
+  } catch {
+    return "—";
+  }
+}
+
+
+// ── Sort types ──
+
+type SortKey =
+  | "controller_name"
+  | "connector"
+  | "trading_pair"
+  | "realized_pnl_quote"
+  | "unrealized_pnl_quote"
+  | "global_pnl_quote"
+  | "volume_traded"
+  | "deployed_at"
+  | "status";
+
+type SortDir = "asc" | "desc";
+
+function compareControllers(a: ControllerInfo, b: ControllerInfo, key: SortKey, dir: SortDir): number {
+  let cmp = 0;
+  switch (key) {
+    case "controller_name":
+    case "connector":
+    case "trading_pair":
+    case "status":
+      cmp = (a[key] || "").localeCompare(b[key] || "");
+      break;
+    case "realized_pnl_quote":
+    case "unrealized_pnl_quote":
+    case "global_pnl_quote":
+    case "volume_traded":
+      cmp = a[key] - b[key];
+      break;
+    case "deployed_at": {
+      const aTime = a.deployed_at ? new Date(a.deployed_at).getTime() : 0;
+      const bTime = b.deployed_at ? new Date(b.deployed_at).getTime() : 0;
+      cmp = aTime - bTime;
+      break;
+    }
+  }
+  return dir === "asc" ? cmp : -cmp;
+}
+
+// ── Stat Card ──
+
+function StatCard({
+  label,
+  value,
+  icon: Icon,
+  valueColor,
+}: {
+  label: string;
+  value: string;
+  icon: React.ComponentType<{ className?: string }>;
+  valueColor?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+      <div className="flex items-center gap-2 mb-1">
+        <Icon className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+        <span className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">
+          {label}
+        </span>
+      </div>
+      <p
+        className="text-xl font-bold tabular-nums"
+        style={valueColor ? { color: valueColor } : {}}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+// ── Status Dot ──
+
+function StatusDot({ status }: { status: string }) {
+  const isStopping = status === "stopping";
+  const color =
+    status === "running"
+      ? "text-[var(--color-green)]"
+      : status === "stopped" || status === "error"
+        ? "text-[var(--color-red)]"
+        : "text-[var(--color-yellow)]";
+  return isStopping ? (
+    <span className="h-2.5 w-2.5 animate-spin rounded-full border-[1.5px] border-[var(--color-yellow)] border-t-transparent" />
+  ) : (
+    <Circle className={`h-2 w-2 fill-current ${color}`} />
+  );
+}
+
+// ── Sortable Header ──
+
+function SortHeader({
+  label,
+  sortKey,
+  currentKey,
+  currentDir,
+  onSort,
+  align = "left",
+}: {
+  label: string;
+  sortKey: SortKey;
+  currentKey: SortKey;
+  currentDir: SortDir;
+  onSort: (key: SortKey) => void;
+  align?: "left" | "right" | "center";
+}) {
+  const active = currentKey === sortKey;
+  const alignCls =
+    align === "right" ? "text-right justify-end" : align === "center" ? "text-center justify-center" : "text-left";
+
+  return (
+    <th
+      className={`px-4 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)] cursor-pointer select-none hover:text-[var(--color-text)] transition-colors ${alignCls}`}
+      onClick={() => onSort(sortKey)}
+    >
+      <div className={`flex items-center gap-1 ${align === "right" ? "justify-end" : align === "center" ? "justify-center" : ""}`}>
+        {label}
+        {active ? (
+          currentDir === "asc" ? (
+            <ChevronUp className="h-3 w-3" />
+          ) : (
+            <ChevronDown className="h-3 w-3" />
+          )
+        ) : (
+          <span className="w-3" />
+        )}
+      </div>
+    </th>
+  );
+}
+
+function formatLogTime(ts?: number): string {
+  if (!ts) return "";
+  try {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function LogsSection({ logs }: { logs: BotLogEntry[] }) {
+  const [filter, setFilter] = useState<"all" | "error" | "general">("all");
+  const filtered = filter === "all" ? logs : logs.filter((l) => l.log_category === filter);
+
+  if (logs.length === 0) {
+    return (
+      <p className="text-xs text-[var(--color-text-muted)] py-2">No logs available</p>
+    );
+  }
+
+  const errorCount = logs.filter((l) => l.log_category === "error").length;
+  const generalCount = logs.filter((l) => l.log_category === "general").length;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-1.5">
+        {(["all", "general", "error"] as const).map((f) => {
+          const count = f === "all" ? logs.length : f === "error" ? errorCount : generalCount;
+          return (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
+                filter === f
+                  ? f === "error"
+                    ? "bg-[var(--color-red)]/15 text-[var(--color-red)]"
+                    : "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              {f} ({count})
+            </button>
+          );
+        })}
+      </div>
+      <div className="max-h-[300px] overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] font-mono text-[11px] leading-relaxed">
+        {filtered.map((log, i) => (
+          <div
+            key={i}
+            className={`flex gap-2 px-2.5 py-1 border-b border-[var(--color-border)]/20 last:border-b-0 ${
+              log.log_category === "error" ? "bg-[var(--color-red)]/5" : ""
+            }`}
+          >
+            <span className="text-[var(--color-text-muted)] shrink-0 tabular-nums">
+              {formatLogTime(log.timestamp)}
+            </span>
+            <span
+              className={`break-all ${
+                log.log_category === "error" ? "text-[var(--color-red)]" : "text-[var(--color-text)]"
+              }`}
+            >
+              {log.msg || JSON.stringify(log)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Controller Row with actions ──
+
+function ControllerRow({
+  ctrl,
+  server,
+  isSelected,
+  onSelect,
+  formatPnlValue,
+  formatValue,
+  sparklineValues,
+  isBotStopping,
+}: {
+  ctrl: ControllerInfo;
+  server: string;
+  isSelected: boolean;
+  onSelect: () => void;
+  formatPnlValue: (val: number, quote: string) => string;
+  formatValue: (val: number, quote: string) => string;
+  sparklineValues?: number[];
+  isBotStopping?: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const isKilled = ctrl.config?.manual_kill_switch === true;
+  const isStopping = ctrl.status === "stopping" || (isBotStopping && !isKilled);
+
+  const toggleMutation = useMutation({
+    mutationFn: () =>
+      isKilled
+        ? api.startControllers(server, ctrl.bot_name, [ctrl.controller_id])
+        : api.stopControllers(server, ctrl.bot_name, [ctrl.controller_id]),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["bots", server] });
+    },
+  });
+
+  return (
+    <tr
+      className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
+      onClick={onSelect}
+    >
+      <td className="px-4 py-2.5">
+        <div className="flex flex-col">
+          <span className="text-sm font-medium" title={ctrl.controller_name}>
+            {ctrl.controller_name}
+          </span>
+          {ctrl.controller_id && ctrl.controller_id !== ctrl.controller_name && (
+            <span className="text-xs text-[var(--color-text-muted)] font-mono truncate" title={ctrl.controller_id}>
+              {ctrl.controller_id}
+            </span>
+          )}
+        </div>
+      </td>
+      <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
+        {ctrl.connector || "—"}
+      </td>
+      <td className="px-4 py-2.5 text-sm">{ctrl.trading_pair || "—"}</td>
+      {(() => {
+        const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+        return (
+          <>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.realized_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.realized_pnl_quote, quote)}
+            </td>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.unrealized_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.unrealized_pnl_quote, quote)}
+            </td>
+            <td
+              className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+              style={{ color: pnlColor(ctrl.global_pnl_quote) }}
+            >
+              {formatPnlValue(ctrl.global_pnl_quote, quote)}
+            </td>
+            <td className="px-2 py-2.5">
+              <div className="flex justify-center">
+                {sparklineValues && sparklineValues.length >= 2 ? (
+                  <PnlSparkline values={sparklineValues} />
+                ) : (
+                  <span className="text-[10px] text-[var(--color-text-muted)]">—</span>
+                )}
+              </div>
+            </td>
+            <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+              {formatValue(ctrl.volume_traded, quote)}
+            </td>
+          </>
+        );
+      })()}
+      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+        {formatUptime(ctrl.deployed_at)}
+      </td>
+      <td className="px-4 py-2.5">
+        <div className="flex items-center gap-1.5 justify-center">
+          <StatusDot status={isKilled ? "stopped" : isStopping ? "stopping" : ctrl.status} />
+        </div>
+      </td>
+      <td className="px-4 py-2.5">
+        <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => toggleMutation.mutate()}
+            disabled={toggleMutation.isPending || isStopping}
+            className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
+              isStopping
+                ? "text-[var(--color-yellow)]"
+                : isKilled
+                  ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
+                  : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
+            }`}
+            title={isStopping ? "Stopping..." : isKilled ? "Start controller" : "Pause controller"}
+          >
+            {toggleMutation.isPending || isStopping ? (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            ) : isKilled ? (
+              <Play className="h-3.5 w-3.5" />
+            ) : (
+              <Pause className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+// ── Bots Collapsible Section ──
+
+function BotRow({ bot, server, onStopInitiated, onStopSettled }: { bot: BotSummary; server: string; onStopInitiated?: (botName: string) => void; onStopSettled?: (botName: string) => void }) {
+  const [showLogs, setShowLogs] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const queryClient = useQueryClient();
+  const isStopping = bot.status === "stopping";
+
+  const stopMutation = useMutation({
+    mutationFn: () => {
+      onStopInitiated?.(bot.bot_name);
+      return api.stopBot(server, bot.bot_name);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["bots", server] });
+      setConfirmStop(false);
+    },
+    onSettled: () => {
+      onStopSettled?.(bot.bot_name);
+    },
+  });
+
+  const allLogs: BotLogEntry[] = useMemo(() => {
+    return [
+      ...(bot.error_logs || []).map((l) => ({ ...l, log_category: "error" as const })),
+      ...(bot.general_logs || []).map((l) => ({ ...l, log_category: "general" as const })),
+    ].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  }, [bot.error_logs, bot.general_logs]);
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-4 px-4 py-2.5 text-sm cursor-pointer hover:bg-[var(--color-surface-hover)]/50 transition-colors"
+        onClick={() => setShowLogs(!showLogs)}
+      >
+        <div className="p-0.5">
+          {showLogs ? (
+            <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+          )}
+        </div>
+        <StatusDot status={bot.status} />
+        <span
+          className="font-medium truncate max-w-[250px]"
+          title={bot.bot_name}
+        >
+          {bot.bot_name}
+        </span>
+        <span className="text-[var(--color-text-muted)]">
+          {bot.num_controllers} controller{bot.num_controllers !== 1 ? "s" : ""}
+        </span>
+        {bot.error_count > 0 && (
+          <span className="text-[var(--color-yellow)] text-xs">
+            {bot.error_count} error{bot.error_count !== 1 ? "s" : ""}
+          </span>
+        )}
+        <span className="ml-auto text-[var(--color-text-muted)] tabular-nums">
+          {formatUptime(bot.deployed_at)}
+        </span>
+        {isStopping ? (
+            <div className="flex items-center gap-1.5 text-[var(--color-yellow)]" onClick={(e) => e.stopPropagation()}>
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              <span className="text-xs font-medium">Stopping</span>
+            </div>
+          ) : confirmStop ? (
+            <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => stopMutation.mutate()}
+                disabled={stopMutation.isPending}
+                className="rounded px-2 py-1 text-xs font-medium bg-[var(--color-red)] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {stopMutation.isPending ? "Stopping..." : "Confirm"}
+              </button>
+              <button
+                onClick={() => setConfirmStop(false)}
+                className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={(e) => { e.stopPropagation(); setConfirmStop(true); }}
+              className="flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--color-red)] hover:bg-[var(--color-red)]/10 transition-colors"
+              title="Stop bot"
+            >
+              <Square className="h-3 w-3" />
+              Stop
+            </button>
+          )}
+      </div>
+      {showLogs && (
+        <div className="px-4 pb-3 pt-1">
+          <LogsSection logs={allLogs} />
+        </div>
+      )}
+      {stopMutation.isError && (
+        <div className="px-4 py-2 text-xs text-[var(--color-red)]">
+          Failed to stop bot: {stopMutation.error instanceof Error ? stopMutation.error.message : "Unknown error"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BotsSection({ bots, server, onStopInitiated, onStopSettled }: { bots: BotSummary[]; server: string; onStopInitiated?: (botName: string) => void; onStopSettled?: (botName: string) => void }) {
+  const [expanded, setExpanded] = useState(true);
+  const Chevron = expanded ? ChevronDown : ChevronRight;
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <button
+        className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-[var(--color-surface-hover)] transition-colors"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <Chevron className="h-4 w-4 text-[var(--color-text-muted)]" />
+        <span className="font-medium">Bots</span>
+        <span className="text-sm text-[var(--color-text-muted)]">({bots.length})</span>
+      </button>
+      {expanded && (
+        <div className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border)]/30">
+          {bots.map((bot) => (
+            <BotRow key={bot.bot_name} bot={bot} server={server} onStopInitiated={onStopInitiated} onStopSettled={onStopSettled} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main Page ──
+
+const BOTS_WS_CHANNELS = ["bots", "controller_perf"];
+
+export function ActiveBotsTab() {
+  const { server } = useServer();
+  const [sortKey, setSortKey] = useState<SortKey>("global_pnl_quote");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [showDeploy, setShowDeploy] = useState(false);
+  const [pendingStopBots, setPendingStopBots] = useState<Set<string>>(new Set());
+
+  const onStopInitiated = useCallback((botName: string) => {
+    setPendingStopBots((prev) => new Set(prev).add(botName));
+  }, []);
+  const onStopSettled = useCallback((botName: string) => {
+    setPendingStopBots((prev) => {
+      const next = new Set(prev);
+      next.delete(botName);
+      return next;
+    });
+  }, []);
+
+  // Subscribe to real-time bots updates via WS
+  useCondorWebSocket(BOTS_WS_CHANNELS, server);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["bots", server],
+    queryFn: () => api.getBots(server!),
+    enabled: !!server,
+    refetchInterval: 30000, // Slower polling since WS handles real-time updates
+  });
+
+  // Compute earliest deploy time from active bots for filtering perf history
+  const earliestDeploy = useMemo(() => {
+    if (!data?.bots?.length) return undefined;
+    let earliest: number | undefined;
+    for (const bot of data.bots) {
+      if (bot.deployed_at) {
+        const ms = Date.parse(bot.deployed_at);
+        if (!isNaN(ms) && (earliest === undefined || ms < earliest)) earliest = ms;
+      }
+    }
+    return earliest ? new Date(earliest).toISOString() : undefined;
+  }, [data?.bots]);
+
+  // Fetch performance history for sparklines (all controllers at once)
+  const { data: perfHistory } = useQuery({
+    queryKey: ["controller-perf-history-all", server, earliestDeploy],
+    queryFn: () =>
+      api.getControllerPerformanceHistory(server!, {
+        interval: "5m",
+        limit: 1000,
+        start_time: earliestDeploy,
+      }),
+    enabled: !!server && (data?.controllers?.length ?? 0) > 0,
+    refetchInterval: 120_000,
+    staleTime: 60_000,
+  });
+
+  const handleSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
+
+  const bots = data?.bots ?? [];
+
+  // Track which bots are stopping (server-side status + optimistic pending mutations)
+  const stoppingBotNames = useMemo(() => {
+    const names = new Set(pendingStopBots);
+    for (const bot of bots) {
+      if (bot.status === "stopping") names.add(bot.bot_name);
+    }
+    return names;
+  }, [bots, pendingStopBots]);
+
+  // Deduplicate controllers by bot_name + controller_id (WS updates can cause duplicates)
+  const controllers = useMemo(() => {
+    const raw = data?.controllers ?? [];
+    const seen = new Map<string, ControllerInfo>();
+    for (const ctrl of raw) {
+      const key = `${ctrl.bot_name}:${ctrl.controller_id || ctrl.controller_name}`;
+      seen.set(key, ctrl); // last wins (most recent data)
+    }
+    return Array.from(seen.values());
+  }, [data?.controllers]);
+
+  const sortedControllers = useMemo(
+    () => [...controllers].sort((a, b) => compareControllers(a, b, sortKey, sortDir)),
+    [controllers, sortKey, sortDir],
+  );
+
+  // Filter performance snapshots to only active controllers and current run
+  const activeSnapshots = useMemo(() => {
+    if (!perfHistory?.snapshots || controllers.length === 0) return [];
+
+    // Build set of active controller IDs and their deploy times
+    const activeControllers = new Map<string, number>(); // id -> deployedAt ms
+    for (const ctrl of controllers) {
+      const cid = ctrl.controller_id || ctrl.controller_name;
+      const deployMs = ctrl.deployed_at ? Date.parse(ctrl.deployed_at) : 0;
+      activeControllers.set(cid, deployMs);
+    }
+
+    return perfHistory.snapshots.filter((snap) => {
+      const key = snap.controller_id || snap.controller_name;
+      if (!key || !activeControllers.has(key)) return false;
+      const deployMs = activeControllers.get(key)!;
+      if (!deployMs) return true; // no deploy time known, keep it
+      const snapMs = Date.parse(snap.timestamp) || 0;
+      return snapMs >= deployMs;
+    });
+  }, [perfHistory, controllers]);
+
+  // Build a map: controller_id -> sorted pnl values for sparklines
+  const sparklineMap = useMemo(() => {
+    const map: Record<string, number[]> = {};
+    if (activeSnapshots.length === 0) return map;
+    // Group by controller_id
+    const grouped: Record<string, ControllerPerformanceSnapshot[]> = {};
+    for (const snap of activeSnapshots) {
+      const key = snap.controller_id || snap.controller_name;
+      if (!key) continue;
+      (grouped[key] ??= []).push(snap);
+    }
+    for (const [key, snaps] of Object.entries(grouped)) {
+      const sorted = snaps.sort((a, b) => {
+        const ta = Date.parse(a.timestamp) || 0;
+        const tb = Date.parse(b.timestamp) || 0;
+        return ta - tb;
+      });
+      map[key] = sorted.map((s) => s.global_pnl_quote);
+    }
+    return map;
+  }, [activeSnapshots]);
+
+  // Currency conversion
+  const quoteCurrencies = useMemo(
+    () => controllers.map((c) => c.trading_pair?.split("-")[1] || "USDT"),
+    [controllers],
+  );
+  const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
+
+  if (!server) {
+    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+  }
+  if (isLoading) return <p className="text-[var(--color-text-muted)]">Loading...</p>;
+  if (error)
+    return (
+      <p className="text-[var(--color-red)]">
+        {error instanceof Error ? error.message : "Error"}
+      </p>
+    );
+
+  const serverOnline = data?.server_online !== false;
+  const errorHint = data?.error_hint;
+  const activeBots = bots.filter((b) => b.status === "running" || b.status === "stopping").length;
+
+  // Compute totals with currency conversion
+  let totalPnl = 0;
+  let totalVolume = 0;
+  for (const ctrl of controllers) {
+    const quote = ctrl.trading_pair?.split("-")[1] || "USDT";
+    totalPnl += convert(ctrl.global_pnl_quote, quote).value;
+    totalVolume += convert(ctrl.volume_traded, quote).value;
+  }
+
+  const isEmpty = controllers.length === 0 && bots.length === 0;
+
+  if (!serverOnline) {
+    return (
+      <div className="space-y-6">
+        <div className="rounded-lg border border-[var(--color-yellow)]/40 bg-[var(--color-yellow)]/10 px-4 py-3">
+          <p className="text-sm font-medium text-[var(--color-yellow)]">
+            Unable to reach server
+          </p>
+          {errorHint && (
+            <p className="text-xs text-[var(--color-text-muted)] mt-1">{errorHint}</p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Summary stat cards + deploy button */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_auto]">
+        <StatCard
+          label="Total PnL"
+          value={(totalPnl >= 0 ? "+" : "") + formatCurrencyVolume(totalPnl, currencySymbol)}
+          icon={TrendingUp}
+          valueColor={pnlColor(totalPnl)}
+        />
+        <StatCard label="Volume" value={formatCurrencyVolume(totalVolume, currencySymbol)} icon={Volume2} />
+        <StatCard label="Active Bots" value={String(activeBots)} icon={Bot} />
+        <StatCard label="Controllers" value={String(controllers.length)} icon={Layers} />
+        <button
+          onClick={() => setShowDeploy(true)}
+          className="flex items-center gap-2 justify-center rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20 h-full col-span-2 lg:col-span-1"
+        >
+          <Rocket className="h-4 w-4" />
+          Deploy Bot
+        </button>
+      </div>
+
+      {/* Aggregated PnL chart */}
+      {activeSnapshots.length > 0 && (
+        <AggregatedPnlChart
+          snapshots={activeSnapshots}
+          controllers={controllers}
+          currencySymbol={currencySymbol}
+          convert={convert}
+        />
+      )}
+
+      {isEmpty ? (
+        <div className="flex flex-col items-center gap-2 py-16 text-[var(--color-text-muted)]">
+          <Bot className="h-10 w-10" />
+          <p>No bots running</p>
+        </div>
+      ) : (
+        <>
+          {/* Controllers table */}
+          {controllers.length > 0 && (
+            <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+                      <SortHeader label="Controller" sortKey="controller_name" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Connector" sortKey="connector" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Pair" sortKey="trading_pair" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} />
+                      <SortHeader label="Realized" sortKey="realized_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                      <SortHeader label="Unrealized" sortKey="unrealized_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                      <SortHeader label="Total PnL" sortKey="global_pnl_quote" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                      <th className="px-2 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)] text-center">
+                        Trend
+                      </th>
+                      <SortHeader label="Volume" sortKey="volume_traded" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                      <SortHeader label="Age" sortKey="deployed_at" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="right" />
+                      <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={handleSort} align="center" />
+                      <th className="px-4 py-3 text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)] text-center">
+                        Actions
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedControllers.map((ctrl) => {
+                      const cid = ctrl.controller_id || ctrl.controller_name;
+                      return (
+                        <ControllerRow
+                          key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                          ctrl={ctrl}
+                          server={server!}
+                          isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`}
+                          onSelect={() => setSelectedKey(`${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`)}
+                          formatPnlValue={formatPnlValue}
+                          formatValue={formatValue}
+                          sparklineValues={sparklineMap[cid]}
+                          isBotStopping={stoppingBotNames.has(ctrl.bot_name)}
+                        />
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Bots collapsible section */}
+          {bots.length > 0 && <BotsSection bots={bots} server={server} onStopInitiated={onStopInitiated} onStopSettled={onStopSettled} />}
+        </>
+      )}
+
+      {/* Fullscreen controller overlay */}
+      {selectedKey && controllers.length > 0 && (
+        <ControllerBrowser
+          controllers={sortedControllers}
+          server={server}
+          initialControllerKey={selectedKey}
+          onClose={() => setSelectedKey(null)}
+          convert={convert}
+          currencySymbol={currencySymbol}
+        />
+      )}
+
+      {/* Deploy dialog */}
+      <DeployBotDialog
+        open={showDeploy}
+        onClose={() => setShowDeploy(false)}
+        server={server}
+      />
+    </div>
+  );
+}

@@ -98,6 +98,7 @@ class ConfigManager:
             self._data.setdefault("users", {})
             self._data.setdefault("server_access", {})
             self._data.setdefault("chat_defaults", {})
+            self._data.setdefault("user_preferences", {})
             # Migrate audit_log from config.yml to separate file (one-time)
             if "audit_log" in self._data:
                 self._audit_log = self._data.pop("audit_log")
@@ -125,6 +126,7 @@ class ConfigManager:
             "users": {},
             "server_access": {},
             "chat_defaults": {},
+            "user_preferences": {},
             "version": self.VERSION,
         }
         self._audit_log = []
@@ -590,6 +592,45 @@ class ConfigManager:
 
     def get_all_users(self) -> list:
         return list(self._data.get("users", {}).values())
+
+    # =========================================================================
+    # USER PREFERENCES (persisted in config.yml, shared across TG + Web)
+    # =========================================================================
+
+    def get_user_preferences(self, user_id: int) -> dict:
+        """Get all preferences for a user. Returns a copy."""
+        prefs = self._data.setdefault("user_preferences", {})
+        return dict(prefs.get(user_id, {}))
+
+    def get_user_preference(self, user_id: int, key: str, default=None):
+        """Get a single preference value."""
+        prefs = self._data.get("user_preferences", {}).get(user_id, {})
+        return prefs.get(key, default)
+
+    def set_user_preference(self, user_id: int, key: str, value) -> None:
+        """Set a single preference value and persist."""
+        prefs = self._data.setdefault("user_preferences", {})
+        if user_id not in prefs:
+            prefs[user_id] = {}
+        prefs[user_id][key] = value
+        self._save_config()
+
+    def set_user_preferences(self, user_id: int, updates: dict) -> None:
+        """Merge multiple preference values and persist."""
+        prefs = self._data.setdefault("user_preferences", {})
+        if user_id not in prefs:
+            prefs[user_id] = {}
+        prefs[user_id].update(updates)
+        self._save_config()
+
+    def delete_user_preference(self, user_id: int, key: str) -> bool:
+        """Delete a preference key. Returns True if it existed."""
+        prefs = self._data.get("user_preferences", {}).get(user_id, {})
+        if key in prefs:
+            del prefs[key]
+            self._save_config()
+            return True
+        return False
 
     # =========================================================================
     # SERVER ACCESS CONTROL

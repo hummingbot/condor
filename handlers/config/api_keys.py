@@ -99,8 +99,8 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     cred_list = []
 
                 # Separate credentials into perpetual and spot
-                perp_creds = [c for c in cred_list if c.endswith("_perpetual")]
-                spot_creds = [c for c in cred_list if not c.endswith("_perpetual")]
+                perp_creds = [c for c in cred_list if "perpetual" in c]
+                spot_creds = [c for c in cred_list if "perpetual" not in c]
 
                 # Store credentials in context for callback handling
                 context.user_data["api_key_current_account"] = account_name
@@ -225,9 +225,9 @@ async def show_connectors_by_type(
 
         # Filter credentials by type
         if is_perpetual:
-            type_creds = [c for c in cred_list if c.endswith("_perpetual")]
+            type_creds = [c for c in cred_list if "perpetual" in c]
         else:
-            type_creds = [c for c in cred_list if not c.endswith("_perpetual")]
+            type_creds = [c for c in cred_list if "perpetual" not in c]
 
         # Store credentials in context for delete functionality
         context.user_data["api_key_credentials"] = type_creds
@@ -260,14 +260,15 @@ async def show_connectors_by_type(
 
         # Filter out testnet connectors and gateway connectors (those with '/' like "uniswap/ethereum")
         connectors = [
-            c for c in all_connectors if "testnet" not in c.lower() and "/" not in c
+            c for c in all_connectors
+            if "testnet" not in c.lower() and "sandbox" not in c.lower() and "/" not in c
         ]
 
         # Filter by type
         if is_perpetual:
-            connectors = [c for c in connectors if c.endswith("_perpetual")]
+            connectors = [c for c in connectors if "perpetual" in c]
         else:
-            connectors = [c for c in connectors if not c.endswith("_perpetual")]
+            connectors = [c for c in connectors if "perpetual" not in c]
 
         # Store connector list in context
         context.user_data["api_key_connectors"] = connectors
@@ -504,7 +505,7 @@ async def show_connector_config(
 
         # Determine connector type for back navigation
         connector_type = (
-            "perpetual" if connector_name.endswith("_perpetual") else "spot"
+            "perpetual" if "perpetual" in connector_name else "spot"
         )
 
         # Initialize context storage for API key configuration
@@ -557,7 +558,7 @@ async def show_connector_config(
         logger.error(f"Error showing connector config: {e}", exc_info=True)
         error_text = f"❌ Error loading connector config: {escape_markdown_v2(str(e))}"
         connector_type = (
-            "perpetual" if connector_name.endswith("_perpetual") else "spot"
+            "perpetual" if "perpetual" in connector_name else "spot"
         )
         keyboard = [
             [
@@ -876,7 +877,7 @@ async def delete_credential(
         # Determine connector type for back navigation
         connector_type = context.user_data.get(
             "api_key_connector_type",
-            "perpetual" if connector_name.endswith("_perpetual") else "spot",
+            "perpetual" if "perpetual" in connector_name else "spot",
         )
 
         # Delete the credential
@@ -911,7 +912,7 @@ async def delete_credential(
 
         connector_type = context.user_data.get(
             "api_key_connector_type",
-            "perpetual" if connector_name.endswith("_perpetual") else "spot",
+            "perpetual" if "perpetual" in connector_name else "spot",
         )
         keyboard = [
             [
@@ -945,7 +946,7 @@ async def show_credential_manage_menu(
     )
 
     # Determine type emoji
-    is_perpetual = connector_name.endswith("_perpetual")
+    is_perpetual = "perpetual" in connector_name
     type_emoji = "📈" if is_perpetual else "💱"
     connector_escaped = escape_markdown_v2(connector_name)
 

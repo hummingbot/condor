@@ -1,20 +1,25 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import React, { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
   ArrowUpDown,
+  BarChart3,
   CheckCircle,
+  Copy,
   Grid3X3,
   Layers,
   Loader2,
   Rocket,
+  Settings2,
   TrendingUp,
+  X,
 } from "lucide-react";
 
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
+import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { GridChart } from "@/components/grid/GridChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
@@ -24,7 +29,9 @@ import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
+import { useRates } from "@/hooks/useRates";
 import { api } from "@/lib/api";
+import { candleStore } from "@/lib/candle-store";
 import type { ExecutorType } from "@/components/executor/types";
 import {
   type GridState,
@@ -167,6 +174,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
 export function CreateExecutor() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Executor type from URL param or default to grid
@@ -196,34 +204,75 @@ export function CreateExecutor() {
   const pair = gridState.pair;
   const isSpot = isSpotConnector(connector);
 
-  const [successId, setSuccessId] = useState<string | null>(null);
-  const [onlyConnected, setOnlyConnected] = useState(true);
+  // Apply connector/pair from URL params (e.g. from Executors detail panel)
+  useEffect(() => {
+    const urlConnector = searchParams.get("connector");
+    const urlPair = searchParams.get("pair");
+    if (urlConnector) {
+      gridDispatch({ type: "SET_CONNECTOR", value: urlConnector });
+      searchParams.delete("connector");
+    }
+    if (urlPair) {
+      gridDispatch({ type: "SET_PAIR", value: urlPair });
+      searchParams.delete("pair");
+    }
+    if (urlConnector || urlPair) {
+      setSearchParams(searchParams, { replace: true });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { data: allConnectors } = useQuery({
-    queryKey: ["connectors", server],
-    queryFn: () => api.getConnectors(server!),
-    enabled: !!server,
-  });
+  const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
+  const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
+  const [rightPanelWidth, setRightPanelWidth] = useState(288);
+  const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
+  const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
 
-  const { data: connectedExchanges } = useQuery({
+  const startHDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = rightPanelWidth;
+    document.body.style.cursor = "col-resize";
+    const onMove = (ev: MouseEvent) => {
+      setRightPanelWidth(Math.max(260, Math.min(500, startW + (startX - ev.clientX))));
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [rightPanelWidth]);
+
+  const startVDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = bottomPaneHeight;
+    document.body.style.cursor = "row-resize";
+    const onMove = (ev: MouseEvent) => {
+      setBottomPaneHeight(Math.max(100, Math.min(500, startH + (startY - ev.clientY))));
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [bottomPaneHeight]);
+
+  const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],
     queryFn: () => api.getConnectedExchanges(server!),
     enabled: !!server,
   });
 
-  const connectors = useMemo(() => {
-    if (!allConnectors) return [];
-    if (!onlyConnected || !connectedExchanges?.length) return allConnectors;
-    const connectedBases = new Set(connectedExchanges.map((c) => c.replace(/_perpetual$/, "")));
-    return allConnectors.filter((c) => {
-      const base = c.replace(/_perpetual$/, "");
-      return connectedBases.has(base);
-    });
-  }, [allConnectors, connectedExchanges, onlyConnected]);
-
-  // WS subscription for executor data
-  const execChannels = useMemo(() => server ? [`executors:${server}`] : [], [server]);
-  useCondorWebSocket(execChannels, server);
+  // WS for executor data (candle streams are managed by candleStore)
+  const wsChannels = useMemo(
+    () => server ? [`executors:${server}`] : [],
+    [server],
+  );
+  useCondorWebSocket(wsChannels, server);
 
   // Main controller data (executors + positions filtered by connector/pair)
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
@@ -231,11 +280,25 @@ export function CreateExecutor() {
 
   const rulesData = useTradingRules(server ?? "", connector);
 
-  // Persist last-used connector/pair to localStorage
+  // Currency conversion for chart tooltip values
+  const quoteCurrency = pair.split("-")[1] || "USDT";
+  const { formatPnlValue, formatValue } = useRates([quoteCurrency]);
+  const convertPnl = useCallback((val: number) => formatPnlValue(val, quoteCurrency), [formatPnlValue, quoteCurrency]);
+  const convertValue = useCallback((val: number) => formatValue(val, quoteCurrency), [formatValue, quoteCurrency]);
+
+  // Load candles for an executor that's outside the current range
+  const handleRequestCandleRange = useCallback((startTime: number) => {
+    if (!server) return;
+    const newLookback = Math.ceil(Date.now() / 1000 - startTime) + 3600; // +1h padding
+    gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: newLookback });
+  }, [server]);
+
+  // Persist last-used connector/pair to localStorage & clear executor selection
   useEffect(() => {
     try {
       localStorage.setItem(LAST_MARKET_KEY, JSON.stringify({ connector, pair }));
     } catch { /* ok */ }
+    setSelectedExecutorId(null);
   }, [connector, pair]);
 
   // Sync connector to filtered list
@@ -298,15 +361,6 @@ export function CreateExecutor() {
       case "dca": return dcaConfig.validation;
     }
   }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation]);
-
-  const activeSide = useMemo(() => {
-    switch (executorType) {
-      case "grid": return gridState.side;
-      case "position": return positionConfig.state.side;
-      case "order": return orderConfig.state.side;
-      case "dca": return dcaConfig.state.side;
-    }
-  }, [executorType, gridState.side, positionConfig.state.side, orderConfig.state.side, dcaConfig.state.side]);
 
   // Chart props depend on active type
   const chartProps = useMemo(() => {
@@ -405,8 +459,13 @@ export function CreateExecutor() {
         case "order": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;
       }
-      setSuccessId(data.executor_id);
-      setTimeout(() => navigate("/executors"), 2500);
+      // Show success modal
+      setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
+      // Invalidate executor queries so the new one appears immediately
+      queryClient.invalidateQueries({ queryKey: ["executors", server, "main", pair] });
+      queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
+      // Auto-select the new executor in the bottom pane
+      setSelectedExecutorId(data.executor_id);
     },
   });
 
@@ -420,7 +479,7 @@ export function CreateExecutor() {
       <div className="flex items-center border-b border-[var(--color-border)] bg-[var(--color-surface)]">
         {/* Back button */}
         <button
-          onClick={() => navigate("/executors")}
+          onClick={() => navigate(-1)}
           className="flex items-center gap-1 border-r border-[var(--color-border)] px-3 py-2.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
@@ -441,17 +500,6 @@ export function CreateExecutor() {
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
             />
           </div>
-          {connectedExchanges && connectedExchanges.length > 0 && (
-            <label className="flex cursor-pointer items-center gap-1.5 border-l border-[var(--color-border)] px-3 py-2.5 text-[10px] text-[var(--color-text-muted)] select-none hover:bg-[var(--color-surface-hover)]">
-              <input
-                type="checkbox"
-                checked={onlyConnected}
-                onChange={(e) => setOnlyConnected(e.target.checked)}
-                className="h-3 w-3 rounded border-[var(--color-border)] accent-[var(--color-primary)]"
-              />
-              Connected only
-            </label>
-          )}
         </div>
 
         {/* Price ticker */}
@@ -501,15 +549,16 @@ export function CreateExecutor() {
       {/* Main Area: Chart + Right Panel */}
       <div className="flex min-h-0 flex-1">
         {/* Chart + Bottom Pane */}
-        <div className="min-w-0 flex-1 flex flex-col border-r border-[var(--color-border)]">
+        <div className="min-w-0 flex-1 flex flex-col">
           <div className="flex-1 min-h-0 overflow-hidden bg-[var(--color-surface)]">
             <GridChart
-              key={`${connector}:${pair}:${gridState.interval}:${gridState.lookbackSeconds}`}
+              key={`${connector}:${pair}:${gridState.interval}`}
               server={server}
               connector={connector}
               pair={pair}
               interval={gridState.interval}
               lookbackSeconds={gridState.lookbackSeconds}
+
               startPrice={chartProps.startPrice}
               endPrice={chartProps.endPrice}
               limitPrice={chartProps.limitPrice}
@@ -520,104 +569,209 @@ export function CreateExecutor() {
               pricePrecision={pricePrecision}
               extraLines={chartProps.extraLines}
               executorOverlays={mainOverlays}
+              positions={mainPositions}
+              selectedExecutorId={selectedExecutorId}
+              convertValue={convertValue}
+              convertPnl={convertPnl}
+              onExecutorDeselect={() => setSelectedExecutorId(null)}
             />
           </div>
-          <TradeBottomPane
-            executors={mainExecutors}
-            positions={mainPositions}
-            isLoadingPositions={isLoadingPositions}
-          />
+          {/* Horizontal resize handle */}
+          <div
+            className="group/hdrag relative h-1.5 shrink-0 cursor-row-resize border-y border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20 transition-colors"
+            onMouseDown={startVDrag}
+          >
+            <div className="absolute inset-x-0 top-1/2 mx-auto h-px w-12 -translate-y-1/2 rounded bg-amber-400/60 group-hover/hdrag:bg-amber-400 transition-colors" />
+          </div>
+          <div style={{ height: bottomPaneHeight }} className="shrink-0 overflow-hidden">
+            <TradeBottomPane
+              executors={mainExecutors}
+              positions={mainPositions}
+              isLoadingPositions={isLoadingPositions}
+              connector={connector}
+              pair={pair}
+              isSpot={isSpot}
+              selectedExecutorId={selectedExecutorId}
+              onExecutorSelect={(ex) => {
+                setSelectedExecutorId(ex?.id ?? null);
+                // If this executor is older than current candle range, expand lookback
+                if (ex && ex.timestamp > 0) {
+                  const key = `candles:${server}:${connector}:${pair}:${gridState.interval}`;
+                  const candles = candleStore.getCandles(key);
+                  if (candles.length > 0) {
+                    const minTime = candles[0].timestamp;
+                    if (ex.timestamp < minTime) {
+                      handleRequestCandleRange(ex.timestamp);
+                    }
+                  }
+                }
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Vertical resize handle */}
+        <div
+          className="group/vdrag relative w-1.5 shrink-0 cursor-col-resize border-x border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-primary)]/10 active:bg-[var(--color-primary)]/20 transition-colors"
+          onMouseDown={startHDrag}
+        >
+          <div className="absolute inset-y-0 left-1/2 my-auto h-12 w-px -translate-x-1/2 rounded bg-amber-400/60 group-hover/vdrag:bg-amber-400 transition-colors" />
         </div>
 
         {/* Right Panel */}
-        <div className="flex w-72 shrink-0 flex-col bg-[var(--color-surface)] xl:w-80">
-          {/* Type Tabs */}
-          <div className="border-b border-[var(--color-border)]">
-            <div className="flex">
-              {TYPE_TABS.map((tab) => (
+        <div className="flex shrink-0 flex-col bg-[var(--color-surface)]" style={{ width: rightPanelWidth }}>
+          {/* Panel Mode Toggle */}
+          <div className="flex border-b border-[var(--color-border)]">
+            <button
+              onClick={() => setRightPanel("config")}
+              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
+                rightPanel === "config"
+                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              <Settings2 className="h-3.5 w-3.5" />
+              Execute
+            </button>
+            <button
+              onClick={() => setRightPanel("depth")}
+              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
+                rightPanel === "depth"
+                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              <BarChart3 className="h-3.5 w-3.5" />
+              Data
+            </button>
+          </div>
+
+          {rightPanel === "config" ? (
+            <>
+              {/* Type Tabs */}
+              <div className="border-b border-[var(--color-border)]">
+                <div className="flex">
+                  {TYPE_TABS.map((tab) => (
+                    <button
+                      key={tab.value}
+                      onClick={() => handleTypeChange(tab.value)}
+                      className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
+                        executorType === tab.value
+                          ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                          : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                      }`}
+                    >
+                      {tab.icon}
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Config Panel */}
+              <div className="flex-1 overflow-y-auto">
+                {executorType === "grid" && (
+                  <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={pair?.split("-")[1] || "USDT"} />
+                )}
+                {executorType === "position" && (
+                  <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+                {executorType === "order" && (
+                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+                {executorType === "dca" && (
+                  <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+              </div>
+
+              {/* Sticky Create Footer */}
+              <div className="border-t border-[var(--color-border)] p-3">
+                {!activeValidation.valid && (
+                  <p className="mb-2 text-[11px] text-[var(--color-red)]">
+                    {activeValidation.errors[0]}
+                  </p>
+                )}
                 <button
-                  key={tab.value}
-                  onClick={() => handleTypeChange(tab.value)}
-                  className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2.5 text-[11px] font-medium transition-colors ${
-                    executorType === tab.value
-                      ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                  }`}
+                  onClick={() => createMutation.mutate()}
+                  disabled={!activeValidation.valid || createMutation.isPending}
+                  className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {tab.icon}
-                  {tab.label}
+                  {createMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Rocket className="h-4 w-4" />
+                  )}
+                  Create {TYPE_LABELS[executorType]}
                 </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Config Panel */}
-          <div className="flex-1 overflow-y-auto">
-            {executorType === "grid" && (
-              <GridConfigPanel state={gridState} dispatch={gridDispatch} currentPrice={currentPrice} isSpot={isSpot} />
-            )}
-            {executorType === "position" && (
-              <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-            )}
-            {executorType === "order" && (
-              <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-            )}
-            {executorType === "dca" && (
-              <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
-            )}
-          </div>
+              </div>
+            </>
+          ) : (
+            <MarketDepthPanel server={server} connector={connector} pair={pair} />
+          )}
         </div>
-      </div>
-
-      {/* Bottom Bar */}
-      <div className="flex items-center justify-between border-t border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
-        <div className="flex items-center gap-3 text-xs">
-          {activeValidation.valid ? (
-            <span className="text-[var(--color-green)]">Ready to launch</span>
-          ) : (
-            <span className="text-[var(--color-red)]">
-              {activeValidation.errors[0]}
-            </span>
-          )}
-          {activeSide === 1 ? (
-            <span className="rounded bg-[var(--color-green)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-green)]">LONG</span>
-          ) : (
-            <span className="rounded bg-[var(--color-red)]/20 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-red)]">SHORT</span>
-          )}
-          <span className="text-[var(--color-text-muted)]">
-            {connector} / {pair}
-          </span>
-        </div>
-
-        <button
-          onClick={() => createMutation.mutate()}
-          disabled={!activeValidation.valid || createMutation.isPending}
-          className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-5 py-2 text-sm font-bold text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {createMutation.isPending ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Rocket className="h-4 w-4" />
-          )}
-          Create {TYPE_LABELS[executorType]}
-        </button>
       </div>
 
       {/* Success modal */}
-      {successId && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-8 py-6 shadow-2xl shadow-black/40">
-            <CheckCircle className="h-10 w-10 text-[var(--color-green)]" />
-            <div className="text-center">
-              <p className="text-sm font-semibold text-[var(--color-text)]">{TYPE_LABELS[executorType]} Created</p>
-              <p className="mt-1 font-mono text-xs text-[var(--color-text-muted)]">{successId}</p>
-            </div>
-            <p className="text-[10px] text-[var(--color-text-muted)]">Redirecting to executors...</p>
+      {successInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="relative w-[360px] rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] p-6 shadow-2xl shadow-black/40 animate-in fade-in zoom-in-95 duration-200">
+            {/* Close button */}
             <button
-              onClick={() => navigate("/executors")}
-              className="mt-1 rounded-lg bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white hover:brightness-110"
+              onClick={() => setSuccessInfo(null)}
+              className="absolute right-3 top-3 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
             >
-              Go now
+              <X className="h-4 w-4" />
+            </button>
+
+            {/* Icon */}
+            <div className="mb-4 flex justify-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-green)]/15">
+                <CheckCircle className="h-6 w-6 text-[var(--color-green)]" />
+              </div>
+            </div>
+
+            {/* Title */}
+            <h3 className="mb-1 text-center text-sm font-semibold text-[var(--color-text)]">
+              {TYPE_LABELS[successInfo.type]} Created
+            </h3>
+            <p className="mb-4 text-center text-[11px] text-[var(--color-text-muted)]">
+              Successfully deployed on {successInfo.connector}
+            </p>
+
+            {/* Details */}
+            <div className="mb-4 space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Executor ID</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-[var(--color-text)]">{successInfo.id.slice(0, 12)}…</span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(successInfo.id)}
+                    className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                    title="Copy full ID"
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Pair</span>
+                <span className="font-mono text-[var(--color-text)]">{successInfo.pair}</span>
+              </div>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[var(--color-text-muted)]">Status</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-[var(--color-green)]/15 px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-green)]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-green)] animate-pulse" />
+                  ACTIVE
+                </span>
+              </div>
+            </div>
+
+            {/* Action */}
+            <button
+              onClick={() => setSuccessInfo(null)}
+              className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110"
+            >
+              Continue Trading
             </button>
           </div>
         </div>

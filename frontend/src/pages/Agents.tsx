@@ -5,12 +5,13 @@ import {
   CircleDot,
   Pause,
   Plus,
+  Trash2,
   Zap,
 } from "lucide-react";
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 
-import { type AgentSummary, api } from "@/lib/api";
+import { type AgentSummary, type RunningInstance, api } from "@/lib/api";
 
 const STATUS_STYLES: Record<string, { dot: string; bg: string; label: string }> = {
   running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", bg: "border-emerald-500/30 bg-emerald-500/5", label: "LIVE" },
@@ -29,7 +30,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-function AgentCard({ agent, onClick }: { agent: AgentSummary; onClick: () => void }) {
+function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick: () => void; onDelete: () => void }) {
   const totalPnl = agent.total_pnl ?? 0;
   const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
   const dayPnl = agent.daily_pnl ?? 0;
@@ -57,7 +58,22 @@ function AgentCard({ agent, onClick }: { agent: AgentSummary; onClick: () => voi
               <h3 className="text-sm font-semibold text-[var(--color-text)]">{agent.name}</h3>
             </div>
           </div>
-          <StatusBadge status={agent.status} />
+          <div className="flex items-center gap-2">
+            <StatusBadge status={agent.status} />
+            {!isLive && (
+              <div
+                className="opacity-0 transition-opacity group-hover:opacity-100"
+                onClick={(e) => { e.stopPropagation(); onDelete(); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onDelete(); } }}
+                role="button"
+                tabIndex={0}
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-md border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </span>
+              </div>
+            )}
+          </div>
         </div>
 
         {agent.description && (
@@ -197,9 +213,137 @@ function CreateAgentDialog({
   );
 }
 
+interface ActiveSession extends RunningInstance {
+  agentName: string;
+  agentSlug: string;
+}
+
+function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
+  return (
+    <div className="mb-6 rounded-lg border border-emerald-500/20 bg-[var(--color-surface)] p-4">
+      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-emerald-400">
+        <Zap className="h-3.5 w-3.5" /> Active Trading Sessions ({sessions.length})
+      </h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+              <th className="px-2 py-1.5">Agent</th>
+              <th className="px-2 py-1.5">Session</th>
+              <th className="px-2 py-1.5">Trading Context</th>
+              <th className="px-2 py-1.5 text-right">Realized PnL</th>
+              <th className="px-2 py-1.5 text-right">Unrealized PnL</th>
+              <th className="px-2 py-1.5 text-right">Volume</th>
+              <th className="px-2 py-1.5 text-right">Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map((s) => {
+              const realizedColor = s.realized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+              const unrealizedColor = s.unrealized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+              const modeBadge = s.execution_mode === "dry_run"
+                ? { label: "DRY RUN", cls: "border-blue-500/30 bg-blue-500/10 text-blue-400" }
+                : s.execution_mode === "run_once"
+                  ? { label: "RUN ONCE", cls: "border-amber-500/30 bg-amber-500/10 text-amber-400" }
+                  : null;
+              return (
+                <tr key={s.agent_id} className="border-t border-[var(--color-border)]/40 font-mono">
+                  <td className="px-2 py-2">
+                    <Link
+                      to={`/agents/${s.agentSlug}`}
+                      className="font-medium text-[var(--color-primary)] hover:underline"
+                    >
+                      {s.agentName}
+                    </Link>
+                  </td>
+                  <td className="px-2 py-2 text-[var(--color-text)]">
+                    <span className="flex items-center gap-1.5">
+                      #{s.session_num}
+                      {modeBadge && (
+                        <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase ${modeBadge.cls}`}>
+                          {modeBadge.label}
+                        </span>
+                      )}
+                    </span>
+                  </td>
+                  <td className="max-w-[200px] px-2 py-2 text-[var(--color-text-muted)]">
+                    <span className="line-clamp-1">{s.trading_context || "—"}</span>
+                  </td>
+                  <td className={`px-2 py-2 text-right ${realizedColor}`}>
+                    ${s.realized_pnl >= 0 ? "+" : ""}{s.realized_pnl.toFixed(2)}
+                  </td>
+                  <td className={`px-2 py-2 text-right ${unrealizedColor}`}>
+                    ${s.unrealized_pnl >= 0 ? "+" : ""}{s.unrealized_pnl.toFixed(2)}
+                  </td>
+                  <td className="px-2 py-2 text-right text-[var(--color-text)]">
+                    ${s.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </td>
+                  <td className="px-2 py-2 text-right text-[var(--color-text)]">{s.open_count}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function DeleteAgentDialog({
+  agent,
+  onClose,
+}: {
+  agent: AgentSummary | null;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteAgent(agent!.slug),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents"] });
+      onClose();
+    },
+  });
+
+  if (!agent) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="mb-2 text-lg font-semibold text-[var(--color-text)]">Delete Agent</h2>
+        <p className="mb-6 text-sm text-[var(--color-text-muted)]">
+          Delete <strong className="text-[var(--color-text)]">{agent.name}</strong>? This cannot be undone.
+        </p>
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => deleteMutation.mutate()}
+            disabled={deleteMutation.isPending}
+            className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-red-600 disabled:opacity-40"
+          >
+            {deleteMutation.isPending ? "Deleting..." : "Delete"}
+          </button>
+        </div>
+        {deleteMutation.isError && (
+          <p className="mt-3 text-xs text-red-400">Failed to delete agent. It may be running.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Agents() {
   const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AgentSummary | null>(null);
 
   const { data: agents = [], isLoading } = useQuery({
     queryKey: ["agents"],
@@ -210,13 +354,25 @@ export function Agents() {
   const running = agents.filter((a) => a.status === "running");
   const others = agents.filter((a) => a.status !== "running");
 
+  const activeSessions = useMemo<ActiveSession[]>(
+    () =>
+      agents.flatMap((a) =>
+        (a.instances || []).map((inst) => ({
+          ...inst,
+          agentName: a.name,
+          agentSlug: a.slug,
+        })),
+      ),
+    [agents],
+  );
+
   const aggTotalPnl = agents.reduce((sum, a) => sum + (a.total_pnl ?? 0), 0);
   const aggVolume = agents.reduce((sum, a) => sum + (a.total_volume ?? 0), 0);
   const aggOpen = agents.reduce((sum, a) => sum + (a.open_positions ?? 0), 0);
   const aggTotalColor = aggTotalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 
   return (
-    <div className="mx-auto w-full max-w-7xl">
+    <div className="w-full">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>
@@ -266,6 +422,11 @@ export function Agents() {
         </div>
       )}
 
+      {/* Active Sessions Table */}
+      {!isLoading && activeSessions.length > 0 && (
+        <ActiveSessionsTable sessions={activeSessions} />
+      )}
+
       {isLoading ? (
         <div className="flex h-64 items-center justify-center text-[var(--color-text-muted)]">
           <div className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
@@ -300,6 +461,7 @@ export function Agents() {
                     key={agent.slug}
                     agent={agent}
                     onClick={() => navigate(`/agents/${agent.slug}`)}
+                    onDelete={() => setDeleteTarget(agent)}
                   />
                 ))}
               </div>
@@ -321,6 +483,7 @@ export function Agents() {
                     key={agent.slug}
                     agent={agent}
                     onClick={() => navigate(`/agents/${agent.slug}`)}
+                    onDelete={() => setDeleteTarget(agent)}
                   />
                 ))}
               </div>
@@ -330,6 +493,7 @@ export function Agents() {
       )}
 
       <CreateAgentDialog open={showCreate} onClose={() => setShowCreate(false)} />
+      <DeleteAgentDialog agent={deleteTarget} onClose={() => setDeleteTarget(null)} />
     </div>
   );
 }

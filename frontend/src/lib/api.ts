@@ -78,6 +78,7 @@ export interface BotDetail {
 
 export interface ControllerInfo {
   controller_name: string;
+  controller_id: string;
   bot_name: string;
   status: string;
   connector: string;
@@ -93,12 +94,21 @@ export interface ControllerInfo {
   config: Record<string, unknown>;
 }
 
+export interface BotLogEntry {
+  timestamp?: number;
+  msg?: string;
+  log_category?: string;
+  [key: string]: unknown;
+}
+
 export interface BotSummary {
   bot_name: string;
   status: string;
   num_controllers: number;
   error_count: number;
   deployed_at: string | null;
+  error_logs: BotLogEntry[];
+  general_logs: BotLogEntry[];
 }
 
 export interface BotsPageResponse {
@@ -106,6 +116,53 @@ export interface BotsPageResponse {
   bots: BotSummary[];
   total_pnl: number;
   total_volume: number;
+  server_online?: boolean;
+  error_hint?: string;
+}
+
+export interface BotRunInfo {
+  bot_name: string;
+  bot_run_id: number | null;
+  account_name: string;
+  strategy_type: string;
+  strategy_name: string;
+  run_status: string;
+  deployment_status: string;
+  created_at: string | null;
+  stopped_at: string | null;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  global_pnl_quote: number;
+  volume_traded: number;
+  num_controllers: number;
+}
+
+export interface BotRunsResponse {
+  runs: BotRunInfo[];
+  total: number;
+}
+
+export interface ControllerPerformanceSnapshot {
+  timestamp: string;
+  bot_name: string;
+  controller_id: string;
+  controller_name: string;
+  connector: string;
+  trading_pair: string;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  global_pnl_quote: number;
+  global_pnl_pct: number;
+  volume_traded: number;
+  close_type_counts: Record<string, number>;
+  positions_summary: Record<string, unknown>[];
+  custom_info: Record<string, unknown>;
+}
+
+export interface ControllerPerformanceHistoryResponse {
+  snapshots: ControllerPerformanceSnapshot[];
+  next_cursor: string | null;
+  interval: string;
   server_online?: boolean;
   error_hint?: string;
 }
@@ -158,8 +215,12 @@ export interface ConsolidatedPosition {
   position_side: string;
   amount: number;
   entry_price: number;
+  notional_value: number;
   current_price: number;
   unrealized_pnl: number;
+  realized_pnl: number;
+  cum_fees: number;
+  executor_count: number;
   leverage: number;
   controller_id: string;
   source: "executor" | "bot";
@@ -370,6 +431,191 @@ export interface SnapshotSummary {
   file: string;
 }
 
+// ── Routines ──
+
+export interface RoutineFieldInfo {
+  type: string;
+  default: unknown;
+  description: string;
+  widget?: "select";
+  options_from?: string;
+}
+
+export interface RoutineInfo {
+  name: string;
+  description: string;
+  is_continuous: boolean;
+  category: string;
+  source: string;
+  fields: Record<string, RoutineFieldInfo>;
+  report_count: number;
+}
+
+export interface RoutineInstance {
+  instance_id: string;
+  routine_name: string;
+  config: Record<string, unknown>;
+  status: string;
+  source: string;
+  schedule?: Record<string, unknown>;
+  created_at: number;
+  last_run_at: number | null;
+  last_result: string | null;
+  last_duration: number | null;
+  run_count: number;
+  has_result?: boolean;
+  result_text?: string;
+  has_chart?: boolean;
+  table_data?: Record<string, unknown>[] | null;
+  table_columns?: string[] | null;
+  sections?: Record<string, unknown>[] | null;
+  error?: string | null;
+}
+
+// ── Archived Bots ──
+
+export interface ArchivedBotSummary {
+  bot_name: string;
+  db_path: string;
+  total_trades: number;
+  total_orders: number;
+  trading_pairs: string[];
+  exchanges: string[];
+  start_time: number | null;
+  end_time: number | null;
+}
+
+export interface PnlPoint {
+  timestamp: number;
+  pnl: number;
+}
+
+export interface ArchivedBotPerformance {
+  bot_name: string;
+  db_path: string;
+  total_pnl: number;
+  total_fees: number;
+  total_volume: number;
+  trade_count: number;
+  buy_count: number;
+  sell_count: number;
+  pnl_by_pair: Record<string, number>;
+  cumulative_pnl: PnlPoint[];
+  trading_pairs: string[];
+  exchanges: string[];
+  executors: ExecutorInfo[];
+  primary_connector: string;
+  primary_trading_pair: string;
+  executor_count: number;
+}
+
+export interface PaginatedExecutors {
+  executors: ExecutorInfo[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+// ── Reports ──
+
+export interface ReportSummary {
+  id: string;
+  title: string;
+  filename: string;
+  created_at: string;
+  source_type: string;
+  source_name: string;
+  tags: string[];
+}
+
+export interface ReportsListResponse {
+  reports: ReportSummary[];
+  total: number;
+}
+
+export interface ReportGroup {
+  source_name: string;
+  source_type: string;
+  latest_report: ReportSummary;
+  total_count: number;
+  all_tags: string[];
+}
+
+// ── Settings ──
+
+export interface GatewayStatus {
+  running: boolean;
+  info: Record<string, unknown> | null;
+  image?: string;
+  created_at?: string;
+  container_status?: string;
+}
+
+export interface CredentialInfo {
+  connector_name: string;
+  connector_type: string;
+}
+
+export interface ConnectorInfo {
+  name: string;
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface ConnectorFieldInfo {
+  key: string;
+  type: string;
+  required: boolean;
+  default?: unknown;
+  description?: string;
+}
+
+// ── Voice Settings ──
+
+export interface VoicePrefs {
+  whisper_model: string;
+  language: string | null;
+  auto_send: boolean;
+}
+
+export interface VoiceSettingsResponse {
+  voice: VoicePrefs;
+  available_models: Record<string, string>;
+  available_languages: Record<string, string>;
+}
+
+// ── Chat ──
+
+export interface ChatAgentOption {
+  key: string;
+  label: string;
+}
+
+export interface ChatModeOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface ChatOptionsResponse {
+  agents: ChatAgentOption[];
+  modes: ChatModeOption[];
+  default_agent: string;
+  default_mode: string;
+}
+
+// ── Backtesting ──
+
+export interface BacktestTask {
+  task_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  config?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  error?: string;
+  created_at?: number;
+  saved?: boolean;
+}
+
 // ── API functions ──
 
 export const api = {
@@ -380,8 +626,10 @@ export const api = {
       `/api/v1/servers/${name}/status`,
     ),
 
-  getPortfolio: (server: string) =>
-    apiFetch<PortfolioResponse>(`/api/v1/servers/${server}/portfolio`),
+  getPortfolio: (server: string, refresh = false) =>
+    apiFetch<PortfolioResponse>(
+      `/api/v1/servers/${server}/portfolio${refresh ? "?refresh=true" : ""}`,
+    ),
 
   getPortfolioHistory: (server: string, range = "1D", breakdown = false) =>
     apiFetch<PortfolioHistoryResponse>(
@@ -410,11 +658,39 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  updateBotControllerConfig: (server: string, botName: string, configId: string, data: Record<string, unknown>) =>
+    apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
   updateConfigYaml: (server: string, configId: string, yamlContent: string) =>
     apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
       method: "PUT",
       body: JSON.stringify({ yaml_content: yamlContent }),
     }),
+
+  getControllerConfigTemplate: (server: string, controllerType: string, controllerName: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/template`,
+    ),
+
+  createControllerConfig: (server: string, configId: string, data: Record<string, unknown>) =>
+    apiFetch<{ created: boolean; config_id: string }>(`/api/v1/servers/${server}/controllers/configs`, {
+      method: "POST",
+      body: JSON.stringify({ ...data, id: configId }),
+    }),
+
+  deleteControllerConfig: (server: string, configId: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
+      method: "DELETE",
+    }),
+
+  deleteController: (server: string, controllerType: string, controllerName: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}`,
+      { method: "DELETE" },
+    ),
 
   getControllerSource: (server: string, controllerType: string, controllerName: string) =>
     apiFetch<ControllerSourceResponse>(
@@ -431,6 +707,77 @@ export const api = {
     apiFetch<Record<string, unknown>>(`/api/v1/servers/${server}/bots/deploy`, {
       method: "POST",
       body: JSON.stringify(data),
+    }),
+
+  stopBot: (server: string, botName: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/stop`,
+      { method: "POST" },
+    ),
+
+  stopControllers: (server: string, botName: string, controllerNames: string[]) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/stop`,
+      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
+    ),
+
+  startControllers: (server: string, botName: string, controllerNames: string[]) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/start`,
+      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
+    ),
+
+  getControllerPerformanceHistory: (
+    server: string,
+    params: {
+      bot_name?: string;
+      controller_id?: string;
+      start_time?: string;
+      end_time?: string;
+      interval?: string;
+      limit?: number;
+      cursor?: string;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.bot_name) qs.set("bot_name", params.bot_name);
+    if (params.controller_id) qs.set("controller_id", params.controller_id);
+    if (params.start_time) qs.set("start_time", params.start_time);
+    if (params.end_time) qs.set("end_time", params.end_time);
+    if (params.interval) qs.set("interval", params.interval);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.cursor) qs.set("cursor", params.cursor);
+    const q = qs.toString();
+    return apiFetch<ControllerPerformanceHistoryResponse>(
+      `/api/v1/servers/${server}/controller-performance/history${q ? `?${q}` : ""}`,
+    );
+  },
+
+  getBotRuns: (
+    server: string,
+    params: {
+      bot_name?: string;
+      run_status?: string;
+      deployment_status?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => {
+    const qs = new URLSearchParams();
+    if (params.bot_name) qs.set("bot_name", params.bot_name);
+    if (params.run_status) qs.set("run_status", params.run_status);
+    if (params.deployment_status) qs.set("deployment_status", params.deployment_status);
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    const q = qs.toString();
+    return apiFetch<BotRunsResponse>(
+      `/api/v1/servers/${server}/bot-runs${q ? `?${q}` : ""}`,
+    );
+  },
+
+  deleteBotRun: (server: string, botRunId: number) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/bot-runs/${botRunId}`, {
+      method: "DELETE",
     }),
 
   getExecutors: (
@@ -510,6 +857,12 @@ export const api = {
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
       `/api/v1/servers/${server}/market/prices?connector=${connector}&trading_pair=${pair}`,
+    ),
+
+  getRateOracleRates: (server: string, tradingPairs: string[]) =>
+    apiFetch<{ rates: Record<string, number> }>(
+      `/api/v1/servers/${server}/rate-oracle/rates`,
+      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
     ),
 
   getTradingRules: (server: string, connector: string) =>
@@ -634,6 +987,46 @@ export const api = {
       `/api/v1/agents/${slug}/sessions/${sessionNum}/snapshots/${tick}`,
     ),
 
+  // ── Backtesting ──
+
+  submitBacktest: (
+    server: string,
+    data: {
+      config_id: string;
+      start_time: number;
+      end_time: number;
+      backtesting_resolution?: string;
+      trade_cost?: number;
+    },
+  ) =>
+    apiFetch<BacktestTask>(`/api/v1/servers/${server}/backtesting/tasks`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  listBacktestTasks: (server: string) =>
+    apiFetch<BacktestTask[]>(`/api/v1/servers/${server}/backtesting/tasks`),
+
+  getBacktestTask: (server: string, taskId: string) =>
+    apiFetch<BacktestTask>(
+      `/api/v1/servers/${server}/backtesting/tasks/${taskId}`,
+    ),
+
+  deleteBacktestTask: (server: string, taskId: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/backtesting/tasks/${taskId}`,
+      { method: "DELETE" },
+    ),
+
+  getSavedBacktests: (server: string) =>
+    apiFetch<BacktestTask[]>(`/api/v1/servers/${server}/backtesting/saved`),
+
+  deleteSavedBacktest: (server: string, taskId: string) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/servers/${server}/backtesting/saved/${taskId}`,
+      { method: "DELETE" },
+    ),
+
   // ── Experiments ──
 
   getAgentExperiments: (slug: string) =>
@@ -643,4 +1036,193 @@ export const api = {
     apiFetch<{ content: string; number: number }>(
       `/api/v1/agents/${slug}/experiments/${expNum}`,
     ),
+
+  // ── Archived Bots ──
+
+  getArchivedBots: (server: string) =>
+    apiFetch<{ bots: ArchivedBotSummary[] }>(`/api/v1/servers/${server}/archived`),
+
+  getArchivedBotPerformance: (server: string, dbPath: string, includeExecutors = false) =>
+    apiFetch<ArchivedBotPerformance>(
+      `/api/v1/servers/${server}/archived/performance?db_path=${encodeURIComponent(dbPath)}&include_executors=${includeExecutors}`,
+    ),
+
+  getArchivedExecutors: (server: string, dbPath: string, offset = 0, limit = 50) =>
+    apiFetch<PaginatedExecutors>(
+      `/api/v1/servers/${server}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
+    ),
+
+  // ── Reports ──
+
+  getReports: (params?: { source_type?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.source_type) qs.set("source_type", params.source_type);
+    if (params?.tag) qs.set("tag", params.tag);
+    if (params?.search) qs.set("search", params.search);
+    if (params?.limit) qs.set("limit", String(params.limit));
+    if (params?.offset) qs.set("offset", String(params.offset));
+    const q = qs.toString();
+    return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
+  },
+
+  getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
+
+  deleteReport: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/reports/${id}`, { method: "DELETE" }),
+
+  // ── Routines ──
+
+  getRoutines: () => apiFetch<RoutineInfo[]>("/api/v1/routines"),
+
+  getRoutineInstances: () =>
+    apiFetch<RoutineInstance[]>("/api/v1/routines/instances"),
+
+  getRoutineInstance: (id: string) =>
+    apiFetch<RoutineInstance>(`/api/v1/routines/instances/${id}`),
+
+  runRoutine: (server: string, name: string, config: Record<string, unknown> = {}) =>
+    apiFetch<{ instance_id: string }>(
+      `/api/v1/routines/run`,
+      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config }) },
+    ),
+
+  scheduleRoutine: (
+    server: string,
+    name: string,
+    config: Record<string, unknown> = {},
+    interval_sec: number = 300,
+  ) =>
+    apiFetch<{ instance_id: string }>(
+      `/api/v1/routines/schedule`,
+      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config, interval_sec }) },
+    ),
+
+  stopRoutineInstance: (id: string) =>
+    apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${id}/stop`, {
+      method: "POST",
+    }),
+
+  getRoutineSource: (name: string) =>
+    apiFetch<{ filename: string; source: string }>(
+      `/api/v1/routines/${encodeURIComponent(name)}/source`,
+    ),
+
+  getRoutineReports: (name: string) =>
+    apiFetch<ReportsListResponse>(
+      `/api/v1/routines/${encodeURIComponent(name)}/reports`,
+    ),
+
+  getRoutineFieldOptions: (source: string, server: string) =>
+    apiFetch<{ options: string[] }>(
+      `/api/v1/routines/options/${encodeURIComponent(source)}?server=${encodeURIComponent(server)}`,
+    ),
+
+  // ── Agent Routines & Reports ──
+
+  getAgentRoutines: (slug: string) =>
+    apiFetch<RoutineInfo[]>(`/api/v1/agents/${encodeURIComponent(slug)}/routines`),
+
+  getAgentReports: (slug: string) =>
+    apiFetch<ReportsListResponse>(`/api/v1/agents/${encodeURIComponent(slug)}/reports`),
+
+  // ── Settings ──
+
+  getSettingsServers: () => apiFetch<ServerInfo[]>("/api/v1/settings/servers"),
+
+  addServer: (data: { name: string; host: string; port: number; username: string; password: string }) =>
+    apiFetch<{ added: boolean; name: string }>("/api/v1/settings/servers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateServer: (name: string, data: { host?: string; port?: number; username?: string; password?: string }) =>
+    apiFetch<{ updated: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  deleteServer: (name: string) =>
+    apiFetch<{ deleted: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+
+  setDefaultServer: (name: string) =>
+    apiFetch<{ default: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}/default`, {
+      method: "POST",
+    }),
+
+  getGatewayStatus: (server: string) =>
+    apiFetch<GatewayStatus>(`/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`),
+
+  startGateway: (server: string, data: { image: string; passphrase: string; port?: number; dev_mode?: boolean }) =>
+    apiFetch<{ started: boolean }>(`/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  stopGateway: (server: string) =>
+    apiFetch<{ stopped: boolean }>(`/api/v1/settings/gateway/stop?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+    }),
+
+  restartGateway: (server: string) =>
+    apiFetch<{ restarted: boolean }>(`/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+    }),
+
+  pullGatewayImage: (server: string, data: { image: string }) =>
+    apiFetch<{ pulled: boolean; image: string }>(`/api/v1/settings/gateway/pull?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getGatewayPullStatus: (server: string) =>
+    apiFetch<{ pull_operations: Record<string, { status: string; progress: string; duration_seconds: number; started_at: number }>; total_operations: number }>(
+      `/api/v1/settings/gateway/pull-status?server=${encodeURIComponent(server)}`,
+    ),
+
+  getGatewayLogs: (server: string) =>
+    apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
+
+  getCredentials: (server: string) =>
+    apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),
+
+  getAvailableConnectors: (server: string, type?: string) => {
+    let url = `/api/v1/settings/connectors?server=${encodeURIComponent(server)}`;
+    if (type) url += `&type=${encodeURIComponent(type)}`;
+    return apiFetch<{ connectors: ConnectorInfo[] }>(url);
+  },
+
+  getConnectorConfigMap: (server: string, name: string) =>
+    apiFetch<{ config_map: Record<string, unknown> }>(
+      `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
+    ),
+
+  addCredential: (server: string, data: { connector_name: string; credentials: Record<string, string> }) =>
+    apiFetch<{ added: boolean }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  deleteCredential: (server: string, connector: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/settings/credentials/${encodeURIComponent(connector)}?server=${encodeURIComponent(server)}`,
+      { method: "DELETE" },
+    ),
+
+  // ── Voice Settings ──
+
+  getVoiceSettings: () =>
+    apiFetch<VoiceSettingsResponse>("/api/v1/settings/voice"),
+
+  updateVoiceSettings: (data: Partial<VoicePrefs>) =>
+    apiFetch<{ voice: VoicePrefs }>("/api/v1/settings/voice", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  // ── Chat ──
+
+  getChatOptions: () =>
+    apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
 };

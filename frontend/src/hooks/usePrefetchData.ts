@@ -53,21 +53,23 @@ export function usePrefetchData() {
       queryFn: () => api.getBots(server),
     });
 
-    // Market data: connectors + trading rules
+    // Prefetch candle connectors list (for market data dropdowns)
     queryClient.prefetchQuery({
-      queryKey: ["connected-exchanges", server],
-      queryFn: () => api.getConnectedExchanges(server),
+      queryKey: ["connectors", server],
+      queryFn: () => api.getConnectors(server),
+      staleTime: 5 * 60 * 1000,
     });
 
+    // Prefetch trading rules only for connected exchanges (with credentials),
+    // not all candle connectors — avoids 404s for unconfigured connectors
     queryClient
       .fetchQuery({
-        queryKey: ["connectors", server],
-        queryFn: () => api.getConnectors(server),
+        queryKey: ["connected-exchanges", server],
+        queryFn: () => api.getConnectedExchanges(server),
         staleTime: 5 * 60 * 1000,
       })
       .then((connectors) => {
         if (!connectors?.length) return;
-        // Prefetch trading rules for each connector
         for (const connector of connectors) {
           queryClient.prefetchQuery({
             queryKey: ["trading-rules", server, connector],
@@ -84,6 +86,28 @@ export function usePrefetchData() {
       queryKey: ["candles", server, defaults.connector, defaults.pair, defaults.interval],
       queryFn: () =>
         api.getCandles(server, defaults.connector, defaults.pair, defaults.interval, 5000, startTime),
+    });
+
+    // Prefetch settings data so Settings page loads instantly
+    queryClient.prefetchQuery({
+      queryKey: ["settings-servers"],
+      queryFn: () => api.getSettingsServers(),
+      staleTime: 60 * 1000,
+    });
+    queryClient.prefetchQuery({
+      queryKey: ["settings-credentials", server],
+      queryFn: () => api.getCredentials(server),
+      staleTime: 5 * 60 * 1000,
+    });
+    queryClient.prefetchQuery({
+      queryKey: ["settings-connectors", server, "spot"],
+      queryFn: () => api.getAvailableConnectors(server, "spot"),
+      staleTime: 5 * 60 * 1000,
+    });
+    queryClient.prefetchQuery({
+      queryKey: ["settings-connectors", server, "perpetual"],
+      queryFn: () => api.getAvailableConnectors(server, "perpetual"),
+      staleTime: 5 * 60 * 1000,
     });
   }, [server, queryClient]);
 }

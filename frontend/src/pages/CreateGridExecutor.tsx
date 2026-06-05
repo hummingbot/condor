@@ -9,6 +9,7 @@ import { PriceTicker } from "@/components/market/PriceTicker";
 import { GridChart } from "@/components/grid/GridChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { useServer } from "@/hooks/useServer";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api } from "@/lib/api";
 
 // ── State ──
@@ -160,6 +161,10 @@ export function CreateGridExecutor() {
   const [state, dispatch] = useReducer(gridReducer, undefined, loadSavedDefaults);
   const validation = useGridValidation(state);
   const isSpot = isSpotConnector(state.connector);
+
+  // WS connection (candle streams are managed by candleStore)
+  const wsChannels = useMemo(() => [] as string[], []);
+  useCondorWebSocket(wsChannels, server);
 
   const [successId, setSuccessId] = useState<string | null>(null);
   const [onlyConnected, setOnlyConnected] = useState(true);
@@ -368,17 +373,20 @@ export function CreateGridExecutor() {
         <div className="min-w-0 flex-1 border-r border-[var(--color-border)]">
           <div className="h-full overflow-hidden bg-[var(--color-surface)]">
             <GridChart
-              key={`${state.connector}:${state.pair}:${state.interval}:${state.lookbackSeconds}`}
+              key={`${state.connector}:${state.pair}:${state.interval}`}
               server={server}
               connector={state.connector}
               pair={state.pair}
               interval={state.interval}
               lookbackSeconds={state.lookbackSeconds}
+
               startPrice={state.start_price}
               endPrice={state.end_price}
               limitPrice={state.limit_price}
               side={state.side}
               minSpread={state.min_spread_between_orders}
+              totalAmountQuote={state.total_amount_quote}
+              minOrderAmountQuote={state.min_order_amount_quote}
               activePickField={state.activePickField}
               onPriceSet={handlePriceSet}
               pricePrecision={pricePrecision}
@@ -394,7 +402,7 @@ export function CreateGridExecutor() {
             </h3>
           </div>
           <div className="flex-1 overflow-y-auto">
-            <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} isSpot={isSpot} />
+            <GridConfigPanel state={state} dispatch={dispatch} currentPrice={currentPrice} isSpot={isSpot} quoteCurrency={state.pair.split("-")[1] || "USDT"} />
           </div>
         </div>
       </div>

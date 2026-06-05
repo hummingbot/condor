@@ -43,6 +43,7 @@ class ServerDataType(Enum):
     BOT_RUNS = "bot_runs"
     CANDLE_CONNECTORS = "candle_connectors"
     SERVER_STATUS = "server_status"
+    ALL_CONNECTORS = "all_connectors"
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120, stale_threshold=10),
     ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
     ServerDataType.SERVER_STATUS: DataTypeDefaults(interval=60, ttl=120, stale_threshold=15),
+    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
 }
 
 
@@ -455,41 +457,21 @@ class ServerDataService:
         self._listeners = [cb for cb in self._listeners if cb is not callback]
 
     def _notify_listeners(self, key: CacheKey, value: Any) -> None:
-        """Notify legacy listeners with old-style arguments."""
+        """Notify listeners with server/channel/data_type/value arguments.
+
+        The WS manager uses the data_type name string to map to channels.
+        No longer imports from data_manager — passes the ServerDataType directly.
+        """
         if not self._listeners:
             return
 
-        # Build a compatible cache_key string and data_type name
-        from condor.data_manager import DataType
-
-        # Map ServerDataType back to old DataType name for WS compatibility
-        _REVERSE_MAP = {
-            ServerDataType.PORTFOLIO: "PORTFOLIO",
-            ServerDataType.PRICES: "CEX_PRICES",
-            ServerDataType.POSITIONS: "CEX_POSITIONS",
-            ServerDataType.ACTIVE_ORDERS: "CEX_ACTIVE_ORDERS",
-            ServerDataType.BOTS_STATUS: "BOTS_STATUS",
-            ServerDataType.EXECUTORS: "EXECUTORS",
-        }
-        dt_name = _REVERSE_MAP.get(key.data_type)
-        if not dt_name:
-            return
-
-        try:
-            old_dt = DataType[dt_name]
-        except (KeyError, Exception):
-            return
-
-        # Build old-style cache key string
+        # Build a channel-compatible cache_key string
         params = key.params_dict
         if key.data_type == ServerDataType.PRICES:
             cache_key_str = f"cex_prices:{params.get('connector_name', '')}:{params.get('trading_pair', '')}"
         elif key.data_type == ServerDataType.PORTFOLIO:
             account = params.get("account_name", "")
-            if account:
-                cache_key_str = f"cex_balances:{account}"
-            else:
-                cache_key_str = "portfolio"
+            cache_key_str = f"cex_balances:{account}" if account else "portfolio"
         elif key.data_type == ServerDataType.BOTS_STATUS:
             cache_key_str = "bots_status"
         elif key.data_type == ServerDataType.EXECUTORS:
@@ -499,7 +481,7 @@ class ServerDataService:
 
         for cb in self._listeners:
             try:
-                cb(key.server, cache_key_str, old_dt, value)
+                cb(key.server, cache_key_str, key.data_type, value)
             except Exception as e:
                 logger.debug("SDS listener error: %s", e)
 
@@ -517,7 +499,10 @@ class ServerDataService:
 
         Called at startup so the cache is warm before any client connects.
         Subscribes to: PORTFOLIO, EXECUTORS, BOTS_STATUS, CONNECTORS,
+        CANDLE_CONNECTORS, POSITIONS, ACTIVE_ORDERS, SERVER_STATUS,
         and TRADING_RULES (per connector) for every server.
+
+        All initial fetches run concurrently via asyncio.gather.
         """
         from config_manager import get_config_manager
 
@@ -533,40 +518,96 @@ class ServerDataService:
             ServerDataType.BOTS_STATUS,
             ServerDataType.CONNECTORS,
             ServerDataType.CANDLE_CONNECTORS,
+            ServerDataType.POSITIONS,
+            ServerDataType.ACTIVE_ORDERS,
+            ServerDataType.SERVER_STATUS,
+            ServerDataType.ALL_CONNECTORS,
         ]
         subscriber_id = "_auto"
-        count = 0
-        for name in servers:
-            for dt in core_types:
-                try:
-                    await self.subscribe(
-                        server=name,
-                        data_type=dt,
-                        subscriber_id=subscriber_id,
-                    )
-                    count += 1
-                except Exception as e:
-                    logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
 
-            # Pre-subscribe trading rules for each discovered connector
-            connectors = self.get(name, ServerDataType.CONNECTORS)
-            if connectors:
-                for connector in connectors:
-                    try:
-                        await self.subscribe(
-                            server=name,
-                            data_type=ServerDataType.TRADING_RULES,
-                            subscriber_id=subscriber_id,
-                            connector_name=connector,
-                        )
-                        count += 1
-                    except Exception as e:
-                        logger.debug(
-                            "SDS auto-subscribe failed for %s/trading_rules/%s: %s",
-                            name, connector, e,
-                        )
+        # Launch all core subscriptions concurrently
+        async def _sub(name: str, dt: ServerDataType) -> bool:
+            try:
+                await self.subscribe(server=name, data_type=dt, subscriber_id=subscriber_id)
+                return True
+            except Exception as e:
+                logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
+                return False
+
+        tasks = [_sub(name, dt) for name in servers for dt in core_types]
+        results = await asyncio.gather(*tasks)
+        count = sum(1 for r in results if r)
+
+        # Pre-subscribe trading rules concurrently across servers
+        tr_tasks = [self._subscribe_trading_rules_for_server(name, subscriber_id) for name in servers]
+        tr_results = await asyncio.gather(*tr_tasks, return_exceptions=True)
+        for r in tr_results:
+            if isinstance(r, int):
+                count += r
+
+        # Register on_change callback for CONNECTORS so that when a server
+        # comes online later and CONNECTORS data is fetched for the first time
+        # (or new connectors appear), we auto-subscribe TRADING_RULES.
+        for name in servers:
+            key = CacheKey.make(name, ServerDataType.CONNECTORS)
+            subs = self._subscriptions.get(key, {})
+            if subscriber_id in subs:
+                subs[subscriber_id].callback = self._make_connectors_change_callback(name)
 
         logger.info("SDS auto-subscribe: %d subscriptions for %d servers", count, len(servers))
+
+    async def _subscribe_trading_rules_for_server(
+        self, server_name: str, subscriber_id: str = "_auto"
+    ) -> int:
+        """Subscribe TRADING_RULES for all known connectors on a server. Returns count."""
+        connectors = self.get(server_name, ServerDataType.CONNECTORS)
+        if not connectors:
+            return 0
+        count = 0
+        for connector in connectors:
+            key = CacheKey.make(
+                server_name, ServerDataType.TRADING_RULES,
+                connector_name=connector,
+            )
+            if key in self._subscriptions:
+                continue  # Already subscribed
+            try:
+                await self.subscribe(
+                    server=server_name,
+                    data_type=ServerDataType.TRADING_RULES,
+                    subscriber_id=subscriber_id,
+                    connector_name=connector,
+                )
+                # Check if the initial fetch failed (connector unavailable/404)
+                entry = self._cache.get(key)
+                if entry and entry.value is None and entry.consecutive_errors > 0:
+                    self.unsubscribe(key, subscriber_id)
+                    self._cache.pop(key, None)  # Clean up error-only entry
+                    logger.info(
+                        "SDS: skipping trading rules for %s/%s (connector unavailable)",
+                        server_name, connector,
+                    )
+                    continue
+                count += 1
+            except Exception as e:
+                logger.debug(
+                    "SDS auto-subscribe failed for %s/trading_rules/%s: %s",
+                    server_name, connector, e,
+                )
+        return count
+
+    def _make_connectors_change_callback(self, server_name: str) -> Callable:
+        """Create a callback that auto-subscribes TRADING_RULES when CONNECTORS change."""
+        async def _on_connectors_change(key: CacheKey, old_value, new_value):
+            if not new_value:
+                return
+            added = await self._subscribe_trading_rules_for_server(server_name)
+            if added:
+                logger.info(
+                    "SDS: auto-subscribed %d new TRADING_RULES for %s after CONNECTORS update",
+                    added, server_name,
+                )
+        return _on_connectors_change
 
     def stop(self) -> None:
         self._running = False
@@ -594,8 +635,12 @@ class ServerDataService:
                 await asyncio.sleep(5)
 
     async def _poll_tick(self) -> None:
-        """Single tick: check each subscribed key and refresh if due."""
+        """Single tick: check each subscribed key and refresh if due.
+
+        Collects all due keys first, then fetches them concurrently via gather.
+        """
         now = time.time()
+        due_keys: List[CacheKey] = []
 
         for key, subs in list(self._subscriptions.items()):
             if not subs:
@@ -616,15 +661,22 @@ class ServerDataService:
                     if now - entry.last_error_at < backoff:
                         continue
 
-            # Rate limit per server
+            due_keys.append(key)
+
+        if not due_keys:
+            return
+
+        # Acquire rate limits and fetch concurrently
+        async def _rate_limited_fetch(key: CacheKey):
             limiter = self._get_rate_limiter(key.server)
             if not await limiter.acquire(timeout=0.5):
-                continue
-
+                return
             try:
                 await self._fetch_and_cache(key)
             except Exception:
                 pass  # Error already recorded in _fetch_and_cache
+
+        await asyncio.gather(*[_rate_limited_fetch(k) for k in due_keys])
 
     async def _fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache. Returns the fetched value."""
@@ -745,88 +797,43 @@ def get_server_data_service() -> ServerDataService:
 
 
 def register_default_fetches() -> None:
-    """Register the default fetch functions for all data types."""
+    """Register the default fetch functions for all data types.
+
+    All fetch functions live in condor.fetchers — no handler imports.
+    """
+    from condor.fetchers import (
+        fetch_portfolio,
+        fetch_current_price as _fetch_price,
+        fetch_positions,
+        fetch_active_orders,
+        fetch_trading_rules,
+        fetch_connectors,
+        fetch_available_cex_connectors,
+        fetch_executors,
+        fetch_bots_status,
+        fetch_bot_runs,
+        fetch_candle_connectors,
+        fetch_server_status,
+    )
+
     sds = get_server_data_service()
 
-    # --- PORTFOLIO ---
-    async def _fetch_portfolio(client, **_kw):
-        return await client.portfolio.get_state()
+    sds.register_fetch(ServerDataType.PORTFOLIO, fetch_portfolio)
 
-    sds.register_fetch(ServerDataType.PORTFOLIO, _fetch_portfolio)
-
-    # --- PRICES ---
+    # Prices needs a thin wrapper to match the (client, **params) signature
     async def _fetch_prices(client, connector_name: str = "", trading_pair: str = "", **_kw):
-        from handlers.executors._shared import fetch_current_price
-        return await fetch_current_price(client, connector_name, trading_pair)
-
+        return await _fetch_price(client, connector_name, trading_pair)
     sds.register_fetch(ServerDataType.PRICES, _fetch_prices)
 
-    # --- POSITIONS ---
-    async def _fetch_positions(client, connector_name: str = None, **_kw):
-        from handlers.cex._shared import fetch_positions
-        return await fetch_positions(client, connector_name)
-
-    sds.register_fetch(ServerDataType.POSITIONS, _fetch_positions)
-
-    # --- ACTIVE_ORDERS ---
-    async def _fetch_orders(client, limit: str = "5", **_kw):
-        try:
-            result = await client.trading.get_active_orders(limit=int(limit))
-            return result.get("data", [])
-        except Exception as e:
-            logger.warning("Error fetching active orders: %s", e)
-            return []
-
-    sds.register_fetch(ServerDataType.ACTIVE_ORDERS, _fetch_orders)
-
-    # --- TRADING_RULES ---
-    async def _fetch_rules(client, connector_name: str = "", **_kw):
-        from handlers.cex._shared import fetch_trading_rules
-        return await fetch_trading_rules(client, connector_name)
-
-    sds.register_fetch(ServerDataType.TRADING_RULES, _fetch_rules)
-
-    # --- CONNECTORS ---
-    async def _fetch_connectors(client, account_name: str = "master_account", **_kw):
-        from handlers.cex._shared import fetch_available_cex_connectors
-        return await fetch_available_cex_connectors(client, account_name)
-
-    sds.register_fetch(ServerDataType.CONNECTORS, _fetch_connectors)
-
-    # --- BOTS_STATUS ---
-    async def _fetch_bots(client, **_kw):
-        return await client.bot_orchestration.get_active_bots_status()
-
-    sds.register_fetch(ServerDataType.BOTS_STATUS, _fetch_bots)
-
-    # --- EXECUTORS ---
-    async def _fetch_executors(client, **_kw):
-        from condor.web.routes.executors import fetch_all_executors
-
-        return await fetch_all_executors(client)
-
-    sds.register_fetch(ServerDataType.EXECUTORS, _fetch_executors)
-
-    # --- BOT_RUNS ---
-    async def _fetch_bot_runs(client, **_kw):
-        return await client.bot_orchestration.get_bot_runs()
-
-    sds.register_fetch(ServerDataType.BOT_RUNS, _fetch_bot_runs)
-
-    # --- CANDLE_CONNECTORS ---
-    async def _fetch_candle_connectors(client, **_kw):
-        return await client.market_data.get_available_candle_connectors()
-
-    sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, _fetch_candle_connectors)
-
-    # --- SERVER_STATUS ---
-    async def _fetch_server_status(client, **_kw):
-        try:
-            await client.accounts.list_accounts()
-            return {"status": "online"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)[:80]}
-
-    sds.register_fetch(ServerDataType.SERVER_STATUS, _fetch_server_status)
+    sds.register_fetch(ServerDataType.POSITIONS, fetch_positions)
+    sds.register_fetch(ServerDataType.ACTIVE_ORDERS, fetch_active_orders)
+    sds.register_fetch(ServerDataType.TRADING_RULES, fetch_trading_rules)
+    sds.register_fetch(ServerDataType.CONNECTORS, fetch_available_cex_connectors)
+    sds.register_fetch(ServerDataType.ALL_CONNECTORS, fetch_connectors)
+    sds.register_fetch(ServerDataType.BOTS_STATUS, fetch_bots_status)
+    sds.register_fetch(ServerDataType.EXECUTORS, fetch_executors)
+    sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)
+    sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, fetch_candle_connectors)
+    sds.register_fetch(ServerDataType.SERVER_STATUS, fetch_server_status)
 
     logger.info("ServerDataService: registered fetch functions for %d data types", len(sds._fetch_registry))

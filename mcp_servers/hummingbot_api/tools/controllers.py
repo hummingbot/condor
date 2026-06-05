@@ -387,7 +387,9 @@ async def modify_controllers(
                                "Set confirm_override=True to update it."),
                 }
 
-            result = await client.controllers.create_or_update_controller_config(config_name, config_data)
+            # Strip internal fields like _config_name that cause Pydantic validation errors
+            clean_data = {k: v for k, v in config_data.items() if not k.startswith("_")}
+            result = await client.controllers.create_or_update_controller_config(config_name, clean_data)
             return {
                 "action": "upsert",
                 "target": "config",

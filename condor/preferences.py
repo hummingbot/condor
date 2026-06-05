@@ -10,8 +10,12 @@ Structure:
 - DEX trading defaults (network, connector, slippage, last swap params)
 - General settings (active server)
 
-Uses telegram-python-bot's persistence via context.user_data
-Data is automatically saved to pickle file and persists across bot restarts
+Storage:
+- Primary: config.yml via ConfigManager (shared across TG + Web)
+- Fallback: context.user_data pickle (for session-level state)
+
+When a user_data dict contains '_user_id', changes are synced to ConfigManager
+so the web dashboard can also read them.
 """
 
 import logging
@@ -19,6 +23,72 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# CONFIG MANAGER SYNC
+# ============================================
+
+
+def _get_user_id(user_data: Dict) -> Optional[int]:
+    """Extract user_id from user_data if present."""
+    return user_data.get("_user_id")
+
+
+def _sync_to_cm(user_data: Dict, key: str, value) -> None:
+    """Persist a preference to ConfigManager (config.yml) if user_id is known."""
+    user_id = _get_user_id(user_data)
+    if user_id is None:
+        return
+    try:
+        from config_manager import get_config_manager
+        cm = get_config_manager()
+        cm.set_user_preference(user_id, key, value)
+    except Exception as e:
+        logger.debug("Failed to sync preference '%s' to config: %s", key, e)
+
+
+def _sync_section_to_cm(user_data: Dict, section: str) -> None:
+    """Persist an entire preference section to ConfigManager."""
+    user_id = _get_user_id(user_data)
+    if user_id is None:
+        return
+    try:
+        from config_manager import get_config_manager
+        prefs = user_data.get(USER_PREFERENCES_KEY, {})
+        section_data = prefs.get(section)
+        if section_data is not None:
+            cm = get_config_manager()
+            cm.set_user_preference(user_id, section, section_data)
+    except Exception as e:
+        logger.debug("Failed to sync section '%s' to config: %s", section, e)
+
+
+def _load_from_cm(user_data: Dict) -> None:
+    """On first access, hydrate user_data preferences from ConfigManager if empty."""
+    user_id = _get_user_id(user_data)
+    if user_id is None:
+        return
+    if user_data.get("_prefs_hydrated"):
+        return
+    try:
+        from config_manager import get_config_manager
+        cm = get_config_manager()
+        cm_prefs = cm.get_user_preferences(user_id)
+        if cm_prefs and USER_PREFERENCES_KEY not in user_data:
+            # Bootstrap preferences from config.yml
+            defaults = _get_default_preferences()
+            for section, section_defaults in defaults.items():
+                if section in cm_prefs:
+                    if isinstance(section_defaults, dict) and isinstance(cm_prefs[section], dict):
+                        merged = {**section_defaults, **cm_prefs[section]}
+                        defaults[section] = merged
+                    else:
+                        defaults[section] = cm_prefs[section]
+            user_data[USER_PREFERENCES_KEY] = defaults
+        user_data["_prefs_hydrated"] = True
+    except Exception as e:
+        logger.debug("Failed to hydrate preferences from config: %s", e)
 
 
 # ============================================
@@ -163,6 +233,47 @@ class AgentPrefs(TypedDict, total=False):
     tool_filter_mode: str    # "essential", "moderate", or "full" for PydanticAI models
 
 
+class VoicePrefs(TypedDict, total=False):
+    whisper_model: str       # "tiny", "base", "small", "medium", "large-v3"
+    language: Optional[str]  # ISO code ("en", "es", ...) or None for auto-detect
+    auto_send: bool          # Send message immediately after transcription
+
+
+# Available whisper models with descriptions
+WHISPER_MODELS = {
+    "tiny": "Tiny — Fastest, lower accuracy",
+    "base": "Base — Good balance (default)",
+    "small": "Small — Better accuracy",
+    "medium": "Medium — High accuracy, slower",
+    "large-v3": "Large v3 — Best accuracy, slowest",
+}
+
+# Supported languages for manual selection (subset of Whisper supported languages)
+VOICE_LANGUAGES = {
+    "": "Auto-detect",
+    "en": "English",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "tr": "Turkish",
+    "uk": "Ukrainian",
+    "sv": "Swedish",
+    "da": "Danish",
+    "fi": "Finnish",
+    "no": "Norwegian",
+}
+
+
 class UserPreferences(TypedDict, total=False):
     portfolio: PortfolioPrefs
     clob: CLOBPrefs
@@ -172,6 +283,7 @@ class UserPreferences(TypedDict, total=False):
     unified_trade: UnifiedTradePrefs
     executors: ExecutorPrefs
     agent: AgentPrefs
+    voice: VoicePrefs
     trading_agent: TradingAgentPrefs
     notes: Dict[str, str]
 
@@ -219,6 +331,11 @@ def _get_default_preferences() -> UserPreferences:
         "agent": {
             "default_agent": "claude-code",
             "show_tool_calls": True,
+        },
+        "voice": {
+            "whisper_model": "small",
+            "language": None,  # Auto-detect
+            "auto_send": True,
         },
         "trading_agent": {
             "last_strategy_id": None,
@@ -342,6 +459,7 @@ def get_preferences(user_data: Dict) -> UserPreferences:
     Returns:
         Complete user preferences dictionary
     """
+    _load_from_cm(user_data)
     _migrate_legacy_data(user_data)
     return deepcopy(user_data[USER_PREFERENCES_KEY])
 
@@ -409,6 +527,7 @@ def set_portfolio_days(user_data: Dict, days: int) -> None:
     """Set portfolio graph days"""
     prefs = _ensure_preferences(user_data)
     prefs["portfolio"]["days"] = days
+    _sync_section_to_cm(user_data, "portfolio")
     logger.info(f"Set portfolio days to {days}")
 
 
@@ -416,6 +535,7 @@ def set_portfolio_interval(user_data: Dict, interval: str) -> None:
     """Set portfolio graph interval"""
     prefs = _ensure_preferences(user_data)
     prefs["portfolio"]["interval"] = interval
+    _sync_section_to_cm(user_data, "portfolio")
     logger.info(f"Set portfolio interval to {interval}")
 
 
@@ -433,6 +553,7 @@ def set_clob_account(user_data: Dict, account: str) -> None:
     """Set CLOB trading account"""
     prefs = _ensure_preferences(user_data)
     prefs["clob"]["account"] = account
+    _sync_section_to_cm(user_data, "clob")
     logger.info(f"Set CLOB account to {account}")
 
 
@@ -445,6 +566,7 @@ def set_clob_last_order(user_data: Dict, params: CLOBOrderParams) -> None:
     """Set last CLOB order parameters (for quick trading)"""
     prefs = _ensure_preferences(user_data)
     prefs["clob"]["last_order"] = dict(params)
+    _sync_section_to_cm(user_data, "clob")
     logger.info(f"Updated CLOB last_order params")
 
 
@@ -516,6 +638,7 @@ def set_dex_slippage(user_data: Dict, slippage: str) -> None:
     """Set default DEX slippage percentage"""
     prefs = _ensure_preferences(user_data)
     prefs["dex"]["default_slippage"] = slippage
+    _sync_section_to_cm(user_data, "dex")
     logger.info(f"Set DEX slippage to {slippage}%")
 
 
@@ -528,6 +651,7 @@ def set_dex_last_swap(user_data: Dict, params: DEXSwapParams) -> None:
     """Set last DEX swap parameters (for quick trading)"""
     prefs = _ensure_preferences(user_data)
     prefs["dex"]["last_swap"] = dict(params)
+    _sync_section_to_cm(user_data, "dex")
     logger.info(f"Updated DEX last_swap params")
 
 
@@ -584,6 +708,7 @@ def set_active_server(user_data: Dict, server_name: Optional[str]) -> None:
     """Set active server name"""
     prefs = _ensure_preferences(user_data)
     prefs["general"]["active_server"] = server_name
+    _sync_section_to_cm(user_data, "general")
     logger.info(f"Set active server to {server_name}")
 
 
@@ -776,6 +901,7 @@ def set_last_trade_connector(
         prefs["unified_trade"] = {}
     prefs["unified_trade"]["last_connector_type"] = connector_type
     prefs["unified_trade"]["last_connector_name"] = connector_name
+    _sync_section_to_cm(user_data, "unified_trade")
     logger.info(f"Set last trade connector: {connector_type}:{connector_name}")
 
 
@@ -868,7 +994,35 @@ def set_default_agent(user_data: Dict, agent_key: str) -> None:
     if "agent" not in prefs:
         prefs["agent"] = {}
     prefs["agent"]["default_agent"] = agent_key
+    _sync_section_to_cm(user_data, "agent")
     logger.info(f"Set default agent to {agent_key}")
+
+
+# ============================================
+# PUBLIC API - VOICE
+# ============================================
+
+
+def get_voice_prefs(user_data: Dict) -> "VoicePrefs":
+    """Get voice preferences"""
+    _migrate_legacy_data(user_data)
+    return deepcopy(user_data[USER_PREFERENCES_KEY].get("voice", {
+        "whisper_model": "small",
+        "language": None,
+        "auto_send": True,
+    }))
+
+
+def set_voice_prefs(user_data: Dict, **kwargs) -> None:
+    """Update voice preferences. Pass only the keys you want to change."""
+    prefs = _ensure_preferences(user_data)
+    if "voice" not in prefs:
+        prefs["voice"] = {"whisper_model": "small", "language": None, "auto_send": True}
+    for key in ("whisper_model", "language", "auto_send"):
+        if key in kwargs:
+            prefs["voice"][key] = kwargs[key]
+    _sync_section_to_cm(user_data, "voice")
+    logger.info("Updated voice preferences: %s", kwargs)
 
 
 # ============================================

@@ -53,7 +53,11 @@ _last_request_time: dict[str, float] = {}  # server -> last request ts
 
 
 @router.get("/servers/{name}/portfolio", response_model=PortfolioResponse)
-async def get_portfolio(name: str, user: WebUser = Depends(get_current_user)):
+async def get_portfolio(
+    name: str,
+    refresh: bool = Query(False),
+    user: WebUser = Depends(get_current_user),
+):
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access to this server")
@@ -61,7 +65,16 @@ async def get_portfolio(name: str, user: WebUser = Depends(get_current_user)):
     from condor.server_data_service import ServerDataType, get_server_data_service
 
     try:
-        state = await get_server_data_service().get_or_fetch(name, ServerDataType.PORTFOLIO)
+        if refresh:
+            # Bypass SDS cache — force exchange re-fetch via Hummingbot
+            from condor.fetchers.portfolio import fetch_portfolio_refreshed
+
+            client = await cm.get_client(name)
+            state = await fetch_portfolio_refreshed(client)
+            # Update SDS cache so subsequent non-refresh reads get fresh data
+            get_server_data_service().put(name, ServerDataType.PORTFOLIO, state)
+        else:
+            state = await get_server_data_service().get_or_fetch(name, ServerDataType.PORTFOLIO)
     except Exception as e:
         logger.warning("Portfolio fetch exception for %s: %s", name, e)
         raise HTTPException(status_code=502, detail=f"Failed to get portfolio: {e}")
@@ -261,14 +274,30 @@ async def get_portfolio_history(
                 break
         if not snapshots and not found_key:
             # Maybe the dict itself maps timestamps → portfolio states
+            dict_prev_totals: dict[str, float] = {}
+            dict_entries: list[tuple[float, object]] = []
             for ts_key, snapshot_data in history.items():
                 try:
                     ts = _parse_timestamp(ts_key)
                 except (ValueError, TypeError):
                     continue
-                total = _sum_snapshot_value(snapshot_data)
+                dict_entries.append((ts, snapshot_data))
+            dict_entries.sort(key=lambda x: x[0])
+            for ts, snapshot_data in dict_entries:
+                cur = _extract_connector_totals(snapshot_data)
+                if cur and dict_prev_totals:
+                    for k, v in dict_prev_totals.items():
+                        if k not in cur:
+                            cur[k] = v
+                if cur:
+                    dict_prev_totals = cur
+                total = sum(cur.values())
                 if total > 0:
                     points.append(PortfolioHistoryPoint(timestamp=ts, total_usd=total))
+
+    # Forward-fill: track per-connector totals so missing exchanges
+    # carry forward their last known value instead of dropping to 0.
+    prev_connector_totals: dict[str, float] = {}
 
     for snapshot in snapshots:
         if not isinstance(snapshot, dict):
@@ -279,7 +308,17 @@ async def get_portfolio_history(
             # Sum token values from nested structure
             # API returns {timestamp, state: {account: {connector: [balances]}}}
             state = snapshot.get("state", snapshot)
-            total = _sum_snapshot_value(state)
+            cur_totals = _extract_connector_totals(state)
+
+            if cur_totals and prev_connector_totals:
+                # Forward-fill: for connectors seen before but missing now, use previous value
+                for key, prev_val in prev_connector_totals.items():
+                    if key not in cur_totals:
+                        cur_totals[key] = prev_val
+
+            if cur_totals:
+                prev_connector_totals = cur_totals
+            total = sum(cur_totals.values())
         if ts:
             points.append(PortfolioHistoryPoint(timestamp=_parse_timestamp(ts), total_usd=float(total)))
 
@@ -297,8 +336,11 @@ async def get_portfolio_history(
                     raw_snapshots = history[key]
                     break
 
-        # Build token values per timestamp
+        # Build token values per timestamp (with forward-fill for missing exchanges)
         ts_token_map: dict[float, dict[str, float]] = {}
+        prev_token_vals: dict[str, float] = {}
+        # Collect and sort by timestamp to ensure correct ffill order
+        raw_entries: list[tuple[float, dict[str, float]]] = []
         for snapshot in raw_snapshots:
             if not isinstance(snapshot, dict):
                 continue
@@ -309,7 +351,7 @@ async def get_portfolio_history(
             state = snapshot.get("state", snapshot)
             token_vals = _extract_token_values(state)
             if token_vals:
-                ts_token_map[parsed_ts] = token_vals
+                raw_entries.append((parsed_ts, token_vals))
 
         # Also handle dict-keyed timestamps
         if not raw_snapshots and isinstance(history, dict):
@@ -320,7 +362,17 @@ async def get_portfolio_history(
                     continue
                 token_vals = _extract_token_values(snapshot_data)
                 if token_vals:
-                    ts_token_map[ts] = token_vals
+                    raw_entries.append((ts, token_vals))
+
+        raw_entries.sort(key=lambda x: x[0])
+        for parsed_ts, token_vals in raw_entries:
+            # Forward-fill: tokens present before but missing now keep previous value
+            if prev_token_vals:
+                for tk, tv in prev_token_vals.items():
+                    if tk not in token_vals:
+                        token_vals[tk] = tv
+            prev_token_vals = token_vals
+            ts_token_map[parsed_ts] = token_vals
 
         if ts_token_map:
             # Determine top 8 tokens by aggregate value
@@ -391,20 +443,28 @@ def _extract_token_values(data: object) -> dict[str, float]:
     return tokens
 
 
-def _sum_snapshot_value(data: object) -> float:
-    """Sum USD values from a portfolio snapshot (nested account/connector/balances)."""
-    total = 0.0
+def _extract_connector_totals(data: object) -> dict[str, float]:
+    """Extract per-connector USD totals from a portfolio snapshot."""
+    totals: dict[str, float] = {}
     if not isinstance(data, dict):
-        return total
-    for val in data.values():
+        return totals
+    for account, val in data.items():
         if isinstance(val, dict):
-            for inner in val.values():
+            for connector, inner in val.items():
+                key = f"{account}:{connector}"
                 if isinstance(inner, list):
+                    s = 0.0
                     for item in inner:
                         if isinstance(item, dict):
-                            total += float(item.get("value", item.get("usd_value", 0)))
+                            s += float(item.get("value", item.get("usd_value", 0)))
+                    totals[key] = s
                 elif isinstance(inner, (int, float)):
-                    total += float(inner)
+                    totals[key] = float(inner)
         elif isinstance(val, (int, float)):
-            total += float(val)
-    return total
+            totals[account] = float(val)
+    return totals
+
+
+def _sum_snapshot_value(data: object) -> float:
+    """Sum USD values from a portfolio snapshot (nested account/connector/balances)."""
+    return sum(_extract_connector_totals(data).values())

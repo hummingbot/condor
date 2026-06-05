@@ -6,6 +6,16 @@ import { syntaxHighlighting, defaultHighlightStyle, bracketMatching } from "@cod
 import { yaml } from "@codemirror/lang-yaml";
 import { python } from "@codemirror/lang-python";
 import { oneDark } from "@codemirror/theme-one-dark";
+import { useTheme } from "@/hooks/useTheme";
+
+const lightTheme = EditorView.theme({
+  "&": { backgroundColor: "var(--color-surface)", color: "var(--color-text)" },
+  ".cm-gutters": { backgroundColor: "var(--color-bg)", color: "var(--color-text-muted)", borderRight: "1px solid var(--color-border)" },
+  ".cm-activeLineGutter": { backgroundColor: "var(--color-surface-hover)" },
+  ".cm-activeLine": { backgroundColor: "var(--color-surface-hover)" },
+  ".cm-cursor": { borderLeftColor: "var(--color-text)" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground": { backgroundColor: "var(--color-primary-alpha, rgba(59,130,246,0.15))" },
+}, { dark: false });
 
 interface CodeEditorProps {
   value: string;
@@ -13,6 +23,7 @@ interface CodeEditorProps {
   language: "yaml" | "python";
   readOnly?: boolean;
   height?: string;
+  className?: string;
 }
 
 export function CodeEditor({
@@ -21,13 +32,16 @@ export function CodeEditor({
   language,
   readOnly = false,
   height = "400px",
+  className,
 }: CodeEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const { theme } = useTheme();
+  const isDark = theme !== "light";
 
-  // Create editor on mount
+  // Create editor on mount (and recreate on theme change)
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -42,7 +56,7 @@ export function CodeEditor({
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       langExtension,
-      oneDark,
+      isDark ? oneDark : lightTheme,
       EditorView.theme({
         "&": { height, fontSize: "13px" },
         ".cm-scroller": { overflow: "auto" },
@@ -72,9 +86,9 @@ export function CodeEditor({
       view.destroy();
       viewRef.current = null;
     };
-    // Only recreate on language/readOnly change, not on value change
+    // Only recreate on language/readOnly/theme change, not on value change
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [language, readOnly, height]);
+  }, [language, readOnly, height, isDark]);
 
   // Sync external value changes into the editor
   useEffect(() => {
@@ -91,7 +105,7 @@ export function CodeEditor({
   return (
     <div
       ref={containerRef}
-      className="rounded-md border border-[var(--color-border)] overflow-hidden"
+      className={`rounded-md border border-[var(--color-border)] overflow-hidden h-full ${className ?? ""}`}
     />
   );
 }
