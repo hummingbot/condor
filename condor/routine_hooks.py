@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -164,7 +165,7 @@ async def dispatch(
 
     # Send the raw interactive report HTML (live Plotly charts), or a minimal
     # fallback when the routine produced no report.
-    html, filename = _resolve_report_html(report_id, result)
+    html, _filename = _resolve_report_html(report_id, result)
 
     # Caption = the report's title (falls back to the routine name).
     report_title = None
@@ -177,8 +178,14 @@ async def dispatch(
                 report_title = entry.get("title")
         except Exception:  # noqa: BLE001
             pass
-    status = "❌ Failed" if failed else "✅ Completed"
-    caption = f"{status} — {report_title or routine_name}"
+    # Use a clean, human-friendly filename (the report title) so the document
+    # arrives "bare" — like a manually dragged file — instead of the
+    # auto-generated on-disk name. No caption: a caption makes Telegram wrap
+    # the file in a message bubble; without it the file shows plain.
+    display_name = report_title or routine_name
+    slug = re.sub(r"[^\w.-]+", "_", display_name).strip("_") or "report"
+    if not slug.lower().endswith(".html"):
+        slug += ".html"
 
     doc_bytes = html.encode("utf-8")
     for chat_id in tg_cfg["chat_ids"]:
@@ -186,11 +193,10 @@ async def dispatch(
             import io
 
             buf = io.BytesIO(doc_bytes)
-            buf.name = filename
+            buf.name = slug
             await bot.send_document(
                 chat_id=int(chat_id),
                 document=buf,
-                caption=caption[:1024],
             )
         except Exception as e:  # noqa: BLE001
             logger.error(

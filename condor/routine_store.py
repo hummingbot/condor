@@ -72,16 +72,23 @@ class _HttpBot:
         return await self._post("sendPhoto", data, files=files)
 
     async def send_document(self, *a, **kw):
+        import mimetypes
+
         chat_id = kw.get("chat_id") or (a[0] if a else None)
         document = kw.get("document") or (a[1] if len(a) > 1 else None)
         data = {"chat_id": chat_id}
         if kw.get("caption"):
             data["caption"] = kw["caption"]
-        files = (
-            {"document": ("file", document, "application/octet-stream")}
-            if document
-            else None
-        )
+        files = None
+        if document is not None:
+            # Honor the buffer's name (e.g. "Daily_PnL.html") and the explicit
+            # `filename` kwarg so the file arrives with a real name + extension
+            # instead of a generic, extension-less "file".
+            filename = (
+                kw.get("filename") or getattr(document, "name", None) or "file"
+            )
+            mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            files = {"document": (filename, document, mime)}
         return await self._post("sendDocument", data, files=files)
 
     async def edit_message_text(self, *a, **kw):
