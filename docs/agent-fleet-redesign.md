@@ -21,11 +21,15 @@ executors. It's a single shape. The proposal:
 3. **Add A2A (agent-to-agent)** as the new backbone: agents publish typed **artifacts**
    (routine reports) to a shared bus, and consume each other's artifacts as tick inputs.
    This turns isolated agents into composable **pipelines**.
-4. **Condor becomes a launcher/scheduler** for agents. The existing **tick loop**
-   (`TickEngine._tick`) stays the core agentic loop for *every* kind; A2A becomes the
-   wiring; triggers (including `/loop`) only decide *when* a tick fires.
-5. **Frontend becomes a fleet view** (Pentagon-like): a live topology of agents + the A2A
-   edges between them, not just a list of bots.
+4. **There is a Main Agent that owns the fleet.** Condor launches *one* top-level agent —
+   defined by a root **`agent.md`** — and that **main agent creates and supervises the
+   sub-agents**, wires their A2A topics, and runs a routine that **reports back to the
+   user**. Condor launches the main agent; the main agent launches the rest.
+5. **Condor becomes a launcher/scheduler** for agents. The existing **tick loop**
+   (`TickEngine._tick`) stays the core agentic loop for *every* kind (main and sub); A2A
+   becomes the wiring; triggers (including `/loop`) only decide *when* a tick fires.
+6. **Frontend becomes a fleet view** (Pentagon-like): the main agent at the hub, sub-agents
+   radiating out, and the A2A edges between them — not just a list of bots.
 
 The throughline: *deterministic where we can (controllers, routines), reasoned where we
 must (the LLM tick), composable across agents (A2A).*
@@ -92,6 +96,7 @@ risk posture. Proposed kinds:
 
 | Kind | One-liner | Acts through | Trades? |
 |---|---|---|---|
+| **Main** | The orchestrator. Creates/supervises sub-agents, wires A2A, reports to the user. | sub-agent lifecycle, A2A, a status routine | No (delegates) |
 | **Collector** | Gathers + structures data, publishes reports. | routines, market-data tools | No (read-only) |
 | **Analyst** | Consumes reports + data, produces recommendations/alerts. | routines, notifications | No |
 | **Manager** | Deploys/tunes/stops **V2 controllers & bots**. | `bot_management`, `controllers` | Via controllers |
@@ -100,7 +105,9 @@ risk posture. Proposed kinds:
 | **Overseer** | Cross-fleet risk/health; can throttle or stop other agents. | A2A control plane, risk | No (governs) |
 
 `kind` is just frontmatter; the engine is the same. The only thing a kind changes is the
-**profile** it resolves (§3).
+**profile** it resolves (§3). **Main** is special only in that it is the entry point Condor
+launches and the one kind allowed to create other agents (§2.4) — it still runs the same
+tick loop.
 
 ### 2.2 Capabilities (the user's "agent capabilities or tools")
 
@@ -114,6 +121,7 @@ brief calls out map cleanly onto tool modules that *already exist*:
 | `connection_manager` | `servers`, `gateway`, `gateway_clmm/swap` | server health | admin-gated |
 | `risk_manager` | `portfolio`, `account`, + A2A control plane | exposure/positions | always-on, can veto |
 | `execution` (current default) | `executors`, `trading` | executors, positions | `RiskEngine` limits |
+| `agent_manager` (Main only) | `manage_trading_agent` (create/start/stop/pause), `call_agent`, `list_fleet` | fleet status | admin-gated; can spawn/stop sub-agents |
 
 An agent's frontmatter lists the capabilities it's granted. The engine resolves them into
 (a) the MCP server allowlist passed to `_create_client`, (b) the provider set run pre-tick,
@@ -163,6 +171,85 @@ You are an arbitrage scanner. Each run:
 
 Absent `kind`/`capabilities`/`produces`/`consumes`, an agent behaves exactly as today.
 **No migration required for existing trading agents.**
+
+### 2.4 The Main Agent (orchestrator)
+
+> **Condor launches one agent: the Main Agent. The Main Agent launches the rest.**
+
+The fleet has a single root. It is defined by a top-level **`agent.md`** (the *main
+`agent.md`*) and is the only agent Condor starts directly. Everything else — collectors,
+analysts, managers, traders — is a **sub-agent the main agent creates** during its ticks.
+
+```
+trading_agents/
+  agent.md                  # ← the MAIN agent (orchestrator). kind: main
+  _main/                    #   its own sessions/snapshots/journal/learnings live here
+    sessions/ ...
+  arb_scanner/              # sub-agent created by the main agent
+    agent.md
+  arb_controller_manager/   # sub-agent
+    agent.md
+  ...
+```
+
+(The root `agent.md` sits at the top of `trading_agents/`; its session/journal data lives in
+a reserved `_main/` folder so it doesn't collide with a slug. Exact placement is an
+implementation detail — the point is *one well-known root agent*.)
+
+**What the Main Agent does, each tick (same `TickEngine._tick`):**
+
+1. **Read fleet state** — `list_fleet()` (which sub-agents exist, their status), plus the
+   latest A2A artifacts its sub-agents have published (pulled into `[UPSTREAM REPORTS]`).
+2. **Reconcile against intent** — its `agent.md` instructions describe the *desired fleet*
+   ("I want an arb desk and a morning-desk pipeline"). If a needed sub-agent is missing or
+   stopped, it **creates/starts** it via the `agent_manager` capability
+   (`manage_trading_agent(action="create_strategy"/"start_agent")`). If one is misbehaving or
+   redundant, it pauses/stops it. This is a *reconciliation loop*, not a one-shot setup.
+3. **Wire A2A** — set the sub-agents' `produces`/`consumes` topics so they chain into
+   pipelines (§4, §6).
+4. **Run a routine that informs the user** — a `fleet_brief` routine (agent-local to the main
+   agent) that rolls up sub-agent artifacts + status + aggregate PnL/exposure into one
+   human-facing report, delivered via `send_notification` (Telegram) and surfaced on the web.
+   This is the **main agent's primary user-facing output**: the human talks to / hears from
+   the main agent, not twenty sub-agents.
+
+So the main agent is both **supervisor** (spawns and governs sub-agents) and **the user's
+single point of contact** (its routine is what informs the user). It deliberately does *not*
+trade or place controllers itself — it delegates that to the sub-agents it creates, keeping
+a clean "orchestrator vs. workers" split.
+
+**Relationship to Overseer.** Main and Overseer are close cousins and could be one agent in a
+small fleet: Main focuses on *composition* (which agents should exist, how they're wired, and
+reporting up to the user); Overseer focuses on *governance* (fleet-wide risk limits, veto,
+kill-switch). Keeping them as separate kinds lets a large fleet split "build the fleet" from
+"police the fleet"; a small deployment can grant the main agent both `agent_manager` and
+`risk_manager` capabilities and run a single root.
+
+**Example `agent.md` for the main agent:**
+
+```yaml
+---
+name: Condor Main
+kind: main
+capabilities: [agent_manager, data_collector]   # + risk_manager if it also governs
+description: Orchestrates the agent fleet and reports to the user
+agent_key: claude-code
+consumes:                       # roll up everything the fleet publishes
+  - { topic: market.morning_brief, mode: pull }
+  - { topic: arb.opportunities,    mode: pull }
+  - { topic: desk.recommendations, mode: pull }
+trigger: { type: interval, frequency_sec: 300 }
+---
+
+You are the Main Agent. You own the fleet. Each tick:
+1. list_fleet() and review the latest artifacts your sub-agents published.
+2. Ensure the desired pipelines exist. If the "arb desk" (arb_scanner → arb_controller_manager)
+   or "morning desk" (morning_brief → trade_recommender → portfolio_watcher) is missing or
+   stopped, create/start the missing sub-agents and wire their produces/consumes topics.
+3. Pause or stop any sub-agent that is erroring or redundant. Never trade yourself.
+4. Run the `fleet_brief` routine and send the user one concise status update:
+   what the fleet did, key opportunities/alerts, aggregate PnL and exposure.
+```
 
 ---
 
@@ -336,7 +423,8 @@ callee: one tick, one artifact back.
 ## 6. Templates (concrete pipelines)
 
 Templates are pre-baked `agent.md` presets = kind + capabilities + trigger + instructions.
-Mapped to the brief's list, they compose into two showcase pipelines:
+Mapped to the brief's list, they compose into two showcase pipelines — both **created and
+supervised by the Main Agent** (§2.4), which also rolls their outputs up to the user.
 
 ### Pipeline A — "Morning desk"
 ```
@@ -363,11 +451,16 @@ Mapped to the brief's list, they compose into two showcase pipelines:
 
 | Template | kind | capabilities | produces / consumes |
 |---|---|---|---|
+| **Main** (the root `agent.md`) | main | agent_manager, data_collector | ← all topics; runs `fleet_brief`, informs the user |
 | **Morning Brief** | collector | data_collector | → `market.morning_brief` |
 | **Trade Recommender** | analyst | data_collector | ← morning_brief → `desk.recommendations` |
 | **Arb Scanner** | collector | data_collector | → `arb.opportunities` |
 | **Arb Controller Manager** (bot manager) | manager | bot_manager | ← arb.opportunities |
 | **Portfolio Watcher** | analyst | risk_manager, data_collector | ← positions, recommendations |
+
+The **Main** template is the one Condor ships and launches by default; from an empty fleet it
+can stand up Pipelines A and B itself (per its `agent.md`), then report what it built. The
+other templates are the building blocks it (or the user) instantiates.
 
 Note Pipeline B's punchline matches the rationale: **V2 Controllers are the deterministic
 execution layer.** The "arb controller manager" agent doesn't place orders — it *manages
@@ -403,25 +496,34 @@ Today: `frontend/src/pages/Agents.tsx` is a card grid; `AgentDetail.tsx` has tab
 detail view; **replace the landing with a fleet/mission-control view.**
 
 ### 8.1 Fleet topology (the headline change)
-A graph where **nodes = agents** (colored by kind, status dot = running/paused/stopped) and
-**edges = A2A topics** (animated when an artifact flows). This makes the *system* legible —
-you see Pipeline A and Pipeline B as actual wired graphs, watch an artifact pulse from the
-arb scanner to the arb manager, and spot orphaned/stale links.
+A graph with the **Main Agent at the hub** and sub-agents radiating out (a literal pentagon
+/ command-center layout). **Nodes = agents** (colored by kind, status dot =
+running/paused/stopped); **solid edges = A2A topics** (animated when an artifact flows);
+**dashed edges from Main = supervision** (Main created/owns this sub-agent). This makes the
+*system* legible — you see the main agent governing the fleet, Pipelines A and B as actual
+wired graphs, an artifact pulse from the arb scanner to the arb manager, and orphaned/stale
+links.
 
 ```
-   ┌──────────────┐  market.morning_brief   ┌──────────────────┐
-   │ Morning Brief│ ───────────────────────▶│ Trade Recommender│
-   │  ● collector │                          │   ● analyst      │
-   └──────────────┘                          └────────┬─────────┘
-                                                       │ desk.recommendations
-                                              ┌────────▼─────────┐
-   ┌──────────────┐  arb.opportunities        │ Portfolio Watcher│
-   │ Arb Scanner  │ ──────────┐               │   ● risk         │
-   │  ● collector │           ▼               └──────────────────┘
-   └──────────────┘   ┌──────────────────┐
-                      │ Arb Ctrl Manager │  manages ▶ [V2 controllers]
-                      │   ● manager       │
-                      └──────────────────┘
+                        ┌────────────────────┐
+                        │     CONDOR MAIN     │   runs fleet_brief ─▶ user
+                        │     ◆ main          │
+                        └─────────┬───────────┘
+              supervises (dashed) │  creates / wires / rolls up
+        ┌───────────────┬─────────┼──────────┬────────────────┐
+        ▼               ▼                     ▼                ▼
+ ┌──────────────┐  market.morning_brief  ┌──────────────────┐
+ │ Morning Brief│ ──────────────────────▶│ Trade Recommender│
+ │  ● collector │                        │   ● analyst      │
+ └──────────────┘                        └────────┬─────────┘
+                                                   │ desk.recommendations
+ ┌──────────────┐  arb.opportunities      ┌────────▼─────────┐
+ │ Arb Scanner  │ ──────────┐             │ Portfolio Watcher│
+ │  ● collector │           ▼             │   ● risk         │
+ └──────────────┘   ┌──────────────────┐  └──────────────────┘
+                    │ Arb Ctrl Manager │  manages ▶ [V2 controllers]
+                    │   ● manager       │
+                    └──────────────────┘
 ```
 
 ### 8.2 Supporting panels (mission-control aesthetic)
@@ -473,10 +575,14 @@ because `kind` defaults to `trader`, `capabilities` to `["execution"]`).
 - Bus `subscribe`/wake → enqueue tick on target engine.
 - *Outcome:* Arb Scanner → Arb Controller Manager fires automatically. Pipeline B live.
 
-**Phase 4 — Control plane + request/response.**
+**Phase 4 — Control plane + request/response + the Main Agent.**
 - `call_agent` MCP tool (run_once-backed); Overseer kind; `fleet.directive` → directives /
   kill-switch.
-- *Outcome:* fleet-level risk governance; agent-as-tool.
+- `agent_manager` capability (wraps the existing `manage_trading_agent` create/start/stop)
+  + the **Main** kind and the root `agent.md`; ship a `fleet_brief` routine and the Main
+  template so Condor launches the main agent, which stands up the sub-agents.
+- *Outcome:* fleet-level risk governance; agent-as-tool; **one root agent the user talks to
+  that builds and reports on the rest of the fleet.**
 
 **Phase 5 — Pentagon frontend.**
 - `GET /fleet/graph`; new `Fleet.tsx` topology landing (replaces the flat card grid as the
@@ -508,12 +614,13 @@ because `kind` defaults to `trader`, `capabilities` to `["execution"]`).
 
 ## 11. One-paragraph mental model (new)
 
-> Condor is a **launcher and switchboard for a fleet of typed agents.** Each agent is a
-> folder declaring a *kind* and *capabilities*; the existing **tick loop is its core** (a
-> trigger only decides when the next tick fires); routines and V2
-> controllers are its deterministic muscle; the LLM tick is its judgment; the Journal /
-> Snapshot / Learnings triad is its private memory; and **A2A artifacts are the shared
-> bloodstream** — one agent publishes what it learned or decided, others consume it as input
-> or are woken by it. Risk isolation by `controller_id` keeps trading agents from colliding;
-> an Overseer keeps the whole fleet inside its limits. Condor just launches the agents and
-> wires the pipes; the agents do the rest.
+> Condor launches **one Main Agent**; that agent — a folder with the root `agent.md` — builds
+> and supervises a **fleet of typed sub-agents** and runs a routine that keeps the user
+> informed. Every agent, main and sub, is a folder declaring a *kind* and *capabilities*, and
+> the existing **tick loop is its core** (a trigger only decides when the next tick fires);
+> routines and V2 controllers are its deterministic muscle; the LLM tick is its judgment; the
+> Journal / Snapshot / Learnings triad is its private memory; and **A2A artifacts are the
+> shared bloodstream** — one agent publishes what it learned or decided, others consume it as
+> input or are woken by it. Risk isolation by `controller_id` keeps trading agents from
+> colliding; an Overseer (or the Main Agent itself) keeps the whole fleet inside its limits.
+> Condor launches the main agent; the main agent launches and wires the rest.
