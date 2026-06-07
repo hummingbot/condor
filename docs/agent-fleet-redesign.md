@@ -21,8 +21,9 @@ executors. It's a single shape. The proposal:
 3. **Add A2A (agent-to-agent)** as the new backbone: agents publish typed **artifacts**
    (routine reports) to a shared bus, and consume each other's artifacts as tick inputs.
    This turns isolated agents into composable **pipelines**.
-4. **Condor becomes a launcher/scheduler** for agents. The recurring execution we already
-   get from the `/loop` feature becomes the heartbeat; A2A becomes the wiring.
+4. **Condor becomes a launcher/scheduler** for agents. The existing **tick loop**
+   (`TickEngine._tick`) stays the core agentic loop for *every* kind; A2A becomes the
+   wiring; triggers (including `/loop`) only decide *when* a tick fires.
 5. **Frontend becomes a fleet view** (Pentagon-like): a live topology of agents + the A2A
    edges between them, not just a list of bots.
 
@@ -303,23 +304,32 @@ rewrite.
 
 ---
 
-## 5. Scheduling: `/loop` as the heartbeat
+## 5. The tick loop is the core; triggers only decide *when* it fires
 
-The brief notes we already have the key feature in the **`/loop`** Claude Code skill (run a
-prompt/command on a recurring interval). The redesign makes scheduling first-class via the
-`trigger` block:
+**The core agentic loop is unchanged: it is the existing `/tick` structure**
+(`TickEngine._tick`). Every agent kind — Collector, Analyst, Manager, Trader, Operator,
+Overseer — runs the same loop: pre-compute providers → read journal → build prompt → spawn
+an ACP/pydantic-ai session → capture tool calls → write snapshot. A Collector's tick happens
+to publish an artifact instead of placing an executor, but it is the *same tick*. We are not
+introducing a new execution primitive — we are giving the existing tick more roles and more
+inputs.
 
-| Trigger | Behavior | Backed by |
+A **trigger** is purely a *wake source* — it answers "when does the next tick fire?" and
+nothing else. The loop, the prompt build, and the snapshot are identical regardless of what
+woke the tick:
+
+| Trigger | Wakes a tick when… | Backed by |
 |---|---|---|
-| `interval` | every N sec (today's `frequency_sec`) | existing loop |
-| `schedule` (cron) | e.g. daily 08:00 for a morning brief | cron parse + loop |
-| `on_artifact` | wake when an upstream topic publishes | A2A push (§4.3) |
-| `manual` | run-once / on-demand only | existing run_once |
+| `interval` | every N sec (today's `frequency_sec`) | the existing loop, unchanged |
+| `schedule` (cron) | a clock time hits (e.g. daily 08:00 morning brief) | cron parse → loop |
+| `on_artifact` | an upstream topic publishes (A2A push, §4.3) | bus wake → loop |
+| `manual` | a human runs it on demand | existing `run_once` |
 
-`/loop` is the user-facing way to arm a recurring agent run from chat; `on_artifact` is the
-system-internal way agents chain to each other without a human in the loop. Same engine,
-different wake source. The single-tick modes (`dry_run`, `run_once`) are unchanged and are
-how `call_agent` is implemented.
+`/loop` is **just a corollary** — one convenient, user-facing way to arm recurring ticks
+from chat. It is not the engine and not the heartbeat; it sits at the same level as cron or
+`on_artifact`, all of which simply enqueue a tick on the same `TickEngine`. The single-tick
+modes (`dry_run`, `run_once`) are unchanged and are also how `call_agent` (§4.3) runs a
+callee: one tick, one artifact back.
 
 ---
 
@@ -457,8 +467,9 @@ because `kind` defaults to `trader`, `capabilities` to `["execution"]`).
 - Web: `GET /fleet/artifacts`, agent `wiring` endpoint.
 - *Outcome:* Trade Recommender consumes the Morning Brief. First real pipeline (pull only).
 
-**Phase 3 — Triggers + push A2A + `/loop` integration.**
-- `trigger` block parsing; cron + `on_artifact` wake sources in the loop.
+**Phase 3 — Triggers + push A2A.**
+- `trigger` block parsing; cron + `on_artifact` (+ `/loop` as a corollary) wake sources that
+  enqueue ticks on the unchanged `TickEngine`.
 - Bus `subscribe`/wake → enqueue tick on target engine.
 - *Outcome:* Arb Scanner → Arb Controller Manager fires automatically. Pipeline B live.
 
@@ -498,7 +509,8 @@ because `kind` defaults to `trader`, `capabilities` to `["execution"]`).
 ## 11. One-paragraph mental model (new)
 
 > Condor is a **launcher and switchboard for a fleet of typed agents.** Each agent is a
-> folder declaring a *kind* and *capabilities*; a tick loop is its heartbeat; routines and V2
+> folder declaring a *kind* and *capabilities*; the existing **tick loop is its core** (a
+> trigger only decides when the next tick fires); routines and V2
 > controllers are its deterministic muscle; the LLM tick is its judgment; the Journal /
 > Snapshot / Learnings triad is its private memory; and **A2A artifacts are the shared
 > bloodstream** — one agent publishes what it learned or decided, others consume it as input
