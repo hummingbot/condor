@@ -674,11 +674,36 @@ async def bots_callback_handler(
                 setting = action_parts[1]
                 await handle_pmm_adv_setting(update, context, setting)
 
-        # Bot detail
+        # Bot detail (legacy: bot_name embedded directly — retained for any
+        # callers where the name length is known-safe).
         elif main_action == "bot_detail":
             if len(action_parts) > 1:
                 bot_name = action_parts[1]
                 await show_bot_detail(update, context, bot_name)
+
+        # Bot detail by index — resolves the index to a bot_name from the
+        # per-user cache stashed by show_bots_menu. Keeps callback_data under
+        # Telegram's 64-byte cap for long bot_names that would otherwise
+        # overflow the name-based callback form. Cache lives in user_data (not
+        # chat_data) so group-chat users don't clobber each other's state.
+        elif main_action == "bot_idx":
+            if len(action_parts) > 1:
+                try:
+                    idx = int(action_parts[1])
+                except ValueError:
+                    logger.warning(
+                        f"Non-integer bot_idx callback: {action_parts[1]!r}"
+                    )
+                    return
+                bots_list = context.user_data.get("bots_main_list", [])
+                if 0 <= idx < len(bots_list):
+                    await show_bot_detail(update, context, bots_list[idx])
+                else:
+                    logger.warning(
+                        f"bot_idx {idx} out of range (cached list has "
+                        f"{len(bots_list)} entries); re-opening bots menu"
+                    )
+                    await show_bots_menu(update, context)
 
         # Controller detail (by index, uses context)
         elif main_action == "ctrl_idx":
