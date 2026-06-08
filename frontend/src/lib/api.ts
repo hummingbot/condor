@@ -447,6 +447,7 @@ export interface RoutineFieldInfo {
   default: unknown;
   description: string;
   widget?: "select";
+  options?: string[];
   options_from?: string;
 }
 

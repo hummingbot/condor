@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+from typing import TypeVar
+
+from pydantic import BaseModel
+
+PRESET_OVERRIDES: dict[str, dict[str, float | int]] = {
+    "safe": {
+        "activation_ticks": 8,
+        "adaptive_long_bb_pos_max": 46.0,
+        "adaptive_short_bb_pos_min": 74.0,
+        "adaptive_strong_long_bb_pos_max": 33.0,
+        "adaptive_strong_short_bb_pos_min": 87.0,
+        "adaptive_min_macd_gap_ratio": 0.10,
+        "adaptive_min_hist_ratio": 0.16,
+        "adaptive_score_open_min": 2.55,
+        "adaptive_score_open_min_extreme": 2.30,
+        "adaptive_hist_sign_bonus": 0.35,
+        "adaptive_hist_sign_penalty": 0.40,
+        "adaptive_momentum_bonus": 0.15,
+        "adaptive_momentum_penalty": 0.15,
+    },
+    "balanced": {
+        "activation_ticks": 6,
+        "adaptive_long_bb_pos_max": 48.0,
+        "adaptive_short_bb_pos_min": 72.0,
+        "adaptive_strong_long_bb_pos_max": 35.0,
+        "adaptive_strong_short_bb_pos_min": 85.0,
+        "adaptive_min_macd_gap_ratio": 0.08,
+        "adaptive_min_hist_ratio": 0.12,
+        "adaptive_score_open_min": 2.40,
+        "adaptive_score_open_min_extreme": 2.15,
+        "adaptive_hist_sign_bonus": 0.35,
+        "adaptive_hist_sign_penalty": 0.35,
+        "adaptive_momentum_bonus": 0.20,
+        "adaptive_momentum_penalty": 0.10,
+    },
+    "opportunistic": {
+        "activation_ticks": 4,
+        "adaptive_long_bb_pos_max": 55.0,
+        "adaptive_short_bb_pos_min": 65.0,
+        "adaptive_strong_long_bb_pos_max": 30.0,
+        "adaptive_strong_short_bb_pos_min": 90.0,
+        "adaptive_min_macd_gap_ratio": 0.06,
+        "adaptive_min_hist_ratio": 0.09,
+        "adaptive_score_open_min": 2.10,
+        "adaptive_score_open_min_extreme": 1.85,
+        "adaptive_hist_sign_bonus": 0.30,
+        "adaptive_hist_sign_penalty": 0.30,
+        "adaptive_momentum_bonus": 0.25,
+        "adaptive_momentum_penalty": 0.05,
+    },
+    "replay_probe": {
+        "activation_ticks": 4,
+        "time_window_min": 90,
+        "adaptive_long_bb_pos_max": 90.0,
+        "adaptive_short_bb_pos_min": 55.0,
+        "adaptive_strong_long_bb_pos_max": 30.0,
+        "adaptive_strong_short_bb_pos_min": 90.0,
+        "adaptive_min_macd_gap_ratio": 0.06,
+        "adaptive_min_hist_ratio": 0.09,
+        "adaptive_score_open_min": 1.00,
+        "adaptive_score_open_min_extreme": 0.75,
+        "adaptive_hist_sign_bonus": 0.30,
+        "adaptive_hist_sign_penalty": 0.30,
+        "adaptive_momentum_bonus": 0.25,
+        "adaptive_momentum_penalty": 0.05,
+    },
+}
+
+ConfigT = TypeVar("ConfigT", bound=BaseModel)
+
+
+def resolve_config_with_preset(config: ConfigT) -> ConfigT:
+    """Apply a named preset profile on top of the submitted config.
+
+    When preset is not ``custom``, keys defined in PRESET_OVERRIDES always win
+    over form/default values (the UI sends every field, so exclude_unset would
+    not help). Fields outside the preset dict — e.g. session_nums, sl_pct —
+    still come from the form.
+    """
+    preset = getattr(config, "preset", "custom")
+    if preset == "custom":
+        return config
+    overrides = PRESET_OVERRIDES.get(preset)
+    if not overrides:
+        return config
+    config_type = type(config)
+    return config_type(**{**config.model_dump(), **overrides, "preset": preset})

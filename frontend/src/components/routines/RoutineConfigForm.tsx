@@ -22,14 +22,16 @@ function SelectField({
   onChange: (v: unknown) => void;
 }) {
   const { server } = useServer();
+  const staticOptions = field.options ?? [];
+  const usesDynamicOptions = !!field.options_from;
   const { data, isLoading } = useQuery({
     queryKey: ["routine-field-options", field.options_from, server],
     queryFn: () => api.getRoutineFieldOptions(field.options_from!, server!),
-    enabled: !!field.options_from && !!server,
+    enabled: usesDynamicOptions && !!server,
     staleTime: 30_000,
   });
 
-  const options = data?.options ?? [];
+  const options = usesDynamicOptions ? (data?.options ?? []) : staticOptions;
 
   // Auto-select first option when options load and no value is set
   useEffect(() => {
@@ -45,7 +47,7 @@ function SelectField({
         onChange={(e) => onChange(e.target.value)}
         className="w-full appearance-none rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 pr-8 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
       >
-        {isLoading && <option value="">Loading...</option>}
+        {usesDynamicOptions && isLoading && <option value="">Loading...</option>}
         {!isLoading && options.length === 0 && (
           <option value="">No options available</option>
         )}
@@ -100,7 +102,8 @@ export function RoutineConfigForm({ fields, values, onChange }: Props) {
           <label className="mb-1 block text-xs font-medium text-[var(--color-text-muted)]">
             {field.description || key}
           </label>
-          {field.widget === "select" && field.options_from ? (
+          {field.widget === "select" &&
+          (field.options_from || (field.options?.length ?? 0) > 0) ? (
             <SelectField
               field={field}
               value={values[key]}

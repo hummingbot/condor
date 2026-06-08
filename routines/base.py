@@ -11,7 +11,7 @@ import importlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -41,6 +41,12 @@ def normalize_result(result) -> RoutineResult:
     return RoutineResult(text=str(result) if result else "Completed")
 
 _routines_cache: dict[str, "RoutineInfo"] | None = None
+
+
+def _literal_field_options(annotation: Any) -> list[str] | None:
+    if get_origin(annotation) is Literal:
+        return [str(value) for value in get_args(annotation)]
+    return None
 
 
 class RoutineInfo:
@@ -94,6 +100,11 @@ class RoutineInfo:
                 "default": field_info.default,
                 "description": field_info.description or name,
             }
+            literal_options = _literal_field_options(annotation)
+            if literal_options:
+                entry["widget"] = "select"
+                entry["options"] = literal_options
+
             # Pass through widget hints from json_schema_extra
             extra = field_info.json_schema_extra
             if isinstance(extra, dict):
@@ -101,6 +112,9 @@ class RoutineInfo:
                     entry["widget"] = extra["widget"]
                 if "options_from" in extra:
                     entry["options_from"] = extra["options_from"]
+                if "options" in extra and isinstance(extra["options"], list):
+                    entry["options"] = extra["options"]
+                    entry["widget"] = extra.get("widget", "select")
             fields[name] = entry
         return fields
 
