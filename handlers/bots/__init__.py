@@ -58,6 +58,7 @@ from .controller_handlers import (  # Unified configs menu with multi-select; Ed
     handle_deploy_use_default,
     handle_edit_config,
     handle_execute_deploy,
+# ── Grid Strike ───────────────────────────────────────────────────────────
     handle_gs_accept_prices,
     handle_gs_back_to_amount,
     handle_gs_back_to_connector,
@@ -84,6 +85,7 @@ from .controller_handlers import (  # Unified configs menu with multi-select; Ed
     handle_gs_wizard_pair,
     handle_gs_wizard_side,
     handle_gs_wizard_take_profit,
+# ── PMM Mister ────────────────────────────────────────────────────────────
     handle_pmm_adv_setting,
     handle_pmm_back,
     handle_pmm_edit_advanced,
@@ -100,6 +102,7 @@ from .controller_handlers import (  # Unified configs menu with multi-select; Ed
     handle_pmm_wizard_pair,
     handle_pmm_wizard_spreads,
     handle_pmm_wizard_tp,
+# ── PMM V1 ────────────────────────────────────────────────────────────────
     handle_pv1_back,
     handle_pv1_pair_select,
     handle_pv1_review_back,
@@ -110,6 +113,217 @@ from .controller_handlers import (  # Unified configs menu with multi-select; Ed
     handle_pv1_wizard_spreads,
     process_pv1_wizard_input,
     show_new_pmm_v1_form,
+# ── Multi Grid Strike ─────────────────────────────────────────────────────
+    show_new_multi_grid_strike_form,
+    handle_mgs_wizard_connector,
+    handle_mgs_wizard_pair,
+    handle_mgs_wizard_leverage,
+    handle_mgs_wizard_amount,
+    handle_mgs_interval_change,
+    handle_mgs_save,
+    handle_mgs_back_to_connector,
+    handle_mgs_back_to_pair,
+    handle_mgs_back_to_leverage,
+    handle_mgs_back_to_amount,
+    handle_mgs_pair_select,
+    handle_mgs_grid_type,
+    handle_mgs_num_grids,
+    handle_mgs_position_mode,
+    handle_mgs_back_to_position_mode,
+    handle_mgs_back_to_grid_type,
+    handle_mgs_back_to_num_grids,
+    process_mgs_wizard_input,
+
+# ── DMan V3 ───────────────────────────────────────────────────────────────
+    show_new_dman_v3_form,
+    handle_dman_wizard_connector,
+    handle_dman_wizard_pair,
+    handle_dman_wizard_leverage,
+    handle_dman_wizard_amount,
+    handle_dman_position_mode,
+    handle_dman_back_to_position_mode,
+    handle_dman_interval_change,
+    handle_dman_set_strategy,
+    handle_dman_save,
+    handle_dman_pair_select,
+    handle_dman_back_to_connector,
+    handle_dman_back_to_pair,
+    handle_dman_back_to_leverage,
+    handle_dman_back_to_amount,
+    process_dman_wizard_input,
+# ── Arbitrage Controller ──────────────────────────────────────────────────
+    show_new_arbitrage_controller_form,
+    handle_arb_wizard_connector_1,
+    handle_arb_wizard_connector_2,
+    handle_arb_wizard_pair_1,
+    handle_arb_wizard_pair_2,
+    handle_arb_wizard_amount,
+    handle_arb_save,
+    handle_arb_back_to_connector_1,
+    handle_arb_back_to_connector_2,
+    handle_arb_back_to_pair_1,
+    handle_arb_back_to_amount,
+    process_arb_wizard_input,
+    handle_arb_pair_select,
+    handle_arb_proceed_anyway,
+# ── XEMM Multiple Levels ──────────────────────────────────────────────────
+    show_new_xemm_multiple_levels_form,
+    handle_xemm_maker_connector,
+    handle_xemm_maker_pair,
+    handle_xemm_taker_connector,
+    handle_xemm_taker_pair,
+    handle_xemm_wizard_amount,
+    handle_xemm_save,
+    handle_xemm_back_to_maker_connector,
+    handle_xemm_back_to_taker_connector,
+    handle_xemm_back_to_pair,
+    handle_xemm_back_to_amount,
+    handle_xemm_proceed_anyway,
+    process_xemm_wizard_input,
+
+# ── MACD-BB Levels ──────────────────────────────────────────────────
+    show_new_macd_bb_v1_form,
+    handle_macdbb_wizard_connector,
+    handle_macdbb_wizard_pair,
+    handle_macdbb_wizard_leverage,
+    handle_macdbb_wizard_amount,
+    handle_macdbb_position_mode,
+    handle_macdbb_back_to_position_mode,
+    handle_macdbb_interval_change,
+    handle_macdbb_save,
+    handle_macdbb_back_to_connector,
+    handle_macdbb_back_to_pair,
+    handle_macdbb_back_to_leverage,
+    handle_macdbb_back_to_amount,
+    process_macdbb_wizard_input,
+    handle_macdbb_pair_select,
+    handle_macdbb_set_strategy,
+# ── Supertrend ──────────────────────────────────────────────────
+    show_new_supertrend_v1_form,
+    handle_st_wizard_connector,
+    handle_st_wizard_pair,
+    handle_st_wizard_leverage,
+    handle_st_wizard_amount,
+    handle_st_interval_change,
+    handle_st_save,
+    handle_st_back_to_connector,
+    handle_st_back_to_pair,
+    handle_st_back_to_leverage,
+    handle_st_back_to_amount,
+    handle_st_position_mode,
+    handle_st_back_to_position_mode,
+    handle_st_set_strategy,
+    process_st_wizard_input,
+# ── Anti-Folla ──────────────────────────────────────────────────────────
+    show_new_anti_folla_v1_form,
+    handle_af_wizard_connector,
+    handle_af_wizard_pair,
+    handle_af_wizard_leverage,
+    handle_af_wizard_amount,
+    handle_af_interval_change,
+    handle_af_save,
+    handle_af_back_to_connector,
+    handle_af_back_to_pair,
+    handle_af_back_to_leverage,
+    handle_af_back_to_amount,
+    process_af_wizard_input,
+    handle_af_position_mode,
+    handle_af_back_to_position_mode,
+    handle_af_set_strategy,
+
+# ── Funding Rate Arbitrage ──────────────────────────────────────────────────────────
+    show_new_funding_rate_arb_form,
+    handle_fra_wizard_connector_1,
+    handle_fra_wizard_pair_1,
+    handle_fra_wizard_connector_2,
+    handle_fra_wizard_pair_2,
+    handle_fra_wizard_amount,
+    handle_fra_save,
+    handle_fra_back_to_connector_1,
+    handle_fra_back_to_pair_1,
+    handle_fra_back_to_connector_2,
+    handle_fra_back_to_pair_2,
+    handle_fra_back_to_amount,
+    process_fra_wizard_input,
+# ── Delta Neutral mm ──────────────────────────────────────────────────────────────
+    show_new_delta_neutral_mm_form,
+    handle_dnmm_wizard_maker_connector,
+    handle_dnmm_wizard_maker_pair,
+    handle_dnmm_wizard_hedge_connector,
+    handle_dnmm_wizard_hedge_pair,
+    handle_dnmm_wizard_amount,
+    handle_dnmm_save,
+    handle_dnmm_back_to_maker_connector,
+    handle_dnmm_back_to_maker_pair,
+    handle_dnmm_back_to_hedge_connector,
+    handle_dnmm_back_to_hedge_pair,
+    handle_dnmm_back_to_amount,
+    process_dnmm_wizard_input,
+# ── Bollinger Grid wizard ──────────────────────────────────────────────────────────────
+    show_new_bollingrid_form,
+    handle_bg_wizard_connector,
+    handle_bg_wizard_pair,
+    handle_bg_wizard_leverage,
+    handle_bg_position_mode,
+    handle_bg_wizard_amount,
+    handle_bg_save,
+    handle_bg_interval_change,
+    handle_bg_back_to_connector,
+    handle_bg_back_to_pair,
+    handle_bg_back_to_leverage,
+    handle_bg_back_to_amount,
+    handle_bg_back_to_position_mode,
+    handle_bg_pair_select,
+    process_bg_wizard_input,
+# ── Quantum Grid Allocator wizard ──────────────────────────────────────────────────────────────
+    show_new_quantum_grid_allocator_form,
+    handle_qga_wizard_connector,
+    handle_qga_wizard_quote,
+    handle_qga_add_asset,
+    handle_qga_alloc_next,
+    handle_qga_amount_step,
+    handle_qga_wizard_amount,
+    handle_qga_save,
+    handle_qga_back_to_connector,
+    handle_qga_back_to_quote,
+    handle_qga_back_to_portfolio,
+    handle_qga_amount,
+    handle_qga_back_to_grid_params,
+    handle_qga_back_to_amount,
+    process_qga_wizard_input,
+# ── StatArb V2 ───────────────────────────────────────────────────────────
+    show_new_stat_arb_v2_form,
+    handle_stat_arb_wizard_connector,
+    handle_stat_arb_base_asset,
+    handle_stat_arb_quote_asset_1,
+    handle_stat_arb_quote_asset_2,
+    handle_stat_arb_back_to_connector,
+    handle_stat_arb_back_to_base_asset,
+    handle_stat_arb_back_to_quote_1,
+    handle_stat_arb_back_to_quote_2,
+    handle_stat_arb_back_to_amount,
+    handle_stat_arb_back_to_leverage,  # <-- AGGIUNGI
+    handle_stat_arb_wizard_leverage,
+    handle_stat_arb_wizard_amount,
+    handle_stat_arb_save,
+    handle_stat_arb_interval_change,
+    process_stat_arb_wizard_input,
+# LM Multi Pair DEX wizard
+    show_new_lm_multi_pair_dex_form,
+    handle_lmp_wizard_connector,
+    handle_lmp_toggle_pair,
+    handle_lmp_next_markets,
+    handle_lmp_token,
+    handle_lmp_allocation,
+    handle_lmp_wizard_amount,
+    handle_lmp_save,
+    handle_lmp_back_to_connector,
+    handle_lmp_back_to_markets,
+    handle_lmp_back_to_token,
+    handle_lmp_back_to_allocation,
+    handle_lmp_back_to_amount,
+    process_lmp_wizard_input,
+    handle_lmp_pair_select,
     handle_save_config,
     handle_select_all,
     handle_select_connector,
@@ -674,6 +888,470 @@ async def bots_callback_handler(
                 setting = action_parts[1]
                 await handle_pmm_adv_setting(update, context, setting)
 
+# ===== StatArb V2 wizard =====
+        elif main_action == "new_stat_arb_v2":
+            await show_new_stat_arb_v2_form(update, context)
+        elif main_action == "stat_arb_connector":
+            if len(action_parts) > 1:
+                connector = action_parts[1]
+                await handle_stat_arb_wizard_connector(update, context, connector)
+        elif main_action == "stat_arb_base_asset":
+            if len(action_parts) > 1:
+                asset = action_parts[1]
+                await handle_stat_arb_base_asset(update, context, asset)
+        elif main_action == "stat_arb_quote_1":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_stat_arb_quote_asset_1(update, context, pair)
+        elif main_action == "stat_arb_quote_2":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_stat_arb_quote_asset_2(update, context, pair)
+        elif main_action == "stat_arb_back_to_base_asset":
+            await handle_stat_arb_back_to_base_asset(update, context)
+        elif main_action == "stat_arb_back_to_quote_1":
+            await handle_stat_arb_back_to_quote_1(update, context)
+        elif main_action == "stat_arb_back_to_quote_2":
+            await handle_stat_arb_back_to_quote_2(update, context)
+        elif main_action == "stat_arb_back_to_leverage":
+            await handle_stat_arb_back_to_leverage(update, context)
+        elif main_action == "stat_arb_leverage":
+            if len(action_parts) > 1:
+                leverage = int(action_parts[1])
+                await handle_stat_arb_wizard_leverage(update, context, leverage)
+        elif main_action == "stat_arb_amount":
+            if len(action_parts) > 1:
+                amount = float(action_parts[1])
+                await handle_stat_arb_wizard_amount(update, context, amount)
+        elif main_action == "stat_arb_save":
+            await handle_stat_arb_save(update, context)
+        elif main_action == "stat_arb_back_to_connector":
+            await handle_stat_arb_back_to_connector(update, context)
+        elif main_action == "stat_arb_back_to_amount":
+            await handle_stat_arb_back_to_amount(update, context)
+        elif main_action == "stat_arb_interval":
+            if len(action_parts) > 1:
+                interval = action_parts[1]
+                await handle_stat_arb_interval_change(update, context, interval)
+# ===== Dman v3 =====
+        elif main_action == "new_dman_v3":
+            await show_new_dman_v3_form(update, context)
+        elif main_action == "dman_connector":
+            if len(action_parts) > 1:
+                await handle_dman_wizard_connector(update, context, action_parts[1])
+        elif main_action == "dman_pair":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_dman_wizard_pair(update, context, pair)
+        elif main_action == "dman_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_dman_pair_select(update, context, pair)
+        elif main_action == "dman_leverage":
+            if len(action_parts) > 1:
+                await handle_dman_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "dman_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_dman_position_mode(update, context, mode)
+        elif main_action == "dman_back_to_position_mode":
+            await handle_dman_back_to_position_mode(update, context)
+        elif main_action == "dman_amount":
+            if len(action_parts) > 1:
+                await handle_dman_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "dman_interval":
+            if len(action_parts) > 1:
+                await handle_dman_interval_change(update, context, action_parts[1])
+        elif main_action == "dman_set_strat":
+            if len(action_parts) > 1:
+                strategy_name = action_parts[1]
+                await handle_dman_set_strategy(update, context, strategy_name)
+        elif main_action == "dman_save":
+            await handle_dman_save(update, context)
+        elif main_action == "dman_back_to_connector":
+            await handle_dman_back_to_connector(update, context)
+        elif main_action == "dman_back_to_pair":
+            await handle_dman_back_to_pair(update, context)
+        elif main_action == "dman_back_to_leverage":
+            await handle_dman_back_to_leverage(update, context)
+        elif main_action == "dman_back_to_amount":
+            await handle_dman_back_to_amount(update, context)
+# ===== Arbitrage =====
+        elif main_action == "new_arbitrage_controller":
+            await show_new_arbitrage_controller_form(update, context)
+        elif main_action == "arb_connector_1":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_connector_1(update, context, action_parts[1])
+        elif main_action == "arb_connector_2":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_connector_2(update, context, action_parts[1])
+        elif main_action == "arb_pair_1":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_pair_1(update, context, action_parts[1])
+        elif main_action == "arb_pair_2":
+            if len(action_parts) > 1:
+                pair = ":".join(action_parts[1:])
+                await handle_arb_wizard_pair_2(update, context, pair)
+        elif main_action == "arb_amount":
+            if len(action_parts) > 1:
+                await handle_arb_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "arb_save":
+            await handle_arb_save(update, context)
+        elif main_action == "arb_back_to_connector_1":
+            await handle_arb_back_to_connector_1(update, context)
+        elif main_action == "arb_back_to_connector_2":
+            await handle_arb_back_to_connector_2(update, context)
+        elif main_action == "arb_back_to_pair_1":
+            await handle_arb_back_to_pair_1(update, context)
+        elif main_action == "arb_back_to_pair_2":
+            await handle_arb_back_to_pair_1(update, context)
+        elif main_action == "arb_back_to_amount":
+            await handle_arb_back_to_amount(update, context)
+        elif main_action == "arb_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_arb_pair_select(update, context, pair)
+        elif main_action == "arb_proceed_anyway":
+            await handle_arb_proceed_anyway(update, context)
+# ===== Xemm =====
+        elif main_action == "new_xemm_multiple_levels":
+            await show_new_xemm_multiple_levels_form(update, context)
+        elif main_action == "xemm_maker_connector":
+            if len(action_parts) > 1:
+                await handle_xemm_maker_connector(update, context, action_parts[1])
+        elif main_action == "xemm_taker_connector":
+            if len(action_parts) > 1:
+                await handle_xemm_taker_connector(update, context, action_parts[1])
+        elif main_action == "xemm_maker_pair":
+                    if len(action_parts) > 1:
+                        pair = ":".join(action_parts[1:])
+                        await handle_xemm_maker_pair(update, context, pair)
+        elif main_action == "xemm_taker_pair":
+            if len(action_parts) > 1:
+                pair = ":".join(action_parts[1:])
+                await handle_xemm_taker_pair(update, context, pair)
+        elif main_action == "xemm_amount":
+            if len(action_parts) > 1:
+                await handle_xemm_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "xemm_save":
+            await handle_xemm_save(update, context)
+        elif main_action == "xemm_back_to_maker_connector":
+            await handle_xemm_back_to_maker_connector(update, context)
+        elif main_action == "xemm_back_to_taker_connector":
+            await handle_xemm_back_to_taker_connector(update, context)
+        elif main_action == "xemm_back_to_pair":
+            await handle_xemm_back_to_pair(update, context)
+        elif main_action == "xemm_back_to_amount":
+            await handle_xemm_back_to_amount(update, context)
+        elif main_action == "xemm_proceed_anyway":
+            await handle_xemm_proceed_anyway(update, context)
+#MACDBB
+        elif main_action == "new_macd_bb_v1":
+            await show_new_macd_bb_v1_form(update, context)
+        elif main_action == "macdbb_connector":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_connector(update, context, action_parts[1])
+        elif main_action == "macdbb_pair":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_pair(update, context, action_parts[1])
+        elif main_action == "macdbb_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_macdbb_pair_select(update, context, pair)
+        elif main_action == "macdbb_leverage":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "macdbb_amount":
+            if len(action_parts) > 1:
+                await handle_macdbb_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "macdbb_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_macdbb_position_mode(update, context, mode)
+        elif main_action == "macdbb_interval":
+            if len(action_parts) > 1:
+                await handle_macdbb_interval_change(update, context, action_parts[1])
+        elif main_action == "macdbb_save":
+            await handle_macdbb_save(update, context)
+        elif main_action == "macdbb_back_to_connector":
+            await handle_macdbb_back_to_connector(update, context)
+        elif main_action == "macdbb_back_to_pair":
+            await handle_macdbb_back_to_pair(update, context)
+        elif main_action == "macdbb_back_to_leverage":
+            await handle_macdbb_back_to_leverage(update, context)
+        elif main_action == "macdbb_back_to_amount":
+            await handle_macdbb_back_to_amount(update, context)
+        elif main_action == "macdbb_back_to_position_mode":
+            await handle_macdbb_back_to_position_mode(update, context)
+        elif main_action == "macdbb_set_strat":
+            if len(action_parts) > 1:
+                strategy_name = action_parts[1]
+                await handle_macdbb_set_strategy(update, context, strategy_name)
+#SUPERTREND
+        elif main_action == "new_supertrend_v1":
+            await show_new_supertrend_v1_form(update, context)
+        elif main_action == "st_connector":
+            if len(action_parts) > 1:
+                await handle_st_wizard_connector(update, context, action_parts[1])
+        elif main_action == "st_pair":
+            if len(action_parts) > 1:
+                await handle_st_wizard_pair(update, context, action_parts[1])
+        elif main_action == "st_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_st_wizard_pair(update, context, pair)
+        elif main_action == "st_leverage":
+            if len(action_parts) > 1:
+                await handle_st_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "st_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_st_position_mode(update, context, mode)
+        elif main_action == "st_back_to_position_mode":
+            await handle_st_back_to_position_mode(update, context)
+        elif main_action == "st_amount":
+            if len(action_parts) > 1:
+                await handle_st_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "st_interval":
+            if len(action_parts) > 1:
+                await handle_st_interval_change(update, context, action_parts[1])
+        elif main_action == "st_set_strat":
+            if len(action_parts) > 1:
+                strategy_name = action_parts[1]
+                await handle_st_set_strategy(update, context, strategy_name)
+        elif main_action == "st_save":
+            await handle_st_save(update, context)
+        elif main_action == "st_back_to_connector":
+            await handle_st_back_to_connector(update, context)
+        elif main_action == "st_back_to_pair":
+            await handle_st_back_to_pair(update, context)
+        elif main_action == "st_back_to_leverage":
+            await handle_st_back_to_leverage(update, context)
+        elif main_action == "st_back_to_amount":
+            await handle_st_back_to_amount(update, context)
+#ANTI-FOLLA
+        elif main_action == "new_anti_folla_v1":
+            await show_new_anti_folla_v1_form(update, context)
+        elif main_action == "af_connector":
+            if len(action_parts) > 1:
+                await handle_af_wizard_connector(update, context, action_parts[1])
+        elif main_action == "af_pair":
+            if len(action_parts) > 1:
+                await handle_af_wizard_pair(update, context, action_parts[1])
+
+        elif main_action == "af_pair_select":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_af_wizard_pair(update, context, pair)
+        elif main_action == "af_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_af_position_mode(update, context, mode)
+        elif main_action == "af_back_to_position_mode":
+            await handle_af_back_to_position_mode(update, context)
+        elif main_action == "af_leverage":
+            if len(action_parts) > 1:
+                await handle_af_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "af_amount":
+            if len(action_parts) > 1:
+                await handle_af_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "af_interval":
+            if len(action_parts) > 1:
+                await handle_af_interval_change(update, context, action_parts[1])
+        elif main_action == "af_set_strat":
+            if len(action_parts) > 1:
+                strategy_name = action_parts[1]
+                await handle_af_set_strategy(update, context, strategy_name)
+        elif main_action == "af_save":
+            await handle_af_save(update, context)
+        elif main_action == "af_back_to_connector":
+            await handle_af_back_to_connector(update, context)
+        elif main_action == "af_back_to_pair":
+            await handle_af_back_to_pair(update, context)
+        elif main_action == "af_back_to_leverage":
+            await handle_af_back_to_leverage(update, context)
+        elif main_action == "af_back_to_amount":
+            await handle_af_back_to_amount(update, context)
+# Funding Rate Arbitrage
+        elif main_action == "new_funding_rate_arb":
+            await show_new_funding_rate_arb_form(update, context)
+        elif main_action == "fra_connector_1":
+            if len(action_parts) > 1:
+                await handle_fra_wizard_connector_1(update, context, action_parts[1])
+        elif main_action == "fra_pair_1":
+            if len(action_parts) > 1:
+                await handle_fra_wizard_pair_1(update, context, action_parts[1])
+        elif main_action == "fra_connector_2":
+            if len(action_parts) > 1:
+                await handle_fra_wizard_connector_2(update, context, action_parts[1])
+        elif main_action == "fra_pair_2":
+            if len(action_parts) > 1:
+                await handle_fra_wizard_pair_2(update, context, action_parts[1])
+        elif main_action == "fra_amount":
+            if len(action_parts) > 1:
+                await handle_fra_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "fra_save":
+            await handle_fra_save(update, context)
+        elif main_action == "fra_back_to_connector_1":
+            await handle_fra_back_to_connector_1(update, context)
+        elif main_action == "fra_back_to_pair_1":
+            await handle_fra_back_to_pair_1(update, context)
+        elif main_action == "fra_back_to_connector_2":
+            await handle_fra_back_to_connector_2(update, context)
+        elif main_action == "fra_back_to_pair_2":
+            await handle_fra_back_to_pair_2(update, context)
+        elif main_action == "fra_back_to_amount":
+            await handle_fra_back_to_amount(update, context)
+# Delta Neutral MM
+        elif main_action == "new_delta_neutral_mm":
+            await show_new_delta_neutral_mm_form(update, context)
+        elif main_action == "dnmm_maker_connector":
+            if len(action_parts) > 1:
+                await handle_dnmm_wizard_maker_connector(update, context, action_parts[1])
+        elif main_action == "dnmm_maker_pair":
+            if len(action_parts) > 1:
+                await handle_dnmm_wizard_maker_pair(update, context, action_parts[1])
+        elif main_action == "dnmm_hedge_connector":
+            if len(action_parts) > 1:
+                await handle_dnmm_wizard_hedge_connector(update, context, action_parts[1])
+        elif main_action == "dnmm_hedge_pair":
+            if len(action_parts) > 1:
+                await handle_dnmm_wizard_hedge_pair(update, context, action_parts[1])
+        elif main_action == "dnmm_amount":
+            if len(action_parts) > 1:
+                await handle_dnmm_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "dnmm_save":
+            await handle_dnmm_save(update, context)
+        elif main_action == "dnmm_back_to_maker_connector":
+            await handle_dnmm_back_to_maker_connector(update, context)
+        elif main_action == "dnmm_back_to_maker_pair":
+            await handle_dnmm_back_to_maker_pair(update, context)
+        elif main_action == "dnmm_back_to_hedge_connector":
+            await handle_dnmm_back_to_hedge_connector(update, context)
+        elif main_action == "dnmm_back_to_hedge_pair":
+            await handle_dnmm_back_to_hedge_pair(update, context)
+        elif main_action == "dnmm_back_to_amount":
+            await handle_dnmm_back_to_amount(update, context)
+# Bollinger Grid (wizard)
+        elif main_action == "new_bollingrid":
+            await show_new_bollingrid_form(update, context)
+        elif main_action == "bg_connector":
+            if len(action_parts) > 1:
+                await handle_bg_wizard_connector(update, context, action_parts[1])
+        elif main_action == "bg_pair":
+            if len(action_parts) > 1:
+                await handle_bg_wizard_pair(update, context, action_parts[1])
+        elif main_action == "bg_pair_select":
+            if len(action_parts) > 1:
+                await handle_bg_pair_select(update, context, action_parts[1])
+        elif main_action == "bg_leverage":
+            if len(action_parts) > 1:
+                await handle_bg_wizard_leverage(update, context, int(action_parts[1]))
+        elif main_action == "bg_position_mode":
+            if len(action_parts) > 1:
+                mode = action_parts[1]
+                await handle_bg_position_mode(update, context, mode)
+        elif main_action == "bg_amount":
+            if len(action_parts) > 1:
+                await handle_bg_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "bg_interval":
+            if len(action_parts) > 1:
+                await handle_bg_interval_change(update, context, action_parts[1])
+        elif main_action == "bg_save":
+            await handle_bg_save(update, context)
+        elif main_action == "bg_back_to_connector":
+            await handle_bg_back_to_connector(update, context)
+        elif main_action == "bg_back_to_pair":
+            await handle_bg_back_to_pair(update, context)
+        elif main_action == "bg_back_to_leverage":
+            await handle_bg_back_to_leverage(update, context)
+        elif main_action == "bg_back_to_position_mode":
+            await handle_bg_back_to_position_mode(update, context)
+        elif main_action == "bg_back_to_amount":
+            await handle_bg_back_to_amount(update, context)
+# Quantum Grid Allocator
+        elif main_action == "new_quantum_grid_allocator":
+            await show_new_quantum_grid_allocator_form(update, context)
+        elif main_action == "qga_connector":
+            if len(action_parts) > 1:
+                await handle_qga_wizard_connector(update, context, action_parts[1])
+        elif main_action == "qga_quote":
+            if len(action_parts) > 1:
+                await handle_qga_wizard_quote(update, context, action_parts[1])
+        elif main_action == "qga_add_asset":
+            if len(action_parts) > 2:
+                asset = action_parts[1]
+                allocation = float(action_parts[2])
+                await handle_qga_add_asset(update, context, asset, allocation)
+        elif main_action == "qga_alloc_next":
+            await handle_qga_alloc_next(update, context)
+        elif main_action == "qga_amount":
+            if len(action_parts) > 1:
+                await handle_qga_wizard_amount(update, context, float(action_parts[1]))
+        elif main_action == "qga_save":
+            await handle_qga_save(update, context)
+        elif main_action == "qga_back_to_connector":
+            await handle_qga_back_to_connector(update, context)
+        elif main_action == "qga_back_to_quote":
+            await handle_qga_back_to_quote(update, context)
+        elif main_action == "qga_back_to_grid_params":
+            await handle_qga_back_to_grid_params(update, context)
+        elif main_action == "qga_back_to_amount":
+            await handle_qga_back_to_amount(update, context)
+        elif main_action == "qga_next":
+            await handle_qga_amount(update, context)
+        elif main_action == "qga_back_to_portfolio":
+            await handle_qga_back_to_portfolio(update, context)
+
+        # ===== LM Multi Pair DEX wizard =====
+        elif main_action == "new_lm_multi_pair_dex":
+            await show_new_lm_multi_pair_dex_form(update, context)
+        elif main_action == "lmp_connector":
+            if len(action_parts) > 1:
+                connector = action_parts[1]
+                await handle_lmp_wizard_connector(update, context, connector)
+        elif main_action == "lmp_toggle_pair":
+            if len(action_parts) > 1:
+                pair = action_parts[1]
+                await handle_lmp_toggle_pair(update, context, pair)
+        elif main_action == "lmp_next_markets":
+            await handle_lmp_next_markets(update, context)
+        elif main_action == "lmp_token":
+            if len(action_parts) > 1:
+                token = action_parts[1]
+                await handle_lmp_token(update, context, token)
+        elif main_action == "lmp_allocation":
+            if len(action_parts) > 1:
+                allocation = float(action_parts[1])
+                await handle_lmp_allocation(update, context, allocation)
+        elif main_action == "lmp_amount":
+            if len(action_parts) > 1:
+                amount = float(action_parts[1])
+                await handle_lmp_wizard_amount(update, context, amount)
+        elif main_action == "lmp_save":
+            await handle_lmp_save(update, context)
+        elif main_action == "lmp_back_to_connector":
+            await handle_lmp_back_to_connector(update, context)
+        elif main_action == "lmp_back_to_markets":
+            await handle_lmp_back_to_markets(update, context)
+        elif main_action == "lmp_back_to_token":
+            await handle_lmp_back_to_token(update, context)
+        elif main_action == "lmp_back_to_allocation":
+            await handle_lmp_back_to_allocation(update, context)
+        elif main_action == "lmp_back_to_amount":
+            await handle_lmp_back_to_amount(update, context)
+
+
+
+
+
+
+
+
+
+
+
+
         # Bot detail
         elif main_action == "bot_detail":
             if len(action_parts) > 1:
@@ -855,6 +1533,31 @@ async def bots_message_handler(
         # Handle PMM V1 wizard input
         elif bots_state == "pv1_wizard_input":
             await process_pv1_wizard_input(update, context, user_input)
+        elif bots_state == "dman_wizard_input":
+            await process_dman_wizard_input(update, context, user_input)
+        elif bots_state == "arb_wizard_input":
+            await process_arb_wizard_input(update, context, user_input)
+        elif bots_state == "xemm_wizard_input":
+            await process_xemm_wizard_input(update, context, update.message.text)
+        elif bots_state == "macdbb_wizard_input":
+            await process_macdbb_wizard_input(update, context, user_input)
+        elif bots_state == "st_wizard_input":
+            await process_st_wizard_input(update, context, user_input)
+        elif bots_state == "af_wizard_input":
+            await process_af_wizard_input(update, context, user_input)
+        elif bots_state == "fra_wizard_input":
+            await process_fra_wizard_input(update, context, user_input)
+        elif bots_state == "dnmm_wizard_input":
+            await process_dnmm_wizard_input(update, context, user_input)
+        elif bots_state == "bg_wizard_input":
+            await process_bg_wizard_input(update, context, user_input)
+        elif bots_state == "qga_wizard_input":
+            await process_qga_wizard_input(update, context, user_input)
+        elif bots_state == "stat_arb_wizard_input":
+            await process_stat_arb_wizard_input(update, context, user_input)
+        elif bots_state == "lmp_wizard_input":
+            await process_lmp_wizard_input(update, context, user_input)
+
         # Handle config edit loop field input (legacy single field)
         elif bots_state.startswith("cfg_edit_input:"):
             await process_cfg_edit_input(update, context, user_input)

@@ -15,12 +15,36 @@ from ._base import BaseController, ControllerField
 from .grid_strike import GridStrikeController
 from .pmm_mister import PmmMisterController
 from .pmm_v1 import PmmV1Controller
-
+from .arbitrage_controller import ArbitrageControllerController
+from .dman_v3 import DManV3Controller
+from .multi_grid_strike import MultiGridStrikeController
+from .xemm_multiple_levels import XEMMMultipleLevelsController
+from .macd_bb_v1 import MacdBbV1Controller
+from .supertrend_v1 import SuperTrendV1Controller
+from .anti_folla_v1 import AntiFollaV1Controller
+from .funding_rate_arb import FundingRateArbController
+from .delta_neutral_mm import DeltaNeutralMMController
+from .bollingrid import BollinGridController
+from .quantum_grid_allocator import QuantumGridAllocatorController
+from .stat_arb_v2 import StatArbV2Controller
+from .lm_multi_pair_dex import LMMultiPairDEXController
 # Registry of controller types
 _CONTROLLER_REGISTRY: Dict[str, Type[BaseController]] = {
     "grid_strike": GridStrikeController,
     "pmm_mister": PmmMisterController,
     "pmm_v1": PmmV1Controller,
+    "dman_v3": DManV3Controller,
+    "arbitrage_controller": ArbitrageControllerController,
+    "xemm_multiple_levels": XEMMMultipleLevelsController,
+    "macd_bb_v1": MacdBbV1Controller,
+    "supertrend_v1": SuperTrendV1Controller,
+    "anti_folla_v1": AntiFollaV1Controller,
+    "funding_rate_arb": FundingRateArbController,
+    "delta_neutral_mm": DeltaNeutralMMController,
+    "bollingrid": BollinGridController,
+    "quantum_grid_allocator": QuantumGridAllocatorController,
+    "stat_arb_v2": LMMultiPairDEXController,
+    "lm_multi_pair_dex": LMMultiPairDEXController,
 }
 
 
@@ -102,6 +126,18 @@ __all__ = [
     "GridStrikeController",
     "PmmMisterController",
     "PmmV1Controller",
+    "DManV3Controller",
+    "ArbitrageControllerController",
+    "XEMMMultipleLevelsController",
+    "MacdBbV1Controller",
+    "SuperTrendV1Controller",
+    "AntiFollaV1Controller",
+    "FundingRateArbController",
+    "DeltaNeutralMMController",
+    "BollinGridController",
+    "QuantumGridAllocatorController",
+    "StatArbV2Controller",
+    "LMMultiPairDEXController",
     # Backwards compatibility
     "SUPPORTED_CONTROLLERS",
 ]

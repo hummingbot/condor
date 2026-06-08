@@ -87,6 +87,9 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
     # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
     "openrouter:": {"label": "OpenRouter — Pick Model"},
+    "openrouter:": {"label": "OpenRouter — Pick Model"},
+    "openai:deepseek-chat": {"label": "DeepSeek V3 (Diretto)"},   # AGGIUNGI QUESTA
+    "openai:deepseek-reasoner": {"label": "DeepSeek R1 (Diretto)"}, # OPZIONALE
 }
 
 DEFAULT_AGENT = "claude-code"
