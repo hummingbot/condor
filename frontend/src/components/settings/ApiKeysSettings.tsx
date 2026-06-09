@@ -163,7 +163,7 @@ export function ApiKeysSettings() {
             <button
               key={type}
               onClick={() => setFlow({ ...flow, step: "select-exchange", connectorType: type })}
-              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-left transition-colors hover:border-[var(--color-primary)]/40"
+              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-left transition-colors hover:border-[var(--color-border-hover)]"
             >
               <span className="text-sm font-medium capitalize text-[var(--color-text)]">{type}</span>
               <p className="mt-1 text-xs text-[var(--color-text-muted)]">
@@ -178,7 +178,7 @@ export function ApiKeysSettings() {
           onClick={() =>
             setFlow({ ...INITIAL_FLOW, step: "connect-hyperliquid", connectorName: "hyperliquid_perpetual" })
           }
-          className="flex w-full items-center justify-between rounded-lg border border-[#5ce0c6]/40 bg-[#5ce0c6]/5 p-4 text-left transition-colors hover:border-[#5ce0c6]/70 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#5ce0c6]/40"
+          className="flex w-full items-center justify-between rounded-lg border border-[#5ce0c6]/40 bg-[#5ce0c6]/5 p-4 text-left transition-colors hover:border-[var(--color-border-hover)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#5ce0c6]/40"
         >
           <span>
             <span className="text-sm font-medium text-[var(--color-text)]">Connect Hyperliquid</span>
@@ -250,7 +250,7 @@ export function ApiKeysSettings() {
                   className={`rounded-md border px-3 py-2 text-left text-sm transition-colors ${
                     alreadyConnected
                       ? "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 text-[var(--color-text-muted)] cursor-default"
-                      : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text)] hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)]"
+                      : "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text)] hover:border-[var(--color-border-hover)] hover:bg-[var(--color-surface-hover)]"
                   }`}
                 >
                   <span className="flex items-center gap-1.5">
