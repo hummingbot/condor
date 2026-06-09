@@ -108,6 +108,10 @@ export function ApiKeysSettings() {
       if (!map[type]) map[type] = [];
       map[type].push(c);
     }
+    // Show connectors alphabetically within each group.
+    for (const list of Object.values(map)) {
+      list.sort((a, b) => a.connector_name.localeCompare(b.connector_name));
+    }
     return map;
   }, [credentials]);
 
@@ -174,20 +178,20 @@ export function ApiKeysSettings() {
           onClick={() =>
             setFlow({ ...INITIAL_FLOW, step: "connect-hyperliquid", connectorName: "hyperliquid_perpetual" })
           }
-          className="flex w-full items-center justify-between rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-4 text-left transition-colors hover:border-[var(--color-primary)]/60 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[var(--color-primary)]/30"
+          className="flex w-full items-center justify-between rounded-lg border border-[#5ce0c6]/30 bg-gradient-to-br from-[#0e3a34] via-[#0a2c28] to-[#061f1c] p-4 text-left transition-colors hover:border-[#5ce0c6]/60 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#5ce0c6]/30"
         >
           <span>
-            <span className="text-sm font-medium text-[var(--color-text)]">Connect Hyperliquid</span>
-            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+            <span className="text-sm font-medium text-white">Connect Hyperliquid</span>
+            <p className="mt-1 text-xs text-[#9fd9cd]">
               {hyperliquidConnected
                 ? "Already connected — remove the existing Hyperliquid keys to reconnect."
                 : "Wallet connect — authorize a trade-only agent (perp + spot). No private key needed."}
             </p>
           </span>
           {hyperliquidConnected ? (
-            <Check className="h-4 w-4 text-[var(--color-primary)]" />
+            <Check className="h-7 w-7 shrink-0 text-[#5ce0c6]" />
           ) : (
-            <Key className="h-4 w-4 text-[var(--color-primary)]" />
+            <img src="/hyperliquid.png" alt="Hyperliquid" className="h-7 w-7 shrink-0 rounded-full" />
           )}
         </button>
       </div>
@@ -208,7 +212,9 @@ export function ApiKeysSettings() {
   }
 
   if (flow.step === "select-exchange") {
-    const connectors: ConnectorInfo[] = connectorsData?.connectors ?? [];
+    const connectors: ConnectorInfo[] = [...(connectorsData?.connectors ?? [])].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
     const configuredNames = new Set(credentials.map((c) => c.connector_name));
     return (
       <div className="space-y-4">
@@ -362,7 +368,9 @@ export function ApiKeysSettings() {
         </p>
       ) : (
         <div className="space-y-4">
-          {Object.entries(grouped).map(([type, creds]) => (
+          {Object.entries(grouped)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([type, creds]) => (
             <div key={type}>
               <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
                 {type}
