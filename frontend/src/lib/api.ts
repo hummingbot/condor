@@ -875,6 +875,11 @@ export const api = {
       `/api/v1/servers/${server}/market/trading-rules?connector=${connector}`,
     ),
 
+  getPairVolumes: (server: string, connector: string) =>
+    apiFetch<{ connector: string; volumes: Record<string, number> }>(
+      `/api/v1/servers/${server}/market/pair-volumes?connector=${connector}`,
+    ),
+
   getOrderBook: (
     server: string,
     connector: string,
