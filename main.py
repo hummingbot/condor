@@ -61,9 +61,8 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = update.effective_user
     token = create_login_token(user.id, user.username or "", user.first_name or "")
 
-    url = f"{WEB_URL}/login?token={token}"
-    _hostname = urlparse(WEB_URL).hostname or ""
-    is_localhost = "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
+    url = f"{WEB_URL if not WEB_PORT else f'{WEB_URL}:{WEB_PORT}'}/login?token={token}"
+    is_localhost = "localhost" in WEB_URL or "127.0.0.1" in WEB_URL
 
     if is_localhost:
         await update.message.reply_text(
