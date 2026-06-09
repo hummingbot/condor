@@ -335,7 +335,7 @@ export function ConnectHyperliquid({
                 <button
                   key={w.uuid}
                   onClick={() => handleConnect(w)}
-                  className="flex w-full items-center gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-left transition-colors hover:border-[var(--color-primary)]/40 hover:bg-[var(--color-surface-hover)]"
+                  className="flex w-full items-center gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-left transition-colors hover:border-[var(--color-border-hover)] hover:bg-[var(--color-surface-hover)]"
                 >
                   {w.icon ? (
                     <img src={w.icon} alt="" className="h-7 w-7 rounded-md" />
