@@ -381,8 +381,8 @@ export function ConnectHyperliquid({
           className="text-[var(--color-primary)] hover:underline"
         >
           Sign up here
-        </a>
-        .
+        </a>{" "}
+        to get {REFERRAL_FEE_DISCOUNT} off trading fees.
       </p>
     </div>
   );
