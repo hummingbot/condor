@@ -178,18 +178,18 @@ export function ApiKeysSettings() {
           onClick={() =>
             setFlow({ ...INITIAL_FLOW, step: "connect-hyperliquid", connectorName: "hyperliquid_perpetual" })
           }
-          className="flex w-full items-center justify-between rounded-lg border border-[#5ce0c6]/30 bg-gradient-to-br from-[#1c6a5b] via-[#155448] to-[#0f4138] p-4 text-left transition-colors hover:border-[#5ce0c6]/60 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#5ce0c6]/30"
+          className="flex w-full items-center justify-between rounded-lg border border-[#5ce0c6]/40 bg-[#5ce0c6]/5 p-4 text-left transition-colors hover:border-[#5ce0c6]/70 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#5ce0c6]/40"
         >
           <span>
-            <span className="text-sm font-medium text-white">Connect Hyperliquid</span>
-            <p className="mt-1 text-xs text-[#9fd9cd]">
+            <span className="text-sm font-medium text-[var(--color-text)]">Connect Hyperliquid</span>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">
               {hyperliquidConnected
                 ? "Already connected — remove the existing Hyperliquid keys to reconnect."
                 : "Wallet connect — authorize a trade-only agent (perp + spot). No private key needed."}
             </p>
           </span>
           {hyperliquidConnected ? (
-            <Check className="h-7 w-7 shrink-0 text-[#5ce0c6]" />
+            <Check className="h-7 w-7 shrink-0 text-[var(--color-primary)]" />
           ) : (
             <img src="/hyperliquid.png" alt="Hyperliquid" className="h-7 w-7 shrink-0 rounded-full" />
           )}
