@@ -185,7 +185,7 @@ export function ApiKeysSettings() {
             <p className="mt-1 text-xs text-[var(--color-text-muted)]">
               {hyperliquidConnected
                 ? "Already connected — remove the existing Hyperliquid keys to reconnect."
-                : "Wallet connect — authorize a trade-only agent (perp + spot). No private key needed."}
+                : "Connect wallet to Hyperliquid (spot + perpetual)"}
             </p>
           </span>
           {hyperliquidConnected ? (
