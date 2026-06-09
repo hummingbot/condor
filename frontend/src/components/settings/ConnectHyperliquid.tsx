@@ -372,7 +372,7 @@ export function ConnectHyperliquid({
         </div>
       )}
 
-      <p className="text-[10px] text-[var(--color-text-muted)]/60">
+      <p className="text-xs text-[var(--color-text-muted)]">
         Don't have a Hyperliquid account?{" "}
         <a
           href="https://app.hyperliquid.xyz/join/HUMMINGBOT"
