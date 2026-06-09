@@ -111,12 +111,12 @@ export function ApiKeysSettings() {
     return map;
   }, [credentials]);
 
-  // Hyperliquid is already connected when either the spot or perpetual credential exists. One agent
-  // approval registers both, so the connect flow is offered only while neither is present.
-  const hyperliquidConnected = useMemo(
-    () => credentials.some((c) => isHyperliquid(c.connector_name)),
-    [credentials],
-  );
+  // Only treat Hyperliquid as connected once BOTH the spot and perpetual credentials exist. If only
+  // one is present (e.g. a partial-save failure), keep the connect flow available to add the other.
+  const hyperliquidConnected = useMemo(() => {
+    const names = new Set(credentials.map((c) => c.connector_name));
+    return names.has("hyperliquid") && names.has("hyperliquid_perpetual");
+  }, [credentials]);
 
   // Parse config map fields
   const configFields = useMemo(() => {
