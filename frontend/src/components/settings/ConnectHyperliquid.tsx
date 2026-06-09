@@ -7,12 +7,13 @@ import {
   BUILDER_FEE_BPS,
   type ConnectStep,
   type HyperliquidConnection,
+  MAX_AGENT_NAME,
   REFERRAL_CODE,
   REFERRAL_FEE_DISCOUNT,
   buildHyperliquidCredentials,
   connectHyperliquid,
+  defaultAgentName,
   hasHyperliquidReferrer,
-  resolveAgentName,
   setHyperliquidReferrer,
 } from "@/lib/wallet/hyperliquid";
 
@@ -51,7 +52,7 @@ export function ConnectHyperliquid({
 }) {
   const [wallets, setWallets] = useState<DiscoveredWallet[]>([]);
   const [scanning, setScanning] = useState(true);
-  const [accountName, setAccountName] = useState("");
+  const [accountName, setAccountName] = useState(() => defaultAgentName());
   const [phase, setPhase] = useState<Phase>("select-wallet");
   const [error, setError] = useState<string | null>(null);
   const [partial, setPartial] = useState<string | null>(null);
@@ -203,19 +204,16 @@ export function ConnectHyperliquid({
       {/* Account name (used as the on-chain agent wallet name) */}
       <div>
         <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-          Agent name <span className="text-[var(--color-text-muted)]/60">(optional — today's date is appended)</span>
+          Agent name <span className="text-[var(--color-text-muted)]/60">(on-chain agent wallet name, max 16 chars)</span>
         </label>
         <input
           value={accountName}
           onChange={(e) => setAccountName(e.target.value)}
           disabled={busy}
-          placeholder="condor"
-          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
+          maxLength={MAX_AGENT_NAME}
+          placeholder={defaultAgentName()}
+          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
         />
-        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-          Agent wallet name:{" "}
-          <span className="font-mono text-[var(--color-text)]">{resolveAgentName(accountName)}</span>
-        </p>
       </div>
 
       {/* Done state */}
@@ -377,7 +375,7 @@ export function ConnectHyperliquid({
       <p className="text-[10px] text-[var(--color-text-muted)]/60">
         Don't have a Hyperliquid account?{" "}
         <a
-          href="https://app.hyperliquid.xyz"
+          href="https://app.hyperliquid.xyz/join/HUMMINGBOT"
           target="_blank"
           rel="noreferrer"
           className="text-[var(--color-primary)] hover:underline"

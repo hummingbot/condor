@@ -69,10 +69,10 @@ const DOMAIN_TYPE = [
   { name: "verifyingContract", type: "address" },
 ];
 
-// Hyperliquid caps agent ("API wallet") names at 16 chars, so append the creation date (YYYYMMDD)
-// to a recognizable base, e.g. "condor-20260604" (15 chars). Same-day reconnects reuse the name and
-// replace the prior agent, which is fine — the latest agent key is the one stored as the credential.
-const MAX_AGENT_NAME = 16;
+// Hyperliquid caps agent ("API wallet") names at 16 chars. The field is pre-filled with the default
+// base plus today's date (e.g. "condor-20260609") and the user can edit it freely. Same-day reconnects
+// reuse the name and replace the prior agent, which is fine — the latest agent key is the credential.
+export const MAX_AGENT_NAME = 16;
 
 /** Local creation date YYYYMMDD (8 chars). */
 function creationStamp(): string {
@@ -81,16 +81,15 @@ function creationStamp(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
 }
 
-/**
- * The on-chain agent ("API wallet") name Condor will use for `input`: a sanitized base with today's
- * date appended, capped at Hyperliquid's 16-char limit (e.g. "condor-20260608"). The UI can call this
- * to show the exact full name that will be created. connectHyperliquid uses the same function.
- */
-export function resolveAgentName(input?: string): string {
-  const stamp = creationStamp(); // YYYYMMDD, 8 chars
-  const rawBase = (input?.trim() || DEFAULT_AGENT_NAME).replace(/[^a-zA-Z0-9]/g, "");
-  const base = (rawBase || DEFAULT_AGENT_NAME).slice(0, MAX_AGENT_NAME - stamp.length - 1);
-  return `${base}-${stamp}`.slice(0, MAX_AGENT_NAME);
+/** Pre-fill for the agent-name field: the default base with today's date, e.g. "condor-20260609". */
+export function defaultAgentName(): string {
+  return `${DEFAULT_AGENT_NAME}-${creationStamp()}`.slice(0, MAX_AGENT_NAME);
+}
+
+/** Clean a user-edited agent name to Hyperliquid's limits (alphanumeric + dash, max 16 chars). */
+export function sanitizeAgentName(input: string): string {
+  const cleaned = (input || "").trim().replace(/[^a-zA-Z0-9-]/g, "").slice(0, MAX_AGENT_NAME);
+  return cleaned || defaultAgentName();
 }
 
 function buildApproveAgentTypedData(agentAddress: string, agentName: string, nonce: number) {
@@ -208,10 +207,9 @@ export async function connectHyperliquid(opts: {
   onStep?: (step: ConnectStep) => void;
 }): Promise<HyperliquidConnection> {
   const { provider, mainAddress, onStep } = opts;
-  // The creation date (e.g. "condor-20260604") differentiates agents and matches the "Valid Until"
-  // entry on Hyperliquid, within the venue's 16-char agent-name limit. resolveAgentName is also what
-  // the UI shows as a live preview, so the displayed name is exactly what gets created.
-  const agentName = resolveAgentName(opts.agentName);
+  // The agent-name field is pre-filled with a dated default (e.g. "condor-20260609") and editable;
+  // use it as-is, just cleaned to Hyperliquid's 16-char / charset limits.
+  const agentName = sanitizeAgentName(opts.agentName ?? "");
 
   // Hyperliquid mainnet signing uses the Arbitrum One domain; make sure the wallet is on it.
   onStep?.("switch-chain");
