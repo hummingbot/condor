@@ -204,7 +204,7 @@ export function ConnectHyperliquid({
       {/* Account name (used as the on-chain agent wallet name) */}
       <div>
         <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-          Agent name <span className="text-[var(--color-text-muted)]/60">(on-chain agent wallet name, max 16 chars)</span>
+          Agent name <span className="text-[var(--color-text-muted)]/60">(max 16 chars)</span>
         </label>
         <input
           value={accountName}
