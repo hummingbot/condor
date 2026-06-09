@@ -1,16 +1,20 @@
-import { AlertCircle, ArrowLeft, Check, Loader2, Wallet } from "lucide-react";
+import { AlertCircle, ArrowLeft, Check, Loader2, Sparkles, Wallet } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api } from "@/lib/api";
+import { type DiscoveredWallet, connectWallet, discoverWallets } from "@/lib/wallet/evm";
 import {
   BUILDER_FEE_BPS,
   type ConnectStep,
-  type DiscoveredWallet,
+  type HyperliquidConnection,
+  REFERRAL_CODE,
+  REFERRAL_FEE_DISCOUNT,
   buildHyperliquidCredentials,
   connectHyperliquid,
-  connectWallet,
-  discoverWallets,
-} from "@/lib/hyperliquid";
+  hasHyperliquidReferrer,
+  resolveAgentName,
+  setHyperliquidReferrer,
+} from "@/lib/wallet/hyperliquid";
 
 type Phase =
   | "select-wallet"
@@ -24,8 +28,17 @@ type Phase =
 const STEP_LABEL: Record<ConnectStep, string> = {
   "switch-chain": "Approve the switch to Arbitrum One in your wallet…",
   "approve-agent": "Sign in your wallet to authorize the Condor agent wallet…",
-  "approve-builder": `Sign in your wallet to approve the Condor builder code (${BUILDER_FEE_BPS} bps)…`,
+  "approve-builder": `Sign in your wallet to approve the ${BUILDER_FEE_BPS} bps builder fee — it goes to the not-for-profit Hummingbot Foundation to support Condor's maintenance…`,
 };
+
+// Both connectors are saved (in parallel) from the one agent approval. They're shown in this order,
+// each flipping to a check as its own save finishes — the spot connector is quicker, the perpetual's
+// full bring-up (HIP-3 markets) takes longer, so the user sees real progress instead of one long wait.
+type SaveState = "saving" | "done" | "error";
+const SAVE_CONNECTORS: { name: string; label: string }[] = [
+  { name: "hyperliquid", label: "Hyperliquid (spot)" },
+  { name: "hyperliquid_perpetual", label: "Hyperliquid Perpetual" },
+];
 
 export function ConnectHyperliquid({
   server,
@@ -42,6 +55,14 @@ export function ConnectHyperliquid({
   const [phase, setPhase] = useState<Phase>("select-wallet");
   const [error, setError] = useState<string | null>(null);
   const [partial, setPartial] = useState<string | null>(null);
+  // Per-connector save status, updated as each addCredential resolves (keyed by connector name).
+  const [saveStatus, setSaveStatus] = useState<Record<string, SaveState>>({});
+
+  // Referral linking (offered on the done screen). `conn` retains the agent key needed to sign the
+  // setReferrer L1 action after credentials are saved.
+  const [conn, setConn] = useState<HyperliquidConnection | null>(null);
+  const [referral, setReferral] = useState<"hidden" | "available" | "linking" | "linked">("hidden");
+  const [referralError, setReferralError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -60,30 +81,47 @@ export function ConnectHyperliquid({
     phase === "switch-chain" ||
     phase === "approve-agent" ||
     phase === "approve-builder" ||
-    phase === "saving";
+    phase === "saving" ||
+    referral === "linking";
 
   async function handleConnect(wallet: DiscoveredWallet) {
     setError(null);
     setPartial(null);
+    setReferralError(null);
+    setReferral("hidden");
+    setSaveStatus({});
     setPhase("connecting");
     try {
       const mainAddress = await connectWallet(wallet.provider);
 
-      const conn = await connectHyperliquid({
+      const connection = await connectHyperliquid({
         provider: wallet.provider,
         mainAddress,
         agentName: accountName,
         onStep: (step: ConnectStep) => setPhase(step),
       });
+      setConn(connection);
 
       // One agent + one set of approvals authorizes both connectors. Register them in parallel
       // and tolerate a partial failure — hummingbot-api validates each connector by spinning up a
       // full trading connector, which can take up to a minute and occasionally fails for one side.
+      // Each connector's row flips to a check (or error) the moment its own save resolves.
       setPhase("saving");
-      const entries = Object.entries(buildHyperliquidCredentials(conn));
+      const creds = buildHyperliquidCredentials(connection);
+      const entries = Object.entries(creds);
+      setSaveStatus(Object.fromEntries(entries.map(([name]) => [name, "saving" as SaveState])));
       const results = await Promise.allSettled(
         entries.map(([connectorName, credentials]) =>
-          api.addCredential(server, { connector_name: connectorName, credentials }),
+          api
+            .addCredential(server, { connector_name: connectorName, credentials })
+            .then((r) => {
+              setSaveStatus((s) => ({ ...s, [connectorName]: "done" }));
+              return r;
+            })
+            .catch((e) => {
+              setSaveStatus((s) => ({ ...s, [connectorName]: "error" }));
+              throw e;
+            }),
         ),
       );
       const failed = entries
@@ -103,7 +141,20 @@ export function ConnectHyperliquid({
       }
 
       setPhase("done");
-      window.setTimeout(onDone, failed.length > 0 ? 3500 : 900);
+
+      // Offer to link the Hummingbot referral code unless the account already has one. If the
+      // lookup itself fails we still offer it — setReferrer surfaces a clear error if it's already set.
+      let alreadyReferred = false;
+      try {
+        alreadyReferred = await hasHyperliquidReferrer(connection.mainAddress);
+      } catch {
+        alreadyReferred = false;
+      }
+      if (alreadyReferred) {
+        window.setTimeout(onDone, failed.length > 0 ? 3500 : 900);
+      } else {
+        setReferral("available");
+      }
     } catch (e) {
       const err = e as { code?: number; message?: string };
       setError(
@@ -112,6 +163,21 @@ export function ConnectHyperliquid({
           : err.message || "Failed to connect Hyperliquid.",
       );
       setPhase("select-wallet");
+    }
+  }
+
+  async function handleLinkReferral() {
+    if (!conn) return;
+    setReferralError(null);
+    setReferral("linking");
+    try {
+      await setHyperliquidReferrer(conn);
+      setReferral("linked");
+      window.setTimeout(onDone, 1500);
+    } catch (e) {
+      const err = e as { message?: string };
+      setReferralError(err.message || "Failed to link the referral code.");
+      setReferral("available");
     }
   }
 
@@ -126,7 +192,7 @@ export function ConnectHyperliquid({
       </button>
 
       <div>
-        <h3 className="text-sm font-semibold text-[var(--color-text)]">Connect Hyperliquid</h3>
+        <h2 className="text-lg font-semibold text-[var(--color-text)]">Connect Hyperliquid</h2>
         <p className="mt-1 text-xs text-[var(--color-text-muted)]">
           Authorize a trade-only agent wallet — your private key never leaves your wallet.
           Registers both <span className="text-[var(--color-text)]">hyperliquid_perpetual</span> and{" "}
@@ -137,7 +203,7 @@ export function ConnectHyperliquid({
       {/* Account name (used as the on-chain agent wallet name) */}
       <div>
         <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
-          Agent name <span className="text-[var(--color-text-muted)]/60">(optional — the date is appended, e.g. condor-20260604)</span>
+          Agent name <span className="text-[var(--color-text-muted)]/60">(optional — today's date is appended)</span>
         </label>
         <input
           value={accountName}
@@ -146,19 +212,103 @@ export function ConnectHyperliquid({
           placeholder="condor"
           className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
         />
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+          Agent wallet name:{" "}
+          <span className="font-mono text-[var(--color-text)]">{resolveAgentName(accountName)}</span>
+        </p>
       </div>
 
       {/* Done state */}
       {phase === "done" ? (
-        <div
-          className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
-            partial
-              ? "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
-              : "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 text-[var(--color-text)]"
-          }`}
-        >
-          <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
-          <span>{partial ?? "Hyperliquid connected."}</span>
+        <div className="space-y-3">
+          <div
+            className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${
+              partial
+                ? "border-[var(--color-border)] bg-[var(--color-surface)] text-[var(--color-text-muted)]"
+                : "border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 text-[var(--color-text)]"
+            }`}
+          >
+            <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+            <span>{partial ?? "Hyperliquid connected."}</span>
+          </div>
+
+          {/* Referral code — link the Hummingbot code for a fee discount (one-time). */}
+          {referral === "linked" ? (
+            <div className="flex items-start gap-2 rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-3 text-sm text-[var(--color-text)]">
+              <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+              <span>
+                Hummingbot referral linked — {REFERRAL_FEE_DISCOUNT} off fees.
+              </span>
+            </div>
+          ) : referral === "available" || referral === "linking" ? (
+            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+              <div className="flex items-start gap-2">
+                <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium text-[var(--color-text)]">
+                    Earn {REFERRAL_FEE_DISCOUNT} off fees
+                  </p>
+                  <p className="text-xs text-[var(--color-text-muted)]">
+                    Link the Hummingbot referral code (
+                    <span className="text-[var(--color-text)]">{REFERRAL_CODE}</span>) to your
+                    Hyperliquid account. One-time, signed by your agent wallet.
+                  </p>
+                </div>
+              </div>
+              {referralError && (
+                <div className="mt-2 flex items-start gap-2 rounded-md border border-[var(--color-red)]/30 bg-red-500/5 p-2 text-xs text-[var(--color-red)]">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>{referralError}</span>
+                </div>
+              )}
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  onClick={handleLinkReferral}
+                  disabled={referral === "linking"}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                >
+                  {referral === "linking" ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" /> Linking…
+                    </>
+                  ) : (
+                    "Link code"
+                  )}
+                </button>
+                <button
+                  onClick={onDone}
+                  disabled={referral === "linking"}
+                  className="rounded-md px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-50"
+                >
+                  Skip
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : phase === "saving" ? (
+        <div className="space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-sm text-[var(--color-text)]">
+          <div className="text-xs text-[var(--color-text-muted)]">
+            Saving credentials — registering both connectors…
+          </div>
+          {SAVE_CONNECTORS.map(({ name, label }) => {
+            const st = saveStatus[name];
+            return (
+              <div key={name} className="flex items-center gap-2">
+                {st === "done" ? (
+                  <Check className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
+                ) : st === "error" ? (
+                  <AlertCircle className="h-4 w-4 shrink-0 text-[var(--color-red)]" />
+                ) : (
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--color-primary)]" />
+                )}
+                <span className={st === "error" ? "text-[var(--color-red)]" : undefined}>{label}</span>
+                {st === "error" && (
+                  <span className="text-xs text-[var(--color-text-muted)]">failed</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       ) : busy ? (
         <div className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-sm text-[var(--color-text)]">
@@ -167,7 +317,6 @@ export function ConnectHyperliquid({
           {phase === "switch-chain" && STEP_LABEL["switch-chain"]}
           {phase === "approve-agent" && STEP_LABEL["approve-agent"]}
           {phase === "approve-builder" && STEP_LABEL["approve-builder"]}
-          {phase === "saving" && "Saving credentials…"}
         </div>
       ) : (
         <div className="space-y-2">

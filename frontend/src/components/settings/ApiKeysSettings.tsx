@@ -111,6 +111,13 @@ export function ApiKeysSettings() {
     return map;
   }, [credentials]);
 
+  // Hyperliquid is already connected when either the spot or perpetual credential exists. One agent
+  // approval registers both, so the connect flow is offered only while neither is present.
+  const hyperliquidConnected = useMemo(
+    () => credentials.some((c) => isHyperliquid(c.connector_name)),
+    [credentials],
+  );
+
   // Parse config map fields
   const configFields = useMemo(() => {
     if (!configMapData?.config_map) return [];
@@ -163,18 +170,25 @@ export function ApiKeysSettings() {
         </div>
 
         <button
+          disabled={hyperliquidConnected}
           onClick={() =>
             setFlow({ ...INITIAL_FLOW, step: "connect-hyperliquid", connectorName: "hyperliquid_perpetual" })
           }
-          className="flex w-full items-center justify-between rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-4 text-left transition-colors hover:border-[var(--color-primary)]/60"
+          className="flex w-full items-center justify-between rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-primary)]/5 p-4 text-left transition-colors hover:border-[var(--color-primary)]/60 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[var(--color-primary)]/30"
         >
           <span>
             <span className="text-sm font-medium text-[var(--color-text)]">Connect Hyperliquid</span>
             <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-              Wallet connect — authorize a trade-only agent (perp + spot). No private key needed.
+              {hyperliquidConnected
+                ? "Already connected — remove the existing Hyperliquid keys to reconnect."
+                : "Wallet connect — authorize a trade-only agent (perp + spot). No private key needed."}
             </p>
           </span>
-          <Key className="h-4 w-4 text-[var(--color-primary)]" />
+          {hyperliquidConnected ? (
+            <Check className="h-4 w-4 text-[var(--color-primary)]" />
+          ) : (
+            <Key className="h-4 w-4 text-[var(--color-primary)]" />
+          )}
         </button>
       </div>
     );
