@@ -668,7 +668,7 @@ async def update_controller_source(
     client = await cm.get_client(name)
     try:
         result = await client.controllers.create_or_update_controller(
-            controller_type, controller_name, source
+            controller_type, controller_name, {"content": source}
         )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))

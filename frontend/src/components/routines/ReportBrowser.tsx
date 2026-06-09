@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Bell,
   Brain,
   ChevronDown,
   ChevronLeft,
@@ -23,10 +24,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInstance, api } from "@/lib/api";
-import { buildConfigValues, formatAgo, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
 import { useServer } from "@/hooks/useServer";
 import { RoutineConfigForm } from "./RoutineConfigForm";
+import { RoutineHooksPanel } from "./RoutineHooksPanel";
 import { ScheduleDropdown } from "./ScheduleDropdown";
 
 interface ReportBrowserProps {
@@ -47,6 +49,7 @@ export function ReportBrowser({
   const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
   const [isCompact, setIsCompact] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
+  const [showNotifyPanel, setShowNotifyPanel] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
   const [reportTheme, setReportTheme] = useState<"dark" | "light">("dark");
   const sidebarRef = useRef<HTMLDivElement>(null);
@@ -269,13 +272,14 @@ export function ReportBrowser({
       else if (e.key === "Escape") {
         if (showSourceModal) setShowSourceModal(false);
         else if (showConfigPanel) setShowConfigPanel(false);
+        else if (showNotifyPanel) setShowNotifyPanel(false);
         else onClose();
         e.preventDefault();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showSourceModal]);
+  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showNotifyPanel, showSourceModal]);
 
   // Scroll active source into view
   useEffect(() => {
@@ -499,7 +503,7 @@ export function ReportBrowser({
                     <span className="text-emerald-400 capitalize">{inst.status}</span>
                     {inst.schedule?.type === "interval" && (
                       <span className="text-[var(--color-text-muted)]">
-                        <Clock className="inline h-2.5 w-2.5" /> {inst.schedule.interval_sec as number}s
+                        <Clock className="inline h-2.5 w-2.5" /> {formatInterval(inst.schedule.interval_sec as number)}
                       </span>
                     )}
                     <span className="text-[var(--color-text-muted)]">{inst.run_count} runs</span>
@@ -529,7 +533,10 @@ export function ReportBrowser({
                   Source
                 </button>
                 <button
-                  onClick={() => setShowConfigPanel(!showConfigPanel)}
+                  onClick={() => {
+                    setShowConfigPanel((v) => !v);
+                    setShowNotifyPanel(false);
+                  }}
                   className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
                     showConfigPanel
                       ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
@@ -539,6 +546,21 @@ export function ReportBrowser({
                 >
                   <Settings2 className="h-3.5 w-3.5" />
                   Config
+                </button>
+                <button
+                  onClick={() => {
+                    setShowNotifyPanel((v) => !v);
+                    setShowConfigPanel(false);
+                  }}
+                  className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
+                    showNotifyPanel
+                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  }`}
+                  title="Post-run notifications"
+                >
+                  <Bell className="h-3.5 w-3.5" />
+                  Notify
                 </button>
                 <button
                   onClick={() => runMutation.mutate()}
@@ -708,6 +730,24 @@ export function ReportBrowser({
                 {(runMutation.error as Error).message}
               </p>
             )}
+          </div>
+        )}
+
+        {/* Notifications panel (collapsible) */}
+        {showNotifyPanel && activeRoutine && (
+          <div className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Notifications
+              </h3>
+              <button
+                onClick={() => setShowNotifyPanel(false)}
+                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+            <RoutineHooksPanel routineName={activeSource} collapsible={false} />
           </div>
         )}
 

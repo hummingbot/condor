@@ -6,7 +6,7 @@ import { ArrowLeft, CheckCircle, Loader2, Rocket } from "lucide-react";
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
-import { GridChart } from "@/components/grid/GridChart";
+import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -372,7 +372,7 @@ export function CreateGridExecutor() {
         {/* Chart */}
         <div className="min-w-0 flex-1 border-r border-[var(--color-border)]">
           <div className="h-full overflow-hidden bg-[var(--color-surface)]">
-            <GridChart
+            <TradeChart
               key={`${state.connector}:${state.pair}:${state.interval}`}
               server={server}
               connector={state.connector}

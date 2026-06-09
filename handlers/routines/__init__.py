@@ -20,8 +20,14 @@ from telegram.ext import CallbackContext, ContextTypes
 
 from handlers import clear_all_input_states
 import condor.reports
+from condor import routine_hooks
 from condor.routine_store import get_routine_store
-from routines.base import discover_routines, get_routine, get_routine_by_state, normalize_result
+from routines.base import (
+    discover_routines,
+    get_routine,
+    get_routine_by_state,
+    normalize_result,
+)
 from utils.auth import restricted
 from utils.telegram_formatters import escape_markdown_v2
 
@@ -262,8 +268,12 @@ async def _execute_routine(
     user_data = context.application.user_data.get(chat_id, {})
     # Inject the active server captured at creation time so routines
     # in group chats connect to the correct server.
-    if active_server and not user_data.get("preferences", {}).get("general", {}).get("active_server"):
-        user_data.setdefault("preferences", {}).setdefault("general", {})["active_server"] = active_server
+    if active_server and not user_data.get("preferences", {}).get("general", {}).get(
+        "active_server"
+    ):
+        user_data.setdefault("preferences", {}).setdefault("general", {})[
+            "active_server"
+        ] = active_server
     context._user_data = user_data
 
     # Reset report capture before execution
@@ -289,6 +299,24 @@ async def _execute_routine(
             store.store_result(instance_id, rich_result)
         except Exception:
             pass
+
+    # Fire post-execution hooks (Telegram notification).
+    # On failure rich_result is None — pass the error text so the notification
+    # reflects the failure instead of a misleading "Completed".
+    failed = rich_result is None
+    hook_result = rich_result if rich_result is not None else normalize_result(result_text)
+    try:
+        await routine_hooks.dispatch(
+            routine_name,
+            hook_result,
+            report_id,
+            failed=failed,
+            bot=context.bot,
+        )
+    except Exception as e:
+        logger.error(
+            f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
+        )
 
     return result_text, duration, report_id
 
@@ -317,8 +345,12 @@ async def _run_continuous_routine(
                 application.user_data[chat_id] = {}
             self._user_data = application.user_data[chat_id]
             # Inject active server so group chats connect to the correct server
-            if active_server and not self._user_data.get("preferences", {}).get("general", {}).get("active_server"):
-                self._user_data.setdefault("preferences", {}).setdefault("general", {})["active_server"] = active_server
+            if active_server and not self._user_data.get("preferences", {}).get(
+                "general", {}
+            ).get("active_server"):
+                self._user_data.setdefault("preferences", {}).setdefault("general", {})[
+                    "active_server"
+                ] = active_server
             self.bot = application.bot
             self.application = application
 
@@ -366,7 +398,11 @@ async def _interval_job_callback(context: CallbackContext) -> None:
         return
 
     result, duration, report_id = await _execute_routine(
-        context, instance_id, routine_name, config_dict, chat_id,
+        context,
+        instance_id,
+        routine_name,
+        config_dict,
+        chat_id,
         active_server=data.get("active_server"),
     )
 
@@ -399,11 +435,20 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     try:
         keyboard = None
         if report_id:
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📤 Share Report", callback_data=f"routines:share:{report_id}"),
-            ]])
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📤 Share Report",
+                            callback_data=f"routines:share:{report_id}",
+                        ),
+                    ]
+                ]
+            )
         await context.bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="MarkdownV2",
+            chat_id=chat_id,
+            text=text,
+            parse_mode="MarkdownV2",
             reply_markup=keyboard,
         )
     except Exception as e:
@@ -425,7 +470,11 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     background = data.get("background", False)
 
     result, duration, report_id = await _execute_routine(
-        context, instance_id, routine_name, config_dict, chat_id,
+        context,
+        instance_id,
+        routine_name,
+        config_dict,
+        chat_id,
         active_server=data.get("active_server"),
     )
 
@@ -451,11 +500,20 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
         try:
             keyboard = None
             if report_id:
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📤 Share Report", callback_data=f"routines:share:{report_id}"),
-                ]])
+                keyboard = InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "📤 Share Report",
+                                callback_data=f"routines:share:{report_id}",
+                            ),
+                        ]
+                    ]
+                )
             await context.bot.send_message(
-                chat_id=chat_id, text=text, parse_mode="MarkdownV2",
+                chat_id=chat_id,
+                text=text,
+                parse_mode="MarkdownV2",
                 reply_markup=keyboard,
             )
         except Exception as e:
@@ -476,7 +534,11 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     chat_id = data["chat_id"]
 
     result, duration, report_id = await _execute_routine(
-        context, instance_id, routine_name, config_dict, chat_id,
+        context,
+        instance_id,
+        routine_name,
+        config_dict,
+        chat_id,
         active_server=data.get("active_server"),
     )
 
@@ -503,11 +565,20 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     try:
         keyboard = None
         if report_id:
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📤 Share Report", callback_data=f"routines:share:{report_id}"),
-            ]])
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📤 Share Report",
+                            callback_data=f"routines:share:{report_id}",
+                        ),
+                    ]
+                ]
+            )
         await context.bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="MarkdownV2",
+            chat_id=chat_id,
+            text=text,
+            parse_mode="MarkdownV2",
             reply_markup=keyboard,
         )
     except Exception as e:
@@ -555,6 +626,7 @@ def _create_scheduled_instance(
     active_server = None
     try:
         from config_manager import get_effective_server
+
         active_server = get_effective_server(chat_id, context.user_data)
     except Exception:
         pass
@@ -616,6 +688,7 @@ def _create_continuous_instance(
     active_server = None
     try:
         from config_manager import get_effective_server
+
         active_server = get_effective_server(chat_id, context.user_data)
     except Exception:
         pass
@@ -1702,6 +1775,7 @@ async def restore_scheduled_jobs(application) -> int:
             _active_server = None
             try:
                 from config_manager import get_effective_server
+
                 _active_server = get_effective_server(chat_id, user_data)
             except Exception:
                 pass

@@ -7,6 +7,7 @@ import { buildConfigValues, formatRoutineName, invalidateRoutineQueries, saveCon
 import { useServer } from "@/hooks/useServer";
 
 import { RoutineConfigForm } from "./RoutineConfigForm";
+import { RoutineHooksPanel } from "./RoutineHooksPanel";
 import { RoutineInstances } from "./RoutineInstances";
 import { RoutineReports } from "./RoutineReports";
 import { RoutineResultView } from "./RoutineResultView";
@@ -130,6 +131,9 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
           />
         </div>
       )}
+
+      {/* Post-execution notifications */}
+      <RoutineHooksPanel routineName={routine.name} />
 
       {/* Actions */}
       <div className="flex items-center gap-2">
