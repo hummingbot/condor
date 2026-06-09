@@ -178,7 +178,7 @@ export function ApiKeysSettings() {
           onClick={() =>
             setFlow({ ...INITIAL_FLOW, step: "connect-hyperliquid", connectorName: "hyperliquid_perpetual" })
           }
-          className="flex w-full items-center justify-between rounded-lg border border-[#5ce0c6]/30 bg-gradient-to-br from-[#0e3a34] via-[#0a2c28] to-[#061f1c] p-4 text-left transition-colors hover:border-[#5ce0c6]/60 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#5ce0c6]/30"
+          className="flex w-full items-center justify-between rounded-lg border border-[#5ce0c6]/30 bg-gradient-to-br from-[#1c6a5b] via-[#155448] to-[#0f4138] p-4 text-left transition-colors hover:border-[#5ce0c6]/60 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[#5ce0c6]/30"
         >
           <span>
             <span className="text-sm font-medium text-white">Connect Hyperliquid</span>
