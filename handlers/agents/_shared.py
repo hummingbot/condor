@@ -87,6 +87,9 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
     # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
     "openrouter:": {"label": "OpenRouter — Pick Model"},
+    # Sentinel — same shape as openrouter:. Clicking opens the Venice model picker.
+    # The actual stored agent_llm becomes "venice:<slug>" once the user picks a model.
+    "venice:": {"label": "Venice — Pick Model"},
 }
 
 DEFAULT_AGENT = "claude-code"
