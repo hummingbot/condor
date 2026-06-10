@@ -96,9 +96,13 @@ class _CandleBuffer:
         return sorted(self._data.values(), key=lambda c: c["timestamp"])
 
     def _evict(self) -> None:
-        while len(self._data) > self._max_size:
-            oldest = min(self._data)
-            del self._data[oldest]
+        excess = len(self._data) - self._max_size
+        if excess <= 0:
+            return
+        # Drop the `excess` oldest timestamps in a single O(n log n) pass
+        # instead of calling min() (O(n)) per evicted candle.
+        for ts in sorted(self._data)[:excess]:
+            del self._data[ts]
 
     @property
     def size(self) -> int:
@@ -830,9 +834,13 @@ class WebSocketManager:
         self._candle_tasks[channel] = asyncio.create_task(self._candle_stream(channel))
         logger.info("Started candle stream for %s", channel)
 
+    def _has_subscribers(self, channel: str) -> bool:
+        """True if any connection is currently subscribed to the channel."""
+        return any(channel in c.channels for c in self._connections)
+
     def _maybe_stop_candle_stream(self, channel: str) -> None:
         # If subscribers still exist, cancel any pending teardown and return
-        if any(channel in c.channels for c in self._connections):
+        if self._has_subscribers(channel):
             timer = self._candle_teardown_timers.pop(channel, None)
             if timer is not None:
                 timer.cancel()
@@ -1139,9 +1147,8 @@ class WebSocketManager:
         logger.info("Started trade stream for %s", channel)
 
     def _maybe_stop_trade_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        if self._has_subscribers(channel):
+            return
         task = self._trade_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
@@ -1289,9 +1296,8 @@ class WebSocketManager:
         logger.info("Started order book stream for %s", channel)
 
     def _maybe_stop_order_book_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        if self._has_subscribers(channel):
+            return
         task = self._order_book_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
@@ -1405,9 +1411,8 @@ class WebSocketManager:
         logger.info("Started executor stream for %s", channel)
 
     def _maybe_stop_executor_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        if self._has_subscribers(channel):
+            return
         task = self._executor_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
@@ -1592,9 +1597,8 @@ class WebSocketManager:
         logger.info("Started bots WS stream for %s", channel)
 
     def _maybe_stop_bots_ws_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        if self._has_subscribers(channel):
+            return
         task = self._bots_ws_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
@@ -1625,8 +1629,8 @@ class WebSocketManager:
                 try:
                     data = self._transform_bots(cached)
                     await self.broadcast(channel, data)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Failed to send initial bots snapshot: %s", e)
 
         while True:
             try:
@@ -1716,9 +1720,8 @@ class WebSocketManager:
         logger.info("Started positions WS stream for %s", channel)
 
     def _maybe_stop_positions_ws_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        if self._has_subscribers(channel):
+            return
         task = self._positions_ws_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
@@ -1809,9 +1812,8 @@ class WebSocketManager:
         logger.info("Started performance WS stream for %s", channel)
 
     def _maybe_stop_performance_ws_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        if self._has_subscribers(channel):
+            return
         task = self._performance_ws_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
@@ -1893,9 +1895,8 @@ class WebSocketManager:
         logger.info("Started controller performance stream for %s", channel)
 
     def _maybe_stop_controller_perf_stream(self, channel: str) -> None:
-        for conn in self._connections:
-            if channel in conn.channels:
-                return
+        if self._has_subscribers(channel):
+            return
         task = self._controller_perf_tasks.pop(channel, None)
         if task and not task.done():
             task.cancel()
