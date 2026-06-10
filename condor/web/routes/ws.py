@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from condor.web.ws_manager import get_ws_manager
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 @router.websocket("/ws")
@@ -21,6 +24,6 @@ async def websocket_endpoint(ws: WebSocket, token: str = Query(...)):
     except WebSocketDisconnect:
         pass
     except Exception:
-        pass
+        log.exception("WS error for user %s", conn.user_id)
     finally:
         manager.disconnect(conn)
