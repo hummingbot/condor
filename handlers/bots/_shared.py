@@ -15,9 +15,9 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from condor.cache import DEFAULT_CACHE_TTL
+from condor.cache import cached_call as _cached_call
 from condor.cache import get_cached as _get_cached
 from condor.cache import set_cached as _set_cached
-from condor.cache import cached_call as _cached_call
 
 logger = logging.getLogger(__name__)
 
@@ -135,28 +135,18 @@ async def get_bots_client(
 
 
 def clear_bots_state(context) -> None:
-    """Clear all bots-related state from user context
+    """Clear all bots-related state from user context.
+
+    Thin wrapper that delegates to the master cleaner
+    ``clear_all_input_states`` (the single source of truth, see CLAUDE.md),
+    which already clears the superset of bots/archived/config-menu keys.
 
     Args:
         context: Telegram context object
     """
-    context.user_data.pop("bots_state", None)
-    context.user_data.pop("controller_config_params", None)
-    context.user_data.pop("controller_configs_list", None)
-    context.user_data.pop("selected_controllers", None)
-    context.user_data.pop("editing_controller_field", None)
-    context.user_data.pop("deploy_params", None)
-    context.user_data.pop("editing_deploy_field", None)
-    # Archived bots state
-    context.user_data.pop("archived_databases", None)
-    context.user_data.pop("archived_current_db", None)
-    context.user_data.pop("archived_page", None)
-    context.user_data.pop("archived_summaries", None)
-    # Config menu state
-    context.user_data.pop("configs_controller_type", None)
-    context.user_data.pop("configs_page", None)
-    context.user_data.pop("selected_configs", None)
-    context.user_data.pop("configs_type_filtered", None)
+    from handlers import clear_all_input_states
+
+    clear_all_input_states(context)
 
 
 def get_controller_config(context) -> Dict[str, Any]:
@@ -217,9 +207,7 @@ def clean_config_for_save(config: Dict[str, Any]) -> Dict[str, Any]:
     member name so deploy/backtest validation accepts them.
     """
     return {
-        k: normalize_enum_value(v)
-        for k, v in config.items()
-        if not k.startswith("_")
+        k: normalize_enum_value(v) for k, v in config.items() if not k.startswith("_")
     }
 
 
@@ -330,7 +318,9 @@ def format_config_field_value(field_name: str, value: Any) -> str:
 _NS = "_bots_cache"
 
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
@@ -341,7 +331,9 @@ def set_cached(user_data: dict, key: str, value: Any) -> None:
 async def cached_call(
     user_data: dict, key: str, fetch_func, ttl: int = DEFAULT_CACHE_TTL, *args, **kwargs
 ) -> Any:
-    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
+    return await _cached_call(
+        user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs
+    )
 
 
 # ============================================
@@ -349,7 +341,10 @@ async def cached_call(
 # ============================================
 
 
-from condor.fetchers.connectors import is_cex_connector, fetch_available_cex_connectors  # noqa: F811
+from condor.fetchers.connectors import (  # noqa: F811
+    fetch_available_cex_connectors,
+    is_cex_connector,
+)
 
 
 async def get_available_cex_connectors(
@@ -382,8 +377,7 @@ async def get_available_cex_connectors(
 # ============================================
 
 
-from condor.fetchers.market_data import fetch_current_price, fetch_candles  # noqa: F811
-
+from condor.fetchers.market_data import fetch_candles, fetch_current_price  # noqa: F811
 
 # ============================================
 # BACKWARDS COMPATIBILITY WRAPPERS
