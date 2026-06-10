@@ -260,8 +260,11 @@ async def show_connectors_by_type(
 
         # Filter out testnet connectors and gateway connectors (those with '/' like "uniswap/ethereum")
         connectors = [
-            c for c in all_connectors
-            if "testnet" not in c.lower() and "sandbox" not in c.lower() and "/" not in c
+            c
+            for c in all_connectors
+            if "testnet" not in c.lower()
+            and "sandbox" not in c.lower()
+            and "/" not in c
         ]
 
         # Filter by type
@@ -504,9 +507,7 @@ async def show_connector_config(
             field_metadata.pop("custom_markets", None)
 
         # Determine connector type for back navigation
-        connector_type = (
-            "perpetual" if "perpetual" in connector_name else "spot"
-        )
+        connector_type = "perpetual" if "perpetual" in connector_name else "spot"
 
         # Initialize context storage for API key configuration
         context.user_data["configuring_api_key"] = True
@@ -557,9 +558,7 @@ async def show_connector_config(
     except Exception as e:
         logger.error(f"Error showing connector config: {e}", exc_info=True)
         error_text = f"❌ Error loading connector config: {escape_markdown_v2(str(e))}"
-        connector_type = (
-            "perpetual" if "perpetual" in connector_name else "spot"
-        )
+        connector_type = "perpetual" if "perpetual" in connector_name else "spot"
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -1024,7 +1023,15 @@ async def _handle_field_value_selection(query, context, selected_value: str) -> 
 
         # Convert value based on field type
         field_meta = field_metadata.get(awaiting_field, {})
-        if field_meta.get("type") == "bool":
+        field_type = field_meta.get("type", "")
+        if field_type == "Literal":
+            # Validate against the whitelist (mirror text-input validation):
+            # never trust the value carried in the callback_data.
+            allowed_values = field_meta.get("allowed_values", [])
+            if allowed_values and selected_value not in allowed_values:
+                await query.answer("❌ Invalid value")
+                return
+        elif field_type == "bool":
             selected_value = selected_value.lower() == "true"
 
         # Store the selected value
