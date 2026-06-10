@@ -9,7 +9,7 @@ status: done
 files:
   - condor/web/routes/ws.py:23
 commits:
-  - "cd8e4df (fix) loguear excepciones inesperadas en el endpoint /ws (CORR-022)"
+  - "495aed8 (fix) loguear excepciones inesperadas en el endpoint /ws (CORR-022)"
 created: 2026-06-10
 ---
 
