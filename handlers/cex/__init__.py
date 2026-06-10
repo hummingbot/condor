@@ -21,20 +21,6 @@ from utils.telegram_formatters import format_error_message
 logger = logging.getLogger(__name__)
 
 
-def clear_cex_state(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Clear all CEX-related state from user context.
-    Call this when starting other commands to prevent state pollution.
-    """
-    context.user_data.pop("cex_state", None)
-    context.user_data.pop("trade_params", None)
-    context.user_data.pop("place_order_params", None)  # Legacy
-    context.user_data.pop("current_positions", None)
-    context.user_data.pop("cex_previous_state", None)
-    context.user_data.pop("trade_menu_message_id", None)
-    context.user_data.pop("trade_menu_chat_id", None)
-
-
 async def _handle_switch_to_dex(
     update: Update, context: ContextTypes.DEFAULT_TYPE, network_id: str
 ) -> None:
@@ -46,7 +32,7 @@ async def _handle_switch_to_dex(
     from handlers.dex.swap import handle_swap as dex_handle_swap
 
     # Clear CEX state
-    clear_cex_state(context)
+    clear_all_input_states(context)
 
     # Save preference (DEX stores network ID)
     set_last_trade_connector(context.user_data, "dex", network_id)
