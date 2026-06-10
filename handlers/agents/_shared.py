@@ -88,8 +88,8 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
     "openrouter:": {"label": "OpenRouter — Pick Model"},
     "openrouter:": {"label": "OpenRouter — Pick Model"},
-    "openai:deepseek-chat": {"label": "DeepSeek V3 (Diretto)"},   # AGGIUNGI QUESTA
-    "openai:deepseek-reasoner": {"label": "DeepSeek R1 (Diretto)"}, # OPZIONALE
+    "openai:deepseek-v4-pro": {"label": "DeepSeek V4 Pro"},   # AGGIUNGI QUESTA
+
 }
 
 DEFAULT_AGENT = "claude-code"
