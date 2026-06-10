@@ -46,6 +46,8 @@ const BUILDER_MAX_FEE_RATE_TENTHS_BPS = Math.round(parseFloat(BUILDER_MAX_FEE_RA
 // code is the user's own fee discount. It can only be set once per account.
 export const REFERRAL_CODE = "HUMMINGBOT";
 export const REFERRAL_FEE_DISCOUNT = "4%";
+// Hyperliquid sign-up link carrying the referral code (new accounts get REFERRAL_FEE_DISCOUNT off fees).
+export const HYPERLIQUID_SIGNUP_URL = `https://app.hyperliquid.xyz/join/${REFERRAL_CODE}`;
 
 // ── Hyperliquid mainnet signing constants ──
 const HL_EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange";

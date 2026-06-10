@@ -6,6 +6,7 @@ import { type DiscoveredWallet, connectWallet, discoverWallets } from "@/lib/wal
 import {
   BUILDER_FEE_BPS,
   type ConnectStep,
+  HYPERLIQUID_SIGNUP_URL,
   type HyperliquidConnection,
   MAX_AGENT_NAME,
   REFERRAL_CODE,
@@ -358,13 +359,23 @@ export function ConnectHyperliquid({
             {/funded on Hyperliquid/i.test(error) && (
               <>
                 {" "}
+                New to Hyperliquid?{" "}
+                <a
+                  href={HYPERLIQUID_SIGNUP_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-[var(--color-primary)] underline"
+                >
+                  Sign up here
+                </a>{" "}
+                to get {REFERRAL_FEE_DISCOUNT} off fees, or{" "}
                 <a
                   href="https://app.hyperliquid.xyz/trade"
                   target="_blank"
                   rel="noreferrer"
                   className="font-medium text-[var(--color-primary)] underline"
                 >
-                  Deposit on Hyperliquid →
+                  deposit on Hyperliquid →
                 </a>
               </>
             )}
@@ -375,7 +386,7 @@ export function ConnectHyperliquid({
       <p className="text-xs text-[var(--color-text-muted)]">
         Don't have a Hyperliquid account?{" "}
         <a
-          href="https://app.hyperliquid.xyz/join/HUMMINGBOT"
+          href={HYPERLIQUID_SIGNUP_URL}
           target="_blank"
           rel="noreferrer"
           className="text-[var(--color-primary)] hover:underline"
