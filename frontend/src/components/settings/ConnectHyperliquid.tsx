@@ -368,15 +368,7 @@ export function ConnectHyperliquid({
                 >
                   Sign up here
                 </a>{" "}
-                to get {REFERRAL_FEE_DISCOUNT} off fees, or{" "}
-                <a
-                  href="https://app.hyperliquid.xyz/trade"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-medium text-[var(--color-primary)] underline"
-                >
-                  deposit on Hyperliquid →
-                </a>
+                to get {REFERRAL_FEE_DISCOUNT} off fees.
               </>
             )}
           </span>
