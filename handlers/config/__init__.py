@@ -212,8 +212,15 @@ def get_modify_value_handler():
     from .gateway import handle_gateway_input
     from .servers import handle_server_input
 
+    @restricted
     async def handle_all_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Route text input to appropriate handler based on context state"""
+        """Route text input to appropriate handler based on context state.
+
+        Guarded by @restricted: blocked/pending/unknown users are rejected
+        before any text input is routed to a sub-handler (defense at the
+        message-handler trust boundary, mirroring the @restricted entry
+        commands like /keys and /servers).
+        """
         logger.info(
             f"handle_all_text_input: user_data keys = {list(context.user_data.keys())}"
         )
