@@ -10,7 +10,7 @@ files:
   - condor/web/ws_manager.py:758
   - condor/web/ws_manager.py:129
 commits:
-  - "b36b828 (fix) usar _executor_tasks en _on_data_update (CORR-001)"
+  - "6a06110 (fix) usar _executor_tasks en _on_data_update (CORR-001)"
 created: 2026-06-10
 ---
 
