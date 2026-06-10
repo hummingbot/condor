@@ -151,11 +151,12 @@ export async function hasApprovedBuilderFee(userAddress: string): Promise<boolea
 }
 
 /** Turn a raw Hyperliquid error string into actionable guidance for known cases. */
-export function friendlyHyperliquidError(detail: string): string {
+export function friendlyHyperliquidError(detail: string, userAddress?: string): string {
   const d = (detail || "").trim();
   if (/must deposit before performing actions/i.test(d)) {
+    const who = userAddress ? `This wallet (${userAddress})` : "This wallet";
     return (
-      "This wallet isn't funded on Hyperliquid yet. Deposit USDC to Hyperliquid from this wallet, " +
+      `${who} isn't funded on Hyperliquid yet. Deposit USDC to Hyperliquid from this wallet, ` +
       "then reconnect — Hyperliquid requires a deposit before it will authorize an agent wallet or builder code."
     );
   }
@@ -185,7 +186,7 @@ async function signAndSubmit(
   if (!res.ok || data.status !== "ok") {
     const detail =
       typeof data.response === "string" ? data.response : data.status || `HTTP ${res.status}`;
-    throw new Error(friendlyHyperliquidError(detail));
+    throw new Error(friendlyHyperliquidError(detail, userAddress));
   }
 }
 
@@ -385,6 +386,6 @@ export async function setHyperliquidReferrer(
   if (!res.ok || data.status !== "ok") {
     const detail =
       typeof data.response === "string" ? data.response : data.status || `HTTP ${res.status}`;
-    throw new Error(friendlyHyperliquidError(detail));
+    throw new Error(friendlyHyperliquidError(detail, conn.mainAddress));
   }
 }
