@@ -893,6 +893,7 @@ export function ReportBrowser({
               src={`/reports/${selectedReport.filename}`}
               className="h-full w-full border-0"
               title={selectedReport.title}
+              sandbox="allow-scripts allow-popups"
             />
           )}
 
