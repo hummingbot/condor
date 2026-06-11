@@ -5,10 +5,11 @@ category: correctness
 impact: low
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/lib/candle-store.ts:267-280
-commits: []
+commits:
+  - "2dd496b (fix) candle-store evicta LRU saltando colecciones activas (CORR-045)"
 created: 2026-06-10
 ---
 

@@ -5,11 +5,12 @@ category: security
 impact: high
 effort: M
 risk: medium
-status: todo
+status: done
 files:
   - frontend/src/components/routines/ReportBrowser.tsx:891-896
   - frontend/src/components/routines/ReportBrowser.tsx:233
-commits: []
+commits:
+  - "e111b24 (fix) sandbox en iframe de reports en ReportBrowser (SEC-016)"
 created: 2026-06-10
 ---
 

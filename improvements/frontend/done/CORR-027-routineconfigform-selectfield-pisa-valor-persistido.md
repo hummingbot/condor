@@ -5,11 +5,12 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/routines/RoutineConfigForm.tsx:35-39
   - frontend/src/components/routines/RoutineConfigForm.tsx:107
-commits: []
+commits:
+  - "6be1de2 (fix) SelectField preserva valor persistido ausente de opciones (CORR-027)"
 created: 2026-06-10
 ---
 

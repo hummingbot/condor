@@ -5,12 +5,13 @@ category: performance
 impact: high
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/chat/ChatMessage.tsx:29
   - frontend/src/components/chat/ChatMessage.tsx:56
   - frontend/src/components/chat/ChatPanel.tsx:312-314
-commits: []
+commits:
+  - "b9d4cf0 (perf) memoizar ChatMessageView para no re-parsear markdown por token (PERF-023)"
 created: 2026-06-10
 ---
 

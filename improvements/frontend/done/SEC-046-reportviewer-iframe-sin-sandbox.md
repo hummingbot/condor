@@ -5,10 +5,11 @@ category: security
 impact: high
 effort: S
 risk: medium
-status: todo
+status: done
 files:
   - frontend/src/components/routines/ReportViewer.tsx:175-179
-commits: []
+commits:
+  - "6036a66 (fix) sandbox en iframe de ReportViewer (SEC-046)"
 created: 2026-06-10
 ---
 
