@@ -5,12 +5,13 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/tabs/ActiveBotsTab.tsx:764
   - frontend/src/pages/tabs/ActiveBotsTab.tsx:593
   - frontend/src/pages/tabs/ActiveBotsTab.tsx:761-768
-commits: []
+commits:
+  - "1b22c38 (fix) React key de controller usa controller_id (CORR-028)"
 created: 2026-06-10
 ---
 

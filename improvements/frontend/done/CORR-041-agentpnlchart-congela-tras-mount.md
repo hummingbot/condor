@@ -5,7 +5,7 @@ category: correctness
 impact: high
 effort: M
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/agent/AgentPnlChart.tsx:32-132
   - frontend/src/components/agent/AgentPnlChart.tsx:73
@@ -13,7 +13,8 @@ files:
   - frontend/src/components/agent/AgentSessionContent.tsx:51
   - frontend/src/components/agent/AgentOverviewTab.tsx:155
   - frontend/src/components/agent/AgentOverviewTab.tsx:174
-commits: []
+commits:
+  - "617213f (fix) AgentPnlChart actualiza la serie al cambiar data (CORR-041)"
 created: 2026-06-10
 ---
 

@@ -5,12 +5,13 @@ category: correctness
 impact: high
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/Executors.tsx:1018
   - frontend/src/hooks/useWebSocket.ts:123
   - frontend/src/pages/Executors.tsx:1027
-commits: []
+commits:
+  - "da2f549 (fix) alinear queryKey del WS con executors-infinite (CORR-006)"
 created: 2026-06-10
 ---
 

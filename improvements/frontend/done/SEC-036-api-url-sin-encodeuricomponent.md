@@ -5,14 +5,15 @@ category: security
 impact: medium
 effort: M
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/lib/api.ts:648
   - frontend/src/lib/api.ts:848
   - frontend/src/lib/api.ts:864
   - frontend/src/lib/api.ts:885
   - frontend/src/lib/api.ts:897
-commits: []
+commits:
+  - "5bf434a (fix) encodeURIComponent en URLs de /servers/* (SEC-036)"
 created: 2026-06-10
 ---
 
