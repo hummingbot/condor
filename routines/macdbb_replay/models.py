@@ -245,6 +245,18 @@ class ReplayConfigBase(BaseModel):
         default=6,
         description="Retries for HL candleSnapshot on HTTP 429/5xx",
     )
+    hl_use_cache: bool = Field(
+        default=True,
+        description="Read/write local HL candle cache during replay price prefetch",
+    )
+    hl_refresh_cache: bool = Field(
+        default=False,
+        description="Ignore cached HL candles and refetch the requested range",
+    )
+    hl_cache_dir: str | None = Field(
+        default=None,
+        description="Override default data/hl_candles cache directory",
+    )
     require_price_data: bool = Field(
         default=True,
         description=(

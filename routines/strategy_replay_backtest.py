@@ -122,7 +122,9 @@ def _trade_rows(trades: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str | RoutineResult:
+async def run(
+    config: Config, context: ContextTypes.DEFAULT_TYPE
+) -> str | RoutineResult:
     config = resolve_config_with_preset(config)
     strategy_dir = TRADING_AGENTS_DIR / config.strategy_slug
     sessions_dir = strategy_dir / "sessions"
@@ -220,7 +222,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str | Routi
                 "Session": session_num,
                 "Status": "ok",
                 "Ticks Parsed": len(per_tick_rows),
-                "Pair Rows": sum(1 for row in per_pair_rows if row.get("match_ok") == 1),
+                "Pair Rows": sum(
+                    1 for row in per_pair_rows if row.get("match_ok") == 1
+                ),
                 "Sim Trades": summary["total_trades"],
                 "Formal Trades": summary["formal_trades"],
                 "Adaptive Trades": summary["adaptive_trades"],
@@ -231,8 +235,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str | Routi
 
         if config.write_csv:
             output_dir = sessions_dir / f"session_{session_num}"
-            write_csv(output_dir / "strategy_replay_per_pair.csv", per_pair_rows, per_pair_columns)
-            write_csv(output_dir / "strategy_replay_per_tick.csv", per_tick_rows, PER_TICK_COLUMNS)
+            write_csv(
+                output_dir / "strategy_replay_per_pair.csv",
+                per_pair_rows,
+                per_pair_columns,
+            )
+            write_csv(
+                output_dir / "strategy_replay_per_tick.csv",
+                per_tick_rows,
+                PER_TICK_COLUMNS,
+            )
             write_csv(
                 output_dir / "strategy_replay_trades.csv",
                 _trade_rows(trades),

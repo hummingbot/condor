@@ -13,6 +13,7 @@ dependencies = [
     "kaleido",
     "plotly",
     "pandas",
+    "pyarrow",
     "geckoterminal-py",
     "mcp",
     "fastapi",
