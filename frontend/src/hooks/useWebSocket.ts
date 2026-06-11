@@ -120,7 +120,7 @@ export function useCondorWebSocket(
         const execs = data as unknown[];
         if (Array.isArray(execs)) {
           queryClient.setQueryData(
-            ["executors-infinite", server, ""],
+            ["executors-infinite", server],
             (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
               if (!old?.pages?.length) return old;
               const firstPage = old.pages[0];
