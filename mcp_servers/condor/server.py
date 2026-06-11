@@ -338,7 +338,8 @@ async def trading_agent_journal_write(
         text: The entry content. Keep it to ONE short line.
         reasoning: One-sentence reasoning (for actions only).
         risk_note: Optional risk note (for actions only).
-        tick: Current tick number (for actions only).
+        tick: Current tick number from [TICK INFO] (for actions only). If omitted/0,
+            Condor infers from tick=N in text or the running engine's tick.
         category: Learning category: "market" (observations, patterns, volatility)
             or "execution" (errors, fills, timing). Only used when entry_type="learning".
             Defaults to "market".

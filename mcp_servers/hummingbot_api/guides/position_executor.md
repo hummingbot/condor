@@ -17,7 +17,8 @@ Takes directional positions with defined entry, stop-loss, and take-profit level
 - Amount is in **base currency** (NOT quote). e.g., for BTC-USDT, amount=0.01 means 0.01 BTC
 
 **CRITICAL:**
-- `amount` is in **base currency** — NOT `total_amount_quote`. To convert from USD: `amount = usd_value / entry_price`
+- Prefer **`notional_usd`** (quote notional, e.g. `200` for a ~$200 position). Condor converts to base `amount` using the live price for `trading_pair`.
+- If you must set `amount` manually, it is in **base currency** — NOT USD. Wrong-pair price math (e.g. ETH price for XRP) will be rejected or clamped to exchange minimums.
 - Always fetch the schema first via progressive disclosure (`manage_executors(executor_type='position_executor')`) before creating
 
 #### Parameter Reference
@@ -26,7 +27,8 @@ Takes directional positions with defined entry, stop-loss, and take-profit level
 - `connector_name`: Exchange connector (e.g., 'binance_perpetual')
 - `trading_pair`: Trading pair (e.g., 'BTC-USDT')
 - `side`: 1 (BUY/LONG) or 2 (SELL/SHORT)
-- `amount`: Position size in **base currency** (e.g., 0.01 BTC). To convert from USD: `amount = usd / price`
+- `notional_usd`: Target position notional in quote/USD (recommended — Condor computes `amount` from live price)
+- `amount`: Position size in **base currency** (e.g., 0.01 BTC). Avoid manual conversion; use `notional_usd` instead.
 - `entry_price`: Limit entry price (optional — omit for market entry)
 - `leverage`: Leverage multiplier (default: 1)
 

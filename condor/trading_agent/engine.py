@@ -195,6 +195,7 @@ class TickEngine:
     _last_running_executor_ids: set[str] = field(default_factory=set, init=False)
     _notified_barrier_close_ids: set[str] = field(default_factory=set, init=False)
     _agent_closed_executor_ids: set[str] = field(default_factory=set, init=False)
+    _executing_tick: int = field(default=0, init=False)
 
     def __post_init__(self):
         agent_dir = self.strategy.agent_dir
@@ -380,6 +381,7 @@ class TickEngine:
         # 3. Read journal context (sessions only)
         learnings = self.journal.read_learnings() if self.journal else ""
         next_tick = self.journal.tick_count + 1 if self.journal else 1
+        self._executing_tick = next_tick
         digest_interval = int(self.config.get("digest_interval_ticks", 0) or 0)
         is_digest_boundary = digest_interval > 0 and next_tick % digest_interval == 0
         recent_count = digest_interval if is_digest_boundary else 3

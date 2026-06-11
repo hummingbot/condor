@@ -1,5 +1,6 @@
 """Trading agent strategy CRUD, lifecycle, monitoring, and journal."""
 
+import re
 from pathlib import Path
 
 from mcp_servers.condor.condor_client import call_main_api, slug_from_agent_id
@@ -264,6 +265,24 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
         return {"content": jm.read_recent(max_entries=max_entries)}
 
 
+def _resolve_journal_tick(tick: int, text: str, agent_id: str) -> int:
+    """Resolve tick number when MCP caller omits tick (defaults to 0)."""
+    if tick and tick > 0:
+        return tick
+    match = re.search(r"\btick[=#](\d+)\b", text, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    from condor.trading_agent.engine import get_engine
+
+    engine = get_engine(agent_id)
+    if engine and engine.journal:
+        executing = getattr(engine, "_executing_tick", 0) or 0
+        if executing > 0:
+            return executing
+        return engine.journal.tick_count + 1
+    return tick
+
+
 def journal_write(
     agent_id: str, entry_type: str, text: str,
     reasoning: str = "", risk_note: str = "", tick: int = 0, category: str = "",
@@ -294,7 +313,7 @@ def journal_write(
     elif entry_type == "state":
         jm.write_state(text)
     else:
-        jm.append_action(tick, text, reasoning, risk_note)
+        jm.append_action(_resolve_journal_tick(tick, text, agent_id), text, reasoning, risk_note)
     return {"written": True}
 
 

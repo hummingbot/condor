@@ -129,14 +129,14 @@ def _update_simulated_streak(
     meta: TickMeta,
     snapshots: dict[str, Any],
     current_streak: int,
+    open_position_count: int,
 ) -> int:
     if meta.neutral_pressure_streak is not None:
         return meta.neutral_pressure_streak
+    if open_position_count > 0:
+        return current_streak
     if not snapshots:
         return current_streak
-    any_formal = any(bool(item.metrics["has_formal"]) for item in snapshots.values())
-    if any_formal:
-        return 0
     all_neutral = all(item.signal == "NEUTRAL" for item in snapshots.values())
     if all_neutral:
         return current_streak + 1
@@ -211,7 +211,9 @@ def simulate_strategy_session(
             if snapshot.price_trusted:
                 last_seen_by_pair[pair] = (tick, snapshot.price)
 
-        simulated_streak = _update_simulated_streak(meta, snapshots, simulated_streak)
+        simulated_streak = _update_simulated_streak(
+            meta, snapshots, simulated_streak, len(open_positions)
+        )
         tick_actions: list[str] = []
         closes_this_tick: list[str] = []
         opens_this_tick: list[str] = []

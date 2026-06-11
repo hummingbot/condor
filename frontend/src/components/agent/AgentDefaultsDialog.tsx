@@ -14,6 +14,7 @@ import {
   buildRiskLimitsPayload,
   type ExecutionMode,
 } from "@/components/agent/AgentSessionConfigFields";
+import { StrategyParamsForm } from "@/components/agent/StrategyParamsForm";
 import { api } from "@/lib/api";
 
 function readRiskLimit(defaults: Record<string, unknown>, key: string, fallback: number) {
@@ -50,6 +51,13 @@ export function AgentDefaultsDialog({
   const [maxTicks, setMaxTicks] = useState("0");
   const [maxOpenExecutors, setMaxOpenExecutors] = useState("5");
   const [maxDrawdown, setMaxDrawdown] = useState("-1");
+  const [strategyParams, setStrategyParams] = useState<Record<string, unknown>>({});
+
+  const { data: strategySchema } = useQuery({
+    queryKey: ["strategy-config-schema", slug],
+    queryFn: () => api.getStrategyConfigSchema(slug),
+    enabled: open,
+  });
 
   useEffect(() => {
     if (!defaults) return;
@@ -65,7 +73,15 @@ export function AgentDefaultsDialog({
     setMaxTicks(String(cfg.max_ticks ?? 0));
     setMaxOpenExecutors(readRiskLimit(cfg, "max_open_executors", 5));
     setMaxDrawdown(readRiskLimit(cfg, "max_drawdown_pct", -1));
+    const saved = cfg.strategy_params;
+    setStrategyParams(
+      typeof saved === "object" && saved !== null ? { ...(saved as Record<string, unknown>) } : {},
+    );
   }, [defaults]);
+
+  const handleStrategyParamChange = (key: string, value: unknown) => {
+    setStrategyParams((prev) => ({ ...prev, [key]: value }));
+  };
 
   const saveMut = useMutation({
     mutationFn: () =>
@@ -78,6 +94,9 @@ export function AgentDefaultsDialog({
           execution_mode: executionMode,
           max_ticks: Math.max(0, Number(maxTicks) || 0),
           risk_limits: buildRiskLimitsPayload(maxOpenExecutors, maxDrawdown),
+          ...(strategySchema && Object.keys(strategySchema.fields).length > 0
+            ? { strategy_params: strategyParams }
+            : {}),
         },
         default_trading_context: defaultTradingContext,
         agent_key: agentKey,
@@ -159,6 +178,16 @@ export function AgentDefaultsDialog({
               onMaxOpenExecutorsChange={setMaxOpenExecutors}
               onMaxDrawdownChange={setMaxDrawdown}
             />
+
+            {strategySchema && Object.keys(strategySchema.fields).length > 0 && (
+              <StrategyParamsForm
+                fields={strategySchema.fields}
+                groups={strategySchema.groups}
+                values={strategyParams}
+                frequencySec={Number(frequencySec) || 60}
+                onChange={handleStrategyParamChange}
+              />
+            )}
           </div>
         )}
 

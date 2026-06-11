@@ -45,7 +45,8 @@ GENERAL:
 - Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
 
 JOURNAL:
-- Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
+- Write ONE action entry per tick via trading_agent_journal_write(entry_type="action", tick=<n>). One line.
+- Always pass tick=<n> from [TICK INFO] as the MCP tick argument (not only tick=<n> inside the text field).
 - Learnings must specify a category: "market" or "execution".
   trading_agent_journal_write(entry_type="learning", category="market|execution", text="...")
   - market: band behavior, volatility regimes, S/R patterns, routine observations.
@@ -147,8 +148,9 @@ def _build_sizing_section(config: dict[str, Any], execution_mode: str) -> str | 
         "[POSITION SIZING]\n"
         f"total_amount_quote=${quote:g} → target **position notional (USD)** on the exchange "
         f"(formal/full entry). Half-size entries: ~${half:g} notional.\n"
-        "Sizing: base `amount` ≈ notional / price. **Leverage does not increase notional** — "
-        "it reduces margin required (~notional / leverage).\n"
+        "Sizing: pass `notional_usd` in executor_config (e.g. notional_usd=200 for half-size); "
+        "Condor converts to base `amount` using live price. Do NOT pre-compute `amount` manually. "
+        "**Leverage does not increase notional** — it reduces margin required (~notional / leverage).\n"
         "Telegram WHAT line: `~$<notional> notional | <leverage>x | SL … TP …` — never notional×leverage."
     )
 
@@ -248,6 +250,30 @@ def build_tick_prompt(
             f"{trading_context}"
         )
 
+    # Strategy-specific parameters (duration fields + effective tick thresholds)
+    from .strategy_configs import resolve_effective_strategy_params
+
+    raw_params = (
+        config.get("strategy_params")
+        if isinstance(config.get("strategy_params"), dict)
+        else {}
+    )
+    frequency_sec = int(config.get("frequency_sec") or 60)
+    strategy_params = resolve_effective_strategy_params(
+        strategy.slug, raw_params, frequency_sec
+    )
+    if strategy_params:
+        strategy_lines = [
+            "[STRATEGY CONFIG]",
+            "Active strategy parameters for this session. Use these values in all formulas and gates below.",
+            "Tick thresholds (neutral_pressure_activation_ticks, neutral_exit_streak, "
+            "sl_symbol_cooldown_ticks, flip_cooldown_ticks) are derived from duration hours "
+            "÷ frequency_sec — use the effective *_ticks values below.",
+        ]
+        for k, v in strategy_params.items():
+            strategy_lines.append(f"{k}: {v}")
+        sections.append("\n".join(strategy_lines))
+
     # Current config (exclude keys shown elsewhere or not useful to the LLM)
     _CONFIG_EXCLUDE = {
         "trading_context",
@@ -256,6 +282,7 @@ def build_tick_prompt(
         "server_name",
         "frequency_sec",
         "execution_mode",  # noise / internal
+        "strategy_params",  # shown in dedicated section above
     }
     config_lines = [
         "[CURRENT CONFIG]",

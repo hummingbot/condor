@@ -449,6 +449,17 @@ export interface RoutineFieldInfo {
   widget?: "select";
   options?: string[];
   options_from?: string;
+  group?: string;
+  duration?: boolean;
+  effective_tick_key?: string;
+}
+
+export interface StrategyConfigSchema {
+  fields: Record<string, RoutineFieldInfo>;
+  groups: string[];
+  defaults: Record<string, unknown>;
+  computed_fields?: Record<string, string>;
+  tick_reference_frequency_sec?: number;
 }
 
 export interface RoutineInfo {
@@ -963,6 +974,9 @@ export const api = {
 
   getAgentConfigSchema: () =>
     apiFetch<Record<string, unknown>>("/api/v1/agents/config-schema"),
+
+  getStrategyConfigSchema: (slug: string) =>
+    apiFetch<StrategyConfigSchema>(`/api/v1/agents/${slug}/strategy-config-schema`),
 
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${slug}`, {

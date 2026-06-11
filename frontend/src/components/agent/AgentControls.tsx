@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pause, Play, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -12,6 +12,7 @@ import {
   buildRiskLimitsPayload,
   type ExecutionMode,
 } from "@/components/agent/AgentSessionConfigFields";
+import { StrategyParamsForm } from "@/components/agent/StrategyParamsForm";
 import { api } from "@/lib/api";
 
 function readRiskLimit(defaults: Record<string, unknown>, key: string, fallback: number) {
@@ -51,6 +52,13 @@ export function StartSessionDialog({
     readRiskLimit(agentConfig, "max_open_executors", 5),
   );
   const [maxDrawdown, setMaxDrawdown] = useState(readRiskLimit(agentConfig, "max_drawdown_pct", -1));
+  const [strategyParams, setStrategyParams] = useState<Record<string, unknown>>({});
+
+  const { data: strategySchema } = useQuery({
+    queryKey: ["strategy-config-schema", slug],
+    queryFn: () => api.getStrategyConfigSchema(slug),
+    enabled: open,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -62,7 +70,15 @@ export function StartSessionDialog({
     setDigestIntervalTicks(String(agentConfig.digest_interval_ticks ?? 0));
     setMaxOpenExecutors(readRiskLimit(agentConfig, "max_open_executors", 5));
     setMaxDrawdown(readRiskLimit(agentConfig, "max_drawdown_pct", -1));
+    const saved = agentConfig.strategy_params;
+    setStrategyParams(
+      typeof saved === "object" && saved !== null ? { ...(saved as Record<string, unknown>) } : {},
+    );
   }, [open, agentConfig, defaultContext]);
+
+  const handleStrategyParamChange = (key: string, value: unknown) => {
+    setStrategyParams((prev) => ({ ...prev, [key]: value }));
+  };
 
   const startMut = useMutation({
     mutationFn: () => {
@@ -73,6 +89,9 @@ export function StartSessionDialog({
         digest_interval_ticks: Math.max(0, Number(digestIntervalTicks) || 0),
         execution_mode: executionMode,
         risk_limits: buildRiskLimitsPayload(maxOpenExecutors, maxDrawdown),
+        ...(strategySchema && Object.keys(strategySchema.fields).length > 0
+          ? { strategy_params: strategyParams }
+          : {}),
       };
       return api.startAgent(slug, config, context);
     },
@@ -130,6 +149,16 @@ export function StartSessionDialog({
             onMaxOpenExecutorsChange={setMaxOpenExecutors}
             onMaxDrawdownChange={setMaxDrawdown}
           />
+
+          {strategySchema && Object.keys(strategySchema.fields).length > 0 && (
+            <StrategyParamsForm
+              fields={strategySchema.fields}
+              groups={strategySchema.groups}
+              values={strategyParams}
+              frequencySec={Number(frequencySec) || Number(agentConfig.frequency_sec) || 60}
+              onChange={handleStrategyParamChange}
+            />
+          )}
         </div>
 
         <div className="mt-6 flex justify-end gap-3">

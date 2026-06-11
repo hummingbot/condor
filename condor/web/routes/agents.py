@@ -201,6 +201,40 @@ def _get_strategy_by_slug(slug: str):
     return strategy
 
 
+def _merge_config_strategy_params(slug: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Normalize strategy_params from UI-saved config (legacy tick migration only)."""
+    from condor.trading_agent.strategy_configs import merge_strategy_params
+
+    result = dict(config)
+    saved = result.get("strategy_params")
+    if not isinstance(saved, dict):
+        saved = {}
+    freq = int(result.get("frequency_sec") or 60)
+    result["strategy_params"] = merge_strategy_params(slug, saved, freq)
+    return result
+
+
+def _deep_merge_strategy_params(
+    base: dict[str, Any], patch: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Merge patch into base, deep-merging nested strategy_params."""
+    result = dict(base)
+    if not patch:
+        return result
+    for key, value in patch.items():
+        if key == "strategy_params" and isinstance(value, dict):
+            existing = result.get("strategy_params")
+            if isinstance(existing, dict):
+                merged_params = dict(existing)
+                merged_params.update(value)
+                result["strategy_params"] = merged_params
+            else:
+                result["strategy_params"] = dict(value)
+        else:
+            result[key] = value
+    return result
+
+
 def _build_agent_defaults(strategy) -> dict[str, Any]:
     """Return editable defaults from strategy frontmatter."""
     from condor.trading_agent.config import AgentConfig, sanitize_config_dict
@@ -209,6 +243,7 @@ def _build_agent_defaults(strategy) -> dict[str, Any]:
     core = AgentConfig.from_dict(default_config)
     merged = core.model_dump()
     merged.update({k: v for k, v in default_config.items() if k not in merged})
+    merged = _merge_config_strategy_params(strategy.slug, merged)
     return {
         "default_config": merged,
         "default_trading_context": strategy.default_trading_context or "",
@@ -667,6 +702,28 @@ async def get_agent_config_schema(user: WebUser = Depends(get_current_user)):
     return schema
 
 
+@router.get("/{slug}/strategy-config-schema")
+async def get_strategy_config_schema(slug: str, user: WebUser = Depends(get_current_user)):
+    """Return strategy-specific parameter schema for UI forms."""
+    strategy = _get_strategy_by_slug(slug)
+    from condor.trading_agent.strategy_configs import get_strategy_config_schema
+
+    default_config = dict(strategy.default_config or {})
+    saved_params = default_config.get("strategy_params")
+    if not isinstance(saved_params, dict):
+        saved_params = {}
+    frequency_sec = int(default_config.get("frequency_sec") or 60)
+
+    schema = get_strategy_config_schema(
+        slug,
+        saved_defaults=saved_params,
+        frequency_sec=frequency_sec,
+    )
+    if schema is None:
+        return {"fields": {}, "groups": [], "defaults": {}}
+    return schema
+
+
 @router.get("/{slug}", response_model=AgentDetail)
 async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     """Get agent detail."""
@@ -681,6 +738,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     from condor.trading_agent.config import load_full_config
 
     config_dict = load_full_config(agent_dir, strategy.default_config)
+    config_dict = _merge_config_strategy_params(strategy.slug, config_dict)
 
     # Read learnings
     learnings_path = agent_dir / "learnings.md"
@@ -820,7 +878,8 @@ async def update_agent_config(
     from condor.trading_agent.config import load_full_config, save_full_config, sanitize_config_dict
 
     config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
-    config_dict.update(req.config)
+    config_dict = _merge_config_strategy_params(strategy.slug, config_dict)
+    config_dict = _deep_merge_strategy_params(config_dict, req.config)
     save_full_config(strategy.agent_dir, sanitize_config_dict(config_dict))
     return {"updated": True, "config": config_dict}
 
@@ -838,9 +897,13 @@ async def update_agent_defaults(
 ):
     """Persist session defaults to agent.md frontmatter."""
     store = _get_store()
+    strategy = _get_strategy_by_slug(slug)
     patch: dict[str, Any] = {}
     if req.default_config is not None:
-        patch["default_config"] = req.default_config
+        existing = _build_agent_defaults(strategy)["default_config"]
+        patch["default_config"] = _deep_merge_strategy_params(
+            existing, req.default_config
+        )
     if req.model_base_url is not None:
         patch.setdefault("default_config", {})
         patch["default_config"]["model_base_url"] = req.model_base_url
@@ -945,8 +1008,9 @@ async def start_agent(
 
     # Load config (merge request overrides)
     config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
+    config_dict = _merge_config_strategy_params(strategy.slug, config_dict)
     if req.config:
-        config_dict.update(req.config)
+        config_dict = _deep_merge_strategy_params(config_dict, req.config)
 
     # Apply trading context: explicit request > strategy default
     if req.trading_context:

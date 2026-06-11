@@ -92,6 +92,62 @@ def _quantize_base_amount_to_step(amount: float, step: float, rounding: str) -> 
     return float(units * d_step)
 
 
+def _extract_target_notional_usd(merged_config: dict[str, Any]) -> float | None:
+    """Read quote-notional target from executor config (LLM or UI)."""
+    for key in ("notional_usd", "total_amount_quote", "notional"):
+        raw = merged_config.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+async def _apply_notional_usd_to_amount(
+    client: Any, merged_config: dict[str, Any]
+) -> tuple[str | None, str]:
+    """Convert notional_usd/total_amount_quote to base amount using live mid price."""
+    notional = _extract_target_notional_usd(merged_config)
+    if notional is None:
+        return None, ""
+
+    connector_name = merged_config.get("connector_name")
+    trading_pair = merged_config.get("trading_pair")
+    if not connector_name or not trading_pair:
+        return (
+            "notional_usd/total_amount_quote requires connector_name and trading_pair in executor_config.",
+            "",
+        )
+
+    llm_amount = merged_config.get("amount")
+    mid = await _fetch_mid_price_for_pair(
+        client, str(connector_name).strip(), str(trading_pair)
+    )
+    if not mid or mid <= 0:
+        return (
+            f"Cannot fetch live price for {trading_pair} to convert notional_usd={notional:g}.",
+            "",
+        )
+
+    amount = notional / mid
+    merged_config["amount"] = amount
+    for key in ("notional_usd", "total_amount_quote", "notional"):
+        merged_config.pop(key, None)
+
+    note = (
+        f"`amount` computed from notional_usd={notional:g} / price≈{mid:g} → {amount:g} "
+        f"for `{trading_pair}`."
+    )
+    if llm_amount is not None:
+        note += f" (Replaced LLM-provided amount={llm_amount}.)"
+
+    return None, note
+
+
 async def _fetch_mid_price_for_pair(client: Any, connector_name: str, trading_pair: str) -> float | None:
     """Return mid/mark price for trading_pair from market_data.get_prices, or None."""
     try:
@@ -204,14 +260,21 @@ async def _apply_position_amount_from_trading_rules(
     if min_order > 0:
         targets.append(_quantize_base_amount_to_step(min_order, step, "up") if step > 0 else min_order)
 
-    mid = None
-    if min_notional > 0:
-        mid = await _fetch_mid_price_for_pair(client, str(connector_name).strip(), final_pair)
-        if mid and mid > 0:
-            need_base = min_notional / mid
-            targets.append(
-                _quantize_base_amount_to_step(need_base, step, "up") if step > 0 else need_base
+    mid = await _fetch_mid_price_for_pair(client, str(connector_name).strip(), final_pair)
+    if mid and mid > 0 and min_notional > 0:
+        original_implied = original * mid
+        if original_implied < min_notional * 0.5:
+            return (
+                f"Requested amount {original:g} implies ~${original_implied:.2f} notional for "
+                f"{final_pair} at price {mid:g}, far below exchange minimum ~${min_notional:.2f}. "
+                f"Pass `notional_usd` (e.g. notional_usd=200) in executor_config instead of "
+                f"pre-computing `amount` — Condor converts using the live price for this pair.",
+                "",
             )
+        need_base = min_notional / mid
+        targets.append(
+            _quantize_base_amount_to_step(need_base, step, "up") if step > 0 else need_base
+        )
 
     amount = max(targets)
     if step > 0 and amount > 0:
@@ -606,9 +669,20 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
 
         amount_rules_note = ""
         if executor_type == "position_executor":
+            notional_err, notional_note = await _apply_notional_usd_to_amount(
+                client, merged_config
+            )
+            if notional_err:
+                return {
+                    "action": "create",
+                    "error": notional_err,
+                    "formatted_output": f"Error: {notional_err}",
+                }
             amt_err, amount_rules_note = await _apply_position_amount_from_trading_rules(
                 client, merged_config
             )
+            if notional_note:
+                amount_rules_note = notional_note + ("\n" + amount_rules_note if amount_rules_note else "")
             if amt_err:
                 return {
                     "action": "create",
