@@ -141,7 +141,7 @@ def resolve_snapshot(
     journal_signal = meta.signals_1h.get(pair)
 
     use_journal = (
-        config.data_source == "journal_first"
+        config.data_source in ("journal_first", "journal_recompute")
         and journal_signal is not None
     ) or (config.data_source == "html_only" and journal_signal is None)
 
@@ -158,38 +158,70 @@ def resolve_snapshot(
     )
 
     if use_journal and journal_signal is not None:
+        journal_price = journal_signal.price
+        if price <= 0 and journal_price is not None and journal_price > 0:
+            price = journal_price
         if price <= 0:
             if config.require_price_data:
                 return None
             price = last_price_by_pair.get(pair, _JOURNAL_PLACEHOLDER_PRICE)
             price_trusted = False
         last_price_by_pair[pair] = price
-        bb_mid = parsed_html.bb_mid if parsed_html else 0.0
-        bb_upper = parsed_html.bb_upper if parsed_html else 0.0
+        bb_mid = (
+            journal_signal.bb_mid
+            if journal_signal.bb_mid is not None
+            else (parsed_html.bb_mid if parsed_html else 0.0)
+        )
+        bb_upper = (
+            journal_signal.bb_upper
+            if journal_signal.bb_upper is not None
+            else (parsed_html.bb_upper if parsed_html else 0.0)
+        )
+        cross_long = journal_signal.bullish_cross
+        cross_short = journal_signal.bearish_cross
+        if cross_long is None and parsed_html is not None:
+            cross_long = parsed_html.bullish_cross
+        if cross_short is None and parsed_html is not None:
+            cross_short = parsed_html.bearish_cross
         parsed = parsed_report_from_journal(
             journal_signal,
             price=price,
-            signal=infer_signal_label(
-                {
-                    "formal_long": journal_signal.formal_long,
-                    "formal_short": journal_signal.formal_short,
-                }
-            ),
-            bb_mid=bb_mid,
-            bb_upper=bb_upper,
+            bb_mid=bb_mid or 0.0,
+            bb_upper=bb_upper or 0.0,
+            bullish_cross=cross_long,
+            bearish_cross=cross_short,
         )
         metrics = compute_metrics(parsed, config)
-        metrics["formal_long"] = journal_signal.formal_long
-        metrics["formal_short"] = journal_signal.formal_short
-        metrics["has_formal"] = journal_signal.formal_long or journal_signal.formal_short
-        metrics["adaptive_long_open"] = (
-            journal_signal.adaptive_long and not metrics["has_formal"]
-        )
-        metrics["adaptive_short_open"] = (
-            journal_signal.adaptive_short and not metrics["has_formal"]
-        )
-        metrics["adaptive_strength_long"] = journal_signal.strength_long
-        metrics["adaptive_strength_short"] = journal_signal.strength_short
+        full_band_telemetry = journal_signal.has_replay_bands()
+        if config.data_source == "journal_first":
+            metrics["formal_long"] = journal_signal.formal_long
+            metrics["formal_short"] = journal_signal.formal_short
+            metrics["has_formal"] = (
+                journal_signal.formal_long or journal_signal.formal_short
+            )
+        elif config.data_source == "journal_recompute" and not full_band_telemetry:
+            metrics["formal_long"] = journal_signal.formal_long
+            metrics["formal_short"] = journal_signal.formal_short
+            metrics["has_formal"] = (
+                journal_signal.formal_long or journal_signal.formal_short
+            )
+        if config.data_source == "journal_first":
+            metrics["adaptive_long_open"] = (
+                journal_signal.adaptive_long and not metrics["has_formal"]
+            )
+            metrics["adaptive_short_open"] = (
+                journal_signal.adaptive_short and not metrics["has_formal"]
+            )
+            metrics["adaptive_strength_long"] = journal_signal.strength_long
+            metrics["adaptive_strength_short"] = journal_signal.strength_short
+        elif config.data_source == "journal_recompute":
+            # Adaptive open gates + strength scores come from compute_metrics (config-driven).
+            metrics["adaptive_long_open"] = (
+                bool(metrics["adaptive_long_open"]) and not metrics["has_formal"]
+            )
+            metrics["adaptive_short_open"] = (
+                bool(metrics["adaptive_short_open"]) and not metrics["has_formal"]
+            )
         source = "journal+hl" if price_tag == "hl" else "journal"
     elif parsed_html is not None:
         parsed = parsed_html

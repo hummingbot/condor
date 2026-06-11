@@ -23,6 +23,8 @@ def parsed_report_from_journal(
     signal: str = "NEUTRAL",
     bb_mid: float = 0.0,
     bb_upper: float = 0.0,
+    bullish_cross: bool | None = None,
+    bearish_cross: bool | None = None,
 ) -> ParsedReport:
     return ParsedReport(
         pair=journal_signal.pair,
@@ -37,9 +39,25 @@ def parsed_report_from_journal(
         histogram=journal_signal.histogram,
         trend=journal_signal.trend,
         momentum=journal_signal.momentum,
-        bullish_cross=journal_signal.formal_long,
+        bullish_cross=(
+            bullish_cross
+            if bullish_cross is not None
+            else (
+                journal_signal.bullish_cross
+                if journal_signal.bullish_cross is not None
+                else journal_signal.formal_long
+            )
+        ),
         price_le_mid=False,
-        bearish_cross=journal_signal.formal_short,
+        bearish_cross=(
+            bearish_cross
+            if bearish_cross is not None
+            else (
+                journal_signal.bearish_cross
+                if journal_signal.bearish_cross is not None
+                else journal_signal.formal_short
+            )
+        ),
         price_ge_upper=False,
         macd_lt_zero=journal_signal.macd < 0,
     )

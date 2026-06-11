@@ -24,6 +24,21 @@ class JournalSignal1h:
     adaptive_short: bool
     strength_long: float
     strength_short: float
+    # Optional replay bands/crosses/price (signals_1h extension after sS)
+    bb_mid: float | None = None
+    bb_upper: float | None = None
+    bb_lower: float | None = None
+    bullish_cross: bool | None = None
+    bearish_cross: bool | None = None
+    price: float | None = None
+
+    def has_replay_bands(self) -> bool:
+        return (
+            self.bb_mid is not None
+            and self.bb_upper is not None
+            and self.bb_mid > 0
+            and self.bb_upper > 0
+        )
 
 
 @dataclass
@@ -157,16 +172,21 @@ class ReplayConfigBase(BaseModel):
         description="Strategy folder under trading_agents/",
     )
     session_nums: str = Field(
-        default="all",
+        default="38",
         description="Session selector: 'all' or comma-separated values like '35,36'",
     )
     time_window_min: int = Field(
         default=25,
         description="Max minutes for matching report file to tick/pair",
     )
-    data_source: Literal["journal_first", "html_only"] = Field(
+    data_source: Literal["journal_first", "journal_recompute", "html_only"] = Field(
         default="journal_first",
-        description="Prefer journal signals_1h telemetry when available.",
+        description=(
+            "journal_first: replay journal entry flags (fL/fS/aL/aS) as logged. "
+            "journal_recompute: recompute entries from journal numerics + config "
+            "(full formal when mid/up logged; else fL/fS fallback). "
+            "html_only: HTML report payloads only."
+        ),
     )
     activation_ticks: int = Field(
         default=6,
@@ -251,6 +271,14 @@ class StrategyReplayConfig(ReplayConfigBase):
         description="Skip tick entries when journal tradeable_count is below this",
     )
     ignore_risk_blocks: bool = Field(default=True)
+    ignore_adaptive_4h_filter: bool = Field(
+        default=False,
+        description="Skip 4h regime filter for adaptive entries (backtest / strategy tuning)",
+    )
+    adaptive_requires_flat: bool = Field(
+        default=True,
+        description="Require 0 open positions before adaptive entries (matches live agent)",
+    )
 
 
 class AdaptiveReplayConfig(ReplayConfigBase):

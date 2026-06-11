@@ -51,7 +51,8 @@ _OPENED_PAIR_RE = re.compile(
 _SIGNAL_TUPLE_RE = re.compile(
     r"([A-Z0-9:-]+):bb=([^,]+),macd=([^,]+),sig=([^,]+),hist=([^,]+),"
     r"gap=([^,]+),hr=([^,]+),tr=([^,]+),mom=([^,]+),"
-    r"fL=([^,]+),fS=([^,]+),aL=([^,]+),aS=([^,]+),sL=([^,|;\s]+),sS=([^,|;\s]+)"
+    r"fL=([^,]+),fS=([^,]+),aL=([^,]+),aS=([^,]+),sL=([^,]+),sS=([^,|;\s]+)"
+    r"(?:,mid=([^,]+),up=([^,]+)(?:,lo=([^,]+))?(?:,bX=([^,]+),sX=([^,]+),p=([^,|;\s]+))?)?"
 )
 _FILTER_4H_TUPLE_RE = re.compile(
     r"([A-Z0-9:-]+):tr=([^,]+)(?:,bb=([^,]+))?(?:,macd=([^,]+))?"
@@ -111,6 +112,12 @@ def _parse_signals_1h(raw: str) -> dict[str, JournalSignal1h]:
     signals: dict[str, JournalSignal1h] = {}
     for match in _SIGNAL_TUPLE_RE.finditer(raw):
         pair = match.group(1)
+        bb_mid_raw = match.group(16)
+        bb_upper_raw = match.group(17)
+        bb_lower_raw = match.group(18)
+        bX_raw = match.group(19)
+        sX_raw = match.group(20)
+        price_raw = match.group(21)
         signals[pair] = JournalSignal1h(
             pair=pair,
             bb_pos_pct=float(match.group(2)),
@@ -127,6 +134,12 @@ def _parse_signals_1h(raw: str) -> dict[str, JournalSignal1h]:
             adaptive_short=_parse_bool_flag(match.group(13)),
             strength_long=float(match.group(14)),
             strength_short=float(match.group(15)),
+            bb_mid=float(bb_mid_raw) if bb_mid_raw else None,
+            bb_upper=float(bb_upper_raw) if bb_upper_raw else None,
+            bb_lower=float(bb_lower_raw) if bb_lower_raw else None,
+            bullish_cross=_parse_bool_flag(bX_raw) if bX_raw else None,
+            bearish_cross=_parse_bool_flag(sX_raw) if sX_raw else None,
+            price=float(price_raw) if price_raw else None,
         )
     return signals
 

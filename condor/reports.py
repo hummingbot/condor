@@ -21,7 +21,8 @@ _last_report_id: str | None = None
 
 CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
-MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "100"))
+# Max reports in index before oldest are auto-deleted. 0 = retain all (default).
+MAX_REPORTS = int(os.environ.get("CONDOR_MAX_REPORTS", "0"))
 _index_lock = asyncio.Lock()
 
 # ── HTML Template ──
@@ -254,7 +255,9 @@ async def delete_report(report_id: str) -> bool:
 
 
 def _cleanup_locked(max_reports: int = MAX_REPORTS) -> None:
-    """Run cleanup while caller already holds _index_lock."""
+    """Drop oldest reports when over max_reports. max_reports <= 0 retains all."""
+    if max_reports <= 0:
+        return
     entries = _read_index()
     if len(entries) <= max_reports:
         return

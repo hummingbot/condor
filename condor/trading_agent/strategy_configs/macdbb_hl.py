@@ -67,6 +67,11 @@ class MacdbbScannerAggressiveHlParams(BaseModel):
         description="Minimum scanner tradeable pairs required for adaptive entries",
         json_schema_extra={"group": "Adaptive mode"},
     )
+    adaptive_skip_4h_filter: bool | None = Field(
+        default=None,
+        description="Skip mandatory 4h filter for adaptive entries only (formal still requires 4h)",
+        json_schema_extra={"group": "Adaptive mode"},
+    )
     sl_symbol_cooldown_hours: float | None = Field(
         default=None,
         description="Wall-clock hours to skip adaptive entries on a symbol after its stop-loss",

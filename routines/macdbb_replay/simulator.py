@@ -18,6 +18,17 @@ from routines.macdbb_replay.signals import (
 )
 
 
+def _adaptive_4h_allows(
+    side: str,
+    trend: str | None,
+    passed: bool | None,
+    config: StrategyReplayConfig,
+) -> bool:
+    if config.ignore_adaptive_4h_filter:
+        return True
+    return filter_4h_allows(side, trend, passed)
+
+
 def _adaptive_notional(config: StrategyReplayConfig) -> float:
     return config.formal_notional_quote / 2.0
 
@@ -361,26 +372,37 @@ def simulate_strategy_session(
                         ):
                             formal_candidates.append((pair, "short", snapshot))
 
+                adaptive_flat_ok = (
+                    len(open_positions) == 0
+                    if config.adaptive_requires_flat
+                    else len(open_positions) < config.max_open_executors
+                )
+                tradeable_ok = (
+                    meta.tradeable_count is None
+                    or meta.tradeable_count >= config.min_tradeable_count
+                )
                 if (
                     config.entry_modes in {"all", "adaptive"}
-                    and len(open_positions) == 0
+                    and adaptive_flat_ok
                     and simulated_streak >= config.activation_ticks
-                    and (meta.tradeable_count is None or meta.tradeable_count >= 3)
+                    and tradeable_ok
                 ):
                     if bool(metrics["adaptive_long_open"]):
-                        if not filter_4h_allows(
+                        if not _adaptive_4h_allows(
                             "long",
                             snapshot.filter_4h_trend,
                             snapshot.filter_4h_pass,
+                            config,
                         ):
                             blockers.append("4h_filter_block_long")
                         elif snapshot.price_trusted:
                             adaptive_candidates.append((pair, "long", snapshot))
                     if bool(metrics["adaptive_short_open"]):
-                        if not filter_4h_allows(
+                        if not _adaptive_4h_allows(
                             "short",
                             snapshot.filter_4h_trend,
                             snapshot.filter_4h_pass,
+                            config,
                         ):
                             blockers.append("4h_filter_block_short")
                         elif snapshot.price_trusted:
