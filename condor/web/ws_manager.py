@@ -813,19 +813,27 @@ class WebSocketManager:
 
     async def broadcast(self, channel: str, data: Any) -> None:
         self._last_data[channel] = data
+        subscribers = [
+            conn for conn in list(self._connections) if channel in conn.channels
+        ]
+        if not subscribers:
+            return
+        # Fan out concurrently so a slow/backpressured client does not block the
+        # rest of the subscribers in the same broadcast tick.
+        results = await asyncio.gather(
+            *(self._send(conn, channel, data) for conn in subscribers),
+            return_exceptions=True,
+        )
         dead: list[_Connection] = []
-        for conn in list(self._connections):
-            if channel in conn.channels:
-                try:
-                    await self._send(conn, channel, data)
-                except Exception as e:
-                    logger.warning(
-                        "Broadcast send failed: channel=%s user=%s: %s",
-                        channel,
-                        conn.user_id,
-                        e,
-                    )
-                    dead.append(conn)
+        for conn, result in zip(subscribers, results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    "Broadcast send failed: channel=%s user=%s: %s",
+                    channel,
+                    conn.user_id,
+                    result,
+                )
+                dead.append(conn)
         for conn in dead:
             self.disconnect(conn)
 
