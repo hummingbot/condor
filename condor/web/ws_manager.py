@@ -179,6 +179,15 @@ class WebSocketManager:
         task.add_done_callback(self._oneshot_tasks.discard)
 
     @staticmethod
+    def _server_from_channel(channel: str) -> str | None:
+        """Server name encoded as the second segment of a channel
+        (``portfolio:<server>``, ``bots_ws:<server>``, ``candles:<server>:...``,
+        ``prices:<server>:<connector>:<pair>``, ...). Every WS channel is
+        server-scoped; returns None when no server segment is present."""
+        parts = channel.split(":")
+        return parts[1] if len(parts) >= 2 and parts[1] else None
+
+    @staticmethod
     def _normalize_candle(c: Any) -> dict | None:
         """Normalize a candle from any format to a uniform dict with float values."""
         try:
@@ -380,6 +389,24 @@ class WebSocketManager:
         channel = msg.get("channel", "")
 
         if action == "subscribe" and channel:
+            # Object-level access control: channels encode their target server as
+            # the second segment, and the stream coroutines push that server's
+            # data back to the subscriber. Only allow subscribing to servers the
+            # user can access (mirrors the REST has_server_access checks); reject
+            # otherwise to prevent cross-server data leaks (IDOR).
+            from config_manager import get_config_manager
+
+            server_name = self._server_from_channel(channel)
+            if server_name is None or not get_config_manager().has_server_access(
+                conn.user_id, server_name
+            ):
+                logger.warning(
+                    "WS subscribe denied: user=%s channel=%s server=%s (no server access)",
+                    conn.user_id,
+                    channel,
+                    server_name,
+                )
+                return
             conn.channels.add(channel)
             logger.info("WS subscribe: user=%s channel=%s", conn.user_id, channel)
             # Send last known data immediately (candles use buffer instead)
