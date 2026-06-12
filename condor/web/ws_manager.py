@@ -347,8 +347,7 @@ class WebSocketManager:
 
     def _maybe_unsub_sds(self, channel: str) -> None:
         """Unsubscribe from SDS if no WS clients remain for this channel."""
-        has_subscribers = any(channel in c.channels for c in self._connections)
-        if has_subscribers:
+        if self._has_subscribers(channel):
             return
 
         if channel in self._sds_subscriptions:
@@ -905,7 +904,7 @@ class WebSocketManager:
         self._candle_teardown_timers.pop(channel, None)
 
         # Re-check: subscribers may have appeared during the grace period
-        if any(channel in c.channels for c in self._connections):
+        if self._has_subscribers(channel):
             logger.debug(
                 "Candle teardown cancelled — subscribers returned for %s", channel
             )
@@ -1213,7 +1212,7 @@ class WebSocketManager:
                     logger.info("Trade WS subscribed: %s", channel)
                     backoff = 5
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
+                        if not self._has_subscribers(channel):
                             logger.info(
                                 "No subscribers for %s, closing trade stream", channel
                             )
@@ -1363,7 +1362,7 @@ class WebSocketManager:
                     logger.info("Order book WS subscribed: %s", channel)
                     backoff = 5
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
+                        if not self._has_subscribers(channel):
                             logger.info(
                                 "No subscribers for %s, closing order book stream",
                                 channel,
@@ -1566,7 +1565,7 @@ class WebSocketManager:
                     logger.info("Executor WS subscribed: %s", channel)
                     got_message = False
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
+                        if not self._has_subscribers(channel):
                             logger.info(
                                 "No subscribers for %s, closing executor stream",
                                 channel,
@@ -1687,7 +1686,7 @@ class WebSocketManager:
                     logger.info("Bots WS subscribed: %s", channel)
                     backoff = 5
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
+                        if not self._has_subscribers(channel):
                             logger.info(
                                 "No subscribers for %s, closing bots WS stream", channel
                             )
@@ -1783,7 +1782,7 @@ class WebSocketManager:
                     logger.info("Positions WS subscribed: %s", channel)
                     backoff = 5
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
+                        if not self._has_subscribers(channel):
                             logger.info(
                                 "No subscribers for %s, closing positions WS stream",
                                 channel,
@@ -1875,7 +1874,7 @@ class WebSocketManager:
                     logger.info("Performance WS subscribed: %s", channel)
                     backoff = 5
                     async for msg in ws:
-                        if not any(channel in c.channels for c in self._connections):
+                        if not self._has_subscribers(channel):
                             logger.info(
                                 "No subscribers for %s, closing performance WS stream",
                                 channel,
@@ -1952,7 +1951,7 @@ class WebSocketManager:
 
         while True:
             try:
-                if not any(channel in c.channels for c in self._connections):
+                if not self._has_subscribers(channel):
                     logger.info(
                         "No subscribers for %s, stopping controller perf stream",
                         channel,
