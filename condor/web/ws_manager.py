@@ -166,6 +166,8 @@ class WebSocketManager:
         # so the GC can't cancel them mid-flight (the event loop only keeps a
         # weak reference). Entries auto-remove on completion.
         self._oneshot_tasks: set[asyncio.Task] = set()
+        # Lazily-built registry of per-type stream lifecycles (see _stream_registry)
+        self._stream_registry_cache: dict | None = None
 
     # -- Helpers --
 
@@ -864,14 +866,95 @@ class WebSocketManager:
     # -- Candle streaming --
 
     def _ensure_candle_stream(self, channel: str) -> None:
-        if channel in self._candle_tasks and not self._candle_tasks[channel].done():
-            return
-        self._candle_tasks[channel] = asyncio.create_task(self._candle_stream(channel))
-        logger.info("Started candle stream for %s", channel)
+        self._ensure_stream("candle", channel)
 
     def _has_subscribers(self, channel: str) -> bool:
         """True if any connection is currently subscribed to the channel."""
         return any(channel in c.channels for c in self._connections)
+
+    # -- Generic stream lifecycle --
+    #
+    # All 8 stream types share the same start/stop lifecycle; only candle needs
+    # a non-uniform stop (deferred teardown with keep-alive) supplied via
+    # ``teardown_hook``. The thin ``_ensure_*_stream`` / ``_maybe_stop_*_stream``
+    # wrappers delegate to ``_ensure_stream`` / ``_maybe_stop_stream`` so the
+    # lifecycle logic lives in one place.
+    def _stream_registry(self) -> dict:
+        """stream_type -> {task_dict, factory, start_log, stop_log, teardown_hook?}."""
+        if self._stream_registry_cache is None:
+            self._stream_registry_cache = {
+                "candle": {
+                    "task_dict": self._candle_tasks,
+                    "factory": self._candle_stream,
+                    "start_log": "Started candle stream for %s",
+                    # Non-uniform stop: deferred teardown with keep-alive.
+                    "teardown_hook": self._maybe_stop_candle_stream,
+                },
+                "trade": {
+                    "task_dict": self._trade_tasks,
+                    "factory": self._trade_stream,
+                    "start_log": "Started trade stream for %s",
+                    "stop_log": "Stopped trade stream for %s",
+                },
+                "order_book": {
+                    "task_dict": self._order_book_tasks,
+                    "factory": self._order_book_stream,
+                    "start_log": "Started order book stream for %s",
+                    "stop_log": "Stopped order book stream for %s",
+                },
+                "executor": {
+                    "task_dict": self._executor_tasks,
+                    "factory": self._executor_stream,
+                    "start_log": "Started executor stream for %s",
+                    "stop_log": "Stopped executor stream for %s",
+                },
+                "bots_ws": {
+                    "task_dict": self._bots_ws_tasks,
+                    "factory": self._bots_ws_stream,
+                    "start_log": "Started bots WS stream for %s",
+                    "stop_log": "Stopped bots WS stream for %s",
+                },
+                "positions_ws": {
+                    "task_dict": self._positions_ws_tasks,
+                    "factory": self._positions_ws_stream,
+                    "start_log": "Started positions WS stream for %s",
+                    "stop_log": "Stopped positions WS stream for %s",
+                },
+                "performance_ws": {
+                    "task_dict": self._performance_ws_tasks,
+                    "factory": self._performance_ws_stream,
+                    "start_log": "Started performance WS stream for %s",
+                    "stop_log": "Stopped performance WS stream for %s",
+                },
+                "controller_perf": {
+                    "task_dict": self._controller_perf_tasks,
+                    "factory": self._controller_perf_stream,
+                    "start_log": "Started controller performance stream for %s",
+                    "stop_log": "Stopped controller performance stream for %s",
+                },
+            }
+        return self._stream_registry_cache
+
+    def _ensure_stream(self, stream_type: str, channel: str) -> None:
+        spec = self._stream_registry()[stream_type]
+        tasks = spec["task_dict"]
+        if channel in tasks and not tasks[channel].done():
+            return
+        tasks[channel] = asyncio.create_task(spec["factory"](channel))
+        logger.info(spec["start_log"], channel)
+
+    def _maybe_stop_stream(self, stream_type: str, channel: str) -> None:
+        spec = self._stream_registry()[stream_type]
+        teardown_hook = spec.get("teardown_hook")
+        if teardown_hook is not None:
+            teardown_hook(channel)
+            return
+        if self._has_subscribers(channel):
+            return
+        task = spec["task_dict"].pop(channel, None)
+        if task and not task.done():
+            task.cancel()
+            logger.info(spec["stop_log"], channel)
 
     def _maybe_stop_candle_stream(self, channel: str) -> None:
         # If subscribers still exist, cancel any pending teardown and return
@@ -1176,18 +1259,10 @@ class WebSocketManager:
     # -- Trade streaming --
 
     def _ensure_trade_stream(self, channel: str) -> None:
-        if channel in self._trade_tasks and not self._trade_tasks[channel].done():
-            return
-        self._trade_tasks[channel] = asyncio.create_task(self._trade_stream(channel))
-        logger.info("Started trade stream for %s", channel)
+        self._ensure_stream("trade", channel)
 
     def _maybe_stop_trade_stream(self, channel: str) -> None:
-        if self._has_subscribers(channel):
-            return
-        task = self._trade_tasks.pop(channel, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Stopped trade stream for %s", channel)
+        self._maybe_stop_stream("trade", channel)
 
     async def _trade_stream(self, channel: str) -> None:
         parts = channel.split(":")
@@ -1320,23 +1395,10 @@ class WebSocketManager:
     # -- Order book streaming --
 
     def _ensure_order_book_stream(self, channel: str) -> None:
-        if (
-            channel in self._order_book_tasks
-            and not self._order_book_tasks[channel].done()
-        ):
-            return
-        self._order_book_tasks[channel] = asyncio.create_task(
-            self._order_book_stream(channel)
-        )
-        logger.info("Started order book stream for %s", channel)
+        self._ensure_stream("order_book", channel)
 
     def _maybe_stop_order_book_stream(self, channel: str) -> None:
-        if self._has_subscribers(channel):
-            return
-        task = self._order_book_tasks.pop(channel, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Stopped order book stream for %s", channel)
+        self._maybe_stop_stream("order_book", channel)
 
     async def _order_book_stream(self, channel: str) -> None:
         parts = channel.split(":")
@@ -1438,20 +1500,10 @@ class WebSocketManager:
     # -- Executor streaming (via Hummingbot WS) --
 
     def _ensure_executor_stream(self, channel: str) -> None:
-        if channel in self._executor_tasks and not self._executor_tasks[channel].done():
-            return
-        self._executor_tasks[channel] = asyncio.create_task(
-            self._executor_stream(channel)
-        )
-        logger.info("Started executor stream for %s", channel)
+        self._ensure_stream("executor", channel)
 
     def _maybe_stop_executor_stream(self, channel: str) -> None:
-        if self._has_subscribers(channel):
-            return
-        task = self._executor_tasks.pop(channel, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Stopped executor stream for %s", channel)
+        self._maybe_stop_stream("executor", channel)
 
     async def _executor_stream(self, channel: str) -> None:
         parts = channel.split(":")
@@ -1624,20 +1676,10 @@ class WebSocketManager:
     # -- Bots WS streaming (via Hummingbot /ws/executors all_bots_status) --
 
     def _ensure_bots_ws_stream(self, channel: str) -> None:
-        if channel in self._bots_ws_tasks and not self._bots_ws_tasks[channel].done():
-            return
-        self._bots_ws_tasks[channel] = asyncio.create_task(
-            self._bots_ws_stream(channel)
-        )
-        logger.info("Started bots WS stream for %s", channel)
+        self._ensure_stream("bots_ws", channel)
 
     def _maybe_stop_bots_ws_stream(self, channel: str) -> None:
-        if self._has_subscribers(channel):
-            return
-        task = self._bots_ws_tasks.pop(channel, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Stopped bots WS stream for %s", channel)
+        self._maybe_stop_stream("bots_ws", channel)
 
     async def _bots_ws_stream(self, channel: str) -> None:
         """Stream all_bots_status from Hummingbot /ws/executors and update SDS cache."""
@@ -1744,23 +1786,10 @@ class WebSocketManager:
     # -- Positions WS streaming (via Hummingbot /ws/executors positions) --
 
     def _ensure_positions_ws_stream(self, channel: str) -> None:
-        if (
-            channel in self._positions_ws_tasks
-            and not self._positions_ws_tasks[channel].done()
-        ):
-            return
-        self._positions_ws_tasks[channel] = asyncio.create_task(
-            self._positions_ws_stream(channel)
-        )
-        logger.info("Started positions WS stream for %s", channel)
+        self._ensure_stream("positions_ws", channel)
 
     def _maybe_stop_positions_ws_stream(self, channel: str) -> None:
-        if self._has_subscribers(channel):
-            return
-        task = self._positions_ws_tasks.pop(channel, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Stopped positions WS stream for %s", channel)
+        self._maybe_stop_stream("positions_ws", channel)
 
     async def _positions_ws_stream(self, channel: str) -> None:
         """Stream positions from Hummingbot /ws/executors and update SDS cache."""
@@ -1836,23 +1865,10 @@ class WebSocketManager:
     # -- Performance WS streaming (via Hummingbot /ws/executors performance) --
 
     def _ensure_performance_ws_stream(self, channel: str) -> None:
-        if (
-            channel in self._performance_ws_tasks
-            and not self._performance_ws_tasks[channel].done()
-        ):
-            return
-        self._performance_ws_tasks[channel] = asyncio.create_task(
-            self._performance_ws_stream(channel)
-        )
-        logger.info("Started performance WS stream for %s", channel)
+        self._ensure_stream("performance_ws", channel)
 
     def _maybe_stop_performance_ws_stream(self, channel: str) -> None:
-        if self._has_subscribers(channel):
-            return
-        task = self._performance_ws_tasks.pop(channel, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Stopped performance WS stream for %s", channel)
+        self._maybe_stop_stream("performance_ws", channel)
 
     async def _performance_ws_stream(self, channel: str) -> None:
         """Stream performance from Hummingbot /ws/executors and update SDS cache."""
@@ -1919,23 +1935,10 @@ class WebSocketManager:
     # -- Controller Performance polling stream --
 
     def _ensure_controller_perf_stream(self, channel: str) -> None:
-        if (
-            channel in self._controller_perf_tasks
-            and not self._controller_perf_tasks[channel].done()
-        ):
-            return
-        self._controller_perf_tasks[channel] = asyncio.create_task(
-            self._controller_perf_stream(channel)
-        )
-        logger.info("Started controller performance stream for %s", channel)
+        self._ensure_stream("controller_perf", channel)
 
     def _maybe_stop_controller_perf_stream(self, channel: str) -> None:
-        if self._has_subscribers(channel):
-            return
-        task = self._controller_perf_tasks.pop(channel, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Stopped controller performance stream for %s", channel)
+        self._maybe_stop_stream("controller_perf", channel)
 
     async def _controller_perf_stream(self, channel: str) -> None:
         """Poll latest controller performance every 30s and broadcast snapshots."""
