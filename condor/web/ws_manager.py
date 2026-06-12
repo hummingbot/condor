@@ -818,7 +818,13 @@ class WebSocketManager:
             if channel in conn.channels:
                 try:
                     await self._send(conn, channel, data)
-                except Exception:
+                except Exception as e:
+                    logger.warning(
+                        "Broadcast send failed: channel=%s user=%s: %s",
+                        channel,
+                        conn.user_id,
+                        e,
+                    )
                     dead.append(conn)
         for conn in dead:
             self.disconnect(conn)
