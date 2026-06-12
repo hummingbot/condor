@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+from dataclasses import replace
 from pathlib import Path
 
-from routines.macdbb_replay.models import Filter4h, JournalSignal1h, TickMeta
+from routines.macdbb_replay.models import Filter4h, JournalSignal1h, TickMeta, BarrierCloseEvent
 
 _TICK_RE = re.compile(r"- tick#(\d+)\s+\|\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+\|")
 _DECISION_RE = re.compile(r"- \*\*#(\d+)\*\*.*")
@@ -57,6 +58,44 @@ _SIGNAL_TUPLE_RE = re.compile(
 _FILTER_4H_TUPLE_RE = re.compile(
     r"([A-Z0-9:-]+):tr=([^,]+)(?:,bb=([^,]+))?(?:,macd=([^,]+))?"
     r"(?:,sig=([^,]+))?(?:,hist=([^,]+))?,pass=([01])"
+)
+_MONITORED_PAIR_RE = re.compile(r"pair=([A-Z0-9:-]+)")
+_POSITION_PNL_RE = re.compile(r"position_pnl_snapshot=([-+]?[0-9.]+)")
+_BARRIER_CLOSE_TYPE_RE = re.compile(r"close_type=(STOP_LOSS|TAKE_PROFIT)", re.IGNORECASE)
+_BARRIER_PNL_RE = re.compile(r"pnl=([-+]?[0-9.]+)")
+_BOGUS_BARRIER_PAIR_BASES = frozenset(
+    {
+        "class",
+        "tick",
+        "between",
+        "entry",
+        "open",
+        "pair",
+        "hold",
+        "regime",
+        "adaptive",
+        "long",
+        "short",
+        "stop",
+        "loss",
+        "hit",
+    }
+)
+_BARRIER_CLOSE_FIELD_RE = re.compile(
+    r"barrier_close=([A-Z0-9:-]+):(STOP_LOSS|TAKE_PROFIT):pnl=([-+]?[0-9.]+)",
+    re.IGNORECASE,
+)
+_BARRIER_TABLE_RE = re.compile(
+    r"-\s*(?P<pair>[A-Z][A-Z0-9:-]+)\s+\d+\s*\|\s*(?P<close>STOP_LOSS|TAKE_PROFIT)\s*\|\s*PnL\s*\$?([-+]?[0-9.]+)",
+    re.IGNORECASE,
+)
+_BARRIER_HIT_RE = re.compile(
+    r"\b(?P<pair>[A-Z][A-Z0-9]{2,10})(?:-USD)?\s+hit\s+(?P<close>STOP_LOSS|TAKE_PROFIT)",
+    re.IGNORECASE,
+)
+_BARRIER_PAIR_HIT_BOLD_RE = re.compile(
+    r"\b(?P<pair>[A-Z][A-Z0-9]{2,10}-USD)\s+(?:LONG|SHORT)\s+hit\s+\*\*(?P<close>STOP_LOSS|TAKE_PROFIT)\*\*",
+    re.IGNORECASE,
 )
 
 
@@ -224,6 +263,115 @@ def _extract_entry_class_from_tick_narrative(line: str) -> str | None:
     return "hold"
 
 
+def _barrier_pair_allowed(pair: str) -> bool:
+    if not pair or not pair.endswith("-USD"):
+        return False
+    base = pair[:-4].lower()
+    return base not in _BOGUS_BARRIER_PAIR_BASES and len(base) >= 2
+
+
+def _barrier_pnl_from_tail(tail: str) -> float | None:
+    pnl_paren = re.search(r"\(-?\$?([0-9.]+)\)", tail)
+    if pnl_paren:
+        return -float(pnl_paren.group(1))
+    pnl_bold = re.search(r"PnL\s*\*\*(-?\$?([0-9.]+))\*\*", tail, re.IGNORECASE)
+    if pnl_bold:
+        token = pnl_bold.group(1).replace("$", "")
+        return float(token)
+    return None
+
+
+def _append_barrier_event(
+    events: list[BarrierCloseEvent],
+    seen: set[tuple[str, str]],
+    pair_raw: str,
+    close_type_raw: str,
+    pnl_quote: float | None,
+) -> None:
+    pair = _normalize_journal_pair_token(pair_raw)
+    close_type = close_type_raw.lower()
+    if not _barrier_pair_allowed(pair):
+        return
+    key = (pair, close_type)
+    if key in seen:
+        if pnl_quote is not None:
+            for index, event in enumerate(events):
+                if (
+                    event.pair == pair
+                    and event.close_type == close_type
+                    and event.pnl_quote is None
+                ):
+                    events[index] = BarrierCloseEvent(
+                        pair=pair,
+                        close_type=close_type,
+                        pnl_quote=pnl_quote,
+                    )
+                    break
+        return
+    seen.add(key)
+    events.append(
+        BarrierCloseEvent(
+            pair=pair,
+            close_type=close_type,
+            pnl_quote=pnl_quote,
+        )
+    )
+
+
+def _parse_barrier_events(line: str) -> list[BarrierCloseEvent]:
+    events: list[BarrierCloseEvent] = []
+    seen: set[tuple[str, str]] = set()
+
+    for match in _BARRIER_CLOSE_FIELD_RE.finditer(line):
+        _append_barrier_event(
+            events,
+            seen,
+            match.group(1),
+            match.group(2),
+            float(match.group(3)),
+        )
+
+    for match in _BARRIER_TABLE_RE.finditer(line):
+        _append_barrier_event(
+            events,
+            seen,
+            match.group("pair"),
+            match.group("close"),
+            float(match.group(3)),
+        )
+
+    close_type_match = _BARRIER_CLOSE_TYPE_RE.search(line)
+    pair_match = _MONITORED_PAIR_RE.search(line)
+    pnl_match = _BARRIER_PNL_RE.search(line)
+    if (
+        close_type_match
+        and pair_match
+        and "barrier_close" in line.lower()
+        and ",open" not in line.lower()
+    ):
+        pnl_quote = float(pnl_match.group(1)) if pnl_match else None
+        _append_barrier_event(
+            events,
+            seen,
+            pair_match.group(1),
+            close_type_match.group(1),
+            pnl_quote,
+        )
+
+    for pattern in (_BARRIER_HIT_RE, _BARRIER_PAIR_HIT_BOLD_RE):
+        for match in pattern.finditer(line):
+            tail = line[match.end() : match.end() + 120]
+            _append_barrier_event(
+                events,
+                seen,
+                match.group("pair"),
+                match.group("close"),
+                _barrier_pnl_from_tail(tail),
+            )
+
+    return events
+
+
 def _parse_decision_line(line: str, tick_time_map: dict[int, dt.datetime]) -> TickMeta | None:
     decision_match = _DECISION_RE.match(line)
     if not decision_match:
@@ -246,7 +394,14 @@ def _parse_decision_line(line: str, tick_time_map: dict[int, dt.datetime]) -> Ti
     queue_match = _QUEUE_TOTAL_RE.search(line)
     signals_match = _SIGNALS_1H_RE.search(line)
     filter_match = _FILTER_4H_RE.search(line)
+    monitored_match = _MONITORED_PAIR_RE.search(line)
+    pnl_snapshot_match = _POSITION_PNL_RE.search(line)
 
+    monitored_pair = (
+        _normalize_journal_pair_token(monitored_match.group(1))
+        if monitored_match
+        else None
+    )
     return TickMeta(
         tick=tick_number,
         timestamp=tick_time_map[tick_number],
@@ -260,6 +415,11 @@ def _parse_decision_line(line: str, tick_time_map: dict[int, dt.datetime]) -> Ti
         else [],
         signals_1h=_parse_signals_1h(signals_match.group(1)) if signals_match else {},
         filter_4h=_parse_filter_4h(filter_match.group(1)) if filter_match else {},
+        monitored_pair=monitored_pair or None,
+        position_pnl_snapshot=float(pnl_snapshot_match.group(1))
+        if pnl_snapshot_match
+        else None,
+        barrier_closes=_parse_barrier_events(line),
     )
 
 
@@ -425,7 +585,27 @@ def parse_journal_ticks(
                     queue_total=carried.queue_total,
                     signals_1h=carried.signals_1h,
                     filter_4h=carried.filter_4h,
+                    monitored_pair=carried.monitored_pair,
+                    position_pnl_snapshot=carried.position_pnl_snapshot,
+                    barrier_closes=list(carried.barrier_closes),
                 )
+
+    for tick_number, line in tick_header_lines.items():
+        meta = tick_meta_map.get(tick_number)
+        if meta is None:
+            continue
+        header_barriers = _parse_barrier_events(line)
+        if not header_barriers:
+            continue
+        merged = list(meta.barrier_closes)
+        seen = {(event.pair, event.close_type) for event in merged}
+        for event in header_barriers:
+            key = (event.pair, event.close_type)
+            if key in seen:
+                continue
+            merged.append(event)
+            seen.add(key)
+        tick_meta_map[tick_number] = replace(meta, barrier_closes=merged)
 
     return tick_meta_map
 
@@ -461,9 +641,25 @@ def enrich_ticks_from_snapshots(
                     parsed.neutral_pressure_streak is not None
                     and existing.neutral_pressure_streak is None
                 )
+                or (
+                    parsed.position_pnl_snapshot is not None
+                    and existing.position_pnl_snapshot is None
+                )
+                or (
+                    parsed.monitored_pair
+                    and not existing.monitored_pair
+                )
             )
             if not use_snapshot:
                 continue
+            merged_barriers = list(existing.barrier_closes)
+            seen = {(event.pair, event.close_type) for event in merged_barriers}
+            for event in parsed.barrier_closes:
+                key = (event.pair, event.close_type)
+                if key in seen:
+                    continue
+                merged_barriers.append(event)
+                seen.add(key)
             enriched[parsed.tick] = TickMeta(
                 tick=parsed.tick,
                 timestamp=existing.timestamp,
@@ -481,6 +677,13 @@ def enrich_ticks_from_snapshots(
                 queue_total=parsed.queue_total or existing.queue_total,
                 signals_1h=parsed.signals_1h or existing.signals_1h,
                 filter_4h={**existing.filter_4h, **parsed.filter_4h},
+                monitored_pair=parsed.monitored_pair or existing.monitored_pair,
+                position_pnl_snapshot=(
+                    parsed.position_pnl_snapshot
+                    if parsed.position_pnl_snapshot is not None
+                    else existing.position_pnl_snapshot
+                ),
+                barrier_closes=merged_barriers,
             )
 
     return enriched

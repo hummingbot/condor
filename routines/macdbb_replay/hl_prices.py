@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HlPriceCache = dict[tuple[str, int], float]
+HlCandleCache = dict[str, list[dict[str, float]]]
+ReplayHlPrefetch = tuple[dict[int, HlPriceCache], HlCandleCache]
 
 _INTERVAL_MAX_DELTA_MS: dict[str, int] = {
     "1m": 45 * 60 * 1000,
@@ -91,15 +93,75 @@ def _aggregate_pair_requests(
 ) -> dict[str, list[tuple[int, int, dt.datetime, str]]]:
     """Canonical pair -> [(session_num, tick_num, tick_time, journal_pair), ...]."""
     pair_requests: dict[str, list[tuple[int, int, dt.datetime, str]]] = {}
+    session_pairs: dict[int, set[str]] = {}
+    session_ticks: dict[int, list[tuple[int, dt.datetime]]] = {}
+
     for session_num, tick_meta_map in session_tick_maps.items():
-        for tick_num, meta in tick_meta_map.items():
-            journal_pairs = set(meta.macd_pairs) | set(meta.queue_total) | set(meta.signals_1h)
-            for journal_pair in journal_pairs:
-                canonical = _canonical_trading_pair(journal_pair)
+        pairs: set[str] = set()
+        ticks: list[tuple[int, dt.datetime]] = []
+        for tick_num, meta in sorted(tick_meta_map.items()):
+            ticks.append((tick_num, meta.timestamp))
+            pairs.update(_tick_pairs(meta))
+        session_pairs[session_num] = pairs
+        session_ticks[session_num] = ticks
+
+    for session_num, pairs in session_pairs.items():
+        ticks = session_ticks[session_num]
+        for canonical in sorted(pairs):
+            journal_pair = canonical
+            for tick_num, tick_time in ticks:
                 pair_requests.setdefault(canonical, []).append(
-                    (session_num, tick_num, meta.timestamp, journal_pair)
+                    (session_num, tick_num, tick_time, journal_pair)
                 )
     return pair_requests
+
+
+def scan_barriers_between(
+    candles: list[dict[str, float]],
+    start: dt.datetime,
+    end: dt.datetime,
+    side: str,
+    entry_price: float,
+    sl_pct: float,
+    tp_pct: float,
+) -> tuple[str, float] | None:
+    """Return (exit_reason, barrier_price) for the first SL/TP hit in (start, end]."""
+    if entry_price <= 0 or not candles:
+        return None
+
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+    sl_threshold = sl_pct / 100.0
+    tp_threshold = tp_pct / 100.0
+
+    if side == "long":
+        sl_price = entry_price * (1.0 - sl_threshold)
+        tp_price = entry_price * (1.0 + tp_threshold)
+    else:
+        sl_price = entry_price * (1.0 + sl_threshold)
+        tp_price = entry_price * (1.0 - tp_threshold)
+
+    window = [
+        candle
+        for candle in candles
+        if "timestamp_ms" in candle and start_ms < int(candle["timestamp_ms"]) <= end_ms
+    ]
+    window.sort(key=lambda candle: int(candle["timestamp_ms"]))
+
+    for candle in window:
+        low = float(candle["low"])
+        high = float(candle["high"])
+        if side == "long":
+            if low <= sl_price:
+                return ("stop_loss_close_proxy", sl_price)
+            if high >= tp_price:
+                return ("take_profit_close_proxy", tp_price)
+        else:
+            if high >= sl_price:
+                return ("stop_loss_close_proxy", sl_price)
+            if low <= tp_price:
+                return ("take_profit_close_proxy", tp_price)
+    return None
 
 
 def hl_cache_has_prices(
@@ -128,10 +190,10 @@ async def prefetch_replay_hl_prices(
     session_tick_maps: dict[int, dict[int, TickMeta]],
     *,
     settings: HlPrefetchSettings | None = None,
-) -> dict[int, HlPriceCache]:
+) -> ReplayHlPrefetch:
     """Fetch each unique pair once and fan out prices to per-session caches."""
     if not session_tick_maps:
-        return {}
+        return {}, {}
 
     opts = settings or HlPrefetchSettings()
     _configure_hl_throttle(opts)
@@ -145,12 +207,12 @@ async def prefetch_replay_hl_prices(
 
     pair_requests = _aggregate_pair_requests(session_tick_maps)
     if not pair_requests:
-        return {session_num: {} for session_num in session_tick_maps}
+        return {session_num: {} for session_num in session_tick_maps}, {}
 
     session_caches: dict[int, HlPriceCache] = {
         session_num: {} for session_num in session_tick_maps
     }
-    pair_candles: dict[str, list[dict[str, float]]] = {}
+    pair_candles: HlCandleCache = {}
     semaphore = asyncio.Semaphore(max(1, opts.max_concurrent))
     pairs_sorted = sorted(pair_requests)
 
@@ -215,12 +277,13 @@ async def prefetch_replay_hl_prices(
 
     total_prices = sum(len(cache) for cache in session_caches.values())
     logger.info(
-        "HL replay prefetch: %d prices across %d sessions (%d unique pairs)",
+        "HL replay prefetch: %d prices across %d sessions (%d unique pairs, %d candle series)",
         total_prices,
         len(session_tick_maps),
         len(pair_requests),
+        len(pair_candles),
     )
-    return session_caches
+    return session_caches, pair_candles
 
 
 async def prefetch_session_hl_prices(
@@ -240,5 +303,5 @@ async def prefetch_session_hl_prices(
         request_interval_ms=request_interval_ms,
         max_retries=max_retries,
     )
-    caches = await prefetch_replay_hl_prices({0: tick_meta_map}, settings=settings)
+    caches, _ = await prefetch_replay_hl_prices({0: tick_meta_map}, settings=settings)
     return caches.get(0, {})

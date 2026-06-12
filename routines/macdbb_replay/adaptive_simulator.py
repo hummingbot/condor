@@ -204,8 +204,6 @@ def simulate_adaptive_session(
                     and bool(metrics["formal_long"])
                 ):
                     exit_reason = "opposite_formal"
-                elif hold_ticks >= config.max_holding_ticks:
-                    exit_reason = "max_holding_ticks"
 
                 if exit_reason:
                     simulated_trades.append(

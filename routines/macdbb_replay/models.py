@@ -52,6 +52,13 @@ class Filter4h:
     passed: bool = False
 
 
+@dataclass(frozen=True)
+class BarrierCloseEvent:
+    pair: str
+    close_type: str
+    pnl_quote: float | None = None
+
+
 @dataclass
 class TickMeta:
     tick: int
@@ -64,6 +71,9 @@ class TickMeta:
     queue_total: list[str] = field(default_factory=list)
     signals_1h: dict[str, JournalSignal1h] = field(default_factory=dict)
     filter_4h: dict[str, Filter4h] = field(default_factory=dict)
+    monitored_pair: str | None = None
+    position_pnl_snapshot: float | None = None
+    barrier_closes: list[BarrierCloseEvent] = field(default_factory=list)
 
 
 @dataclass
@@ -210,10 +220,6 @@ class ReplayConfigBase(BaseModel):
     )
     sl_pct: float = Field(default=1.5)
     tp_pct: float = Field(default=3.0)
-    max_holding_ticks: int = Field(
-        default=8,
-        description="Force-close after this many ticks if still open",
-    )
     write_csv: bool = Field(default=True)
     compare_journal_flags: bool = Field(
         default=False,

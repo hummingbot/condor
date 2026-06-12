@@ -8,6 +8,7 @@ from routines.macdbb_replay.metrics import (
     parsed_report_from_journal,
 )
 from routines.macdbb_replay.models import (
+    JournalSignal1h,
     ParsedReport,
     ReplayConfigBase,
     SignalSnapshot,
@@ -21,6 +22,16 @@ from routines.macdbb_replay.reports import (
 )
 
 _JOURNAL_PLACEHOLDER_PRICE = 100.0
+
+
+def _journal_price_is_plausible(journal_signal: JournalSignal1h, price: float) -> bool:
+    if price <= 0:
+        return False
+    if journal_signal.bb_mid and journal_signal.bb_mid > 0:
+        ratio = price / journal_signal.bb_mid
+        if ratio > 5.0 or ratio < 0.2:
+            return False
+    return True
 
 
 def _resolve_price(
@@ -129,6 +140,8 @@ def resolve_snapshot(
     config: ReplayConfigBase,
     last_price_by_pair: dict[str, float],
     hl_price_cache: HlPriceCache | None = None,
+    last_signal_by_pair: dict[str, JournalSignal1h] | None = None,
+    monitor_pair: bool = False,
 ) -> SignalSnapshot | None:
     report_meta_1h = nearest_report(
         reports_by_pair,
@@ -139,6 +152,10 @@ def resolve_snapshot(
     )
     parsed_html = load_parsed_report(report_meta_1h) if report_meta_1h else None
     journal_signal = meta.signals_1h.get(pair)
+    carried_signal = False
+    if journal_signal is None and monitor_pair and last_signal_by_pair:
+        journal_signal = last_signal_by_pair.get(pair)
+        carried_signal = journal_signal is not None
 
     use_journal = (
         config.data_source in ("journal_first", "journal_recompute")
@@ -159,13 +176,27 @@ def resolve_snapshot(
 
     if use_journal and journal_signal is not None:
         journal_price = journal_signal.price
-        if price <= 0 and journal_price is not None and journal_price > 0:
+        if (
+            price <= 0
+            and journal_price is not None
+            and journal_price > 0
+            and _journal_price_is_plausible(journal_signal, journal_price)
+        ):
             price = journal_price
+            if price_tag != "hl":
+                price_trusted = True
+                price_tag = price_tag or "journal"
         if price <= 0:
-            if config.require_price_data:
+            carried_price = last_price_by_pair.get(pair, 0.0)
+            if carried_price > 0:
+                price = carried_price
+                price_trusted = True
+                price_tag = price_tag or "carried"
+            elif config.require_price_data and not monitor_pair:
                 return None
-            price = last_price_by_pair.get(pair, _JOURNAL_PLACEHOLDER_PRICE)
-            price_trusted = False
+            else:
+                price = carried_price or _JOURNAL_PLACEHOLDER_PRICE
+                price_trusted = monitor_pair and carried_price > 0
         last_price_by_pair[pair] = price
         bb_mid = (
             journal_signal.bb_mid
@@ -191,7 +222,7 @@ def resolve_snapshot(
             bullish_cross=cross_long,
             bearish_cross=cross_short,
         )
-        metrics = compute_metrics(parsed, config)
+        metrics = compute_metrics(parsed, config, journal_signal=journal_signal)
         full_band_telemetry = journal_signal.has_replay_bands()
         if config.data_source == "journal_first":
             metrics["formal_long"] = journal_signal.formal_long
@@ -222,7 +253,10 @@ def resolve_snapshot(
             metrics["adaptive_short_open"] = (
                 bool(metrics["adaptive_short_open"]) and not metrics["has_formal"]
             )
-        source = "journal+hl" if price_tag == "hl" else "journal"
+        if carried_signal:
+            source = "carried+hl" if price_tag == "hl" else "carried"
+        else:
+            source = "journal+hl" if price_tag == "hl" else "journal"
     elif parsed_html is not None:
         parsed = parsed_html
         if price <= 0:
@@ -276,12 +310,14 @@ def build_tick_snapshots(
     last_price_by_pair: dict[str, float],
     extra_pairs: list[str] | None = None,
     hl_price_cache: HlPriceCache | None = None,
+    last_signal_by_pair: dict[str, JournalSignal1h] | None = None,
 ) -> dict[str, SignalSnapshot]:
     pairs = list(meta.macd_pairs)
     if meta.queue_total:
         for pair in meta.queue_total:
             if pair not in pairs:
                 pairs.append(pair)
+    monitor_pairs: set[str] = set(extra_pairs or [])
     if extra_pairs:
         for pair in extra_pairs:
             if pair not in pairs:
@@ -296,6 +332,8 @@ def build_tick_snapshots(
             config,
             last_price_by_pair,
             hl_price_cache=hl_price_cache,
+            last_signal_by_pair=last_signal_by_pair,
+            monitor_pair=pair in monitor_pairs,
         )
         if snapshot is not None:
             snapshots[pair] = snapshot

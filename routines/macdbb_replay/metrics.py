@@ -63,14 +63,33 @@ def parsed_report_from_journal(
     )
 
 
-def compute_metrics(
-    parsed: ParsedReport, config: ReplayConfigBase
-) -> dict[str, float | bool]:
-    epsilon = config.bb_proximity_epsilon_pct
+def _effective_macd_ratios(
+    parsed: ParsedReport,
+    journal_signal: JournalSignal1h | None,
+) -> tuple[float, float]:
     macd_gap_ratio = abs(parsed.macd - parsed.signal_line) / max(
         abs(parsed.signal_line), 1e-6
     )
     hist_ratio = abs(parsed.histogram) / max(abs(parsed.macd), 1e-6)
+    if journal_signal is None:
+        return macd_gap_ratio, hist_ratio
+
+    # Journal logs precomputed gap/hr; raw macd/sig/hist round to 0 on micro-price pairs.
+    if journal_signal.macd_gap_ratio > 0:
+        macd_gap_ratio = journal_signal.macd_gap_ratio
+    if journal_signal.hist_ratio > 0:
+        hist_ratio = journal_signal.hist_ratio
+    return macd_gap_ratio, hist_ratio
+
+
+def compute_metrics(
+    parsed: ParsedReport,
+    config: ReplayConfigBase,
+    *,
+    journal_signal: JournalSignal1h | None = None,
+) -> dict[str, float | bool]:
+    epsilon = config.bb_proximity_epsilon_pct
+    macd_gap_ratio, hist_ratio = _effective_macd_ratios(parsed, journal_signal)
 
     price_le_mid = _price_at_or_below_mid(parsed, epsilon)
     price_ge_upper = _price_at_or_above_upper(parsed, epsilon)

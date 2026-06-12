@@ -179,8 +179,9 @@ async def run(
         parsed_sessions[session_num] = tick_meta_map
 
     hl_caches_by_session: dict[int, dict[tuple[str, int], float]] = {}
+    hl_candle_cache: dict[str, list[dict[str, float]]] = {}
     if config.price_source in ("auto", "hl_candles") and parsed_sessions:
-        hl_caches_by_session = await prefetch_replay_hl_prices(
+        hl_caches_by_session, hl_candle_cache = await prefetch_replay_hl_prices(
             parsed_sessions,
             settings=hl_prefetch_settings_from_config(config),
         )
@@ -194,6 +195,7 @@ async def run(
             reports_by_pair=reports_by_pair,
             config=config,
             hl_price_cache=hl_price_cache,
+            hl_candle_cache=hl_candle_cache,
         )
         status = summary.get("status", "ok")
         if status == "skipped_no_price_data":

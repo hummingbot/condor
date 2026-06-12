@@ -4,6 +4,7 @@ import datetime as dt
 from typing import Any
 
 from routines.macdbb_replay.models import (
+    JournalSignal1h,
     OpenPosition,
     SimTrade,
     StrategyReplayConfig,
@@ -11,6 +12,7 @@ from routines.macdbb_replay.models import (
     compute_return_pct,
 )
 from routines.macdbb_replay.reports import ReportMeta
+from routines.macdbb_replay.hl_prices import HlCandleCache, scan_barriers_between
 from routines.macdbb_replay.signals import (
     build_tick_snapshots,
     filter_4h_allows,
@@ -136,22 +138,148 @@ def _snapshot_row(
     return row
 
 
-def _update_simulated_streak(
-    meta: TickMeta,
+def _advance_simulated_streak(
     snapshots: dict[str, Any],
     current_streak: int,
     open_position_count: int,
+    opened_this_tick: bool,
 ) -> int:
-    if meta.neutral_pressure_streak is not None:
-        return meta.neutral_pressure_streak
+    if opened_this_tick:
+        return 0
     if open_position_count > 0:
         return current_streak
     if not snapshots:
         return current_streak
-    all_neutral = all(item.signal == "NEUTRAL" for item in snapshots.values())
-    if all_neutral:
+    if all(item.signal == "NEUTRAL" for item in snapshots.values()):
         return current_streak + 1
-    return current_streak
+    return 0
+
+
+def _canonical_trading_pair(pair: str) -> str:
+    if "-" in pair:
+        return pair
+    return f"{pair}-USD"
+
+
+def _exit_price_from_pnl(position: OpenPosition, pnl_quote: float) -> float:
+    return_pct = pnl_quote / position.notional_quote
+    if position.side == "long":
+        return position.entry_price * (1.0 + return_pct)
+    return position.entry_price * (1.0 - return_pct)
+
+
+def _monitor_mark_price(
+    position: OpenPosition,
+    meta: TickMeta,
+    snapshot_price: float,
+) -> float:
+    if (
+        meta.monitored_pair == position.pair
+        and meta.position_pnl_snapshot is not None
+        and position.notional_quote > 0
+    ):
+        return _exit_price_from_pnl(position, meta.position_pnl_snapshot)
+    return snapshot_price
+
+
+def _apply_journal_barrier_closes(
+    session_num: int,
+    tick: int,
+    meta: TickMeta,
+    open_positions: dict[str, OpenPosition],
+    simulated_trades: list[SimTrade],
+    closes_this_tick: list[str],
+    sl_cooldown_until: dict[str, int],
+    config: StrategyReplayConfig,
+) -> None:
+    for event in meta.barrier_closes:
+        position = open_positions.get(event.pair)
+        if position is None:
+            continue
+        if event.close_type == "stop_loss":
+            exit_reason = "stop_loss_close_proxy"
+        elif event.close_type == "take_profit":
+            exit_reason = "take_profit_close_proxy"
+        else:
+            continue
+        if event.pnl_quote is not None:
+            exit_price = _exit_price_from_pnl(position, event.pnl_quote)
+        elif exit_reason == "stop_loss_close_proxy":
+            sl = config.sl_pct / 100.0
+            exit_price = (
+                position.entry_price * (1.0 - sl)
+                if position.side == "long"
+                else position.entry_price * (1.0 + sl)
+            )
+        else:
+            tp = config.tp_pct / 100.0
+            exit_price = (
+                position.entry_price * (1.0 + tp)
+                if position.side == "long"
+                else position.entry_price * (1.0 - tp)
+            )
+        simulated_trades.append(
+            _close_trade(
+                session_num,
+                position,
+                tick,
+                exit_price,
+                exit_reason,
+            )
+        )
+        closes_this_tick.append(f"{event.pair}:{exit_reason}")
+        del open_positions[event.pair]
+        if exit_reason == "stop_loss_close_proxy":
+            sl_cooldown_until[event.pair] = tick + config.sl_cooldown_ticks
+
+
+def _apply_intrabar_barriers(
+    session_num: int,
+    tick: int,
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    open_positions: dict[str, OpenPosition],
+    simulated_trades: list[SimTrade],
+    closes_this_tick: list[str],
+    sl_cooldown_until: dict[str, int],
+    config: StrategyReplayConfig,
+    hl_candle_cache: HlCandleCache | None,
+) -> None:
+    if not hl_candle_cache:
+        return
+    for pair in list(open_positions.keys()):
+        position = open_positions[pair]
+        candles = hl_candle_cache.get(_canonical_trading_pair(pair))
+        if not candles:
+            continue
+        scan_start = max(window_start, position.entry_time)
+        if scan_start >= window_end:
+            continue
+        hit = scan_barriers_between(
+            candles,
+            scan_start,
+            window_end,
+            position.side,
+            position.entry_price,
+            config.sl_pct,
+            config.tp_pct,
+        )
+        if hit is None:
+            continue
+        exit_reason, exit_price = hit
+        simulated_trades.append(
+            _close_trade(
+                session_num,
+                position,
+                tick,
+                exit_price,
+                exit_reason,
+            )
+        )
+        closes_this_tick.append(f"{pair}:{exit_reason}")
+        del open_positions[pair]
+        if exit_reason == "stop_loss_close_proxy":
+            sl_cooldown_until[pair] = tick + config.sl_cooldown_ticks
 
 
 def _scanner_allows_entries(meta: TickMeta, config: StrategyReplayConfig) -> bool:
@@ -183,6 +311,7 @@ def simulate_strategy_session(
     reports_by_pair: dict[str, list[ReportMeta]],
     config: StrategyReplayConfig,
     hl_price_cache: dict[tuple[str, int], float] | None = None,
+    hl_candle_cache: HlCandleCache | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[SimTrade], dict[str, Any]]:
     if config.require_price_data and not session_has_trusted_prices(
         tick_meta_map,
@@ -200,15 +329,18 @@ def simulate_strategy_session(
     sl_cooldown_until: dict[str, int] = {}
     flip_cooldown_until: dict[str, int] = {}
     last_price_by_pair: dict[str, float] = {}
+    last_signal_by_pair: dict[str, JournalSignal1h] = {}
     last_seen_by_pair: dict[str, tuple[int, float]] = {}
     simulated_streak = 0
 
     sl_threshold = config.sl_pct / 100.0
     tp_threshold = config.tp_pct / 100.0
     adaptive_notional = _adaptive_notional(config)
+    sorted_ticks = sorted(tick_meta_map)
 
-    for tick in sorted(tick_meta_map):
+    for tick_index, tick in enumerate(sorted_ticks):
         meta = tick_meta_map[tick]
+        entry_streak = simulated_streak
         extra_pairs = list(open_positions.keys())
         snapshots = build_tick_snapshots(
             meta,
@@ -217,37 +349,105 @@ def simulate_strategy_session(
             last_price_by_pair,
             extra_pairs=extra_pairs,
             hl_price_cache=hl_price_cache,
+            last_signal_by_pair=last_signal_by_pair,
         )
+        for pair, signal in meta.signals_1h.items():
+            last_signal_by_pair[pair] = signal
         for pair, snapshot in snapshots.items():
             if snapshot.price_trusted:
                 last_seen_by_pair[pair] = (tick, snapshot.price)
+        for pair, position in open_positions.items():
+            if (
+                meta.monitored_pair == pair
+                and meta.position_pnl_snapshot is not None
+                and position.notional_quote > 0
+            ):
+                last_seen_by_pair[pair] = (
+                    tick,
+                    _exit_price_from_pnl(position, meta.position_pnl_snapshot),
+                )
 
-        simulated_streak = _update_simulated_streak(
-            meta, snapshots, simulated_streak, len(open_positions)
-        )
         tick_actions: list[str] = []
         closes_this_tick: list[str] = []
         opens_this_tick: list[str] = []
+
+        if tick_index > 0:
+            prev_tick = sorted_ticks[tick_index - 1]
+            prev_meta = tick_meta_map[prev_tick]
+            _apply_journal_barrier_closes(
+                session_num,
+                tick,
+                meta,
+                open_positions,
+                simulated_trades,
+                closes_this_tick,
+                sl_cooldown_until,
+                config,
+            )
+            _apply_intrabar_barriers(
+                session_num,
+                tick,
+                prev_meta.timestamp,
+                meta.timestamp,
+                open_positions,
+                simulated_trades,
+                closes_this_tick,
+                sl_cooldown_until,
+                config,
+                hl_candle_cache,
+            )
+        elif meta.barrier_closes:
+            _apply_journal_barrier_closes(
+                session_num,
+                tick,
+                meta,
+                open_positions,
+                simulated_trades,
+                closes_this_tick,
+                sl_cooldown_until,
+                config,
+            )
 
         # Step 5 + barriers on RUNNING legs
         for pair in list(open_positions.keys()):
             position = open_positions[pair]
             snapshot = snapshots.get(pair)
-            if snapshot is None or not snapshot.price_trusted:
+            mark_price: float | None = None
+            metrics = None
+            snapshot_signal = "NEUTRAL"
+            filter_trend = None
+            filter_pass = None
+
+            if snapshot is not None:
+                metrics = snapshot.metrics
+                snapshot_signal = snapshot.signal
+                filter_trend = snapshot.filter_4h_trend
+                filter_pass = snapshot.filter_4h_pass
+                if snapshot.price_trusted:
+                    mark_price = _monitor_mark_price(position, meta, snapshot.price)
+                elif (
+                    meta.monitored_pair == pair
+                    and meta.position_pnl_snapshot is not None
+                    and position.notional_quote > 0
+                ):
+                    mark_price = _monitor_mark_price(
+                        position, meta, position.entry_price
+                    )
+            else:
                 continue
-            metrics = snapshot.metrics
+
+            if mark_price is None or metrics is None:
+                continue
+
             current_return_pct = compute_return_pct(
-                position.side, position.entry_price, snapshot.price
+                position.side, position.entry_price, mark_price
             )
-            hold_ticks = tick - position.entry_tick
             exit_reason = ""
 
             if current_return_pct <= -sl_threshold:
                 exit_reason = "stop_loss_close_proxy"
             elif current_return_pct >= tp_threshold:
                 exit_reason = "take_profit_close_proxy"
-            elif hold_ticks >= config.max_holding_ticks:
-                exit_reason = "max_holding_ticks"
 
             if not exit_reason:
                 opposite_formal = (
@@ -264,7 +464,7 @@ def simulate_strategy_session(
                     position.monitor_state = "aligned"
 
             if not exit_reason:
-                if snapshot.signal == "NEUTRAL":
+                if snapshot_signal == "NEUTRAL":
                     position.neutral_streak += 1
                     position.monitor_state = "neutral_counting"
                 elif (
@@ -286,7 +486,7 @@ def simulate_strategy_session(
                         session_num,
                         position,
                         tick,
-                        snapshot.price,
+                        mark_price,
                         exit_reason,
                     )
                 )
@@ -302,8 +502,8 @@ def simulate_strategy_session(
                         len(open_positions) < config.max_open_executors
                         and filter_4h_allows(
                             reverse_side,
-                            snapshot.filter_4h_trend,
-                            snapshot.filter_4h_pass,
+                            filter_trend,
+                            filter_pass,
                         )
                         and config.entry_modes in {"all", "formal"}
                     ):
@@ -315,17 +515,16 @@ def simulate_strategy_session(
                             entry_time=meta.timestamp,
                             pair=pair,
                             side=reverse_side,
-                            entry_price=snapshot.price,
+                            entry_price=mark_price,
                             entry_class="formal",
                             entry_trigger=reverse_trigger,
                             notional_quote=config.formal_notional_quote,
                             entry_score_long=float(metrics["adaptive_strength_long"]),
                             entry_score_short=float(metrics["adaptive_strength_short"]),
-                            entry_neutral_streak=simulated_streak,
+                            entry_neutral_streak=entry_streak,
                             entry_price_trusted=True,
                         )
                         opens_this_tick.append(reverse_trigger)
-                        simulated_streak = 0
 
         # Step 4 entries
         entries_allowed = _scanner_allows_entries(meta, config)
@@ -357,6 +556,7 @@ def simulate_strategy_session(
                         elif (
                             snapshot.price_trusted
                             and len(open_positions) < config.max_open_executors
+                            and not blockers
                         ):
                             formal_candidates.append((pair, "long", snapshot))
                     if bool(metrics["formal_short"]):
@@ -369,6 +569,7 @@ def simulate_strategy_session(
                         elif (
                             snapshot.price_trusted
                             and len(open_positions) < config.max_open_executors
+                            and not blockers
                         ):
                             formal_candidates.append((pair, "short", snapshot))
 
@@ -381,10 +582,23 @@ def simulate_strategy_session(
                     meta.tradeable_count is None
                     or meta.tradeable_count >= config.min_tradeable_count
                 )
+                barrier_reentry_this_tick = any(
+                    token.endswith(
+                        (
+                            ":stop_loss_close_proxy",
+                            ":take_profit_close_proxy",
+                        )
+                    )
+                    for token in closes_this_tick
+                )
+                adaptive_streak_ok = (
+                    entry_streak >= config.activation_ticks
+                    or barrier_reentry_this_tick
+                )
                 if (
                     config.entry_modes in {"all", "adaptive"}
                     and adaptive_flat_ok
-                    and simulated_streak >= config.activation_ticks
+                    and adaptive_streak_ok
                     and tradeable_ok
                 ):
                     if bool(metrics["adaptive_long_open"]):
@@ -395,7 +609,7 @@ def simulate_strategy_session(
                             config,
                         ):
                             blockers.append("4h_filter_block_long")
-                        elif snapshot.price_trusted:
+                        elif snapshot.price_trusted and not blockers:
                             adaptive_candidates.append((pair, "long", snapshot))
                     if bool(metrics["adaptive_short_open"]):
                         if not _adaptive_4h_allows(
@@ -405,7 +619,7 @@ def simulate_strategy_session(
                             config,
                         ):
                             blockers.append("4h_filter_block_short")
-                        elif snapshot.price_trusted:
+                        elif snapshot.price_trusted and not blockers:
                             adaptive_candidates.append((pair, "short", snapshot))
 
                 per_pair_rows.append(
@@ -438,11 +652,10 @@ def simulate_strategy_session(
                     notional_quote=config.formal_notional_quote,
                     entry_score_long=float(metrics["adaptive_strength_long"]),
                     entry_score_short=float(metrics["adaptive_strength_short"]),
-                    entry_neutral_streak=simulated_streak,
+                    entry_neutral_streak=entry_streak,
                     entry_price_trusted=True,
                 )
                 opens_this_tick.append(trigger)
-                simulated_streak = 0
 
             if not opens_this_tick and adaptive_candidates:
                 ranked = sorted(
@@ -468,11 +681,10 @@ def simulate_strategy_session(
                     notional_quote=adaptive_notional,
                     entry_score_long=float(metrics["adaptive_strength_long"]),
                     entry_score_short=float(metrics["adaptive_strength_short"]),
-                    entry_neutral_streak=simulated_streak,
+                    entry_neutral_streak=entry_streak,
                     entry_price_trusted=True,
                 )
                 opens_this_tick.append(trigger)
-                simulated_streak = 0
         else:
             for pair, snapshot in snapshots.items():
                 per_pair_rows.append(
@@ -506,6 +718,13 @@ def simulate_strategy_session(
             tick_actions.extend([f"close:{action}" for action in closes_this_tick])
         if not tick_actions:
             tick_actions = ["hold"]
+
+        simulated_streak = _advance_simulated_streak(
+            snapshots,
+            simulated_streak,
+            len(open_positions),
+            bool(opens_this_tick),
+        )
 
         per_tick_rows.append(
             {
