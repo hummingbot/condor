@@ -162,8 +162,19 @@ class WebSocketManager:
         self._last_candle_ws_update: dict[str, float] = {}
         # Track whether first message per channel has been logged
         self._candle_first_msg_logged: set[str] = set()
+        # Strong refs to fire-and-forget one-shot tasks (backfill, warm cache)
+        # so the GC can't cancel them mid-flight (the event loop only keeps a
+        # weak reference). Entries auto-remove on completion.
+        self._oneshot_tasks: set[asyncio.Task] = set()
 
     # -- Helpers --
+
+    def _track_oneshot(self, task: asyncio.Task) -> None:
+        """Keep a strong reference to a fire-and-forget task until it finishes,
+        so the GC can't silently cancel it (the event loop only holds a weak
+        reference). The reference is dropped automatically on completion."""
+        self._oneshot_tasks.add(task)
+        task.add_done_callback(self._oneshot_tasks.discard)
 
     @staticmethod
     def _normalize_candle(c: Any) -> dict | None:
@@ -267,6 +278,13 @@ class WebSocketManager:
             if not task.done():
                 task.cancel()
         self._controller_perf_tasks.clear()
+
+        # Cancel any still-pending one-shot tasks (snapshot: cancel() fires the
+        # done-callback that mutates the set).
+        for task in list(self._oneshot_tasks):
+            if not task.done():
+                task.cancel()
+        self._oneshot_tasks.clear()
 
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
@@ -453,7 +471,9 @@ class WebSocketManager:
                 old_max = buf.max_size
                 buf.set_duration(dur)
                 if buf.max_size > old_max and buf.needs_backfill:
-                    asyncio.create_task(self._backfill_candles(channel))
+                    self._track_oneshot(
+                        asyncio.create_task(self._backfill_candles(channel))
+                    )
 
         # Send buffered candles as initial snapshot
         sorted_candles = buf.get_sorted()
@@ -600,7 +620,9 @@ class WebSocketManager:
             if prefix == "portfolio":
                 from condor.web.routes.portfolio import warm_portfolio_history
 
-                asyncio.create_task(warm_portfolio_history(server_name))
+                self._track_oneshot(
+                    asyncio.create_task(warm_portfolio_history(server_name))
+                )
         except Exception as e:
             logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
 
