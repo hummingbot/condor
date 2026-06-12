@@ -168,12 +168,20 @@ class SimTrade:
 class ReplayConfigBase(BaseModel):
     """Shared threshold and simulation settings for MACD+BB replay."""
 
-    preset: Literal["custom", "safe", "balanced", "opportunistic", "replay_probe"] = (
+    preset: Literal[
+        "custom",
+        "safe",
+        "balanced",
+        "opportunistic",
+        "replay_probe",
+        "hl_sweep_best",
+    ] = (
         Field(
-            default="balanced",
+            default="hl_sweep_best",
             description=(
                 "Adaptive threshold profile. Preset applies its adaptive_* values "
-                "at run time (overrides those form fields). Use custom to tune manually."
+                "at run time (overrides those form fields). Use custom to tune manually. "
+                "hl_sweep_best = sessions 36-48 sweep winner (sl2.4/tp10/ne32)."
             ),
         )
     )

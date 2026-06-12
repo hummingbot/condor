@@ -67,11 +67,16 @@ _INTERVAL_MS: dict[str, int] = {
 }
 
 
+# Journal/scanner pair base -> Hyperliquid candleSnapshot coin (when they differ).
+_HL_COIN_ALIASES: dict[str, str] = {
+    "PEPE": "kPEPE",
+}
+
+
 def trading_pair_to_hl_coin(trading_pair: str) -> str:
-    """Map connector pair to HL coin (ZEC-USD -> ZEC, ABCD:FOO-USD -> ABCD:FOO)."""
-    if "-" in trading_pair:
-        return trading_pair.rsplit("-", 1)[0]
-    return trading_pair
+    """Map connector pair to HL coin (ZEC-USD -> ZEC, PEPE-USD -> kPEPE)."""
+    base = trading_pair.rsplit("-", 1)[0] if "-" in trading_pair else trading_pair
+    return _HL_COIN_ALIASES.get(base, base)
 
 
 _MAX_CHUNK_BARS = 2000

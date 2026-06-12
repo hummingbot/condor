@@ -72,6 +72,14 @@ class MacdbbScannerAggressiveHlParams(BaseModel):
         description="Skip mandatory 4h filter for adaptive entries only (formal still requires 4h)",
         json_schema_extra={"group": "Adaptive mode"},
     )
+    adaptive_requires_flat: bool | None = Field(
+        default=None,
+        description=(
+            "When true, adaptive entries require 0 RUNNING executors; "
+            "when false, allow adaptive opens while slots remain under max_open_executors"
+        ),
+        json_schema_extra={"group": "Adaptive mode"},
+    )
     sl_symbol_cooldown_hours: float | None = Field(
         default=None,
         description="Wall-clock hours to skip adaptive entries on a symbol after its stop-loss",

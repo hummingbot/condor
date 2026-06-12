@@ -4,7 +4,9 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-PRESET_OVERRIDES: dict[str, dict[str, float | int]] = {
+PresetValue = float | int | bool
+
+PRESET_OVERRIDES: dict[str, dict[str, PresetValue]] = {
     "safe": {
         "activation_ticks": 8,
         "adaptive_long_bb_pos_max": 46.0,
@@ -65,6 +67,32 @@ PRESET_OVERRIDES: dict[str, dict[str, float | int]] = {
         "adaptive_hist_sign_penalty": 0.30,
         "adaptive_momentum_bonus": 0.25,
         "adaptive_momentum_penalty": 0.05,
+    },
+    # Sessions 36-48 sweep winner (+$148.39): sl2.4/tp10/ne32 + tighter adaptive gates.
+    "hl_sweep_best": {
+        "activation_ticks": 1,
+        "sl_pct": 2.4,
+        "tp_pct": 10.0,
+        "neutral_exit_streak": 32,
+        "adaptive_long_bb_pos_max": 65.0,
+        "adaptive_short_bb_pos_min": 72.0,
+        "adaptive_strong_long_bb_pos_max": 30.0,
+        "adaptive_strong_short_bb_pos_min": 90.0,
+        "adaptive_min_macd_gap_ratio": 0.06,
+        "adaptive_min_hist_ratio": 0.09,
+        "adaptive_score_open_min": 1.50,
+        "adaptive_score_open_min_extreme": 1.00,
+        "adaptive_hist_sign_bonus": 0.30,
+        "adaptive_hist_sign_penalty": 0.30,
+        "adaptive_momentum_bonus": 0.25,
+        "adaptive_momentum_penalty": 0.05,
+        "bb_proximity_epsilon_pct": 0.10,
+        "ignore_adaptive_4h_filter": True,
+        "adaptive_requires_flat": False,
+        "max_open_executors": 3,
+        "min_tradeable_count": 1,
+        "sl_cooldown_ticks": 2,
+        "flip_cooldown_ticks": 8,
     },
 }
 
