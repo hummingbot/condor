@@ -5,10 +5,11 @@ category: performance
 impact: high
 effort: M
 risk: medium
-status: todo
+status: done
 files:
   - condor/web/ws_manager.py:814
-commits: []
+commits:
+  - "09dc0c7 (perf) broadcast usa gather para fan-out concurrente y no bloquear ante cliente lento (PERF-020)"
 created: 2026-06-10
 ---
 
@@ -33,10 +34,10 @@ orden por socket se preserva porque cada conexión recibe exactamente un envío
 por tick.
 
 ## Criterio de aceptación
-- [ ] `broadcast()` usa `asyncio.gather(..., return_exceptions=True)` en vez de awaits secuenciales
-- [ ] Todos los envíos de un mismo broadcast se disparan concurrentemente
-- [ ] Las conexiones muertas se siguen limpiando correctamente tras el gather
-- [ ] No se rompe ningún test existente
+- [x] `broadcast()` usa `asyncio.gather(..., return_exceptions=True)` en vez de awaits secuenciales
+- [x] Todos los envíos de un mismo broadcast se disparan concurrentemente
+- [x] Las conexiones muertas se siguen limpiando correctamente tras el gather
+- [x] No se rompe ningún test existente (no hay suite para ws_manager; verificado con AST parse + import + black/isort)
 
 ## Notas
 Combina bien con [[CORR-022]] (loguear el fallo por cliente) y [[CORR-024]]

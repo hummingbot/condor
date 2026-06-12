@@ -5,11 +5,12 @@ category: correctness
 impact: medium
 effort: S
 risk: medium
-status: todo
+status: done
 files:
   - condor/web/ws_manager.py:456
   - condor/web/ws_manager.py:603
-commits: []
+commits:
+  - "8f5202e (fix) trackear tasks fire-and-forget de backfill/warm para evitar GC silencioso (CORR-021)"
 created: 2026-06-10
 ---
 
@@ -39,10 +40,10 @@ compleja: ambas tareas son finitas (`_backfill_candles` es one-shot;
 evitar el GC del fire-and-forget, no un leak de tareas long-lived.
 
 ## Criterio de aceptación
-- [ ] Ambos `create_task` guardan una referencia fuerte (dict/set del manager)
-- [ ] Las referencias se limpian al completar el task (o se cancelan en `stop()`)
-- [ ] No quedan tasks fire-and-forget sin referenciar en `ws_manager.py`
-- [ ] No se rompe ningún test existente
+- [x] Ambos `create_task` guardan una referencia fuerte (dict/set del manager)
+- [x] Las referencias se limpian al completar el task (o se cancelan en `stop()`)
+- [x] No quedan tasks fire-and-forget sin referenciar en `ws_manager.py`
+- [x] No se rompe ningún test existente (no hay suite para ws_manager; verificado con AST parse + import + black/isort)
 
 ## Notas
 El `_refresh_loop` long-lived del lado portfolio (`portfolio.py:220`) YA está

@@ -5,10 +5,11 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - condor/web/ws_manager.py:819
-commits: []
+commits:
+  - "56a3e75 (fix) broadcast loguea fallo de envio por cliente antes de desconectar (CORR-023)"
 created: 2026-06-10
 ---
 
@@ -32,9 +33,9 @@ Es zero-risk: no altera el control de flujo (la conexión se sigue agregando a
 556, 605, 802 ya loguean `"... %s", channel, e`).
 
 ## Criterio de aceptación
-- [ ] Cada fallo de envío en `broadcast()` se loguea con `channel`, `user_id` y la excepción
-- [ ] La limpieza de conexiones muertas (`disconnect`) sigue funcionando igual
-- [ ] No se rompe ningún test existente
+- [x] Cada fallo de envío en `broadcast()` se loguea con `channel`, `user_id` y la excepción
+- [x] La limpieza de conexiones muertas (`disconnect`) sigue funcionando igual
+- [x] No se rompe ningún test existente (no hay suite para ws_manager; verificado con AST parse + import + black/isort)
 
 ## Notas
 Toca el mismo bloque que [[PERF-020]] (gather) y [[CORR-024]] (snapshot). Si se

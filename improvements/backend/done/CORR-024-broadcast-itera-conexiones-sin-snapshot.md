@@ -9,7 +9,7 @@ status: done
 files:
   - condor/web/ws_manager.py:817
 commits:
-  - "b320b83 (fix) broadcast itera snapshot de conexiones para no saltear en disconnect concurrente (CORR-024)"
+  - "8a3f4ae (fix) broadcast itera snapshot de conexiones para no saltear en disconnect concurrente (CORR-024)"
 created: 2026-06-10
 ---
 

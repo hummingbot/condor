@@ -5,13 +5,14 @@ category: architecture
 impact: medium
 effort: M
 risk: medium
-status: todo
+status: done
 files:
   - condor/web/ws_manager.py:831
   - condor/web/ws_manager.py:1143
   - condor/web/ws_manager.py:1287
   - condor/web/ws_manager.py:1405
-commits: []
+commits:
+  - "e7213af (refactor) centralizar lifecycle de streams en _ensure_stream/_maybe_stop_stream con registro generico (ARCH-025)"
 created: 2026-06-10
 ---
 
@@ -36,11 +37,11 @@ centralizan los helpers de arranque/parada. Alinea con la tendencia reciente de
 dedup/centralización del repo (ARCH-011/012/014 ya cerrados).
 
 ## Criterio de aceptación
-- [ ] Un único `_ensure_stream(stream_type, channel)` reemplaza los 8 `_ensure_*` (salvo special-case de candle)
-- [ ] Un único `_maybe_stop_stream(stream_type, channel)` reemplaza los 8 `_maybe_stop_*`
-- [ ] Registro `stream_type -> {task_dict, coroutine_factory, teardown_hook}` documentado
-- [ ] Comportamiento de start/stop de cada stream preservado (sin cambio funcional)
-- [ ] No se rompe ningún test existente (añadir test del lifecycle genérico por tipo si aplica)
+- [x] Un único `_ensure_stream(stream_type, channel)` reemplaza los 8 `_ensure_*` (candle también lo usa; su ensure sí es uniforme)
+- [x] Un único `_maybe_stop_stream(stream_type, channel)` reemplaza los 8 `_maybe_stop_*` (candle vía `teardown_hook`)
+- [x] Registro `stream_type -> {task_dict, factory, start_log, stop_log, teardown_hook?}` documentado (`_stream_registry()`)
+- [x] Comportamiento de start/stop de cada stream preservado (sin cambio funcional)
+- [x] No se rompe ningún test existente (no hay suite; verificado con AST + import + black/isort + test runtime ad-hoc: ensure idempotente, stop cancela los 7 uniformes, y candle agenda teardown diferido vía hook tanto por el wrapper como por dispatch genérico)
 
 ## Notas
 **Excepción importante:** el par de candle NO es uniforme.
@@ -52,3 +53,14 @@ soportarlo vía un `teardown_hook` opcional, no asumir 8 tipos idénticos. El
 duplicado son ~110-130 líneas de los helpers de lifecycle; el resto del span son
 las corutinas `_X_stream()` con lógica genuinamente distinta que NO se deduplica.
 Acotar el scope a los helpers de lifecycle.
+
+**Implementación (cierre):** registro perezoso y cacheado `_stream_registry()`
+que mapea `stream_type -> {task_dict, factory, start_log, stop_log,
+teardown_hook?}`, más `_ensure_stream`/`_maybe_stop_stream` genéricos. Los 8
+`_ensure_*` y los 7 `_maybe_stop_*` uniformes quedan como wrappers de 1 línea que
+delegan en los genéricos (cero churn para los ~22 call sites, que siguen llamando
+los nombres originales). `_maybe_stop_candle_stream` se mantiene intacto como
+implementación real del `teardown_hook` de candle (su keep-alive diferido,
+`_candle_teardown_timers`/`_CANDLE_KEEP_ALIVE`/`_deferred_stop_candle_stream` y
+poll-fallback no se tocan); el genérico delega en él sin recursión. Las corutinas
+`_X_stream()` no se modificaron.

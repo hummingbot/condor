@@ -5,12 +5,13 @@ category: security
 impact: high
 effort: M
 risk: high
-status: todo
+status: done
 files:
   - condor/web/ws_manager.py:362
   - condor/web/routes/ws.py:11
   - config_manager.py:699
-commits: []
+commits:
+  - "4299b43 (fix) validar has_server_access en subscribe del WS para evitar fuga cross-server (SEC-019)"
 created: 2026-06-10
 ---
 
@@ -47,10 +48,10 @@ Centralizar la extracción de `server_name` desde el canal en un helper para no
 repetir el `channel.split(":")[1]` por cada tipo de canal.
 
 ## Criterio de aceptación
-- [ ] Un usuario solo puede suscribirse a canales de servidores a los que tiene acceso explícito
-- [ ] Los intentos de suscripción no autorizados se loggean y se rechazan (el canal no se agrega a `conn.channels`)
-- [ ] Test: el usuario A no recibe datos del servidor B tras intentar `subscribe` a `bots_ws:<server_B>`
-- [ ] No se rompe ninguna suscripción legítima existente
+- [x] Un usuario solo puede suscribirse a canales de servidores a los que tiene acceso explícito
+- [x] Los intentos de suscripción no autorizados se loggean y se rechazan (el canal no se agrega a `conn.channels`)
+- [x] Test: el usuario A no recibe datos del servidor B tras intentar `subscribe` a `bots_ws:<server_B>` (test runtime ad-hoc con `get_config_manager` stubbeado: deny cross-server, deny canal sin server, allow servidor accesible)
+- [x] No se rompe ninguna suscripción legítima existente (todos los canales WS son server-scoped en `parts[1]`; el allow agrega el canal igual que antes)
 
 ## Notas
 `risk: high` y toca control de acceso: confirmar con el usuario antes de editar.
@@ -58,3 +59,14 @@ La re-validación periódica de permisos a mitad de sesión (revocación en cali
 y el cierre del WS al perder acceso son una mejora complementaria fuera de este
 item — anotar como follow-up si interesa. Sigue el patrón de autorización REST
 ya establecido en el repo (ver SEC-006/SEC-007/SEC-008 ya cerrados).
+
+**Implementación (cierre):** chokepoint único en la rama `subscribe` de
+`handle_message`, antes de `conn.channels.add(channel)`. Helper estático
+`_server_from_channel(channel)` extrae el server de `parts[1]` (None si el canal
+no es server-scoped). Si no hay server o `cm.has_server_access(conn.user_id,
+server)` es False (default `TRADER`), se loguea el intento y se rechaza (no se
+agrega el canal, no se arranca ningún stream). Fail-closed: un canal sin segmento
+de server se rechaza (todos los canales reales son server-scoped). No se editó
+`routes/ws.py` (el item lo listaba como referencia del path WS, no requería
+cambios) ni `config_manager.py` (solo se consume `has_server_access`). La
+revocación en caliente queda como follow-up.
