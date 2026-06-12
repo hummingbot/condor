@@ -5,10 +5,11 @@ category: correctness
 impact: low
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - condor/web/ws_manager.py:817
-commits: []
+commits:
+  - "b320b83 (fix) broadcast itera snapshot de conexiones para no saltear en disconnect concurrente (CORR-024)"
 created: 2026-06-10
 ---
 
@@ -32,9 +33,9 @@ idiomático y ya se usa en este mismo archivo (línea 310:
 self._connections` (línea 307).
 
 ## Criterio de aceptación
-- [ ] `broadcast()` itera sobre un snapshot (`list(self._connections)`) en vez de la lista viva
-- [ ] No se saltean conexiones si una se remueve durante la iteración
-- [ ] No se rompe ningún test existente
+- [x] `broadcast()` itera sobre un snapshot (`list(self._connections)`) en vez de la lista viva
+- [x] No se saltean conexiones si una se remueve durante la iteración
+- [x] No se rompe ningún test existente (no hay suite para ws_manager; verificado con AST parse + import + black/isort)
 
 ## Notas
 Si se implementa [[PERF-020]] (gather), este item se subsume parcialmente porque

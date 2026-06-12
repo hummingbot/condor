@@ -814,7 +814,7 @@ class WebSocketManager:
     async def broadcast(self, channel: str, data: Any) -> None:
         self._last_data[channel] = data
         dead: list[_Connection] = []
-        for conn in self._connections:
+        for conn in list(self._connections):
             if channel in conn.channels:
                 try:
                     await self._send(conn, channel, data)
