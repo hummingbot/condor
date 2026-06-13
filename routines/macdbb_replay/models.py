@@ -177,13 +177,17 @@ class ReplayConfigBase(BaseModel):
         "opportunistic",
         "replay_probe",
         "hl_sweep_best",
+        "hl_bb_loose_best",
+        "hl_mega_sweep_best",
     ] = (
         Field(
-            default="hl_sweep_best",
+            default="hl_mega_sweep_best",
             description=(
                 "Adaptive threshold profile. Preset applies its adaptive_* values "
                 "at run time (overrides those form fields). Use custom to tune manually. "
-                "hl_sweep_best = sessions 36-48 sweep winner (sl2.4/tp10/ne32)."
+                "hl_sweep_best = sessions 36-48 sweep winner (sl2.4/tp10/ne32). "
+                "hl_bb_loose_best = sessions 36-50 refine winner (loose BB gates). "
+                "hl_mega_sweep_best = sessions 36-50 mega sweep winner (+$199)."
             ),
         )
     )
