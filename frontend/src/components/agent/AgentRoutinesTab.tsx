@@ -9,7 +9,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type ReportSummary, type RoutineInfo, api } from "@/lib/api";
-import { buildConfigValues, formatAgo, formatRoutineName, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { buildConfigValues, formatAgo, formatRoutineName, invalidateRoutineQueries, saveConfig, updateConfigValues } from "@/lib/routineUtils";
 import { useServer } from "@/hooks/useServer";
 import { useColorizeReportIframe } from "@/hooks/useColorizeReportIframe";
 import { RoutineConfigForm } from "@/components/routines/RoutineConfigForm";
@@ -33,12 +33,12 @@ function RoutineCard({ routine }: { routine: RoutineInfo }) {
   const handleConfigChange = useCallback(
     (key: string, value: unknown) => {
       setConfigValues((prev) => {
-        const next = { ...prev, [key]: value };
+        const next = updateConfigValues(prev, key, value, routine.preset_overrides);
         saveConfig(routine.name, next);
         return next;
       });
     },
-    [routine.name],
+    [routine.name, routine.preset_overrides],
   );
 
   // Poll active instance

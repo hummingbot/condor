@@ -64,8 +64,9 @@ class TickMeta:
     tick: int
     timestamp: dt.datetime
     macd_pairs: list[str]
-    neutral_pressure_streak: int | None
-    entry_class: str | None
+    adaptive_activation_streak: int | None = None
+    entry_class: str | None = None
+    thesis_decay_streak: int | None = None
     tradeable_count: int | None = None
     scanner_analyzed: int | None = None
     queue_total: list[str] = field(default_factory=list)
@@ -136,12 +137,13 @@ class OpenPosition:
     notional_quote: float
     entry_score_long: float
     entry_score_short: float
-    entry_neutral_streak: int
+    entry_adaptive_activation_streak: int
+    entry_bb_pos_pct: float = 0.0
     entry_price_trusted: bool = False
-    monitor_state: str = "aligned"
-    neutral_streak: int = 0
+    monitor_state: str = "thesis_intact"
+    thesis_decay_streak: int = 0
     flip_streak: int = 0
-    neutral_extra_pending: bool = False
+    thesis_decay_extra_pending: bool = False
 
 
 @dataclass
@@ -162,7 +164,7 @@ class SimTrade:
     notional_quote: float
     entry_score_long: float
     entry_score_short: float
-    entry_neutral_streak: int
+    entry_adaptive_activation_streak: int
 
 
 class ReplayConfigBase(BaseModel):
@@ -208,7 +210,14 @@ class ReplayConfigBase(BaseModel):
     )
     activation_ticks: int = Field(
         default=6,
-        description="neutral_pressure_streak threshold for adaptive mode",
+        description="adaptive_activation_streak threshold for adaptive mode",
+    )
+    thesis_bb_drift_pts: float = Field(
+        default=25.0,
+        description=(
+            "Formal-entry BB drift (percentage points from entry_bb_pos_pct) "
+            "that triggers thesis decay counting"
+        ),
     )
     adaptive_long_bb_pos_max: float = Field(default=48.0)
     adaptive_short_bb_pos_min: float = Field(default=72.0)
@@ -289,7 +298,7 @@ class StrategyReplayConfig(ReplayConfigBase):
     )
     max_open_executors: int = Field(default=3)
     formal_notional_quote: float = Field(default=200.0)
-    neutral_exit_streak: int = Field(default=3)
+    thesis_decay_exit_ticks: int = Field(default=3)
     sl_cooldown_ticks: int = Field(default=3)
     flip_cooldown_ticks: int = Field(default=2)
     min_tradeable_count: int = Field(
@@ -305,8 +314,6 @@ class StrategyReplayConfig(ReplayConfigBase):
         default=True,
         description="Require 0 open positions before adaptive entries (matches live agent)",
     )
-
-
 class AdaptiveReplayConfig(ReplayConfigBase):
     """Legacy adaptive-only replay with single position."""
 

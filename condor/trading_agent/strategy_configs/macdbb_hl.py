@@ -9,18 +9,29 @@ from pydantic import BaseModel, Field
 
 # Maps duration fields to effective tick keys injected at prompt time.
 DURATION_EFFECTIVE_TICK_KEYS: dict[str, str] = {
-    "neutral_pressure_activation_hours": "neutral_pressure_activation_ticks",
-    "neutral_exit_hours": "neutral_exit_streak",
+    "adaptive_activation_hours": "adaptive_activation_ticks",
+    "thesis_decay_exit_hours": "thesis_decay_exit_ticks",
     "sl_symbol_cooldown_hours": "sl_symbol_cooldown_ticks",
     "flip_cooldown_hours": "flip_cooldown_ticks",
+    # Legacy hour keys (saved configs) resolve to the same effective ticks.
+    "neutral_pressure_activation_hours": "adaptive_activation_ticks",
+    "neutral_exit_hours": "thesis_decay_exit_ticks",
 }
 
 # Legacy tick-only params migrated using session frequency_sec when available.
 LEGACY_TICK_TO_HOURS: dict[str, str] = {
-    "neutral_pressure_activation_ticks": "neutral_pressure_activation_hours",
-    "neutral_exit_streak": "neutral_exit_hours",
+    "adaptive_activation_ticks": "adaptive_activation_hours",
+    "thesis_decay_exit_ticks": "thesis_decay_exit_hours",
+    "neutral_pressure_activation_ticks": "adaptive_activation_hours",
+    "neutral_exit_streak": "thesis_decay_exit_hours",
     "sl_symbol_cooldown_ticks": "sl_symbol_cooldown_hours",
     "flip_cooldown_ticks": "flip_cooldown_hours",
+}
+
+# Legacy hour param names from older agent.md / saved sessions.
+LEGACY_HOURS_ALIASES: dict[str, str] = {
+    "neutral_pressure_activation_hours": "adaptive_activation_hours",
+    "neutral_exit_hours": "thesis_decay_exit_hours",
 }
 
 
@@ -53,13 +64,13 @@ class MacdbbScannerAggressiveHlParams(BaseModel):
     """
 
     # Adaptive mode (duration-primary; effective ticks derived from frequency_sec)
-    neutral_pressure_activation_hours: float | None = Field(
+    adaptive_activation_hours: float | None = Field(
         default=None,
         description="Wall-clock hours of NEUTRAL-only agent ticks before adaptive mode activates",
         json_schema_extra={
             "group": "Adaptive mode",
             "duration": True,
-            "effective_tick_key": "neutral_pressure_activation_ticks",
+            "effective_tick_key": "adaptive_activation_ticks",
         },
     )
     min_tradeable_for_adaptive: int | None = Field(
@@ -259,14 +270,23 @@ class MacdbbScannerAggressiveHlParams(BaseModel):
     )
 
     # Position monitor (duration-primary)
-    neutral_exit_hours: float | None = Field(
+    thesis_decay_exit_hours: float | None = Field(
         default=None,
-        description="Wall-clock hours of NEUTRAL 1h MACD readings before closing a RUNNING leg",
+        description=(
+            "Wall-clock hours of thesis-decay NEUTRAL monitor ticks before closing a RUNNING leg"
+        ),
         json_schema_extra={
             "group": "Position monitor",
             "duration": True,
-            "effective_tick_key": "neutral_exit_streak",
+            "effective_tick_key": "thesis_decay_exit_ticks",
         },
+    )
+    thesis_bb_drift_pts: float | None = Field(
+        default=None,
+        description=(
+            "Formal-entry BB drift (percentage points from entry) that triggers thesis decay"
+        ),
+        json_schema_extra={"group": "Position monitor"},
     )
     flip_cooldown_hours: float | None = Field(
         default=None,

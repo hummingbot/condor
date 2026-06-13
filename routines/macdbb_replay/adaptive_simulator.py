@@ -72,8 +72,8 @@ def simulate_adaptive_session(
                 "pair": pair,
                 "report_id": snapshot.report_id,
                 "entry_class_journal": meta.entry_class or "",
-                "neutral_pressure_streak": meta.neutral_pressure_streak
-                if meta.neutral_pressure_streak is not None
+                "adaptive_activation_streak": meta.adaptive_activation_streak
+                if meta.adaptive_activation_streak is not None
                 else "",
                 "signal": snapshot.signal,
                 "bb_pos_pct": round(snapshot.parsed.bb_pos_pct, 2)
@@ -131,7 +131,7 @@ def simulate_adaptive_session(
 
         if current_position is None and candidate_rows:
             adaptive_mode_active = (
-                (meta.neutral_pressure_streak or 0) >= config.activation_ticks
+                (meta.adaptive_activation_streak or 0) >= config.activation_ticks
             )
             if adaptive_mode_active:
                 open_candidates: list[tuple[str, str, float, float, float]] = []
@@ -171,7 +171,7 @@ def simulate_adaptive_session(
                         "entry_price": selected[2],
                         "entry_score_long": selected[3],
                         "entry_score_short": selected[4],
-                        "entry_neutral_streak": meta.neutral_pressure_streak or 0,
+                        "entry_adaptive_activation_streak": meta.adaptive_activation_streak or 0,
                     }
                     action_taken = "open"
                     action_reason = f"adaptive_{selected[1]}"
@@ -224,7 +224,7 @@ def simulate_adaptive_session(
                             notional_quote=config.notional_quote,
                             entry_score_long=current_position["entry_score_long"],
                             entry_score_short=current_position["entry_score_short"],
-                            entry_neutral_streak=current_position["entry_neutral_streak"],
+                            entry_adaptive_activation_streak=current_position["entry_adaptive_activation_streak"],
                         )
                     )
                     if action_taken == "hold":
@@ -240,8 +240,8 @@ def simulate_adaptive_session(
                 "tick": tick,
                 "tick_time_utc": meta.timestamp.isoformat(),
                 "entry_class_journal": meta.entry_class or "",
-                "neutral_pressure_streak": meta.neutral_pressure_streak
-                if meta.neutral_pressure_streak is not None
+                "adaptive_activation_streak": meta.adaptive_activation_streak
+                if meta.adaptive_activation_streak is not None
                 else "",
                 "macd_pairs_count": len(meta.macd_pairs),
                 "best_candidate_pair": best_pair,
@@ -285,7 +285,7 @@ def simulate_adaptive_session(
                     notional_quote=config.notional_quote,
                     entry_score_long=current_position["entry_score_long"],
                     entry_score_short=current_position["entry_score_short"],
-                    entry_neutral_streak=current_position["entry_neutral_streak"],
+                    entry_adaptive_activation_streak=current_position["entry_adaptive_activation_streak"],
                 )
             )
 

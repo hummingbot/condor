@@ -42,7 +42,37 @@ export function buildConfigValues(
       values[key] = field.default;
     }
   }
-  return values;
+  return applyPresetOverrides(values, routine.preset_overrides);
+}
+
+/** Merge preset override values when a named preset is active (not custom). */
+export function applyPresetOverrides(
+  values: Record<string, unknown>,
+  presetOverrides?: Record<string, Record<string, unknown>>,
+): Record<string, unknown> {
+  const preset = values.preset;
+  if (!preset || preset === "custom" || !presetOverrides) {
+    return values;
+  }
+  const overrides = presetOverrides[String(preset)];
+  if (!overrides) {
+    return values;
+  }
+  return { ...values, ...overrides };
+}
+
+/** Apply a single field change; when preset changes, refresh overridden fields. */
+export function updateConfigValues(
+  prev: Record<string, unknown>,
+  key: string,
+  value: unknown,
+  presetOverrides?: Record<string, Record<string, unknown>>,
+): Record<string, unknown> {
+  const next = { ...prev, [key]: value };
+  if (key === "preset" && value !== "custom") {
+    return applyPresetOverrides(next, presetOverrides);
+  }
+  return next;
 }
 
 // ── Formatters ──

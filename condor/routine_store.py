@@ -144,7 +144,7 @@ class RoutineStore:
         report_counts = self._get_report_counts()
         out = []
         for name, info in all_routines.items():
-            out.append({
+            entry = {
                 "name": name,
                 "description": info.description,
                 "is_continuous": info.is_continuous,
@@ -152,7 +152,10 @@ class RoutineStore:
                 "source": info.source,
                 "fields": info.get_fields(),
                 "report_count": report_counts.get(name, 0) or report_counts.get(name.split("/")[-1], 0),
-            })
+            }
+            if info.preset_overrides:
+                entry["preset_overrides"] = info.preset_overrides
+            out.append(entry)
         return out
 
     # ── Instances ──

@@ -11,7 +11,12 @@ _TICK_RE = re.compile(r"- tick#(\d+)\s+\|\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+
 _DECISION_RE = re.compile(r"- \*\*#(\d+)\*\*.*")
 _DECISION_TICK_RE = re.compile(r"tick=(\d+)")
 _MACD_PAIRS_RE = re.compile(r"macd_pairs=([A-Z0-9:-]+(?:,[A-Z0-9:-]+)*)")
-_NEUTRAL_STREAK_RE = re.compile(r"neutral_pressure_streak=(\d+)")
+_ADAPTIVE_ACTIVATION_STREAK_RE = re.compile(
+    r"(?:adaptive_activation_streak|neutral_pressure_streak)=(\d+)"
+)
+_THESIS_DECAY_STREAK_RE = re.compile(
+    r"(?:thesis_decay_streak|neutral_streak)=(\d+)"
+)
 _ENTRY_CLASS_RE = re.compile(r"entry_class=([a-zA-Z0-9_]+)")
 _TRADEABLE_COUNT_RE = re.compile(r"tradeable_count=(\d+)")
 _SCANNER_ANALYZED_RE = re.compile(r"scanner_analyzed=(\d+)")
@@ -31,7 +36,11 @@ _TICK_SUMMARY_ENTRY_RE = re.compile(
     re.IGNORECASE,
 )
 _TICK_STREAK_RE = re.compile(
-    r"neutral_pressure_streak(?:`|')?(?:=| reaches | is )[\s*]*(\d+)",
+    r"(?:adaptive_activation_streak|adaptive_activation_streak)(?:`|')?(?:=| reaches | is )[\s*]*(\d+)",
+    re.IGNORECASE,
+)
+_THESIS_DECAY_TICK_STREAK_RE = re.compile(
+    r"(?:thesis_decay_streak|neutral_streak)(?:`|')?(?:=| reaches | is )[\s*]*(\d+)",
     re.IGNORECASE,
 )
 _TICK_STREAK_ALT_RE = re.compile(r"Adaptive streak \*\*(\d+)\*\*", re.IGNORECASE)
@@ -237,7 +246,6 @@ def _extract_pre_open_streak_from_narrative(line: str) -> int | None:
 
 def _extract_streak_from_tick_narrative(line: str) -> int | None:
     for pattern in (
-        _NEUTRAL_STREAK_RE,
         _TICK_STREAK_RE,
         _TICK_STREAK_ALT_RE,
         _TICK_STREAK_PAREN_RE,
@@ -245,6 +253,13 @@ def _extract_streak_from_tick_narrative(line: str) -> int | None:
         match = pattern.search(line)
         if match:
             return int(match.group(1))
+    return None
+
+
+def _extract_thesis_decay_streak_from_tick_narrative(line: str) -> int | None:
+    match = _THESIS_DECAY_TICK_STREAK_RE.search(line)
+    if match:
+        return int(match.group(1))
     return None
 
 
@@ -387,7 +402,8 @@ def _parse_decision_line(line: str, tick_time_map: dict[int, dt.datetime]) -> Ti
 
     pairs_match = _MACD_PAIRS_RE.search(line)
     reviewed_pairs = pairs_match.group(1).split(",") if pairs_match else []
-    streak_match = _NEUTRAL_STREAK_RE.search(line)
+    streak_match = _ADAPTIVE_ACTIVATION_STREAK_RE.search(line)
+    thesis_decay_match = _THESIS_DECAY_STREAK_RE.search(line)
     entry_class_match = _ENTRY_CLASS_RE.search(line)
     tradeable_match = _TRADEABLE_COUNT_RE.search(line)
     analyzed_match = _SCANNER_ANALYZED_RE.search(line)
@@ -406,7 +422,10 @@ def _parse_decision_line(line: str, tick_time_map: dict[int, dt.datetime]) -> Ti
         tick=tick_number,
         timestamp=tick_time_map[tick_number],
         macd_pairs=reviewed_pairs,
-        neutral_pressure_streak=int(streak_match.group(1)) if streak_match else None,
+        adaptive_activation_streak=int(streak_match.group(1)) if streak_match else None,
+        thesis_decay_streak=int(thesis_decay_match.group(1))
+        if thesis_decay_match
+        else None,
         entry_class=entry_class_match.group(1) if entry_class_match else None,
         tradeable_count=int(tradeable_match.group(1)) if tradeable_match else None,
         scanner_analyzed=int(analyzed_match.group(1)) if analyzed_match else None,
@@ -450,7 +469,8 @@ def parse_journal_ticks(
             tick=tick_number,
             timestamp=tick_time_map[tick_number],
             macd_pairs=_extract_pairs_from_tick_narrative(line),
-            neutral_pressure_streak=_extract_streak_from_tick_narrative(line),
+            adaptive_activation_streak=_extract_streak_from_tick_narrative(line),
+            thesis_decay_streak=_extract_thesis_decay_streak_from_tick_narrative(line),
             entry_class=_extract_entry_class_from_tick_narrative(line),
         )
 
@@ -470,14 +490,15 @@ def parse_journal_ticks(
 
         pre_open_streak = _extract_pre_open_streak_from_narrative(header_line)
         if pre_open_streak is not None and (
-            meta.neutral_pressure_streak is None
-            or meta.neutral_pressure_streak < pre_open_streak
+            meta.adaptive_activation_streak is None
+            or meta.adaptive_activation_streak < pre_open_streak
         ):
             meta = TickMeta(
                 tick=meta.tick,
                 timestamp=meta.timestamp,
                 macd_pairs=meta.macd_pairs,
-                neutral_pressure_streak=pre_open_streak,
+                adaptive_activation_streak=pre_open_streak,
+                thesis_decay_streak=meta.thesis_decay_streak,
                 entry_class=meta.entry_class,
                 tradeable_count=meta.tradeable_count,
                 scanner_analyzed=meta.scanner_analyzed,
@@ -500,7 +521,8 @@ def parse_journal_ticks(
                 tick=meta.tick,
                 timestamp=meta.timestamp,
                 macd_pairs=meta.macd_pairs,
-                neutral_pressure_streak=meta.neutral_pressure_streak,
+                adaptive_activation_streak=meta.adaptive_activation_streak,
+                thesis_decay_streak=meta.thesis_decay_streak,
                 entry_class=meta.entry_class or "opened_long",
                 tradeable_count=meta.tradeable_count,
                 scanner_analyzed=meta.scanner_analyzed,
@@ -521,7 +543,8 @@ def parse_journal_ticks(
                 tick=meta.tick,
                 timestamp=meta.timestamp,
                 macd_pairs=meta.macd_pairs,
-                neutral_pressure_streak=meta.neutral_pressure_streak,
+                adaptive_activation_streak=meta.adaptive_activation_streak,
+                thesis_decay_streak=meta.thesis_decay_streak,
                 entry_class=meta.entry_class or "opened_short",
                 tradeable_count=meta.tradeable_count,
                 scanner_analyzed=meta.scanner_analyzed,
@@ -557,7 +580,8 @@ def parse_journal_ticks(
             tick=meta.tick,
             timestamp=meta.timestamp,
             macd_pairs=list(meta.macd_pairs or last_pairs),
-            neutral_pressure_streak=meta.neutral_pressure_streak,
+            adaptive_activation_streak=meta.adaptive_activation_streak,
+            thesis_decay_streak=meta.thesis_decay_streak,
             entry_class=meta.entry_class,
             tradeable_count=meta.tradeable_count
             if meta.tradeable_count is not None
@@ -570,7 +594,7 @@ def parse_journal_ticks(
             filter_4h=dict(meta.filter_4h or last_filter_4h),
         )
 
-        if meta.neutral_pressure_streak is None:
+        if meta.adaptive_activation_streak is None:
             streak = _extract_streak_from_tick_narrative(header_line)
             if streak is not None:
                 carried = tick_meta_map[tick_number]
@@ -578,7 +602,8 @@ def parse_journal_ticks(
                     tick=carried.tick,
                     timestamp=carried.timestamp,
                     macd_pairs=carried.macd_pairs,
-                    neutral_pressure_streak=streak,
+                    adaptive_activation_streak=streak,
+                    thesis_decay_streak=carried.thesis_decay_streak,
                     entry_class=carried.entry_class,
                     tradeable_count=carried.tradeable_count,
                     scanner_analyzed=carried.scanner_analyzed,
@@ -638,12 +663,12 @@ def enrich_ticks_from_snapshots(
                     and not existing.filter_4h
                 )
                 or (
-                    parsed.neutral_pressure_streak is not None
-                    and existing.neutral_pressure_streak is None
+                    parsed.adaptive_activation_streak is not None
+                    and existing.adaptive_activation_streak is None
                 )
                 or (
-                    parsed.position_pnl_snapshot is not None
-                    and existing.position_pnl_snapshot is None
+                    parsed.thesis_decay_streak is not None
+                    and existing.thesis_decay_streak is None
                 )
                 or (
                     parsed.monitored_pair
@@ -664,9 +689,12 @@ def enrich_ticks_from_snapshots(
                 tick=parsed.tick,
                 timestamp=existing.timestamp,
                 macd_pairs=parsed.macd_pairs or existing.macd_pairs,
-                neutral_pressure_streak=parsed.neutral_pressure_streak
-                if parsed.neutral_pressure_streak is not None
-                else existing.neutral_pressure_streak,
+                adaptive_activation_streak=parsed.adaptive_activation_streak
+                if parsed.adaptive_activation_streak is not None
+                else existing.adaptive_activation_streak,
+                thesis_decay_streak=parsed.thesis_decay_streak
+                if parsed.thesis_decay_streak is not None
+                else existing.thesis_decay_streak,
                 entry_class=parsed.entry_class or existing.entry_class,
                 tradeable_count=parsed.tradeable_count
                 if parsed.tradeable_count is not None

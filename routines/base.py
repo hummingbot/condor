@@ -64,6 +64,7 @@ class RoutineInfo:
         cleanup_fn: Callable | None = None,
         category: str = "Uncategorized",
         source: str = "global",
+        preset_overrides: dict[str, dict[str, Any]] | None = None,
     ):
         self.name = name
         self.config_class = config_class
@@ -75,6 +76,7 @@ class RoutineInfo:
         self.cleanup_fn = cleanup_fn
         self.category = category
         self.source = source
+        self.preset_overrides = preset_overrides
 
         # Extract description from Config docstring
         doc = config_class.__doc__ or name
@@ -181,6 +183,7 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source="global",
+                preset_overrides=getattr(module, "PRESET_OVERRIDES", None),
             )
             logger.debug(
                 f"Discovered routine: {file_path.stem} (continuous={is_continuous})"
@@ -252,6 +255,7 @@ def discover_routines_from_path(
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source=source,
+                preset_overrides=getattr(module, "PRESET_OVERRIDES", None),
             )
             logger.debug(f"Discovered agent routine: {file_path.stem}")
 

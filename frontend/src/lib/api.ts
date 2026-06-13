@@ -470,6 +470,7 @@ export interface RoutineInfo {
   source: string;
   fields: Record<string, RoutineFieldInfo>;
   report_count: number;
+  preset_overrides?: Record<string, Record<string, unknown>>;
 }
 
 export interface RoutineInstance {

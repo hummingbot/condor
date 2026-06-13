@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from .macdbb_hl import (
     DURATION_EFFECTIVE_TICK_KEYS,
+    LEGACY_HOURS_ALIASES,
     LEGACY_TICK_TO_HOURS,
     MacdbbScannerAggressiveHlParams,
 )
@@ -29,6 +30,19 @@ def ticks_to_hours(ticks: int | float, frequency_sec: int) -> float:
     return round(float(ticks) * freq / 3600, 4)
 
 
+def migrate_legacy_hours_aliases(params: dict[str, Any] | None) -> dict[str, Any]:
+    """Map deprecated strategy param hour keys to canonical names."""
+    if not params:
+        return {}
+    migrated = dict(params)
+    for legacy_key, canonical_key in LEGACY_HOURS_ALIASES.items():
+        if legacy_key in migrated and canonical_key not in migrated:
+            migrated[canonical_key] = migrated.pop(legacy_key)
+        elif legacy_key in migrated:
+            migrated.pop(legacy_key, None)
+    return migrated
+
+
 def migrate_legacy_tick_params(
     params: dict[str, Any] | None,
     frequency_sec: int,
@@ -36,7 +50,7 @@ def migrate_legacy_tick_params(
     """Convert old *_ticks fields to *_hours when hours are missing."""
     if not params:
         return {}
-    migrated = dict(params)
+    migrated = migrate_legacy_hours_aliases(params)
     ref_freq = max(1, int(frequency_sec))
 
     for legacy_tick_key, hours_key in LEGACY_TICK_TO_HOURS.items():

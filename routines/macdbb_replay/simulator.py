@@ -35,6 +35,82 @@ def _adaptive_notional(config: StrategyReplayConfig) -> float:
     return config.formal_notional_quote / 2.0
 
 
+def _thesis_decay_reasons(
+    position: OpenPosition,
+    *,
+    trend: str | None,
+    bb_pos_pct: float | None,
+    config: StrategyReplayConfig,
+) -> tuple[bool, bool]:
+    trend_decay = False
+    bb_decay = False
+
+    if position.side == "long" and trend == "bearish":
+        trend_decay = True
+    elif position.side == "short" and trend == "bullish":
+        trend_decay = True
+
+    if bb_pos_pct is None:
+        return trend_decay, bb_decay
+
+    if position.entry_class == "regime_adaptive_half_size":
+        if position.side == "long" and bb_pos_pct > config.adaptive_long_bb_pos_max:
+            bb_decay = True
+        elif position.side == "short" and bb_pos_pct < config.adaptive_short_bb_pos_min:
+            bb_decay = True
+    elif position.entry_class == "formal":
+        drift = config.thesis_bb_drift_pts
+        if position.side == "long" and bb_pos_pct >= position.entry_bb_pos_pct + drift:
+            bb_decay = True
+        elif position.side == "short" and bb_pos_pct <= position.entry_bb_pos_pct - drift:
+            bb_decay = True
+
+    return trend_decay, bb_decay
+
+
+def _entry_bb_pos_pct(snapshot: Any) -> float:
+    if snapshot.parsed is not None:
+        return float(snapshot.parsed.bb_pos_pct)
+    return 0.0
+
+
+def _update_thesis_decay_streak(
+    position: OpenPosition,
+    *,
+    snapshot_signal: str,
+    metrics: dict[str, float | bool],
+    trend: str | None,
+    bb_pos_pct: float | None,
+    config: StrategyReplayConfig,
+) -> None:
+    same_direction_formal = (
+        position.side == "long" and bool(metrics["formal_long"])
+    ) or (position.side == "short" and bool(metrics["formal_short"]))
+
+    if same_direction_formal:
+        position.thesis_decay_streak = 0
+        position.monitor_state = "thesis_intact"
+        position.thesis_decay_extra_pending = False
+        return
+
+    if snapshot_signal != "NEUTRAL":
+        return
+
+    trend_decay, bb_decay = _thesis_decay_reasons(
+        position,
+        trend=trend,
+        bb_pos_pct=bb_pos_pct,
+        config=config,
+    )
+    if trend_decay or bb_decay:
+        position.thesis_decay_streak += 1
+        position.monitor_state = "thesis_decay"
+    else:
+        position.thesis_decay_streak = 0
+        position.monitor_state = "thesis_intact"
+        position.thesis_decay_extra_pending = False
+
+
 def _close_trade(
     session_num: int,
     position: OpenPosition,
@@ -61,7 +137,7 @@ def _close_trade(
         notional_quote=position.notional_quote,
         entry_score_long=position.entry_score_long,
         entry_score_short=position.entry_score_short,
-        entry_neutral_streak=position.entry_neutral_streak,
+        entry_adaptive_activation_streak=position.entry_adaptive_activation_streak,
     )
 
 
@@ -84,8 +160,8 @@ def _snapshot_row(
         "signal_source": snapshot.source,
         "price_trusted": int(snapshot.price_trusted),
         "entry_class_journal": meta.entry_class or "",
-        "neutral_pressure_streak": meta.neutral_pressure_streak
-        if meta.neutral_pressure_streak is not None
+        "adaptive_activation_streak": meta.adaptive_activation_streak
+        if meta.adaptive_activation_streak is not None
         else "",
         "signal": snapshot.signal,
         "bb_pos_pct": round(snapshot.parsed.bb_pos_pct, 2) if snapshot.parsed else "",
@@ -461,24 +537,25 @@ def simulate_strategy_session(
                         position.flip_streak = 1
                 elif position.flip_streak >= 1:
                     position.flip_streak = 0
-                    position.monitor_state = "aligned"
+                    position.monitor_state = "thesis_intact"
 
             if not exit_reason:
-                if snapshot_signal == "NEUTRAL":
-                    position.neutral_streak += 1
-                    position.monitor_state = "neutral_counting"
-                elif (
-                    position.side == "long" and bool(metrics["formal_long"])
-                ) or (position.side == "short" and bool(metrics["formal_short"])):
-                    position.neutral_streak = 0
-                    position.monitor_state = "aligned"
-                    position.neutral_extra_pending = False
+                trend = snapshot.parsed.trend if snapshot.parsed else None
+                bb_pos_pct = snapshot.parsed.bb_pos_pct if snapshot.parsed else None
+                _update_thesis_decay_streak(
+                    position,
+                    snapshot_signal=snapshot_signal,
+                    metrics=metrics,
+                    trend=trend,
+                    bb_pos_pct=bb_pos_pct,
+                    config=config,
+                )
 
-                if position.neutral_streak >= config.neutral_exit_streak:
-                    if current_return_pct < 0 and not position.neutral_extra_pending:
-                        position.neutral_extra_pending = True
+                if position.thesis_decay_streak >= config.thesis_decay_exit_ticks:
+                    if current_return_pct < 0 and not position.thesis_decay_extra_pending:
+                        position.thesis_decay_extra_pending = True
                     else:
-                        exit_reason = "neutral_exit"
+                        exit_reason = "thesis_decay_exit"
 
             if exit_reason:
                 simulated_trades.append(
@@ -521,7 +598,8 @@ def simulate_strategy_session(
                             notional_quote=config.formal_notional_quote,
                             entry_score_long=float(metrics["adaptive_strength_long"]),
                             entry_score_short=float(metrics["adaptive_strength_short"]),
-                            entry_neutral_streak=entry_streak,
+                            entry_adaptive_activation_streak=entry_streak,
+                            entry_bb_pos_pct=_entry_bb_pos_pct(snapshot),
                             entry_price_trusted=True,
                         )
                         opens_this_tick.append(reverse_trigger)
@@ -652,7 +730,8 @@ def simulate_strategy_session(
                     notional_quote=config.formal_notional_quote,
                     entry_score_long=float(metrics["adaptive_strength_long"]),
                     entry_score_short=float(metrics["adaptive_strength_short"]),
-                    entry_neutral_streak=entry_streak,
+                    entry_adaptive_activation_streak=entry_streak,
+                    entry_bb_pos_pct=_entry_bb_pos_pct(snapshot),
                     entry_price_trusted=True,
                 )
                 opens_this_tick.append(trigger)
@@ -681,7 +760,8 @@ def simulate_strategy_session(
                     notional_quote=adaptive_notional,
                     entry_score_long=float(metrics["adaptive_strength_long"]),
                     entry_score_short=float(metrics["adaptive_strength_short"]),
-                    entry_neutral_streak=entry_streak,
+                    entry_adaptive_activation_streak=entry_streak,
+                    entry_bb_pos_pct=_entry_bb_pos_pct(snapshot),
                     entry_price_trusted=True,
                 )
                 opens_this_tick.append(trigger)
@@ -732,8 +812,8 @@ def simulate_strategy_session(
                 "tick": tick,
                 "tick_time_utc": meta.timestamp.isoformat(),
                 "entry_class_journal": meta.entry_class or "",
-                "neutral_pressure_streak": meta.neutral_pressure_streak
-                if meta.neutral_pressure_streak is not None
+                "adaptive_activation_streak": meta.adaptive_activation_streak
+                if meta.adaptive_activation_streak is not None
                 else simulated_streak,
                 "sim_streak": simulated_streak,
                 "open_positions": len(open_positions),

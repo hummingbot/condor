@@ -22,6 +22,7 @@ from routines.macdbb_replay.models import (
     write_csv,
 )
 from routines.macdbb_replay.paths import TRADING_AGENTS_DIR
+from routines.macdbb_replay import presets
 from routines.macdbb_replay.presets import resolve_config_with_preset
 from routines.macdbb_replay.reports import build_reports_by_pair, load_reports_index
 from routines.macdbb_replay.simulator import simulate_strategy_session
@@ -29,6 +30,9 @@ from routines.macdbb_replay.simulator import simulate_strategy_session
 logger = logging.getLogger(__name__)
 
 Config = StrategyReplayConfig
+
+# Re-exported for routine discovery — UI reads this to sync form fields on preset change.
+PRESET_OVERRIDES = presets.PRESET_OVERRIDES
 
 
 PER_PAIR_COLUMNS = [
@@ -40,7 +44,7 @@ PER_PAIR_COLUMNS = [
     "signal_source",
     "price_trusted",
     "entry_class_journal",
-    "neutral_pressure_streak",
+    "adaptive_activation_streak",
     "signal",
     "bb_pos_pct",
     "price",
@@ -68,7 +72,7 @@ PER_TICK_COLUMNS = [
     "tick",
     "tick_time_utc",
     "entry_class_journal",
-    "neutral_pressure_streak",
+    "adaptive_activation_streak",
     "sim_streak",
     "open_positions",
     "macd_pairs_count",
@@ -93,7 +97,7 @@ TRADE_COLUMNS = [
     "pnl_quote",
     "entry_score_long",
     "entry_score_short",
-    "entry_neutral_streak",
+    "entry_adaptive_activation_streak",
 ]
 
 
@@ -116,7 +120,7 @@ def _trade_rows(trades: list[Any]) -> list[dict[str, Any]]:
             "pnl_quote": round(trade.pnl_quote, 2),
             "entry_score_long": round(trade.entry_score_long, 4),
             "entry_score_short": round(trade.entry_score_short, 4),
-            "entry_neutral_streak": trade.entry_neutral_streak,
+            "entry_adaptive_activation_streak": trade.entry_adaptive_activation_streak,
         }
         for trade in trades
     ]

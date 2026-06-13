@@ -3,7 +3,7 @@ import { AlertTriangle, Brain, ExternalLink, FileText, Loader2, Play } from "luc
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { type RoutineInfo, type RoutineInstance, api } from "@/lib/api";
-import { buildConfigValues, formatRoutineName, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { buildConfigValues, formatRoutineName, invalidateRoutineQueries, saveConfig, updateConfigValues } from "@/lib/routineUtils";
 import { useServer } from "@/hooks/useServer";
 
 import { RoutineConfigForm } from "./RoutineConfigForm";
@@ -39,12 +39,12 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
   const handleConfigChange = useCallback(
     (key: string, value: unknown) => {
       setConfigValues((prev) => {
-        const next = { ...prev, [key]: value };
+        const next = updateConfigValues(prev, key, value, routine.preset_overrides);
         saveConfig(routine.name, next);
         return next;
       });
     },
-    [routine.name],
+    [routine.name, routine.preset_overrides],
   );
 
   // Poll active instance

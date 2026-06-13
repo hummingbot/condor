@@ -23,7 +23,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { type RoutineInstance, api } from "@/lib/api";
-import { buildConfigValues, formatAgo, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { buildConfigValues, formatAgo, invalidateRoutineQueries, saveConfig, updateConfigValues } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
 import { useServer } from "@/hooks/useServer";
 import { useColorizeReportIframe } from "@/hooks/useColorizeReportIframe";
@@ -770,7 +770,12 @@ export function ReportBrowser({
                 values={configValues}
                 onChange={(key, value) => {
                   setConfigValues((prev) => {
-                    const next = { ...prev, [key]: value };
+                    const next = updateConfigValues(
+                      prev,
+                      key,
+                      value,
+                      activeRoutine.preset_overrides,
+                    );
                     saveConfig(activeSource, next);
                     return next;
                   });
@@ -907,7 +912,12 @@ export function ReportBrowser({
                         values={configValues}
                         onChange={(key, value) => {
                           setConfigValues((prev) => {
-                            const next = { ...prev, [key]: value };
+                            const next = updateConfigValues(
+                              prev,
+                              key,
+                              value,
+                              activeRoutine.preset_overrides,
+                            );
                             saveConfig(activeSource, next);
                             return next;
                           });

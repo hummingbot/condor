@@ -266,7 +266,7 @@ def build_tick_prompt(
         strategy_lines = [
             "[STRATEGY CONFIG]",
             "Active strategy parameters for this session. Use these values in all formulas and gates below.",
-            "Tick thresholds (neutral_pressure_activation_ticks, neutral_exit_streak, "
+            "Tick thresholds (adaptive_activation_ticks, thesis_decay_exit_ticks, "
             "sl_symbol_cooldown_ticks, flip_cooldown_ticks) are derived from duration hours "
             "÷ frequency_sec — use the effective *_ticks values below.",
         ]
