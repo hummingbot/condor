@@ -1,4 +1,8 @@
-import { getSentiment } from "./sentiment-color";
+import {
+  getSentiment,
+  parseSignedNumber,
+  shouldSkipSentimentColumn,
+} from "./sentiment-color";
 
 const POSITIVE_CLASS = "condor-report-positive";
 const NEGATIVE_CLASS = "condor-report-negative";
@@ -7,8 +11,8 @@ function parseCellValue(text: string): unknown {
   const trimmed = text.trim();
   if (trimmed === "True") return true;
   if (trimmed === "False") return false;
-  const num = Number(trimmed.replace(/,/g, ""));
-  if (trimmed !== "" && !Number.isNaN(num)) return num;
+  const parsed = parseSignedNumber(trimmed);
+  if (parsed !== null) return parsed;
   return trimmed;
 }
 
@@ -20,6 +24,20 @@ function applySentimentClass(el: Element, value: unknown): void {
   const sentiment = getSentiment(value);
   if (sentiment === "positive") el.classList.add(POSITIVE_CLASS);
   else if (sentiment === "negative") el.classList.add(NEGATIVE_CLASS);
+}
+
+function colorizeTableCells(table: HTMLTableElement): void {
+  const headers = Array.from(table.querySelectorAll("thead th")).map(
+    (th) => th.textContent ?? "",
+  );
+
+  table.querySelectorAll("tbody tr").forEach((row) => {
+    row.querySelectorAll("td").forEach((cell, colIndex) => {
+      const column = headers[colIndex] ?? "";
+      if (shouldSkipSentimentColumn(column)) return;
+      applySentimentClass(cell, parseCellValue(cell.textContent ?? ""));
+    });
+  });
 }
 
 /** Colorize saved report HTML (works for reports generated before sentiment styling). */
@@ -34,8 +52,8 @@ export function colorizeReportDocument(doc: Document): void {
     doc.head.appendChild(style);
   }
 
-  doc.querySelectorAll(".section-table td, table td").forEach((el) => {
-    applySentimentClass(el, parseCellValue(el.textContent ?? ""));
+  doc.querySelectorAll(".section-table table, table").forEach((table) => {
+    colorizeTableCells(table as HTMLTableElement);
   });
 
   doc.querySelectorAll(".kpi-card .value").forEach((el) => {

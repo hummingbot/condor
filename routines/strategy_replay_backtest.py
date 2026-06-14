@@ -330,11 +330,20 @@ async def run(
         for row in _trade_rows(all_trades)
     ]
 
+    pnl_trend = (
+        "positive" if total_pnl > 0 else "negative" if total_pnl < 0 else "neutral"
+    )
+
     sections = [
         {"type": "kpi", "label": "Sessions", "value": str(len(session_rollup_rows))},
         {"type": "kpi", "label": "Sim Trades", "value": str(total_trades)},
         {"type": "kpi", "label": "Win Rate", "value": f"{total_win_rate:.1%}"},
-        {"type": "kpi", "label": "Sim PnL", "value": f"${total_pnl:+.2f}"},
+        {
+            "type": "kpi",
+            "label": "Sim PnL",
+            "value": f"${total_pnl:+.2f}",
+            "trend": pnl_trend,
+        },
     ]
 
     try:
@@ -344,10 +353,12 @@ async def run(
         builder.source("routine", "strategy_replay_backtest").tags(
             ["trading-agent", "backtest", "strategy"]
         )
+        builder.manual_order()
         builder.kpi("Sim Trades", str(total_trades))
         builder.kpi("Formal", str(formal_trades))
         builder.kpi("Adaptive", str(adaptive_trades))
-        builder.kpi("Sim PnL", f"${total_pnl:+.2f}")
+        builder.kpi("Sim PnL", f"${total_pnl:+.2f}", trend=pnl_trend)
+        builder.params(config.model_dump(), title="Run Parameters")
         builder.markdown("\n".join(summary_lines))
         if session_rollup_rows:
             builder.table(session_rollup_rows, columns=table_columns)
@@ -368,6 +379,8 @@ async def run(
                     "PnL $",
                 ],
             )
+        else:
+            builder.markdown("### Simulated Trades\n\nNo simulated trades.")
         await builder.save()
     except Exception as error:
         logger.warning("Report generation failed: %s", error)

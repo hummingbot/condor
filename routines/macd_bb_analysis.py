@@ -200,6 +200,7 @@ async def run(
         builder.source("routine", "macd_bb_analysis").tags(
             ["technical-analysis", "macd", "bollinger"]
         )
+        builder.manual_order()
         builder.kpi(
             "Signal",
             signal,
@@ -211,11 +212,7 @@ async def run(
         )
         builder.kpi("BB Position", f"{bb_pos * 100:.1f}%")
         builder.kpi("Histogram", f"{hist_curr:.6g}")
-        builder.markdown(
-            f"Connector: `{config.connector_name}`  \n"
-            f"Pair: `{config.trading_pair}`  \n"
-            f"Interval: `{config.interval}`"
-        )
+        builder.params(config.model_dump(), title="Run Parameters")
         builder.table([table_row], columns=table_columns)
         builder.markdown("### Entry Rules Check")
         builder.table(conditions_rows, columns=conditions_columns)

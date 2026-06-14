@@ -1,7 +1,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { RoutineInstance } from "@/lib/api";
-import { sentimentClass } from "@/lib/sentiment-color";
+import { sentimentClass, shouldSkipSentimentColumn } from "@/lib/sentiment-color";
 
 interface Props {
   instance: RoutineInstance;
@@ -122,7 +122,9 @@ export function RoutineResultView({ instance }: Props) {
                     const display = isNum
                       ? (val as number).toFixed(val % 1 === 0 ? 0 : 2)
                       : String(val ?? "");
-                    const colorClass = sentimentClass(val);
+                    const colorClass = shouldSkipSentimentColumn(col)
+                      ? ""
+                      : sentimentClass(val);
                     return (
                       <td key={col} className={`px-3 py-1.5 font-mono ${colorClass}`}>
                         {display}

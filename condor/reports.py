@@ -283,6 +283,56 @@ _NEGATIVE_TERMS = frozenset(
     {"short", "bearish", "false", "decreasing", "negative", "no", "sell"}
 )
 
+_NO_SENTIMENT_COLUMNS = frozenset(
+    {
+        "session",
+        "entry tick",
+        "exit tick",
+        "tick",
+        "ticks parsed",
+        "pair rows",
+        "sim trades",
+        "formal trades",
+        "adaptive trades",
+        "pair",
+        "interval",
+        "parameter",
+        "value",
+        "rule",
+        "condition",
+        "entry class",
+        "trigger",
+        "exit reason",
+        "status",
+        "hold",
+        "created",
+        "volume $",
+    }
+)
+
+
+def _parse_signed_number(value: Any) -> float | None:
+    """Parse numeric strings like $+189.90, -12.5%, or +3.2."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().replace(",", "")
+    if not normalized:
+        return None
+    for prefix in ("$", "€", "£"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].strip()
+            break
+    if normalized.endswith("%"):
+        normalized = normalized[:-1].strip()
+    try:
+        return float(normalized)
+    except ValueError:
+        return None
+
 
 def _sentiment_class(value: Any, trend: str | None = None) -> str:
     if trend in ("positive", "up"):
@@ -293,10 +343,11 @@ def _sentiment_class(value: Any, trend: str | None = None) -> str:
         return "positive"
     if value is False:
         return "negative"
-    if isinstance(value, (int, float)):
-        if value > 0:
+    parsed = _parse_signed_number(value)
+    if parsed is not None:
+        if parsed > 0:
             return "positive"
-        if value < 0:
+        if parsed < 0:
             return "negative"
         return ""
     if isinstance(value, str):
@@ -347,6 +398,20 @@ class ReportBuilder:
         if not columns and rows:
             columns = list(rows[0].keys())
         self._sections.append({"type": "table", "columns": columns or [], "rows": rows})
+        return self
+
+    def params(self, config: dict, title: str = "Run Parameters") -> ReportBuilder:
+        """Render run configuration as a two-column Parameter / Value table."""
+        rows = []
+        for key in sorted(config.keys()):
+            val = config[key]
+            if isinstance(val, (dict, list)):
+                display = json.dumps(val)
+            else:
+                display = str(val)
+            rows.append({"Parameter": key, "Value": display})
+        self.markdown(f"### {title}")
+        self.table(rows, columns=["Parameter", "Value"])
         return self
 
     async def save(self, report_id: str | None = None) -> str:
@@ -458,7 +523,7 @@ class ReportBuilder:
                 parts.append(f'<div class="section plotly-chart">{sec["content"]}</div>')
                 i += 1
             elif sec["type"] == "table":
-                parts.append(self._render_table(sec["columns"], sec["rows"]))
+                parts.append(ReportBuilder._render_table(sec["columns"], sec["rows"]))
                 i += 1
             else:
                 i += 1
@@ -472,7 +537,8 @@ class ReportBuilder:
             cells = []
             for c in columns:
                 val = row.get(c, "")
-                cls = _sentiment_class(val)
+                skip_sentiment = c.strip().lower() in _NO_SENTIMENT_COLUMNS
+                cls = "" if skip_sentiment else _sentiment_class(val)
                 if cls:
                     cells.append(f'<td class="{cls}">{val}</td>')
                 else:
