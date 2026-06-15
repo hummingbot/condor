@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -227,6 +227,10 @@ export function CreateExecutor() {
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
 
+  // Teardown for an in-flight drag, so an unmount mid-drag still detaches the
+  // document listeners and restores the body cursor.
+  const dragCleanup = useRef<(() => void) | null>(null);
+
   const startHDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
@@ -235,13 +239,15 @@ export function CreateExecutor() {
     const onMove = (ev: MouseEvent) => {
       setRightPanelWidth(Math.max(260, Math.min(500, startW + (startX - ev.clientX))));
     };
-    const onUp = () => {
+    const cleanup = () => {
       document.body.style.cursor = "";
       document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("mouseup", cleanup);
+      dragCleanup.current = null;
     };
+    dragCleanup.current = cleanup;
     document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    document.addEventListener("mouseup", cleanup);
   }, [rightPanelWidth]);
 
   const startVDrag = useCallback((e: React.MouseEvent) => {
@@ -252,14 +258,19 @@ export function CreateExecutor() {
     const onMove = (ev: MouseEvent) => {
       setBottomPaneHeight(Math.max(100, Math.min(500, startH + (startY - ev.clientY))));
     };
-    const onUp = () => {
+    const cleanup = () => {
       document.body.style.cursor = "";
       document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("mouseup", cleanup);
+      dragCleanup.current = null;
     };
+    dragCleanup.current = cleanup;
     document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    document.addEventListener("mouseup", cleanup);
   }, [bottomPaneHeight]);
+
+  // Tear down a drag interrupted by unmount.
+  useEffect(() => () => dragCleanup.current?.(), []);
 
   const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],

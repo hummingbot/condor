@@ -5,12 +5,13 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/Executors.tsx:468-488
   - frontend/src/pages/CreateExecutor.tsx:243-261
   - frontend/src/components/agent/AgentFloatingPanel.tsx:57-58
-commits: []
+commits:
+  - "<pending> (fix) limpiar listeners de resize-drag en unmount (CORR-008)"
 created: 2026-06-10
 ---
 
@@ -35,9 +36,9 @@ los `onMouseMove`/`onMouseUp` activos en refs y añadir un
 que un unmount mid-drag siempre los desadjunte y restaure `document.body`.
 
 ## Criterio de aceptación
-- [ ] Desmontar el panel de detalle (o el draggable de CreateExecutor) mid-drag remueve los listeners `mousemove`/`mouseup` de document
-- [ ] `document.body` cursor y `userSelect` se restauran aunque el drag se interrumpa por unmount
-- [ ] No queda cursor `col-resize` pegado ni selección de texto deshabilitada tras navegar durante un resize
+- [x] Desmontar el panel de detalle (o el draggable de CreateExecutor) mid-drag remueve los listeners `mousemove`/`mouseup` de document
+- [x] `document.body` cursor y `userSelect` se restauran aunque el drag se interrumpa por unmount
+- [x] No queda cursor `col-resize` pegado ni selección de texto deshabilitada tras navegar durante un resize
 
 ## Notas
 Patrón repetido en 3 archivos; conviene resolver `Executors.tsx` primero y replicar a los otros dos.

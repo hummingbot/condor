@@ -1,5 +1,5 @@
 import { Brain, FileText, FlaskConical, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { PanelId } from "./AgentToolbar";
 
@@ -38,6 +38,10 @@ export function AgentFloatingPanel({ panelId, onClose, children }: AgentFloating
     return () => window.removeEventListener("keydown", handler);
   }, [isOpen, onClose]);
 
+  // Teardown for an in-flight drag, so an unmount mid-drag still detaches the
+  // document listeners.
+  const dragCleanup = useRef<(() => void) | null>(null);
+
   // Resize drag
   const startDrag = useCallback(
     (e: React.MouseEvent) => {
@@ -49,16 +53,21 @@ export function AgentFloatingPanel({ panelId, onClose, children }: AgentFloating
         const delta = startX - ev.clientX;
         setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startWidth + delta)));
       };
-      const onUp = () => {
+      const cleanup = () => {
         setIsDragging(false);
         document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
+        document.removeEventListener("mouseup", cleanup);
+        dragCleanup.current = null;
       };
+      dragCleanup.current = cleanup;
       document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
+      document.addEventListener("mouseup", cleanup);
     },
     [width],
   );
+
+  // Tear down a drag interrupted by unmount.
+  useEffect(() => () => dragCleanup.current?.(), []);
 
   const meta = panelId ? PANEL_META[panelId] : null;
   const Icon = meta?.icon;

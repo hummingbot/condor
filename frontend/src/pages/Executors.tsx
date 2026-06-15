@@ -464,6 +464,9 @@ export function DetailPanel({
   const navigate = useNavigate();
   const [panelWidth, setPanelWidth] = useState(480);
   const isDragging = useRef(false);
+  // Holds the teardown for an in-flight drag so an unmount mid-drag (panel
+  // closed / executor switched) still detaches listeners and restores body.
+  const dragCleanup = useRef<(() => void) | null>(null);
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -474,18 +477,23 @@ export function DetailPanel({
       const newWidth = window.innerWidth - ev.clientX;
       setPanelWidth(Math.max(300, Math.min(newWidth, window.innerWidth * 0.8)));
     };
-    const onMouseUp = () => {
+    const cleanup = () => {
       isDragging.current = false;
       document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
+      document.removeEventListener("mouseup", cleanup);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      dragCleanup.current = null;
     };
+    dragCleanup.current = cleanup;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("mouseup", cleanup);
   }, []);
+
+  // Tear down a drag interrupted by unmount.
+  useEffect(() => () => dragCleanup.current?.(), []);
 
   const sideLabel = executor.side.toUpperCase();
   const sideColor = sideLabel === "BUY" || sideLabel === "1" ? "var(--color-green)" : "var(--color-red)";
