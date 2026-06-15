@@ -10,7 +10,7 @@ files:
   - frontend/src/pages/tabs/EditorTab.tsx:328-335
   - frontend/src/pages/tabs/EditorTab.tsx:855
 commits:
-  - "<pending> (fix) invalidar controller-source tras guardar un controller (CORR-030)"
+  - "86b2f6e (fix) invalidar controller-source tras guardar un controller (CORR-030)"
 created: 2026-06-10
 ---
 
