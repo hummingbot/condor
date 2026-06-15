@@ -5,13 +5,14 @@ category: performance
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/bots/ControllerBrowser.tsx:88
   - frontend/src/components/bots/ControllerBrowser.tsx:65
   - frontend/src/components/bots/ControllerBrowser.tsx:93-99
   - frontend/src/pages/tabs/ActiveBotsTab.tsx:789
-commits: []
+commits:
+  - "<pending> (perf) memoizar originalYaml en YamlConfigEditor (PERF-024)"
 created: 2026-06-10
 ---
 
@@ -33,9 +34,9 @@ seguro (no cambia el comportamiento en cambios reales de contenido). `isDirty` e
 contra un valor memoizado estable.
 
 ## Criterio de aceptación
-- [ ] `originalYaml` se computa dentro de un `useMemo` keyed sobre `config`
-- [ ] `yamlLib.dump` no se llama en renders donde `config` no cambió (verificable con log/profiling)
-- [ ] El botón Reset y el indicador dirty se comportan igual (y dejan de pisar ediciones por ticks WS)
+- [x] `originalYaml` se computa dentro de un `useMemo` keyed sobre `config`
+- [x] `yamlLib.dump` no se llama en renders donde `config` no cambió (verificable con log/profiling)
+- [x] El botón Reset y el indicador dirty se comportan igual (y dejan de pisar ediciones por ticks WS)
 
 ## Notas
 Relacionado con [[ARCH-034]] (centralizar `configToYaml` en `lib/`): conviene memoizar acá y, al

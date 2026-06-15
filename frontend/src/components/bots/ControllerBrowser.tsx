@@ -13,7 +13,7 @@ import {
   Save,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
@@ -85,16 +85,20 @@ function YamlConfigEditor({
   botName: string;
   onSaved: () => void;
 }) {
-  const originalYaml = configToYaml(config);
+  // Memoize the dump so typing / local-state renders don't re-run yaml.dump, and
+  // so WS-tick churn of the `config` object identity that yields the SAME content
+  // produces an identical string (compared by value) below.
+  const originalYaml = useMemo(() => configToYaml(config), [config]);
   const [yamlContent, setYamlContent] = useState(originalYaml);
   const [parseError, setParseError] = useState<string | null>(null);
 
-  // Sync when config changes externally (e.g. after save or controller switch)
+  // Sync when config content actually changes (save / controller switch). Keyed
+  // on the string value, not the `config` object: a tick that re-creates `config`
+  // with unchanged content leaves `originalYaml` equal, so unsaved edits survive.
   useEffect(() => {
-    const newYaml = configToYaml(config);
-    setYamlContent(newYaml);
+    setYamlContent(originalYaml);
     setParseError(null);
-  }, [config]);
+  }, [originalYaml]);
 
   const isDirty = yamlContent !== originalYaml;
 
