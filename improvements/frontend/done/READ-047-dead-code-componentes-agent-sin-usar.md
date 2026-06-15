@@ -13,7 +13,7 @@ files:
   - frontend/src/components/agent/AgentFloatingPanel.tsx
   - frontend/src/components/agent/AgentRoutinesTab.tsx
 commits:
-  - "<pending> (chore) eliminar 5 componentes muertos de la UI del agent (READ-047)"
+  - "f3398c3 (chore) eliminar 5 componentes muertos de la UI del agent (READ-047)"
 created: 2026-06-10
 ---
 
