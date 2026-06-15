@@ -330,6 +330,11 @@ function EditorPane({
       if (tab.file.kind === "config") {
         queryClient.invalidateQueries({ queryKey: ["available-configs", server] });
         queryClient.invalidateQueries({ queryKey: ["config-detail", server, tab.file.configId] });
+      } else if (tab.file.kind === "controller") {
+        // Otherwise FileContentLoader serves the pre-edit source on reopen (staleTime).
+        queryClient.invalidateQueries({
+          queryKey: ["controller-source", server, tab.file.controllerType, tab.file.controllerName],
+        });
       }
     },
   });

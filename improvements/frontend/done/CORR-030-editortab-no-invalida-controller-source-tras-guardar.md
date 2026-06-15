@@ -5,11 +5,12 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/tabs/EditorTab.tsx:328-335
   - frontend/src/pages/tabs/EditorTab.tsx:855
-commits: []
+commits:
+  - "<pending> (fix) invalidar controller-source tras guardar un controller (CORR-030)"
 created: 2026-06-10
 ---
 
@@ -29,8 +30,8 @@ En `saveMutation.onSuccess`, añadir una rama `else` para controllers que llame
 reflejando la rama de config.
 
 ## Criterio de aceptación
-- [ ] Guardar un controller `.py` y reabrirlo muestra el contenido guardado sin refrescar la página
-- [ ] La query `controller-source` se invalida en el guardado exitoso de un controller
+- [x] Guardar un controller `.py` y reabrirlo muestra el contenido guardado sin refrescar la página
+- [x] La query `controller-source` se invalida en el guardado exitoso de un controller
 
 ## Notas
 Mismo archivo que [[CORR-026]] (setState en render) y [[PERF-025]] (memoización), concerns distintos.
