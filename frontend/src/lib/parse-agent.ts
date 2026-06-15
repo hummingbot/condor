@@ -330,20 +330,24 @@ function parseToolCalls(text: string): ToolCall[] {
   // Match each ### N. tool_name (status) line, with optional content after
   const headerRegex = /^### (\d+)\.\s+(\S+)\s+\(([^)]*)\)/gm;
   let match;
-  const headers: { number: number; name: string; status: string; index: number }[] = [];
+  // `start` = raw offset of the header line; `index` = offset of the block body
+  // right after the header line. The block for header i runs until the next
+  // header's `start` (exact), avoiding magic offset arithmetic.
+  const headers: { number: number; name: string; status: string; start: number; index: number }[] = [];
 
   while ((match = headerRegex.exec(text)) !== null) {
     headers.push({
       number: parseInt(match[1]),
       name: match[2],
       status: match[3],
+      start: match.index,
       index: match.index + match[0].length,
     });
   }
 
   for (let i = 0; i < headers.length; i++) {
     const h = headers[i];
-    const blockEnd = i + 1 < headers.length ? headers[i + 1].index - headers[i + 1].name.length - 20 : text.length;
+    const blockEnd = i + 1 < headers.length ? headers[i + 1].start : text.length;
     const block = text.slice(h.index, blockEnd);
 
     const tc: ToolCall = {

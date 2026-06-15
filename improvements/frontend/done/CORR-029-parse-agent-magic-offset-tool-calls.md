@@ -5,11 +5,12 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/lib/parse-agent.ts:340
   - frontend/src/lib/parse-agent.ts:346
-commits: []
+commits:
+  - "<pending> (fix) limites de bloque exactos en parseToolCalls (CORR-029)"
 created: 2026-06-10
 ---
 
@@ -34,10 +35,10 @@ Guardar el offset de inicio de cada header por separado (ej. `start: match.index
 mágica `- name.length - 20` por completo. Esto da límites exactos sin números mágicos.
 
 ## Criterio de aceptación
-- [ ] Los bloques Input/Output se cortan usando el `match.index` real del header siguiente, no un offset hardcodeado
-- [ ] Tool calls con nombres cortos y N/status de tamaño variable parsean Input/Output correctamente
-- [ ] Ningún bloque de tool-call contiene fragmentos del header `### N. name (status)` siguiente
-- [ ] No queda el literal `- 20` en el cálculo de fin de bloque
+- [x] Los bloques Input/Output se cortan usando el `match.index` real del header siguiente, no un offset hardcodeado
+- [x] Tool calls con nombres cortos y N/status de tamaño variable parsean Input/Output correctamente
+- [x] Ningún bloque de tool-call contiene fragmentos del header `### N. name (status)` siguiente
+- [x] No queda el literal `- 20` en el cálculo de fin de bloque
 
 ## Notas
 Hallazgo reportado tanto por la lente CORR como READ — es un bug de correctness en parsing puro.
