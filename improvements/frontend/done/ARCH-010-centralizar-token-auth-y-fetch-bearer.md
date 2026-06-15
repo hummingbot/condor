@@ -13,7 +13,7 @@ files:
   - frontend/src/components/chat/ChatInput.tsx:284-286
   - frontend/src/components/routines/RoutineResultView.tsx:22-24
 commits:
-  - "bead28d (refactor) centralizar token de auth en lib/auth-token (ARCH-010)"
+  - "e10d0f4 (refactor) centralizar token de auth en lib/auth-token (ARCH-010)"
 created: 2026-06-10
 ---
 
