@@ -10,7 +10,7 @@ files:
   - frontend/src/pages/tabs/EditorTab.tsx:866-887
   - frontend/src/pages/tabs/EditorTab.tsx:769-784
 commits:
-  - "<pending> (fix) FileContentLoader maneja data en useEffect, no en render (CORR-026)"
+  - "c0afa69 (fix) FileContentLoader maneja data en useEffect, no en render (CORR-026)"
 created: 2026-06-10
 ---
 
