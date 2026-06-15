@@ -5,12 +5,13 @@ category: performance
 impact: high
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/tabs/BacktestingTab.tsx:594
   - frontend/src/pages/tabs/BacktestingTab.tsx:598
   - frontend/src/pages/tabs/BacktestingTab.tsx:1138
-commits: []
+commits:
+  - "<pending> (perf) memoizar extractResults en BacktestingTab (PERF-001)"
 created: 2026-06-10
 ---
 
@@ -35,9 +36,9 @@ referencia estable de `data` entre renders cuando no cambia, así que el parse s
 re-ejecuta cuando llega data nueva de la task.
 
 ## Criterio de aceptación
-- [ ] `extractResults` corre solo cuando cambia la referencia de `selectedTask.result` (o `pinnedTask.result`), verificable con un `console.count` temporal mientras se tipea en el formulario
-- [ ] Tipear en los inputs de config del backtest no dispara re-parseo de candles/executors
-- [ ] El output de chart y métricas es idéntico al anterior para la misma task
+- [x] `extractResults` corre solo cuando cambia la referencia de `selectedTask.result` (o `pinnedTask.result`), verificable con un `console.count` temporal mientras se tipea en el formulario
+- [x] Tipear en los inputs de config del backtest no dispara re-parseo de candles/executors
+- [x] El output de chart y métricas es idéntico al anterior para la misma task
 
 ## Notas
 Pre-requisito natural de [[ARCH-009]] (extraer `extractResults` a `lib/backtest.ts`) y

@@ -15,7 +15,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { IChartApi } from "lightweight-charts";
 
 import { useServer } from "@/hooks/useServer";
@@ -591,11 +591,19 @@ export function BacktestingTab() {
   }, []);
 
   const rawTaskResults = selectedTask?.result as Record<string, unknown> | undefined;
-  const processed = rawTaskResults ? extractResults(rawTaskResults) : null;
+  // Re-parse only when react-query hands us a new result reference, not on every
+  // keystroke/poll/toast re-render (candles/executors can be thousands of rows).
+  const processed = useMemo(
+    () => (rawTaskResults ? extractResults(rawTaskResults) : null),
+    [rawTaskResults],
+  );
 
   // Pinned task processed data for comparison
   const pinnedRawResults = pinnedTask?.result as Record<string, unknown> | undefined;
-  const pinnedProcessed = pinnedRawResults ? extractResults(pinnedRawResults) : null;
+  const pinnedProcessed = useMemo(
+    () => (pinnedRawResults ? extractResults(pinnedRawResults) : null),
+    [pinnedRawResults],
+  );
 
   // Extract config info from a task for display
   const getTaskConfigInfo = useCallback((task: Record<string, unknown>) => {
