@@ -10,11 +10,11 @@ Yields the same ACPEvent types so TickEngine can consume it identically.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 import uuid
-from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -102,10 +102,40 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 }
 
 
+# Global semaphores keyed by base URL so all clients pointing at the same
+# inference server (e.g. LM Studio) share one slot, regardless of which
+# session (user chat, trading tick, etc.) holds it.
+_SERVER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
+
+
+def _get_server_semaphore(base_url: str) -> asyncio.Semaphore:
+    if base_url not in _SERVER_SEMAPHORES:
+        _SERVER_SEMAPHORES[base_url] = asyncio.Semaphore(1)
+    return _SERVER_SEMAPHORES[base_url]
+
+
 def is_pydantic_ai_model(agent_key: str) -> bool:
     """Check if an agent_key should use the PydanticAI client."""
     prefix = agent_key.split(":", 1)[0] if ":" in agent_key else ""
     return prefix in PYDANTIC_AI_PREFIXES
+
+
+def _tool_args_to_dict(args: Any) -> dict | None:
+    """Normalise a pydantic-ai tool-call `args` value to a dict.
+
+    OpenAI-compatible providers (LM Studio, Ollama, OpenRouter) deliver tool-call
+    arguments as a JSON string rather than a dict, so a bare isinstance(dict)
+    check would drop them. Parse the string form too.
+    """
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str) and args.strip():
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
 
 
 class PydanticAIClient:
@@ -141,9 +171,17 @@ class PydanticAIClient:
         # Auto-detect filter mode based on model if not explicitly set
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
-        self._exit_stack: AsyncExitStack | None = None
-        self._mcp_ctx: Any = None
         self._agent: Any = None
+        # Resolved in start() to the global semaphore for this server's base URL,
+        # so all sessions sharing the same LM Studio instance are serialized.
+        self._request_semaphore: asyncio.Semaphore | None = None
+        # Background task that owns the MCP server cancel scopes.
+        # anyio requires cancel scopes to be entered/exited in the same task,
+        # so we can't close them from an arbitrary caller task.
+        self._mcp_task: asyncio.Task | None = None
+        self._ready_event: asyncio.Event | None = None
+        self._shutdown_event: asyncio.Event | None = None
+        self._startup_error: BaseException | None = None
 
     def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
@@ -161,11 +199,22 @@ class PydanticAIClient:
           - openai:model     → OpenAI API (or custom base_url for vLLM, etc.)
           - groq/anthropic   → standard pydantic-ai resolution
         """
+        import httpx
+        from openai import AsyncOpenAI
         from pydantic_ai.models.openai import OpenAIModel
         from pydantic_ai.providers.openai import OpenAIProvider
 
         prefix, _, model_id = self.model_name.partition(":")
         base_url = self.base_url
+
+        # The OpenAI SDK applies its own default timeout (connect=5s) that takes
+        # precedence over any httpx.AsyncClient timeout. Set it on AsyncOpenAI
+        # directly so it actually applies. connect=30s handles a busy LM Studio
+        # connection pool; the read timeout covers slow local model generation —
+        # including a cold first request where the model is still loading into
+        # memory. Default 600s; override via LOCAL_MODEL_READ_TIMEOUT.
+        _read_timeout = float(os.environ.get("LOCAL_MODEL_READ_TIMEOUT", "600"))
+        _local_timeout = httpx.Timeout(connect=30.0, read=_read_timeout, write=30.0, pool=30.0)
 
         # OpenRouter: OpenAI-compatible cloud gateway, requires API key.
         # Handled before the generic DEFAULT_BASE_URLS branch because that branch
@@ -181,24 +230,33 @@ class PydanticAIClient:
                 raise RuntimeError(
                     "OPENROUTER_API_KEY is not set. Add it to your .env to use openrouter:* models."
                 )
-            provider = OpenAIProvider(
+            openai_client = AsyncOpenAI(
                 base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
                 api_key=api_key,
+                timeout=_local_timeout,
             )
-            return OpenAIModel(model_id, provider=provider)
+            return OpenAIModel(model_id, provider=OpenAIProvider(openai_client=openai_client))
 
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
             if not model_id:
                 model_id = self._resolve_default_local_model(prefix=prefix, base_url=base_url)
-            provider = OpenAIProvider(base_url=base_url, api_key="not-needed")
-            return OpenAIModel(model_id, provider=provider)
+            openai_client = AsyncOpenAI(
+                base_url=base_url,
+                api_key="not-needed",
+                timeout=_local_timeout,
+            )
+            return OpenAIModel(model_id, provider=OpenAIProvider(openai_client=openai_client))
 
         # OpenAI with custom base_url (vLLM, TGI, etc.)
         if prefix == "openai" and base_url:
-            provider = OpenAIProvider(base_url=base_url, api_key="not-needed")
-            return OpenAIModel(model_id, provider=provider)
+            openai_client = AsyncOpenAI(
+                base_url=base_url,
+                api_key="not-needed",
+                timeout=_local_timeout,
+            )
+            return OpenAIModel(model_id, provider=OpenAIProvider(openai_client=openai_client))
 
         # Standard pydantic-ai resolution (openai, groq, anthropic, google)
         from pydantic_ai.models import infer_model
@@ -281,24 +339,15 @@ class PydanticAIClient:
         return None
 
     async def start(self) -> None:
-        """Initialize MCP servers and create the pydantic-ai agent.
-
-        MCP servers are entered into the exit stack here so they are properly
-        cleaned up when stop() is called, even if prompt_stream() errors out.
-        """
+        """Initialize MCP servers and create the pydantic-ai agent."""
         from pydantic_ai import Agent
         from pydantic_ai.mcp import MCPServerStdio
 
-        self._exit_stack = AsyncExitStack()
-
-        # Build MCP server instances from configs
-        # Each config has: name, command, args, env
         toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
             args = srv_config.get("args", [])
 
-            # Build env dict: merge extra_env + per-server env vars
             env = dict(self.extra_env or {})
             for env_entry in srv_config.get("env", []):
                 if isinstance(env_entry, dict):
@@ -308,28 +357,35 @@ class PydanticAIClient:
                 command,
                 args=args,
                 env=env if env else None,
+                timeout=30,
             )
 
             toolsets.append(mcp_server)
             self._mcp_servers.append(mcp_server)
 
         model = self._build_model()
+        self._agent = Agent(model, toolsets=toolsets)
 
-        self._agent = Agent(
-            model,
-            toolsets=toolsets,
-        )
+        # Resolve the global semaphore for this server's base URL so all client
+        # instances targeting the same inference server share one request slot.
+        prefix = self.model_name.split(":", 1)[0]
+        resolved_base_url = self.base_url or DEFAULT_BASE_URLS.get(prefix, self.model_name)
+        self._request_semaphore = _get_server_semaphore(resolved_base_url)
 
-        # Enter MCP servers into the exit stack so stop() cleans them up.
-        # This uses the agent's run_mcp_servers() context manager which
-        # properly starts and stops all MCP subprocess servers.
-        try:
-            self._mcp_ctx = self._agent.run_mcp_servers()
-            await self._exit_stack.enter_async_context(self._mcp_ctx)
-        except Exception:
-            # MCP server startup failed -- clean up to prevent orphan subprocesses
-            await self.stop()
-            raise
+        # Spin up a dedicated background task to own the MCP server cancel scopes.
+        # anyio cancel scopes must be entered and exited in the same asyncio task;
+        # using a shared AsyncExitStack across tasks causes RuntimeError on teardown.
+        self._ready_event = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
+        self._startup_error = None
+        self._mcp_task = asyncio.create_task(self._run_mcp_lifecycle())
+
+        await self._ready_event.wait()
+        if self._startup_error is not None:
+            self._mcp_task = None
+            self._mcp_servers.clear()
+            self._agent = None
+            raise self._startup_error
 
         log.info(
             "PydanticAI client ready: model=%s, mcp_servers=%d",
@@ -337,14 +393,27 @@ class PydanticAIClient:
             len(self._mcp_servers),
         )
 
+    async def _run_mcp_lifecycle(self) -> None:
+        """Background task that holds the MCP server context open."""
+        try:
+            async with self._agent.run_mcp_servers():
+                self._ready_event.set()
+                await self._shutdown_event.wait()
+        except BaseException as exc:
+            if not self._ready_event.is_set():
+                self._startup_error = exc
+                self._ready_event.set()
+
     async def stop(self) -> None:
-        """Clean up MCP server subprocesses."""
-        if self._exit_stack:
+        """Signal the MCP lifecycle task to shut down and wait for it."""
+        if self._mcp_task is not None:
+            self._shutdown_event.set()
             try:
-                await self._exit_stack.aclose()
+                await asyncio.wait_for(self._mcp_task, timeout=10)
             except Exception:
-                log.exception("Error closing MCP server exit stack")
-            self._exit_stack = None
+                log.exception("Error stopping MCP server task")
+                self._mcp_task.cancel()
+            self._mcp_task = None
         self._mcp_servers.clear()
         self._agent = None
 
@@ -370,93 +439,97 @@ class PydanticAIClient:
         """
         assert self._agent is not None, "Client not started"
 
-        start_time = time.monotonic()
+        # Serialize requests: local inference servers (LM Studio, Ollama) process
+        # one request at a time. Without this, concurrent ticks race to connect
+        # and the losing ticks ConnectTimeout against a busy server.
+        async with self._request_semaphore:
+            start_time = time.monotonic()
 
-        try:
-            from pydantic_ai.agent import CallToolsNode, ModelRequestNode
-            from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
-            from pydantic_graph import End
+            try:
+                from pydantic_ai.agent import CallToolsNode, ModelRequestNode
+                from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
+                from pydantic_graph import End
 
-            async with self._agent.iter(text) as run:
-                async for node in run:
-                    if isinstance(node, End):
-                        # Final result -- extract text from the result
-                        if hasattr(node, "data") and node.data:
-                            result_data = node.data
-                            if hasattr(result_data, "data"):
-                                yield TextChunk(text=str(result_data.data))
-                        break
+                async with self._agent.iter(text) as run:
+                    async for node in run:
+                        if isinstance(node, End):
+                            # Final result -- extract text from the result
+                            if hasattr(node, "data") and node.data:
+                                result_data = node.data
+                                if hasattr(result_data, "data"):
+                                    yield TextChunk(text=str(result_data.data))
+                            break
 
-                    if isinstance(node, ModelRequestNode):
-                        elapsed = time.monotonic() - start_time
-                        yield Heartbeat(elapsed_seconds=elapsed)
-                        # Extract tool return results from request parts
-                        if hasattr(node, 'request') and node.request:
-                            for part in node.request.parts:
-                                if isinstance(part, ToolReturnPart):
-                                    content = part.content
-                                    output_str = content if isinstance(content, str) else str(content)
-                                    yield ToolCallUpdate(
-                                        tool_call_id=part.tool_call_id or "",
-                                        status="completed",
-                                        output=output_str,
-                                    )
-
-                    elif isinstance(node, CallToolsNode):
-                        # Emit text and tool-call events from model response
-                        for part in node.model_response.parts:
-                            if isinstance(part, TextPart) and part.content:
-                                yield TextChunk(text=part.content)
-
-                            elif isinstance(part, ToolCallPart):
-                                tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
-                                tool_name = part.tool_name
-
-                                # Risk check via permission callback
-                                if self.permission_callback:
-                                    tool_call_info = {
-                                        "tool": tool_name,
-                                        "title": tool_name,
-                                        "input": part.args if isinstance(part.args, dict) else {},
-                                    }
-                                    options = [
-                                        {"optionId": "allow", "kind": "allow_once"},
-                                        {"optionId": "deny", "kind": "deny"},
-                                    ]
-                                    result = await self.permission_callback(
-                                        tool_call_info, options
-                                    )
-                                    outcome = result.get("outcome", {})
-                                    if isinstance(outcome, dict) and outcome.get("outcome") == "cancelled":
-                                        yield ToolCallEvent(
-                                            tool_call_id=tool_id,
-                                            title=tool_name,
-                                            status="blocked",
-                                            kind="mcp",
-                                            input=part.args if isinstance(part.args, dict) else None,
+                        if isinstance(node, ModelRequestNode):
+                            elapsed = time.monotonic() - start_time
+                            yield Heartbeat(elapsed_seconds=elapsed)
+                            # Extract tool return results from request parts
+                            if hasattr(node, 'request') and node.request:
+                                for part in node.request.parts:
+                                    if isinstance(part, ToolReturnPart):
+                                        content = part.content
+                                        output_str = content if isinstance(content, str) else str(content)
+                                        yield ToolCallUpdate(
+                                            tool_call_id=part.tool_call_id or "",
+                                            status="completed",
+                                            output=output_str,
                                         )
-                                        continue
 
-                                yield ToolCallEvent(
-                                    tool_call_id=tool_id,
-                                    title=tool_name,
-                                    status="in_progress",
-                                    kind="mcp",
-                                    input=part.args if isinstance(part.args, dict) else None,
-                                )
+                        elif isinstance(node, CallToolsNode):
+                            # Emit text and tool-call events from model response
+                            for part in node.model_response.parts:
+                                if isinstance(part, TextPart) and part.content:
+                                    yield TextChunk(text=part.content)
 
-                                yield ToolCallUpdate(
-                                    tool_call_id=tool_id,
-                                    status="completed",
-                                )
+                                elif isinstance(part, ToolCallPart):
+                                    tool_id = part.tool_call_id or uuid.uuid4().hex[:12]
+                                    tool_name = part.tool_name
 
-            yield PromptDone(stop_reason="end_turn")
+                                    # Risk check via permission callback
+                                    if self.permission_callback:
+                                        tool_call_info = {
+                                            "tool": tool_name,
+                                            "title": tool_name,
+                                            "input": _tool_args_to_dict(part.args) or {},
+                                        }
+                                        options = [
+                                            {"optionId": "allow", "kind": "allow_once"},
+                                            {"optionId": "deny", "kind": "deny"},
+                                        ]
+                                        result = await self.permission_callback(
+                                            tool_call_info, options
+                                        )
+                                        outcome = result.get("outcome", {})
+                                        if isinstance(outcome, dict) and outcome.get("outcome") == "cancelled":
+                                            yield ToolCallEvent(
+                                                tool_call_id=tool_id,
+                                                title=tool_name,
+                                                status="blocked",
+                                                kind="mcp",
+                                                input=_tool_args_to_dict(part.args),
+                                            )
+                                            continue
 
-        except asyncio.TimeoutError:
-            yield PromptDone(stop_reason="timeout")
-        except Exception as e:
-            log.exception("PydanticAI prompt error: %s", e)
-            yield TextChunk(text=self._format_error(e))
+                                    yield ToolCallEvent(
+                                        tool_call_id=tool_id,
+                                        title=tool_name,
+                                        status="in_progress",
+                                        kind="mcp",
+                                        input=_tool_args_to_dict(part.args),
+                                    )
+
+                                    yield ToolCallUpdate(
+                                        tool_call_id=tool_id,
+                                        status="completed",
+                                    )
+
+                yield PromptDone(stop_reason="end_turn")
+
+            except asyncio.TimeoutError:
+                yield PromptDone(stop_reason="timeout")
+            except Exception as e:
+                log.exception("PydanticAI prompt error: %s", e)
+                yield TextChunk(text=self._format_error(e))
             yield PromptDone(stop_reason="error")
 
     def _format_error(self, e: Exception) -> str:
