@@ -5,14 +5,15 @@ category: readability
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/agent/AgentExperimentsTab.tsx
   - frontend/src/components/agent/AgentSessionsTab.tsx
   - frontend/src/components/agent/AgentToolbar.tsx
   - frontend/src/components/agent/AgentFloatingPanel.tsx
   - frontend/src/components/agent/AgentRoutinesTab.tsx
-commits: []
+commits:
+  - "<pending> (chore) eliminar 5 componentes muertos de la UI del agent (READ-047)"
 created: 2026-06-10
 ---
 
@@ -37,10 +38,10 @@ el markup de snapshot de experimentos o de run de routine se considera valioso, 
 compartido a un componente reusado por `SessionReviewer` en vez de dejar el archivo de tab entero muerto.
 
 ## Criterio de aceptación
-- [ ] Los cinco archivos listados se eliminan del repo
-- [ ] `tsc`/`vite build` compila sin errores de import sin resolver
-- [ ] grep en `frontend/src` no encuentra referencias a `ExperimentsTab`, `SessionsTab`, `SessionSelector`, `SessionMetricsBar`, `AgentToolbar`, `AgentFloatingPanel` ni `AgentRoutinesTab`
-- [ ] La página de agent detail y el session reviewer siguen renderizando igual
+- [x] Los cinco archivos listados se eliminan del repo
+- [x] `tsc`/`vite build` compila sin errores de import sin resolver
+- [x] grep en `frontend/src` no encuentra referencias a `ExperimentsTab`, `SessionsTab`, `SessionSelector`, `SessionMetricsBar`, `AgentToolbar`, `AgentFloatingPanel` ni `AgentRoutinesTab`
+- [x] La página de agent detail y el session reviewer siguen renderizando igual
 
 ## Notas
 Interacciones a tener en cuenta al shippear:
