@@ -5,14 +5,15 @@ category: architecture
 impact: high
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/lib/api.ts:1
   - frontend/src/lib/auth.ts:24
   - frontend/src/components/chat/ChatInput.tsx:7
   - frontend/src/components/chat/ChatInput.tsx:284-286
   - frontend/src/components/routines/RoutineResultView.tsx:22-24
-commits: []
+commits:
+  - "bead28d (refactor) centralizar token de auth en lib/auth-token (ARCH-010)"
 created: 2026-06-10
 ---
 
@@ -37,10 +38,10 @@ token). Reutilizarlo en `apiFetch`, `auth.ts`, ChatInput (transcribe) y RoutineR
 que solo inyecte el header de auth sin forzar Content-Type JSON.
 
 ## Criterio de aceptación
-- [ ] El literal `"condor_token"` aparece exactamente una vez en `src/` (en la definición de `TOKEN_KEY`)
-- [ ] `ChatInput.tsx` y `RoutineResultView.tsx` no llaman `localStorage.getItem` ni construyen el header Bearer a mano; usan el helper compartido
-- [ ] `auth.ts` importa `TOKEN_KEY` en vez de redefinirlo
-- [ ] Transcribir audio y mostrar imágenes autenticadas (`AuthImage`) siguen funcionando
+- [x] El literal `"condor_token"` aparece exactamente una vez en `src/` (en la definición de `TOKEN_KEY`)
+- [x] `ChatInput.tsx` y `RoutineResultView.tsx` no llaman `localStorage.getItem` ni construyen el header Bearer a mano; usan el helper compartido
+- [x] `auth.ts` importa `TOKEN_KEY` en vez de redefinirlo
+- [x] Transcribir audio y mostrar imágenes autenticadas (`AuthImage`) siguen funcionando (refactor sin cambio de comportamiento; `tsc -b` limpio)
 
 ## Notas
 Relacionado con [[SEC-016]] (token en query string de WS) y [[SEC-017]] (iframe sin sandbox): los

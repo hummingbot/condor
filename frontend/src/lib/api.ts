@@ -1,14 +1,11 @@
-const TOKEN_KEY = "condor_token";
+import { authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = localStorage.getItem(TOKEN_KEY);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...authHeaders(),
     ...(init?.headers as Record<string, string>),
   };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

@@ -3,8 +3,7 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import { Loader2, Mic, Send, Square } from "lucide-react";
 
 import { api } from "@/lib/api";
-
-const TOKEN_KEY = "condor_token";
+import { authFetch } from "@/lib/auth-token";
 
 interface ChatInputProps {
   onSend: (text: string) => void;
@@ -277,13 +276,11 @@ export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputP
 }
 
 async function transcribeAudio(blob: Blob): Promise<string> {
-  const token = localStorage.getItem(TOKEN_KEY);
   const formData = new FormData();
   formData.append("file", blob, "recording.webm");
 
-  const res = await fetch("/api/v1/transcribe", {
+  const res = await authFetch("/api/v1/transcribe", {
     method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: formData,
   });
 

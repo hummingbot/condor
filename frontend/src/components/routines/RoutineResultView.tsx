@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { RoutineInstance } from "@/lib/api";
+import { authFetch } from "@/lib/auth-token";
 
 interface Props {
   instance: RoutineInstance;
@@ -19,10 +20,7 @@ function AuthImage({ src, alt, className }: { src: string; alt: string; classNam
 
   useEffect(() => {
     let revoke: string | null = null;
-    const token = localStorage.getItem("condor_token");
-    fetch(src, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    authFetch(src)
       .then((res) => (res.ok ? res.blob() : Promise.reject()))
       .then((blob) => {
         const url = URL.createObjectURL(blob);
