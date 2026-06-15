@@ -5,10 +5,11 @@ category: performance
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/agent/AgentSessionContent.tsx:169-195
-commits: []
+commits:
+  - "<pending> (perf) paralelizar fetch de snapshots con Promise.all (PERF-022)"
 created: 2026-06-10
 ---
 
@@ -30,9 +31,9 @@ Mantener el mismo shape de resultado para no tocar el código downstream. Opcion
 concurrencia si el backend es sensible.
 
 ## Criterio de aceptación
-- [ ] Las llamadas a `api.getSnapshot` corren concurrentemente (verificable en el network panel: requests solapados, no waterfall)
-- [ ] `snapshotQueries.data` sigue devolviendo un `SnapshotBubble` por snapshot en orden de tick
-- [ ] Un snapshot que falla sigue produciendo una burbuja fallback (tick + timestamp) sin rechazar toda la query
+- [x] Las llamadas a `api.getSnapshot` corren concurrentemente (verificable en el network panel: requests solapados, no waterfall)
+- [x] `snapshotQueries.data` sigue devolviendo un `SnapshotBubble` por snapshot en orden de tick
+- [x] Un snapshot que falla sigue produciendo una burbuja fallback (tick + timestamp) sin rechazar toda la query
 
 ## Notas
 El `queryKey` embebe la lista de ticks (línea 170), así que cada cambio de cantidad de snapshots

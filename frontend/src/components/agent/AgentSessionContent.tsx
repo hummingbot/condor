@@ -169,26 +169,28 @@ export function SessionExecutors({
   const snapshotQueries = useQuery({
     queryKey: ["agent", slug, "session", sessionNum, "snapshot-contents", snapshotSummaries.map((s) => s.tick).join(",")],
     queryFn: async () => {
-      const results: SnapshotBubble[] = [];
-      for (const snap of snapshotSummaries) {
-        try {
-          const data = await api.getSnapshot(slug, sessionNum, snap.tick);
-          if (data?.content) {
-            const parsed = parseSnapshot(data.content);
-            results.push({
-              tick: snap.tick,
-              timestamp: snap.timestamp,
-              agentResponse: parsed.agentResponse,
-              toolCallCount: parsed.toolCalls.length,
-            });
-          } else {
-            results.push({ tick: snap.tick, timestamp: snap.timestamp });
+      // Fetch all snapshots concurrently: Promise.all preserves input order, so
+      // the result stays sorted by tick while latency collapses to the slowest
+      // request instead of the sum of all of them.
+      return Promise.all(
+        snapshotSummaries.map(async (snap): Promise<SnapshotBubble> => {
+          try {
+            const data = await api.getSnapshot(slug, sessionNum, snap.tick);
+            if (data?.content) {
+              const parsed = parseSnapshot(data.content);
+              return {
+                tick: snap.tick,
+                timestamp: snap.timestamp,
+                agentResponse: parsed.agentResponse,
+                toolCallCount: parsed.toolCalls.length,
+              };
+            }
+            return { tick: snap.tick, timestamp: snap.timestamp };
+          } catch {
+            return { tick: snap.tick, timestamp: snap.timestamp };
           }
-        } catch {
-          results.push({ tick: snap.tick, timestamp: snap.timestamp });
-        }
-      }
-      return results;
+        }),
+      );
     },
     enabled: snapshotSummaries.length > 0,
     staleTime: 60000,
