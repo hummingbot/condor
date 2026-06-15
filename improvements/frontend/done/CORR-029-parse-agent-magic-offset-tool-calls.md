@@ -10,7 +10,7 @@ files:
   - frontend/src/lib/parse-agent.ts:340
   - frontend/src/lib/parse-agent.ts:346
 commits:
-  - "<pending> (fix) limites de bloque exactos en parseToolCalls (CORR-029)"
+  - "52988df (fix) limites de bloque exactos en parseToolCalls (CORR-029)"
 created: 2026-06-10
 ---
 
