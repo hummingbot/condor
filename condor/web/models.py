@@ -55,6 +55,7 @@ class ConnectorBalance(BaseModel):
     connector: str
     balances: list[BalanceItem]
     total_usd: float = 0.0
+    note: str | None = None
 
 
 class PortfolioResponse(BaseModel):
