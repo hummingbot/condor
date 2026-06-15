@@ -9,7 +9,7 @@ status: done
 files:
   - frontend/src/components/agent/AgentSessionContent.tsx:169-195
 commits:
-  - "<pending> (perf) paralelizar fetch de snapshots con Promise.all (PERF-022)"
+  - "df96b9f (perf) paralelizar fetch de snapshots con Promise.all (PERF-022)"
 created: 2026-06-10
 ---
 
