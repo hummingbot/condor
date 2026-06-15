@@ -863,27 +863,46 @@ function FileContentLoader({
     enabled: tab.file.kind === "config" && !tab.loaded && !loadedRef.current,
   });
 
-  if (tab.file.kind === "controller" && controllerQuery.data && !loadedRef.current) {
-    loadedRef.current = true;
-    onLoaded(controllerQuery.data.source ?? "", false);
-  }
-  if (tab.file.kind === "controller" && controllerQuery.isError && !loadedRef.current) {
-    loadedRef.current = true;
-    onError(controllerQuery.error instanceof Error ? controllerQuery.error.message : "Failed to load");
-  }
-
-  if (tab.file.kind === "config" && configQuery.data && !loadedRef.current) {
-    loadedRef.current = true;
-    const filtered = Object.fromEntries(
-      Object.entries(configQuery.data.config).filter(([k]) => k !== "id"),
-    );
-    const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
-    onLoaded(dumped, false);
-  }
-  if (tab.file.kind === "config" && configQuery.isError && !loadedRef.current) {
-    loadedRef.current = true;
-    onError(configQuery.error instanceof Error ? configQuery.error.message : "Failed to load");
-  }
+  // Defer the parent setState to commit phase: calling onLoaded/onError directly
+  // in the render body updates EditorTab while this child renders (the classic
+  // "Cannot update a component while rendering a different component" anti-pattern).
+  // loadedRef still guards against re-entry / StrictMode double-invoke.
+  useEffect(() => {
+    if (loadedRef.current) return;
+    if (tab.file.kind === "controller") {
+      if (controllerQuery.data) {
+        loadedRef.current = true;
+        onLoaded(controllerQuery.data.source ?? "", false);
+      } else if (controllerQuery.isError) {
+        loadedRef.current = true;
+        onError(
+          controllerQuery.error instanceof Error ? controllerQuery.error.message : "Failed to load",
+        );
+      }
+    } else if (tab.file.kind === "config") {
+      if (configQuery.data) {
+        loadedRef.current = true;
+        const filtered = Object.fromEntries(
+          Object.entries(configQuery.data.config).filter(([k]) => k !== "id"),
+        );
+        const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
+        onLoaded(dumped, false);
+      } else if (configQuery.isError) {
+        loadedRef.current = true;
+        onError(configQuery.error instanceof Error ? configQuery.error.message : "Failed to load");
+      }
+    }
+  }, [
+    tab.file.kind,
+    controllerQuery.data,
+    controllerQuery.isError,
+    controllerQuery.error,
+    configQuery.data,
+    configQuery.isError,
+    configQuery.error,
+    onLoaded,
+    onError,
+  ]);
 
   return null;
 }

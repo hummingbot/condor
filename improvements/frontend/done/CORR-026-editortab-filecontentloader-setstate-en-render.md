@@ -5,11 +5,12 @@ category: correctness
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/tabs/EditorTab.tsx:866-887
   - frontend/src/pages/tabs/EditorTab.tsx:769-784
-commits: []
+commits:
+  - "<pending> (fix) FileContentLoader maneja data en useEffect, no en render (CORR-026)"
 created: 2026-06-10
 ---
 
@@ -30,9 +31,9 @@ desde el efecto (guardado por `loadedRef`). Esto difiere el `setState` del padre
 commit, eliminando el update en fase de render.
 
 ## Criterio de aceptación
-- [ ] `onLoaded`/`onError` solo se llaman dentro de `useEffect`, nunca directo en el render body de `FileContentLoader`
-- [ ] Abrir un tab de controller o config sigue cargando su contenido sin el warning "update a component while rendering" en consola
-- [ ] El doble render de StrictMode no carga un tab dos veces ni lanza error
+- [x] `onLoaded`/`onError` solo se llaman dentro de `useEffect`, nunca directo en el render body de `FileContentLoader`
+- [x] Abrir un tab de controller o config sigue cargando su contenido sin el warning "update a component while rendering" en consola
+- [x] El doble render de StrictMode no carga un tab dos veces ni lanza error
 
 ## Notas
 Mismo archivo que [[CORR-030]] (no invalidar `controller-source` tras guardar) y [[PERF-025]].
