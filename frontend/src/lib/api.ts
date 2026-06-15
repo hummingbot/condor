@@ -38,7 +38,6 @@ export interface ConnectorBalance {
   connector: string;
   balances: BalanceItem[];
   total_usd: number;
-  note?: string | null;
 }
 
 export interface PortfolioResponse {

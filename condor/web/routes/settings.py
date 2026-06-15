@@ -431,11 +431,9 @@ async def delete_credential(
             account_name="master_account",
             connector_name=connector,
         )
-        # Invalidate configured connectors + portfolio caches so the removed key disappears immediately
+        # Invalidate configured connectors cache
         from condor.server_data_service import ServerDataType, get_server_data_service
-        sds = get_server_data_service()
-        sds.invalidate(server, ServerDataType.CONNECTORS)
-        sds.invalidate(server, ServerDataType.PORTFOLIO)
+        get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
         return {"deleted": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

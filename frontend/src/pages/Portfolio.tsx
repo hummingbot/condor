@@ -370,14 +370,6 @@ function ConnectorRow({
             <span className="text-xs text-[var(--color-text-muted)]">
               {connector.balances.length} token{connector.balances.length !== 1 ? "s" : ""}
             </span>
-            {connector.note && (
-              <span
-                title={connector.note}
-                className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-text-muted)]"
-              >
-                unified
-              </span>
-            )}
           </div>
         </td>
         <td className="px-4 py-3" />
@@ -391,13 +383,6 @@ function ConnectorRow({
           </span>
         </td>
       </tr>
-      {expanded && connector.note && (
-        <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
-          <td colSpan={5} className="px-4 py-2.5 pl-10 text-xs italic text-[var(--color-text-muted)]">
-            {connector.note}
-          </td>
-        </tr>
-      )}
       {expanded &&
         connector.balances.map((b) => (
           <TokenRow key={b.token} b={b} totalPortfolio={totalPortfolio} convertFromUsd={convertFromUsd} currencySymbol={currencySymbol} />
