@@ -11,7 +11,7 @@ files:
   - frontend/src/pages/CreateExecutor.tsx:243-261
   - frontend/src/components/agent/AgentFloatingPanel.tsx:57-58
 commits:
-  - "<pending> (fix) limpiar listeners de resize-drag en unmount (CORR-008)"
+  - "9266f06 (fix) limpiar listeners de resize-drag en unmount (CORR-008)"
 created: 2026-06-10
 ---
 
