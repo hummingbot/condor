@@ -12,7 +12,7 @@ files:
   - frontend/src/components/bots/ControllerBrowser.tsx:93-99
   - frontend/src/pages/tabs/ActiveBotsTab.tsx:789
 commits:
-  - "<pending> (perf) memoizar originalYaml en YamlConfigEditor (PERF-024)"
+  - "be699bc (perf) memoizar originalYaml en YamlConfigEditor (PERF-024)"
 created: 2026-06-10
 ---
 
