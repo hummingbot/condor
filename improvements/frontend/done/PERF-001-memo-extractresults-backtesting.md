@@ -11,7 +11,7 @@ files:
   - frontend/src/pages/tabs/BacktestingTab.tsx:598
   - frontend/src/pages/tabs/BacktestingTab.tsx:1138
 commits:
-  - "<pending> (perf) memoizar extractResults en BacktestingTab (PERF-001)"
+  - "2bab052 (perf) memoizar extractResults en BacktestingTab (PERF-001)"
 created: 2026-06-10
 ---
 
