@@ -24,6 +24,11 @@ export function Login() {
     attempted.current = true;
     setLoggingIn(true);
 
+    // Strip the one-time token from the URL so it does not linger in browser
+    // history or get leaked via the Referer header. The token is consumed via
+    // a POST below; the address bar should not keep it.
+    window.history.replaceState(null, "", window.location.pathname);
+
     loginWithToken(token)
       .then(() => navigate("/", { replace: true }))
       .catch((err) => {

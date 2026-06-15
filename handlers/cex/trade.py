@@ -14,8 +14,8 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from config_manager import get_client
 from condor.server_data_service import ServerDataType, get_server_data_service
+from config_manager import get_client
 from handlers.config.user_preferences import (
     get_all_enabled_networks,
     get_clob_account,
@@ -24,7 +24,11 @@ from handlers.config.user_preferences import (
     set_last_trade_connector,
 )
 from handlers.dex._shared import format_relative_time
-from utils.telegram_formatters import escape_markdown_v2, format_error_message
+from utils.telegram_formatters import (
+    escape_markdown_v2,
+    format_compact_number,
+    format_error_message,
+)
 
 from ._shared import (
     get_available_cex_connectors,
@@ -47,27 +51,6 @@ DEFAULT_LEVERAGE = 5
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
-
-
-def _format_number(value, decimals: int = 2) -> str:
-    """Format number with K/M suffix for readability"""
-    if value is None:
-        return "—"
-    try:
-        num = float(value)
-        if num == 0:
-            return "0"
-        if abs(num) >= 1_000_000:
-            return f"{num/1_000_000:.{decimals}f}M"
-        if abs(num) >= 1_000:
-            return f"{num/1_000:.{decimals}f}K"
-        if abs(num) >= 1:
-            return f"{num:.{decimals}f}"
-        if abs(num) >= 0.01:
-            return f"{num:.4f}"
-        return f"{num:.6f}"
-    except (ValueError, TypeError):
-        return "—"
 
 
 def _format_price(price: float) -> str:
@@ -130,10 +113,10 @@ def _format_compact_order_line(order: dict) -> str:
     )
 
     # Format price
-    price_str = f"@{_format_number(price, 4)}" if price else "@MKT"
+    price_str = f"@{format_compact_number(price, 4)}" if price else "@MKT"
 
     # Build line like swap format: "✅ SOL-USDT BUY @144.51 0.5  1d bin"
-    line = f"{status_char} {pair} {side} {price_str} {_format_number(amount)}"
+    line = f"{status_char} {pair} {side} {price_str} {format_compact_number(amount)}"
 
     # Add metadata (age and connector)
     meta_parts = []
@@ -173,7 +156,7 @@ def _format_compact_position_line(pos: dict) -> str:
     except (ValueError, TypeError):
         pnl_str = "—"
 
-    line = f"{side_emoji} {connector} {pair} {side_display} @{_format_number(entry_price, 4)} {_format_number(amount)} PnL:{pnl_str}"
+    line = f"{side_emoji} {connector} {pair} {side_display} @{format_compact_number(entry_price, 4)} {format_compact_number(amount)} PnL:{pnl_str}"
 
     return escape_markdown_v2(line)
 
@@ -196,6 +179,7 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = context.user_data.get("_user_id")
     if user_id:
         from handlers.config.user_preferences import get_active_server
+
         server = get_active_server(context.user_data)
         if server:
             sds = get_server_data_service()
@@ -205,11 +189,41 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             account = get_clob_account(context.user_data)
             # Subscribe to relevant data types for active trading
             import asyncio
-            asyncio.ensure_future(sds.subscribe(server, ServerDataType.PRICES, sub_id, interval=3, connector_name=connector, trading_pair=pair))
-            asyncio.ensure_future(sds.subscribe(server, ServerDataType.ACTIVE_ORDERS, sub_id, interval=10, limit="5"))
-            asyncio.ensure_future(sds.subscribe(server, ServerDataType.TRADING_RULES, sub_id, interval=300, connector_name=connector))
+
+            asyncio.ensure_future(
+                sds.subscribe(
+                    server,
+                    ServerDataType.PRICES,
+                    sub_id,
+                    interval=3,
+                    connector_name=connector,
+                    trading_pair=pair,
+                )
+            )
+            asyncio.ensure_future(
+                sds.subscribe(
+                    server, ServerDataType.ACTIVE_ORDERS, sub_id, interval=10, limit="5"
+                )
+            )
+            asyncio.ensure_future(
+                sds.subscribe(
+                    server,
+                    ServerDataType.TRADING_RULES,
+                    sub_id,
+                    interval=300,
+                    connector_name=connector,
+                )
+            )
             if "perpetual" in (connector or "").lower():
-                asyncio.ensure_future(sds.subscribe(server, ServerDataType.POSITIONS, sub_id, interval=10, connector_name=connector))
+                asyncio.ensure_future(
+                    sds.subscribe(
+                        server,
+                        ServerDataType.POSITIONS,
+                        sub_id,
+                        interval=10,
+                        connector_name=connector,
+                    )
+                )
 
     await show_trade_menu(update, context)
 
@@ -225,11 +239,17 @@ async def handle_trade_refresh(
     # Invalidate both old cache and SDS
     invalidate_cache(context.user_data, "balances", "orders", "positions")
     from handlers.config.user_preferences import get_active_server
+
     server = get_active_server(context.user_data)
     if server:
         sds = get_server_data_service()
-        sds.invalidate(server, ServerDataType.PORTFOLIO, ServerDataType.ACTIVE_ORDERS,
-                        ServerDataType.POSITIONS, ServerDataType.PRICES)
+        sds.invalidate(
+            server,
+            ServerDataType.PORTFOLIO,
+            ServerDataType.ACTIVE_ORDERS,
+            ServerDataType.POSITIONS,
+            ServerDataType.PRICES,
+        )
 
     await handle_trade(update, context)
 
@@ -401,12 +421,16 @@ def _build_trade_menu_text(
         if balances_found:
             if "base" in balances_found:
                 b = balances_found["base"]
-                val_str = f"(${_format_number(b['value'])})" if b["value"] > 0 else ""
-                help_text += f"💰 `{escape_markdown_v2(b['token'])}`: `{escape_markdown_v2(_format_number(b['units']))}` {escape_markdown_v2(val_str)}\n"
+                val_str = (
+                    f"(${format_compact_number(b['value'])})" if b["value"] > 0 else ""
+                )
+                help_text += f"💰 `{escape_markdown_v2(b['token'])}`: `{escape_markdown_v2(format_compact_number(b['units']))}` {escape_markdown_v2(val_str)}\n"
             if "quote" in balances_found:
                 q = balances_found["quote"]
-                val_str = f"(${_format_number(q['value'])})" if q["value"] > 0 else ""
-                help_text += f"💵 `{escape_markdown_v2(q['token'])}`: `{escape_markdown_v2(_format_number(q['units']))}` {escape_markdown_v2(val_str)}\n"
+                val_str = (
+                    f"(${format_compact_number(q['value'])})" if q["value"] > 0 else ""
+                )
+                help_text += f"💵 `{escape_markdown_v2(q['token'])}`: `{escape_markdown_v2(format_compact_number(q['units']))}` {escape_markdown_v2(val_str)}\n"
         else:
             help_text += "_No balance found_\n".replace(".", "\\.")
     else:
@@ -441,9 +465,9 @@ def _build_trade_menu_text(
         min_notional = rules.get("min_notional_size", 0)
         rules_line = []
         if min_order > 0:
-            rules_line.append(f"📏 Min amount: `{_format_number(min_order)}`")
+            rules_line.append(f"📏 Min amount: `{format_compact_number(min_order)}`")
         if min_notional > 0:
-            rules_line.append(f"Min notional: `${_format_number(min_notional)}`")
+            rules_line.append(f"Min notional: `${format_compact_number(min_notional)}`")
         if rules_line:
             help_text += (
                 escape_markdown_v2(" | ".join(rules_line)).replace("\\`", "`") + "\n"
@@ -466,11 +490,11 @@ def _build_trade_menu_text(
 
             if buy_price:
                 buy_cost = amt_float * buy_price
-                help_text += f"🟢 `BUY  {_format_number(amt_float)} {escape_markdown_v2(base_token)} → {_format_number(buy_cost, 2)} {escape_markdown_v2(quote_token)} @{_format_number(buy_price, 2)}`\n"
+                help_text += f"🟢 `BUY  {format_compact_number(amt_float)} {escape_markdown_v2(base_token)} → {format_compact_number(buy_cost, 2)} {escape_markdown_v2(quote_token)} @{format_compact_number(buy_price, 2)}`\n"
 
             if sell_price:
                 sell_proceeds = amt_float * sell_price
-                help_text += f"🔴 `SELL {_format_number(amt_float)} {escape_markdown_v2(base_token)} → {_format_number(sell_proceeds, 2)} {escape_markdown_v2(quote_token)} @{_format_number(sell_price, 2)}`\n"
+                help_text += f"🔴 `SELL {format_compact_number(amt_float)} {escape_markdown_v2(base_token)} → {format_compact_number(sell_proceeds, 2)} {escape_markdown_v2(quote_token)} @{format_compact_number(sell_price, 2)}`\n"
         else:
             help_text += "_No quotes available_\n".replace(".", "\\.")
     else:
@@ -573,19 +597,30 @@ async def show_trade_menu(
         balances = sds.get(server_name, ServerDataType.PORTFOLIO, account_name=account)
         positions = (
             sds.get(server_name, ServerDataType.POSITIONS, connector_name=connector)
-            if is_perpetual else None
+            if is_perpetual
+            else None
         )
         orders = sds.get(server_name, ServerDataType.ACTIVE_ORDERS, limit="5")
-        trading_rules = sds.get(server_name, ServerDataType.TRADING_RULES, connector_name=connector)
-        current_price = sds.get(server_name, ServerDataType.PRICES, connector_name=connector, trading_pair=trading_pair)
+        trading_rules = sds.get(
+            server_name, ServerDataType.TRADING_RULES, connector_name=connector
+        )
+        current_price = sds.get(
+            server_name,
+            ServerDataType.PRICES,
+            connector_name=connector,
+            trading_pair=trading_pair,
+        )
     else:
         balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
         positions = (
             get_cached(context.user_data, f"positions_{connector}", ttl=60)
-            if is_perpetual else None
+            if is_perpetual
+            else None
         )
         orders = get_cached(context.user_data, "recent_orders", ttl=60)
-        trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
+        trading_rules = get_cached(
+            context.user_data, f"trading_rules_{connector}", ttl=300
+        )
         current_price = context.user_data.get("current_market_price")
 
     # Use cached quote if available and no explicit quote provided
@@ -668,6 +703,7 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
 
     # Get all cached data from SDS (server-scoped), fall back to old cache
     from handlers.config.user_preferences import get_active_server
+
     server = get_active_server(context.user_data)
     sds = get_server_data_service()
 
@@ -675,19 +711,30 @@ async def _update_trade_message(context: ContextTypes.DEFAULT_TYPE, message) -> 
         balances = sds.get(server, ServerDataType.PORTFOLIO, account_name=account)
         positions = (
             sds.get(server, ServerDataType.POSITIONS, connector_name=connector)
-            if is_perpetual else None
+            if is_perpetual
+            else None
         )
         orders = sds.get(server, ServerDataType.ACTIVE_ORDERS, limit="5")
-        trading_rules = sds.get(server, ServerDataType.TRADING_RULES, connector_name=connector)
-        current_price = sds.get(server, ServerDataType.PRICES, connector_name=connector, trading_pair=trading_pair)
+        trading_rules = sds.get(
+            server, ServerDataType.TRADING_RULES, connector_name=connector
+        )
+        current_price = sds.get(
+            server,
+            ServerDataType.PRICES,
+            connector_name=connector,
+            trading_pair=trading_pair,
+        )
     else:
         balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
         positions = (
             get_cached(context.user_data, f"positions_{connector}", ttl=60)
-            if is_perpetual else None
+            if is_perpetual
+            else None
         )
         orders = get_cached(context.user_data, "recent_orders", ttl=60)
-        trading_rules = get_cached(context.user_data, f"trading_rules_{connector}", ttl=300)
+        trading_rules = get_cached(
+            context.user_data, f"trading_rules_{connector}", ttl=300
+        )
         current_price = context.user_data.get("current_market_price")
     quote_data = get_cached(context.user_data, "trade_quote", ttl=30)
 
@@ -744,6 +791,7 @@ async def _fetch_trade_data_background(
 
     # Get SDS for dual-write (server-scoped)
     from handlers.config.user_preferences import get_active_server
+
     server = get_active_server(context.user_data)
     sds = get_server_data_service()
 
@@ -775,7 +823,13 @@ async def _fetch_trade_data_background(
             if price:
                 context.user_data["current_market_price"] = price
                 if server:
-                    sds.put(server, ServerDataType.PRICES, price, connector_name=connector, trading_pair=trading_pair)
+                    sds.put(
+                        server,
+                        ServerDataType.PRICES,
+                        price,
+                        connector_name=connector,
+                        trading_pair=trading_pair,
+                    )
             return price
         except Exception as e:
             logger.warning(f"Could not fetch price: {e}")
@@ -785,7 +839,12 @@ async def _fetch_trade_data_background(
         try:
             result = await get_trading_rules(context.user_data, client, connector)
             if server:
-                sds.put(server, ServerDataType.TRADING_RULES, result, connector_name=connector)
+                sds.put(
+                    server,
+                    ServerDataType.TRADING_RULES,
+                    result,
+                    connector_name=connector,
+                )
             return result
         except Exception as e:
             logger.warning(f"Could not fetch rules: {e}")
@@ -871,7 +930,9 @@ async def _fetch_trade_data_background(
         try:
             result = await get_positions(context.user_data, client, connector)
             if server:
-                sds.put(server, ServerDataType.POSITIONS, result, connector_name=connector)
+                sds.put(
+                    server, ServerDataType.POSITIONS, result, connector_name=connector
+                )
             return result
         except Exception as e:
             logger.warning(f"Could not fetch positions: {e}")
@@ -1255,17 +1316,43 @@ async def handle_trade_connector_select(
     # Invalidate DataManager and update context for new connector
     user_id = context.user_data.get("_user_id")
     from handlers.config.user_preferences import get_active_server
+
     server = get_active_server(context.user_data)
     if server:
         sds = get_server_data_service()
-        sds.invalidate(server, ServerDataType.PORTFOLIO, ServerDataType.POSITIONS,
-                        ServerDataType.TRADING_RULES, ServerDataType.PRICES)
+        sds.invalidate(
+            server,
+            ServerDataType.PORTFOLIO,
+            ServerDataType.POSITIONS,
+            ServerDataType.TRADING_RULES,
+            ServerDataType.PRICES,
+        )
         if user_id:
             sub_id = f"tg_trade_{user_id}"
-            asyncio.ensure_future(sds.subscribe(server, ServerDataType.PRICES, sub_id, interval=3,
-                                                 connector_name=connector_name, trading_pair=params.get("trading_pair", "")))
-            asyncio.ensure_future(sds.subscribe(server, ServerDataType.ACTIVE_ORDERS, sub_id, interval=10, limit="5"))
-            asyncio.ensure_future(sds.subscribe(server, ServerDataType.TRADING_RULES, sub_id, interval=300, connector_name=connector_name))
+            asyncio.ensure_future(
+                sds.subscribe(
+                    server,
+                    ServerDataType.PRICES,
+                    sub_id,
+                    interval=3,
+                    connector_name=connector_name,
+                    trading_pair=params.get("trading_pair", ""),
+                )
+            )
+            asyncio.ensure_future(
+                sds.subscribe(
+                    server, ServerDataType.ACTIVE_ORDERS, sub_id, interval=10, limit="5"
+                )
+            )
+            asyncio.ensure_future(
+                sds.subscribe(
+                    server,
+                    ServerDataType.TRADING_RULES,
+                    sub_id,
+                    interval=300,
+                    connector_name=connector_name,
+                )
+            )
 
     context.user_data["cex_state"] = "trade"
 
@@ -1476,10 +1563,14 @@ async def handle_trade_execute(
         context.user_data["_force_cex_balance_refresh"] = True
         # Also invalidate DataManager (server-scoped)
         from handlers.config.user_preferences import get_active_server
+
         exec_server = get_active_server(context.user_data)
         if exec_server:
             get_server_data_service().invalidate(
-                exec_server, ServerDataType.PORTFOLIO, ServerDataType.ACTIVE_ORDERS, ServerDataType.POSITIONS
+                exec_server,
+                ServerDataType.PORTFOLIO,
+                ServerDataType.ACTIVE_ORDERS,
+                ServerDataType.POSITIONS,
             )
 
         # Save for quick repeat
@@ -1555,23 +1646,37 @@ async def _update_trade_menu_after_input(
 
         # Get cached data from DataManager (server-scoped), fall back to old cache
         from handlers.config.user_preferences import get_active_server
+
         input_server = get_active_server(context.user_data)
         sds = get_server_data_service()
 
         if input_server:
-            balances = sds.get(input_server, ServerDataType.PORTFOLIO, account_name=account)
+            balances = sds.get(
+                input_server, ServerDataType.PORTFOLIO, account_name=account
+            )
             positions = (
-                sds.get(input_server, ServerDataType.POSITIONS, connector_name=connector)
-                if is_perpetual else None
+                sds.get(
+                    input_server, ServerDataType.POSITIONS, connector_name=connector
+                )
+                if is_perpetual
+                else None
             )
             orders = sds.get(input_server, ServerDataType.ACTIVE_ORDERS, limit="5")
-            trading_rules = sds.get(input_server, ServerDataType.TRADING_RULES, connector_name=connector)
-            current_price = sds.get(input_server, ServerDataType.PRICES, connector_name=connector, trading_pair=trading_pair)
+            trading_rules = sds.get(
+                input_server, ServerDataType.TRADING_RULES, connector_name=connector
+            )
+            current_price = sds.get(
+                input_server,
+                ServerDataType.PRICES,
+                connector_name=connector,
+                trading_pair=trading_pair,
+            )
         else:
             balances = get_cached(context.user_data, f"cex_balances_{account}", ttl=60)
             positions = (
                 get_cached(context.user_data, f"positions_{connector}", ttl=60)
-                if is_perpetual else None
+                if is_perpetual
+                else None
             )
             orders = get_cached(context.user_data, "recent_orders", ttl=60)
             trading_rules = get_cached(
@@ -1696,10 +1801,14 @@ async def process_trade(
         context.user_data["_force_cex_balance_refresh"] = True
         # Also invalidate SDS (server-scoped)
         from handlers.config.user_preferences import get_active_server
+
         qt_server = get_active_server(context.user_data)
         if qt_server:
             get_server_data_service().invalidate(
-                qt_server, ServerDataType.PORTFOLIO, ServerDataType.ACTIVE_ORDERS, ServerDataType.POSITIONS
+                qt_server,
+                ServerDataType.PORTFOLIO,
+                ServerDataType.ACTIVE_ORDERS,
+                ServerDataType.POSITIONS,
             )
 
         # Update params for next trade

@@ -23,7 +23,11 @@ from handlers.config.user_preferences import (
     set_dex_last_swap,
     set_last_trade_connector,
 )
-from utils.telegram_formatters import escape_markdown_v2, format_error_message
+from utils.telegram_formatters import (
+    escape_markdown_v2,
+    format_compact_number,
+    format_error_message,
+)
 
 from ._shared import (
     HISTORY_FILTERS,
@@ -47,62 +51,6 @@ logger = logging.getLogger(__name__)
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
-
-
-def _format_network_display(network_id: str) -> str:
-    """Format network ID for button display
-
-    Examples:
-        solana-mainnet-beta -> Solana
-        ethereum-mainnet -> Ethereum
-        solana-devnet -> Solana Dev
-    """
-    if not network_id:
-        return "Network"
-
-    parts = network_id.split("-")
-    chain = parts[0].capitalize()
-
-    if len(parts) > 1:
-        net = parts[1]
-        if net in ("mainnet", "mainnet-beta"):
-            return chain
-        elif net == "devnet":
-            return f"{chain} Dev"
-        elif net == "testnet":
-            return f"{chain} Test"
-        else:
-            return f"{chain} {net[:4]}"
-
-    return chain
-
-
-def _format_number(value, decimals: int = 2) -> str:
-    """Format number with K/M suffix for readability"""
-    if value is None:
-        return "—"
-    try:
-        num = float(value)
-        if num == 0:
-            return "0"
-        if abs(num) >= 1_000_000:
-            return f"{num/1_000_000:.{decimals}f}M"
-        if abs(num) >= 1_000:
-            return f"{num/1_000:.{decimals}f}K"
-        if abs(num) >= 1:
-            return f"{num:.{decimals}f}"
-        if abs(num) >= 0.01:
-            return f"{num:.4f}"
-        if abs(num) >= 0.0001:
-            return f"{num:.6f}"
-        if abs(num) >= 0.000001:
-            return f"{num:.8f}"
-        if abs(num) >= 0.00000001:
-            return f"{num:.10f}"
-        # For extremely small numbers, use scientific notation
-        return f"{num:.2e}"
-    except (ValueError, TypeError):
-        return "—"
 
 
 async def _fetch_recent_swaps(client, limit: int = 5) -> list:
@@ -146,16 +94,16 @@ def _format_compact_swap_line(swap: dict) -> str:
             display_price = 1 / price
         else:
             display_price = price
-        price_display = f"@{_format_number(display_price)}"
+        price_display = f"@{format_compact_number(display_price)}"
 
     # Quote amount (what was spent/received in quote token)
     # BUY: quote amount = input_amount (what we paid)
     # SELL: quote amount = output_amount (what we received)
     quote_amount_str = "—"
     if side == "BUY" and input_amount is not None:
-        quote_amount_str = f"{_format_number(input_amount)} {quote_token}"
+        quote_amount_str = f"{format_compact_number(input_amount)} {quote_token}"
     elif side == "SELL" and output_amount is not None:
-        quote_amount_str = f"{_format_number(output_amount)} {quote_token}"
+        quote_amount_str = f"{format_compact_number(output_amount)} {quote_token}"
 
     # Relative time
     age = format_relative_time(timestamp)
@@ -459,17 +407,17 @@ def _build_swap_menu_text(
                             balances_found["quote_value"] = bal.get("value", 0)
 
             # Always show both tokens
-            base_bal_str = _format_number(balances_found["base_balance"])
+            base_bal_str = format_compact_number(balances_found["base_balance"])
             base_val_str = (
-                f"(${_format_number(balances_found['base_value'])})"
+                f"(${format_compact_number(balances_found['base_value'])})"
                 if balances_found["base_value"] > 0
                 else ""
             )
             help_text += f"💰 `{escape_markdown_v2(base_token)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
 
-            quote_bal_str = _format_number(balances_found["quote_balance"])
+            quote_bal_str = format_compact_number(balances_found["quote_balance"])
             quote_val_str = (
-                f"(${_format_number(balances_found['quote_value'])})"
+                f"(${format_compact_number(balances_found['quote_value'])})"
                 if balances_found["quote_value"] > 0
                 else ""
             )
@@ -495,13 +443,13 @@ def _build_swap_menu_text(
         if buy_data and buy_data.get("price"):
             buy_price = float(buy_data["price"])
             amount_in = buy_data.get("amount_in", "?")
-            help_text += f"`BUY {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_in, 4)} {escape_markdown_v2(quote_token)} @{_format_number(buy_price, 4)}`\n"
+            help_text += f"`BUY {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {format_compact_number(amount_in, 4)} {escape_markdown_v2(quote_token)} @{format_compact_number(buy_price, 4)}`\n"
 
         sell_data = quote_result.get("sell")
         if sell_data and sell_data.get("price"):
             sell_price = float(sell_data["price"])
             amount_out = sell_data.get("amount_out", "?")
-            help_text += f"`SELL {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {_format_number(amount_out, 4)} {escape_markdown_v2(quote_token)} @{_format_number(sell_price, 4)}`\n"
+            help_text += f"`SELL {escape_markdown_v2(str(amount_requested))} {escape_markdown_v2(base_token)} for {format_compact_number(amount_out, 4)} {escape_markdown_v2(quote_token)} @{format_compact_number(sell_price, 4)}`\n"
 
         if buy_price and sell_price:
             midpoint = (buy_price + sell_price) / 2
@@ -1337,14 +1285,16 @@ def _format_detailed_swap_line(swap: dict) -> str:
     # Input/Output
     if side == "BUY":
         if input_amount is not None and quote_token:
-            lines.append(f"   In: {_format_number(input_amount)} {quote_token}")
+            lines.append(f"   In: {format_compact_number(input_amount)} {quote_token}")
         if output_amount is not None and base_token:
-            lines.append(f"   Out: {_format_number(output_amount)} {base_token}")
+            lines.append(f"   Out: {format_compact_number(output_amount)} {base_token}")
     else:
         if input_amount is not None and base_token:
-            lines.append(f"   In: {_format_number(input_amount)} {base_token}")
+            lines.append(f"   In: {format_compact_number(input_amount)} {base_token}")
         if output_amount is not None and quote_token:
-            lines.append(f"   Out: {_format_number(output_amount)} {quote_token}")
+            lines.append(
+                f"   Out: {format_compact_number(output_amount)} {quote_token}"
+            )
 
     # Price
     if price is not None and price > 0:
@@ -1353,7 +1303,7 @@ def _format_detailed_swap_line(swap: dict) -> str:
         else:
             display_price = price
         lines.append(
-            f"   Price: {_format_number(display_price, 4)} {quote_token}/{base_token}"
+            f"   Price: {format_compact_number(display_price, 4)} {quote_token}/{base_token}"
         )
 
     # Metadata

@@ -60,7 +60,9 @@ class ConfigManager:
         )  # server_name -> (client, connect_time)
         self._client_ttl = 300  # 5 minutes
         self._client_verify_interval = 60  # seconds between liveness checks
-        self._client_locks: Dict[str, asyncio.Lock] = {}  # per-server lock for get_client
+        self._client_locks: Dict[str, asyncio.Lock] = (
+            {}
+        )  # per-server lock for get_client
         self._load_config()
         self._load_audit_log()
 
@@ -364,9 +366,7 @@ class ConfigManager:
             elif time.time() - last_verified < self._client_ttl:
                 # Needs liveness check
                 try:
-                    await asyncio.wait_for(
-                        client.accounts.list_accounts(), timeout=5
-                    )
+                    await asyncio.wait_for(client.accounts.list_accounts(), timeout=5)
                     self._clients[name] = (client, time.time())
                     return client
                 except Exception:
@@ -476,7 +476,7 @@ class ConfigManager:
         finally:
             try:
                 await client.close()
-            except:
+            except Exception:
                 pass
 
     async def close_all_clients(self):
@@ -625,9 +625,10 @@ class ConfigManager:
 
     def delete_user_preference(self, user_id: int, key: str) -> bool:
         """Delete a preference key. Returns True if it existed."""
-        prefs = self._data.get("user_preferences", {}).get(user_id, {})
-        if key in prefs:
-            del prefs[key]
+        prefs = self._data.setdefault("user_preferences", {})
+        user_prefs = prefs.get(user_id)
+        if user_prefs and key in user_prefs:
+            del user_prefs[key]
             self._save_config()
             return True
         return False

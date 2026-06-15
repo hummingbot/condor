@@ -8,6 +8,7 @@ import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, ContextTypes
 
+from handlers import is_gateway_network
 from handlers.config import clear_config_state
 from handlers.config.user_preferences import get_all_enabled_networks
 from utils.auth import hummingbot_api_required, restricted
@@ -21,36 +22,19 @@ from utils.telegram_formatters import (
 logger = logging.getLogger(__name__)
 
 
+# ============================================
+# PORTFOLIO STATE KEYS (context.user_data)
+# ============================================
+# Centralized definitions so a typo is a NameError instead of a silent
+# miss, and renaming a key only requires editing one place.
 
-def _is_gateway_network(connector_name: str) -> bool:
-    """
-    Check if a connector name looks like a Gateway network (not a CEX connector).
-
-    Gateway networks have patterns like: solana-mainnet-beta, ethereum-mainnet, base, arbitrum
-    CEX connectors have patterns like: binance, binance_perpetual, hyperliquid, kucoin
-    """
-    connector_lower = connector_name.lower()
-
-    # Known Gateway network patterns
-    gateway_patterns = [
-        "solana",
-        "ethereum",
-        "base",
-        "arbitrum",
-        "polygon",
-        "optimism",
-        "avalanche",
-        "mainnet",
-        "devnet",
-        "testnet",
-    ]
-
-    # Check if connector matches any Gateway pattern
-    for pattern in gateway_patterns:
-        if pattern in connector_lower:
-            return True
-
-    return False
+KEY_TEXT_MESSAGE_ID = "portfolio_text_message_id"
+KEY_CHAT_ID = "portfolio_chat_id"
+KEY_SERVER_NAME = "portfolio_server_name"
+KEY_SERVER_STATUS = "portfolio_server_status"
+KEY_BALANCES = "portfolio_balances"
+KEY_CONNECTOR_KEYS = "portfolio_connector_keys"
+KEY_VIEW_MODE = "portfolio_view_mode"
 
 
 def _filter_balances_by_networks(balances: dict, enabled_networks: set) -> dict:
@@ -80,7 +64,7 @@ def _filter_balances_by_networks(balances: dict, enabled_networks: set) -> dict:
             connector_lower = connector_name.lower()
 
             # CEX connectors are never filtered - always include them
-            if not _is_gateway_network(connector_name):
+            if not is_gateway_network(connector_name):
                 filtered_account[connector_name] = connector_balances
             # Gateway connectors are filtered by enabled networks
             elif connector_lower in enabled_networks:
@@ -281,13 +265,13 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         logger.info(f"[TIMING] /portfolio total: {time.time() - t_start:.2f}s")
 
         # Store data for callbacks
-        context.user_data["portfolio_text_message_id"] = text_msg.message_id
-        context.user_data["portfolio_chat_id"] = message.chat_id
-        context.user_data["portfolio_server_name"] = server_name
-        context.user_data["portfolio_server_status"] = server_status
+        context.user_data[KEY_TEXT_MESSAGE_ID] = text_msg.message_id
+        context.user_data[KEY_CHAT_ID] = message.chat_id
+        context.user_data[KEY_SERVER_NAME] = server_name
+        context.user_data[KEY_SERVER_STATUS] = server_status
         # Cache data for connector detail callbacks
-        context.user_data["portfolio_balances"] = balances
-        context.user_data["portfolio_connector_keys"] = connector_keys
+        context.user_data[KEY_BALANCES] = balances
+        context.user_data[KEY_CONNECTOR_KEYS] = connector_keys
 
     except Exception as e:
         logger.error(f"Error fetching portfolio: {e}", exc_info=True)
@@ -357,9 +341,9 @@ async def handle_connector_detail(
     await query.answer()
 
     # Get cached data
-    balances = context.user_data.get("portfolio_balances")
-    text_message_id = context.user_data.get("portfolio_text_message_id")
-    chat_id = context.user_data.get("portfolio_chat_id")
+    balances = context.user_data.get(KEY_BALANCES)
+    text_message_id = context.user_data.get(KEY_TEXT_MESSAGE_ID)
+    chat_id = context.user_data.get(KEY_CHAT_ID)
 
     if not balances or not text_message_id or not chat_id:
         logger.warning("Missing cached data for connector detail view")
@@ -395,7 +379,7 @@ async def handle_connector_detail(
         )
 
         # Store current view mode
-        context.user_data["portfolio_view_mode"] = f"connector:{connector_key}"
+        context.user_data[KEY_VIEW_MODE] = f"connector:{connector_key}"
 
     except Exception as e:
         logger.error(f"Error showing connector detail: {e}", exc_info=True)
@@ -409,12 +393,12 @@ async def handle_back_to_overview(
     await query.answer()
 
     # Get cached data
-    balances = context.user_data.get("portfolio_balances")
-    server_name = context.user_data.get("portfolio_server_name")
-    server_status = context.user_data.get("portfolio_server_status")
-    connector_keys = context.user_data.get("portfolio_connector_keys", [])
-    text_message_id = context.user_data.get("portfolio_text_message_id")
-    chat_id = context.user_data.get("portfolio_chat_id")
+    balances = context.user_data.get(KEY_BALANCES)
+    server_name = context.user_data.get(KEY_SERVER_NAME)
+    server_status = context.user_data.get(KEY_SERVER_STATUS)
+    connector_keys = context.user_data.get(KEY_CONNECTOR_KEYS, [])
+    text_message_id = context.user_data.get(KEY_TEXT_MESSAGE_ID)
+    chat_id = context.user_data.get(KEY_CHAT_ID)
 
     if not text_message_id or not chat_id:
         logger.warning("Missing message IDs for back to overview")
@@ -440,7 +424,7 @@ async def handle_back_to_overview(
         )
 
         # Clear view mode
-        context.user_data["portfolio_view_mode"] = "overview"
+        context.user_data[KEY_VIEW_MODE] = "overview"
 
     except Exception as e:
         logger.error(f"Error returning to overview: {e}", exc_info=True)
@@ -457,8 +441,8 @@ async def refresh_portfolio_dashboard(
     query = update.callback_query
     bot = query.get_bot()
 
-    chat_id = context.user_data.get("portfolio_chat_id")
-    text_message_id = context.user_data.get("portfolio_text_message_id")
+    chat_id = context.user_data.get(KEY_CHAT_ID)
+    text_message_id = context.user_data.get(KEY_TEXT_MESSAGE_ID)
 
     if not chat_id or not text_message_id:
         logger.warning("Missing message IDs for refresh")
@@ -522,14 +506,13 @@ async def refresh_portfolio_dashboard(
             logger.warning(f"Failed to update text message: {e}")
 
         # Store data for callbacks
-        context.user_data["portfolio_server_name"] = server_name
-        context.user_data["portfolio_server_status"] = server_status
-        context.user_data["portfolio_balances"] = balances
-        context.user_data["portfolio_connector_keys"] = connector_keys
+        context.user_data[KEY_SERVER_NAME] = server_name
+        context.user_data[KEY_SERVER_STATUS] = server_status
+        context.user_data[KEY_BALANCES] = balances
+        context.user_data[KEY_CONNECTOR_KEYS] = connector_keys
 
     except Exception as e:
         logger.error(f"Failed to refresh portfolio dashboard: {e}", exc_info=True)
-
 
 
 def get_portfolio_callback_handler():
