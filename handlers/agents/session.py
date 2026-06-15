@@ -162,12 +162,19 @@ async def get_or_create_session(
             None  # None triggers auto-detection based on model size
         )
 
+        base_url = (
+            agent_prefs.get("base_url") or
+            os.environ.get("LMSTUDIO_BASE_URL") or
+            None
+        )
+
         client = PydanticAIClient(
             model=agent_key,
             mcp_servers=mcp_servers,
             permission_callback=permission_callback,
             extra_env=extra_env,
             tool_filter_mode=tool_filter_mode,  # Auto-detects if None
+            base_url=base_url,
         )
     else:
         # For ACP subprocess models: claude-code, gemini, codex
