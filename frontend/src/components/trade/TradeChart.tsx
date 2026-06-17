@@ -463,9 +463,41 @@ export function TradeChart({
     return () => observer.disconnect();
   }, [chartReady]);
 
-  // ── Push candle data to chart ──
+  // Signature of the last full setData() render: channel key + earliest
+  // timestamp + count. Lets us tell a wholesale change (first load, pair/
+  // interval switch, history backfill/prepend) apart from a live tick, where
+  // the listener below already applied a cheap series.update().
+  const lastSetDataSigRef = useRef<string>("");
+
+  // ── Push candle data to chart (full setData only on structural changes) ──
   useEffect(() => {
     if (!chartReady || !seriesRef.current || !candles.length) return;
+
+    const key = `${server}:${connector}:${pair}:${interval}`;
+    const first = candles[0].timestamp;
+    const prevSig = lastSetDataSigRef.current;
+    const [prevKey, prevFirstStr, prevLenStr] = prevSig.split("|");
+    const prevFirst = Number(prevFirstStr);
+    const prevLen = Number(prevLenStr);
+
+    // lightweight-charts series.update() only handles the last bar or a single
+    // newer appended bar. So a full setData() is only required when:
+    //   • first load for this chart instance (no prior signature), or
+    //   • the channel key changed (pair/interval/connector/server switch), or
+    //   • the earliest candle moved back in time, i.e. older history was
+    //     prepended (REST backfill) — update() can't insert before the data.
+    // A plain live tick keeps the same key and earliest timestamp (last-bar
+    // update) or grows the count by appending a newer bar; both are already
+    // handled incrementally by the candleStore listener below, so we skip the
+    // expensive map + setData over the whole array on every tick.
+    const isFirstLoad = prevSig === "";
+    const keyChanged = prevKey !== key;
+    const historyPrepended = candles.length > prevLen && first < prevFirst;
+    const needsFullReset = isFirstLoad || keyChanged || historyPrepended;
+
+    lastSetDataSigRef.current = `${key}|${first}|${candles.length}`;
+
+    if (!needsFullReset) return;
 
     const mapped = candles.map((c) => ({
       time: c.timestamp as import("lightweight-charts").UTCTimestamp,
@@ -480,7 +512,7 @@ export function TradeChart({
       chartRef.current?.timeScale().fitContent();
       initializedRef.current = true;
     }
-  }, [candles, chartReady]);
+  }, [candles, chartReady, server, connector, pair, interval]);
 
   // ── Real-time last candle update via candle store listener ──
   useEffect(() => {
