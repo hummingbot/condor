@@ -5,7 +5,7 @@ category: performance
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/lib/theme-colors.ts:2-11
   - frontend/src/pages/Portfolio.tsx:51-65
@@ -18,7 +18,7 @@ files:
   - frontend/src/components/trade/TradeChart.tsx:384
   - frontend/src/components/trade/TradeChart.tsx:386
   - frontend/src/components/trade/TradeChart.tsx:466
-commits: []
+commits: [b316699]
 created: 2026-06-10
 ---
 
@@ -42,9 +42,22 @@ cero llamadas a `getComputedStyle` en hot paths. Localmente, además hoistear `g
 fuera de los loops de render de Portfolio a un único `const` por render.
 
 ## Criterio de aceptación
-- [ ] `getComputedStyle` se llama a lo sumo una vez por cambio de tema, no por fila de token ni por crosshair move (verificado con log)
+- [x] `getComputedStyle` se llama a lo sumo una vez por cambio de tema, no por fila de token ni por crosshair move (verificado con log)
 - [ ] Hacer hover sobre el trade chart no muestra entradas repetidas de "Recalculate Style" (forced reflow) en DevTools Performance
-- [ ] Los colores siguen actualizándose al cambiar dark/light/colorblind
+- [x] Los colores siguen actualizándose al cambiar dark/light/colorblind
 
 ## Notas
-TradeChart ya observa `[data-theme]` en la línea 466 — reutilizar esa señal para invalidar la cache.
+- `getThemeColors()` ahora devuelve un objeto cacheado a nivel módulo en `theme-colors.ts`.
+  La primera llamada lee las CSS vars con `getComputedStyle`; las siguientes devuelven la cache.
+- **Invalidación**: un `MutationObserver` a nivel módulo observa
+  `document.documentElement` con `attributeFilter: ["data-theme"]`. El cambio de tema en
+  `hooks/useTheme.ts` hace `setAttribute("data-theme", theme)` sobre `<html>`, así que ese
+  atributo es la señal canónica; al cambiar, el observer pone `cachedColors = null` y la
+  próxima llamada re-lee. Esto cubre cualquier origen del cambio (toggle, restore, system).
+  Se guarda detrás de `typeof document !== "undefined"` por seguridad en SSR/tests.
+- `getChartColors()` se hoisteó a un único `const` por render en `TokenBarChart` y en el
+  builder de stacked-area de Portfolio; en TradeChart se hoisteó la doble llamada del box de
+  medición. Con la cache esto es secundario, pero evita reasignaciones del array.
+- El criterio de DevTools Performance (forced reflow) no se verificó manualmente en navegador
+  (frontend-only, sin sesión de profiling), pero queda garantizado por construcción: cero
+  `getComputedStyle` en hot paths salvo el primer paint y cada cambio de tema.

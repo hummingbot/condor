@@ -247,6 +247,7 @@ function TokenBarChart({
 }) {
   if (tokens.length === 0) return null;
   const maxVal = tokens[0]?.usd_value ?? 0;
+  const chartColors = getChartColors();
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 h-full flex flex-col">
@@ -255,12 +256,13 @@ function TokenBarChart({
         {tokens.map((t, i) => {
           const barPct = maxVal > 0 ? (t.usd_value / maxVal) * 100 : 0;
           const allocPct = totalPortfolioValue > 0 ? (t.usd_value / totalPortfolioValue) * 100 : 0;
+          const color = chartColors[i % chartColors.length];
           return (
             <div key={`${t.connector}-${t.token}`} className="flex items-center gap-2">
               <div className="flex items-center gap-1.5 w-16 justify-end shrink-0">
                 <div
                   className="h-2.5 w-2.5 rounded-sm shrink-0"
-                  style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
+                  style={{ backgroundColor: color }}
                 />
                 <span className="text-xs font-medium truncate">{t.token}</span>
               </div>
@@ -269,7 +271,7 @@ function TokenBarChart({
                   className="h-full rounded transition-all duration-500"
                   style={{
                     width: `${Math.max(barPct, 2)}%`,
-                    backgroundColor: getChartColors()[i % getChartColors().length],
+                    backgroundColor: color,
                     opacity: 0.8,
                   }}
                 />
@@ -482,6 +484,8 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
   const toX = (ts: number) => PAD.left + ((ts - minTs) / tsRange) * plotW;
   const toY = (val: number) => PAD.top + plotH - ((val - minVal) / valRange) * plotH;
 
+  const chartColors = getChartColors();
+
   // Build stacked area paths
   const stackedAreas: { token: string; color: string; path: string }[] = [];
   if (stacked && topTokens.length > 0 && points.length > 1) {
@@ -489,7 +493,7 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
     const tokenOrder = topTokens;
     for (let ti = 0; ti < tokenOrder.length; ti++) {
       const token = tokenOrder[ti];
-      const color = getChartColors()[ti % getChartColors().length];
+      const color = chartColors[ti % chartColors.length];
 
       // Upper line (cumulative up to and including this token)
       const upperPoints = points.map((p) => {
@@ -559,7 +563,7 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
   // Tooltip dimensions for stacked mode
   const hoverTokens = hover?.point.tokens ?? {};
   const hoverTokenEntries = stacked && topTokens.length > 0
-    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: getChartColors()[topTokens.indexOf(t) % getChartColors().length] }))
+    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: chartColors[topTokens.indexOf(t) % chartColors.length] }))
     : [];
   const tooltipH = stacked && hoverTokenEntries.length > 0 ? 28 + hoverTokenEntries.length * 16 : 40;
   const tooltipW = stacked && hoverTokenEntries.length > 0 ? 150 : 108;
@@ -738,7 +742,7 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
                 <div key={token} className="flex items-center gap-1.5">
                   <div
                     className="h-2.5 w-2.5 rounded-sm"
-                    style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
+                    style={{ backgroundColor: chartColors[i % chartColors.length] }}
                   />
                   <span className="text-xs text-[var(--color-text-muted)]">{token}</span>
                 </div>

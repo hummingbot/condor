@@ -228,7 +228,8 @@ export function TradeChart({
             const diff = curPrice - anchor.price;
             const pct = anchor.price !== 0 ? (diff / anchor.price) * 100 : 0;
             const up = diff >= 0;
-            const clr = up ? getThemeColors().green : getThemeColors().red;
+            const tc = getThemeColors();
+            const clr = up ? tc.green : tc.red;
 
             // Draw the box as a pixel overlay — no chart series, so no relayout/flicker
             const ax = chart.timeScale().timeToCoordinate(anchor.time as import("lightweight-charts").UTCTimestamp);
