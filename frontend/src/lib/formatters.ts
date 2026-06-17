@@ -43,6 +43,11 @@ export function formatPnl(val: number) {
   return formatCurrencyPnl(val);
 }
 
+/** Normalize a timestamp to seconds (ms timestamps > 1e12 are divided by 1000). */
+export function tsToSeconds(ts: number): number {
+  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
+}
+
 export function formatAge(timestamp: number): string {
   if (!timestamp) return "\u2014";
   try {

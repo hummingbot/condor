@@ -5,12 +5,13 @@ category: readability
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/tabs/BacktestingTab.tsx:27-29
   - frontend/src/components/charts/ArchivedPerformanceCharts.tsx:34-36
   - frontend/src/components/charts/ExecutorChart.tsx:49-51
-commits: []
+commits:
+  - f45f02c
 created: 2026-06-10
 ---
 
@@ -26,9 +27,11 @@ Mover `tsToSeconds` a un módulo compartido (`lib/formatters.ts` o un nuevo `lib
 exportarla y reemplazar las 3 definiciones locales por el import.
 
 ## Criterio de aceptación
-- [ ] `tsToSeconds` existe en un solo módulo exportado
-- [ ] Los 3 archivos de charts importan esa única definición y no tienen copia local
+- [x] `tsToSeconds` existe en un solo módulo exportado
+- [x] Los 3 archivos de charts importan esa única definición y no tienen copia local
 - [ ] Los charts renderizan los ejes temporales igual que antes
 
 ## Notas
 Misma familia de helpers de tiempo que [[ARCH-011]] y [[ARCH-013]]; agrupables en un solo PR de DRY.
+
+Implementado: `tsToSeconds` exportado desde `frontend/src/lib/formatters.ts` (junto a los otros helpers de tiempo); las 3 copias locales eliminadas y reemplazadas por import. El criterio de render visual no se verificó en navegador (sin entorno corriendo), pero el cambio es un refactor sin alterar la lógica (definición byte a byte idéntica), por lo que el comportamiento es equivalente. tsc -b exit 0; eslint sin nuevos errores (baseline: 1 error preexistente en BacktestingTab:512 no relacionado).

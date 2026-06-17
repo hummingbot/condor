@@ -21,13 +21,9 @@ import type { IChartApi } from "lightweight-charts";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
 import { api } from "@/lib/api";
-import { formatPct, formatPnl, formatUsd, pnlColor } from "@/lib/formatters";
+import { formatPct, formatPnl, formatUsd, pnlColor, tsToSeconds } from "@/lib/formatters";
 
 // -- Helpers --
-
-function tsToSeconds(ts: number): number {
-  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
-}
 
 function tsToDateTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString("en-US", {

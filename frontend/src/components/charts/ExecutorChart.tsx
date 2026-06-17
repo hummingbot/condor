@@ -10,6 +10,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { tsToSeconds } from "@/lib/formatters";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
@@ -45,10 +46,6 @@ const isActive = (status: string) => {
   const s = status?.toLowerCase() ?? "";
   return s === "running" || s === "active_position" || s === "active";
 };
-
-function tsToSeconds(ts: number): number {
-  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
-}
 
 /** Vertical line definition for grid box edges drawn directly on the canvas */
 interface GridVerticalLine {
