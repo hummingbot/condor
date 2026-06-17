@@ -75,6 +75,28 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def append_audit(
+    audit_file: Path, action: str, target: str, summary: str, source: str
+) -> None:
+    """Append one JSONL entry to a shared ``audit.log``.
+
+    Free function (not a method) so every per-user store under
+    ``data/memory/user_{id}/`` — memories and skills alike — writes the same
+    format to the *same* file. ``target`` is namespaced by caller
+    (``memory:<slug>`` / ``skill:<slug>``) so ``/memory`` can tell them apart.
+    """
+    audit_file.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": _utcnow(),
+        "source": source,
+        "action": action,
+        "target": target,
+        "summary": (summary or "")[:200],
+    }
+    with audit_file.open("a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 class MemoryStore:
     """Per-user memory store. One instance per ``user_id``."""
 
@@ -254,16 +276,7 @@ class MemoryStore:
     def _append_audit(
         self, action: str, target: str, summary: str, source: str
     ) -> None:
-        self.root.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "ts": _utcnow(),
-            "source": source,
-            "action": action,
-            "target": target,
-            "summary": (summary or "")[:200],
-        }
-        with self.audit_file.open("a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        append_audit(self.audit_file, action, target, summary, source)
 
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
