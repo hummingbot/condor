@@ -20,8 +20,7 @@ from telegram.ext import (
 from condor.persistence import SafePicklePersistence
 from handlers import clear_all_input_states
 from utils.auth import restricted
-from utils.config import WEB_PORT, WEB_URL
-from utils.config import TELEGRAM_TOKEN
+from utils.config import TELEGRAM_TOKEN, WEB_PORT, WEB_URL
 
 # Enable logging
 logging.basicConfig(
@@ -63,7 +62,9 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     url = f"{WEB_URL}/login?token={token}"
     _hostname = urlparse(WEB_URL).hostname or ""
-    is_localhost = "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
+    is_localhost = (
+        "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
+    )
 
     if is_localhost:
         await update.message.reply_text(
@@ -241,6 +242,7 @@ def reload_handlers():
         "handlers.agents.stream",
         "handlers.agents.confirmation",
         "handlers.agents._shared",
+        "handlers.memory",
         "handlers.admin",
         "handlers.admin.update",
         "utils.auth",
@@ -270,7 +272,11 @@ def register_handlers(application: Application) -> None:
     # Import fresh versions after reload
     from handlers.admin import admin_command
     from handlers.admin.update import update_command
-    from handlers.agents import agent_callback_handler, agent_command, agent_voice_handler
+    from handlers.agents import (
+        agent_callback_handler,
+        agent_command,
+        agent_voice_handler,
+    )
     from handlers.bots import (
         bots_callback_handler,
         bots_command,
@@ -284,6 +290,7 @@ def register_handlers(application: Application) -> None:
     from handlers.config.servers import servers_command
     from handlers.dex import dex_callback_handler, lp_command
     from handlers.executors import executors_callback_handler, executors_command
+    from handlers.memory import memory_callback_handler, memory_command
     from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
     from handlers.routines import routines_callback_handler, routines_command
     from handlers.trading import trade_command as unified_trade_command
@@ -307,6 +314,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    application.add_handler(CommandHandler("memory", memory_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -342,6 +350,11 @@ def register_handlers(application: Application) -> None:
     # Add agent callback handler
     application.add_handler(
         CallbackQueryHandler(agent_callback_handler, pattern="^agent:")
+    )
+
+    # Add memory callback handler (/memory review + delete)
+    application.add_handler(
+        CallbackQueryHandler(memory_callback_handler, pattern="^memory:")
     )
 
     # Add admin callback handler
@@ -397,14 +410,23 @@ async def post_init(application: Application) -> None:
 
     # Preload Whisper model in background so first voice message is fast
     import asyncio
-    from utils.transcribe import _get_model, DEFAULT_MODEL
+
+    from utils.transcribe import DEFAULT_MODEL, _get_model
 
     asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
 
     # Clear any previously set commands for all scopes to avoid stale overrides
-    from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeDefault
+    from telegram import (
+        BotCommandScopeAllGroupChats,
+        BotCommandScopeAllPrivateChats,
+        BotCommandScopeDefault,
+    )
 
-    for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()]:
+    for scope in [
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+    ]:
         try:
             await application.bot.delete_my_commands(scope=scope)
         except Exception:
@@ -412,7 +434,9 @@ async def post_init(application: Application) -> None:
 
     if ADMIN_USER_ID:
         try:
-            await application.bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID)))
+            await application.bot.delete_my_commands(
+                scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID))
+            )
         except Exception:
             pass
 
@@ -421,6 +445,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Welcome message and setup"),
         BotCommand("portfolio", "View balances across exchanges"),
         BotCommand("agent", "AI trading assistant"),
+        BotCommand("memory", "Review what the assistant remembers about you"),
         BotCommand("executors", "Deploy and manage trading executors"),
         BotCommand("bots", "Deploy and manage trading bots"),
         BotCommand("new_bot", "Create bot configurations"),
@@ -485,7 +510,6 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(watch_and_reload(application))
 
 
-
 async def watch_and_reload(application: Application) -> None:
     """Watch for file changes and reload handlers automatically."""
     try:
@@ -510,6 +534,7 @@ async def watch_and_reload(application: Application) -> None:
             # Reload assistants if any .md file in assistants/ changed
             if any(str(assistants_path) in str(path) for _, path in changes):
                 from handlers.agents._shared import reload_assistants
+
                 reload_assistants()
                 logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
@@ -581,6 +606,7 @@ def main() -> None:
 
         # Stop all trading agents
         from condor.trading_agent.engine import get_all_engines
+
         for engine in list(get_all_engines().values()):
             try:
                 await engine.stop()
@@ -589,18 +615,22 @@ def main() -> None:
 
         # Stop WebSocket manager
         from condor.web.ws_manager import get_ws_manager
+
         get_ws_manager().stop()
 
         # Stop ServerDataService
         from condor.server_data_service import get_server_data_service
+
         get_server_data_service().stop()
 
         # Close cached Hummingbot API clients (ConfigManager)
         from config_manager import get_config_manager
+
         await get_config_manager().close_all_clients()
 
         # Close MCP hummingbot client
         from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+
         await hummingbot_client.close()
 
     # Create the Application with persistence enabled
@@ -654,6 +684,7 @@ async def _run_dual(application: Application) -> None:
 
     # Notify admin that Condor has started
     from utils.config import ADMIN_USER_ID
+
     if ADMIN_USER_ID:
         try:
             await application.bot.send_message(
