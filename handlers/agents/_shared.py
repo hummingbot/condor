@@ -73,7 +73,10 @@ def discover_assistants() -> dict[str, dict[str, str]]:
     for path in sorted(_ASSISTANTS_DIR.glob("*.md")):
         name = path.stem
         meta, _ = _load_assistant_full(name)
-        result[name] = {"label": meta["label"], "description": meta.get("description", "")}
+        result[name] = {
+            "label": meta["label"],
+            "description": meta.get("description", ""),
+        }
     return result
 
 
@@ -113,8 +116,8 @@ _MODE_CONTEXT_BUILDERS: dict[str, Any] = {}
 
 def _build_agent_builder_context() -> str:
     """Append live strategy/agent data to the agent_builder prompt."""
-    from condor.trading_agent.strategy import StrategyStore
     from condor.trading_agent.engine import get_all_engines
+    from condor.trading_agent.strategy import StrategyStore
 
     sections: list[str] = []
 
@@ -125,10 +128,14 @@ def _build_agent_builder_context() -> str:
         for s in strategies:
             skills = ", ".join(s.skills) if s.skills else "none"
             pair = s.default_config.get("trading_pair", "")
-            strat_lines.append(f"- {s.name} (id={s.id}, agent={s.agent_key}, skills={skills}, pair={pair})")
+            strat_lines.append(
+                f"- {s.name} (id={s.id}, agent={s.agent_key}, skills={skills}, pair={pair})"
+            )
         sections.append("\n".join(strat_lines))
     else:
-        sections.append("No strategies exist yet. Help the user create their first one.")
+        sections.append(
+            "No strategies exist yet. Help the user create their first one."
+        )
 
     engines = get_all_engines()
     if engines:
@@ -201,6 +208,7 @@ def _build_system_prompt(platform: str = "telegram") -> str:
         f"{formatting}"
     )
 
+
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
     "place_order",
@@ -262,7 +270,8 @@ def get_project_dir() -> str:
 
 
 def _condor_mcp_args(
-    chat_id: int | str, user_id: int,
+    chat_id: int | str,
+    user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
 ) -> list[str]:
@@ -273,9 +282,12 @@ def _condor_mcp_args(
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
     effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
     args = [
-        "--chat-id", str(effective_chat_id),
-        "--user-id", str(user_id),
-        "--bot-token", os.environ.get("TELEGRAM_TOKEN", ""),
+        "--chat-id",
+        str(effective_chat_id),
+        "--user-id",
+        str(user_id),
+        "--bot-token",
+        os.environ.get("TELEGRAM_TOKEN", ""),
     ]
     if agent_slug:
         args.extend(["--agent-slug", agent_slug])
@@ -285,7 +297,9 @@ def _condor_mcp_args(
 
 
 def build_mcp_servers_for_session(
-    user_id: int, chat_id: int | str, user_data: dict | None = None,
+    user_id: int,
+    chat_id: int | str,
+    user_data: dict | None = None,
     execution_mode: str = "loop",
     server_name: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -312,7 +326,8 @@ def build_mcp_servers_for_session(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"] + _condor_mcp_args(chat_id, user_id, server_name=server_name),
+        "args": ["run", "python", "-m", "mcp_servers.condor"]
+        + _condor_mcp_args(chat_id, user_id, server_name=server_name),
         "env": [],
     }
 
@@ -320,7 +335,8 @@ def build_mcp_servers_for_session(
         log.warning(
             "No accessible server for user %s (chat %s) — "
             "agent will start without mcp-hummingbot",
-            user_id, chat_id,
+            user_id,
+            chat_id,
         )
         return [condor]
 
@@ -329,7 +345,8 @@ def build_mcp_servers_for_session(
         log.warning(
             "Server '%s' resolved for user %s but not found in servers config — "
             "agent will start without mcp-hummingbot",
-            server_name, user_id,
+            server_name,
+            user_id,
         )
         return [condor]
 
@@ -339,11 +356,18 @@ def build_mcp_servers_for_session(
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": [
-            "run", "python", "-m", "mcp_servers.hummingbot_api",
-            "--url", api_url,
-            "--username", server["username"],
-            "--password", server["password"],
-            "--server-name", server_name,
+            "run",
+            "python",
+            "-m",
+            "mcp_servers.hummingbot_api",
+            "--url",
+            api_url,
+            "--username",
+            server["username"],
+            "--password",
+            server["password"],
+            "--server-name",
+            server_name,
         ],
         "env": [],
     }
@@ -352,7 +376,10 @@ def build_mcp_servers_for_session(
 
 
 def build_mcp_servers_for_agent(
-    server_name: str, user_id: int, chat_id: int, agent_slug: str | None = None,
+    server_name: str,
+    user_id: int,
+    chat_id: int,
+    agent_slug: str | None = None,
     execution_mode: str = "loop",
 ) -> list[dict[str, Any]]:
     """Build MCP server configs for a trading agent bound to a specific server.
@@ -368,7 +395,8 @@ def build_mcp_servers_for_agent(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"] + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
+        "args": ["run", "python", "-m", "mcp_servers.condor"]
+        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
         "env": [],
     }
 
@@ -387,11 +415,18 @@ def build_mcp_servers_for_agent(
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": [
-            "run", "python", "-m", "mcp_servers.hummingbot_api",
-            "--url", api_url,
-            "--username", server["username"],
-            "--password", server["password"],
-            "--server-name", server_name,
+            "run",
+            "python",
+            "-m",
+            "mcp_servers.hummingbot_api",
+            "--url",
+            api_url,
+            "--username",
+            server["username"],
+            "--password",
+            server["password"],
+            "--server-name",
+            server_name,
         ],
         "env": [],
     }
@@ -399,10 +434,21 @@ def build_mcp_servers_for_agent(
     return [mcp_hummingbot, condor]
 
 
-def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram", server_name: str | None = None) -> str:
+def build_initial_context(
+    user_id: int,
+    chat_id: int | str,
+    user_data: dict | None = None,
+    agent_key: str | None = None,
+    platform: str = "telegram",
+    server_name: str | None = None,
+) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
-    from config_manager import ServerPermission, get_config_manager, get_effective_server
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+    from config_manager import (
+        ServerPermission,
+        get_config_manager,
+        get_effective_server,
+    )
 
     cm = get_config_manager()
 
@@ -457,7 +503,7 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
                 "mcp__condor__trading_agent_journal_read",
                 "mcp__condor__trading_agent_journal_write",
                 "mcp__condor__send_notification",
-                "mcp__condor__manage_notes",
+                "mcp__condor__manage_memory",
             ]
             tool_preload_hint = (
                 "IMPORTANT: At the very start of the session (before your first response), "
@@ -477,20 +523,40 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
         if tool_preload_hint:
             server_info.extend([tool_preload_hint, ""])
 
-        server_info.extend([
-            "Available servers:",
-            *server_lines,
-            "",
-            "Server switching is not supported mid-session. If the user wants a different server, "
-            "tell them to start a new session with that server selected.",
-            "",
-            "Permission rules:",
-            f"- Your current permission on '{active_name}' is {active_perm_label}.",
-            "- OWNER: Full access including trading operations and server management.",
-            "- TRADER: Can trade, view balances, and manage own settings.",
-            "- Enforce the permission level for this server.",
-        ])
+        server_info.extend(
+            [
+                "Available servers:",
+                *server_lines,
+                "",
+                "Server switching is not supported mid-session. If the user wants a different server, "
+                "tell them to start a new session with that server selected.",
+                "",
+                "Permission rules:",
+                f"- Your current permission on '{active_name}' is {active_perm_label}.",
+                "- OWNER: Full access including trading operations and server management.",
+                "- TRADER: Can trade, view balances, and manage own settings.",
+                "- Enforce the permission level for this server.",
+            ]
+        )
 
         sections.append("\n".join(server_info))
+
+    # User memory index — what the agent remembers about this user (shared with
+    # the user's trading agents). Inject only the index; bodies are read on
+    # demand via manage_memory(action="read"). Nothing injected for new users.
+    try:
+        from condor.memory import MemoryStore
+
+        memory_index = MemoryStore(user_id).list_index()
+        if memory_index:
+            sections.append(
+                "[USER MEMORY — what you remember about this user]\n"
+                "Consider this before responding. Read a full memory with "
+                'manage_memory(action="read", name="..."). When you learn something '
+                'new and stable about the user, save it with manage_memory(action="write", ...).\n\n'
+                f"{memory_index}"
+            )
+    except Exception:
+        pass  # Memory is advisory — never block session start on it.
 
     return "\n\n".join(sections)
