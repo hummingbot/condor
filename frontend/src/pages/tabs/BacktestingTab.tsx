@@ -1,4 +1,3 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Calendar,
   CheckCircle2,
@@ -18,9 +17,9 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { IChartApi } from "lightweight-charts";
 
+import { useBacktest } from "@/hooks/useBacktest";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
-import { api } from "@/lib/api";
 import type { BacktestData, ExecutorData } from "@/lib/backtest";
 import { extractResults } from "@/lib/backtest";
 import { formatPct, formatPnl, formatUsd, pnlColor, tsToSeconds } from "@/lib/formatters";
@@ -458,7 +457,22 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
 export function BacktestingTab() {
   const { server } = useServer();
-  const queryClient = useQueryClient();
+
+  // Data layer: queries + mutations + selection/pinning state
+  const {
+    configsData,
+    tasks,
+    tasksLoading,
+    selectedTask,
+    selectedTaskLoading,
+    selectedTaskId,
+    setSelectedTaskId,
+    pinnedTask,
+    pinnedTaskId,
+    setPinnedTaskId,
+    submit: submitMutation,
+    remove: deleteMutation,
+  } = useBacktest(server);
 
   // Form state
   const [configId, setConfigId] = useState("");
@@ -470,57 +484,10 @@ export function BacktestingTab() {
   const [endDate, setEndDate] = useState(() =>
     toDateInputValue(Math.floor(Date.now() / 1000)),
   );
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [configDropdownOpen, setConfigDropdownOpen] = useState(false);
   const [configSearch, setConfigSearch] = useState("");
   const [activePreset, setActivePreset] = useState<string | null>("1W");
-  const [pinnedTaskId, setPinnedTaskId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-
-  // Available configs
-  const { data: configsData } = useQuery({
-    queryKey: ["available-configs", server],
-    queryFn: () => api.getAvailableConfigs(server!),
-    enabled: !!server,
-  });
-
-  // Task list
-  const {
-    data: tasks,
-    isLoading: tasksLoading,
-  } = useQuery({
-    queryKey: ["backtest-tasks", server],
-    queryFn: () => api.listBacktestTasks(server!),
-    enabled: !!server,
-    refetchInterval: 5000,
-  });
-
-  // Selected task detail
-  const { data: selectedTask, isLoading: selectedTaskLoading } = useQuery({
-    queryKey: ["backtest-task", server, selectedTaskId],
-    queryFn: () => api.getBacktestTask(server!, selectedTaskId!),
-    enabled: !!server && !!selectedTaskId,
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      if (status === "pending" || status === "running") return 2000;
-      return false;
-    },
-  });
-
-  // Pinned task detail (for comparison)
-  const { data: pinnedTask } = useQuery({
-    queryKey: ["backtest-task", server, pinnedTaskId],
-    queryFn: () => api.getBacktestTask(server!, pinnedTaskId!),
-    enabled: !!server && !!pinnedTaskId && pinnedTaskId !== selectedTaskId,
-  });
-
-  // Auto-select first completed task
-  useEffect(() => {
-    if (!selectedTaskId && tasks && tasks.length > 0) {
-      const completed = tasks.find((t) => t.status === "completed");
-      setSelectedTaskId(completed?.task_id ?? tasks[0].task_id);
-    }
-  }, [tasks, selectedTaskId]);
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -530,32 +497,19 @@ export function BacktestingTab() {
     }
   }, [toast]);
 
-  // Submit mutation
-  const submitMutation = useMutation({
-    mutationFn: () =>
-      api.submitBacktest(server!, {
+  // Submit the current form as a backtest task
+  const submitBacktest = useCallback(() => {
+    submitMutation.mutate(
+      {
         config_id: configId,
         start_time: dateToTs(startDate),
         end_time: dateToTs(endDate),
         backtesting_resolution: resolution,
         trade_cost: parseFloat(tradeCost),
-      }),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["backtest-tasks", server] });
-      if (data.task_id) setSelectedTaskId(data.task_id);
-      setToast("Backtest submitted successfully");
-    },
-  });
-
-  // Delete mutation
-  const deleteMutation = useMutation({
-    mutationFn: (taskId: string) => api.deleteBacktestTask(server!, taskId),
-    onSuccess: (_, taskId) => {
-      if (selectedTaskId === taskId) setSelectedTaskId(null);
-      if (pinnedTaskId === taskId) setPinnedTaskId(null);
-      queryClient.invalidateQueries({ queryKey: ["backtest-tasks", server] });
-    },
-  });
+      },
+      { onSuccess: () => setToast("Backtest submitted successfully") },
+    );
+  }, [submitMutation, configId, startDate, endDate, resolution, tradeCost]);
 
   const applyPreset = useCallback((label: string, days: number) => {
     const now = Math.floor(Date.now() / 1000);
@@ -814,7 +768,7 @@ export function BacktestingTab() {
           {/* Right: Run button */}
           <div className="relative group lg:shrink-0">
             <button
-              onClick={() => submitMutation.mutate()}
+              onClick={submitBacktest}
               disabled={!!disabledReason}
               className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shadow-[var(--color-primary)]/20"
             >
