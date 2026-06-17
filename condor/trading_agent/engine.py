@@ -29,9 +29,9 @@ from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
+from .providers import ProviderRegistry
 from .risk import RiskEngine, RiskLimits, auto_approve_with_risk_check
 from .strategy import Strategy
-from .providers import ProviderRegistry
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +41,15 @@ _engines: dict[str, "TickEngine"] = {}
 
 class _NullTracker:
     """Stub tracker for experiments (no journal)."""
-    def get_total_exposure(self) -> float: return 0.0
-    def get_open_executor_count(self) -> int: return 0
-    def get_drawdown_pct(self) -> float: return 0.0
+
+    def get_total_exposure(self) -> float:
+        return 0.0
+
+    def get_open_executor_count(self) -> int:
+        return 0
+
+    def get_drawdown_pct(self) -> float:
+        return 0.0
 
 
 def get_engine(agent_id: str) -> TickEngine | None:
@@ -101,6 +107,7 @@ class TickEngine:
 
             # Save config per session
             from .config import save_full_config
+
             save_full_config(self.session_dir, self.config)
 
             self.journal = JournalManager(
@@ -127,7 +134,11 @@ class TickEngine:
         self._bot = bot
         self._task = asyncio.create_task(self._loop())
         _engines[self.agent_id] = self
-        log.info("TickEngine %s started (freq=%ss)", self.agent_id, self.config.get("frequency_sec", 60))
+        log.info(
+            "TickEngine %s started (freq=%ss)",
+            self.agent_id,
+            self.config.get("frequency_sec", 60),
+        )
 
     async def stop(self) -> None:
         """Stop gracefully."""
@@ -194,7 +205,11 @@ class TickEngine:
                 # Single-tick modes: stop after first tick
                 if mode in ("dry_run", "run_once"):
                     label = "Dry run" if mode == "dry_run" else "Run-once"
-                    log.info("TickEngine %s: %s complete, self-stopping", self.agent_id, label)
+                    log.info(
+                        "TickEngine %s: %s complete, self-stopping",
+                        self.agent_id,
+                        label,
+                    )
                     await self._notify(f"Agent {self.agent_id}: {label} complete.")
                     self._running = False
                     _engines.pop(self.agent_id, None)
@@ -203,8 +218,14 @@ class TickEngine:
                 # max_ticks limit (loop mode only)
                 max_ticks = self.config.get("max_ticks", 0)
                 if max_ticks > 0 and self.journal.tick_count >= max_ticks:
-                    log.info("TickEngine %s: reached max_ticks=%d, self-stopping", self.agent_id, max_ticks)
-                    await self._notify(f"Agent {self.agent_id}: completed {max_ticks} ticks (max_ticks limit).")
+                    log.info(
+                        "TickEngine %s: reached max_ticks=%d, self-stopping",
+                        self.agent_id,
+                        max_ticks,
+                    )
+                    await self._notify(
+                        f"Agent {self.agent_id}: completed {max_ticks} ticks (max_ticks limit)."
+                    )
                     self._running = False
                     self.journal.close()
                     _engines.pop(self.agent_id, None)
@@ -246,7 +267,9 @@ class TickEngine:
 
         # 3. Read journal context (sessions only)
         learnings = self.journal.read_learnings() if self.journal else ""
-        recent_decisions = self.journal.get_recent_decisions(count=3) if self.journal else ""
+        recent_decisions = (
+            self.journal.get_recent_decisions(count=3) if self.journal else ""
+        )
         summary = self.journal.read_summary() if self.journal else ""
 
         # 4. Get risk state (experiments pass None — returns clean state)
@@ -259,17 +282,31 @@ class TickEngine:
                 risk_state.block_reason,
             )
             self.journal.record_tick("blocked: " + risk_state.block_reason)
-            await self._notify(f"Agent {self.agent_id} blocked: {risk_state.block_reason}")
+            await self._notify(
+                f"Agent {self.agent_id} blocked: {risk_state.block_reason}"
+            )
             return
 
         # 5. Build prompt (server credentials are injected via env into MCP process)
         # Cache routine discovery on first tick — routines rarely change mid-session
         if self._cached_routines_section is None:
             from .prompts import _build_routines_section
+
             try:
                 self._cached_routines_section = _build_routines_section(self.strategy)
             except Exception:
                 self._cached_routines_section = ""
+
+        # User memory index (advisory) — read fresh each tick so memory written
+        # by the chat or by the agent itself shows up promptly. It's a small file
+        # read, like learnings/summary above; failure never blocks a tick.
+        user_memory = ""
+        try:
+            from condor.memory import MemoryStore
+
+            user_memory = MemoryStore(self.user_id).list_index()
+        except Exception:
+            pass
 
         next_tick = self.journal.tick_count + 1 if self.journal else 1
         prompt = build_tick_prompt(
@@ -283,14 +320,13 @@ class TickEngine:
             tick_number=next_tick,
             agent_id=self.agent_id,
             cached_routines_section=self._cached_routines_section or None,
+            user_memory=user_memory,
         )
 
         # Inject pending user directives
         if self._pending_directives:
             directives = "\n".join(f"- {d}" for d in self._pending_directives)
-            prompt += (
-                f"\n\nUSER DIRECTIVES (apply these on this tick):\n{directives}"
-            )
+            prompt += f"\n\nUSER DIRECTIVES (apply these on this tick):\n{directives}"
             self._pending_directives.clear()
 
         # 6. Create a fresh agent client per tick (clean context window)
@@ -344,12 +380,14 @@ class TickEngine:
         tick_duration = time.time() - self._last_tick_at
 
         from datetime import datetime, timezone
+
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         executors_summary = core_data_summaries.get("executors", "No executor data.")
 
         if self.is_experiment:
             # Experiments: save a single snapshot file, no journal
             from .journal import save_experiment_snapshot
+
             save_experiment_snapshot(
                 agent_dir=self.strategy.agent_dir,
                 experiment_num=self.session_num,
@@ -365,7 +403,10 @@ class TickEngine:
             )
             log.info(
                 "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
-                self.agent_id, self.session_num, len(tool_calls), len(response_text),
+                self.agent_id,
+                self.session_num,
+                len(tool_calls),
+                len(response_text),
             )
         else:
             # Sessions: full journal tracking
@@ -395,7 +436,11 @@ class TickEngine:
                 duration=tick_duration,
             )
 
-            action_brief = response_text[:100].replace("\n", " ") if response_text else "No response"
+            action_brief = (
+                response_text[:100].replace("\n", " ")
+                if response_text
+                else "No response"
+            )
             self.journal.write_summary(
                 tick=tick_num,
                 status="Running",
@@ -406,7 +451,10 @@ class TickEngine:
 
             log.info(
                 "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
-                self.agent_id, tick_num, len(tool_calls), len(response_text),
+                self.agent_id,
+                tick_num,
+                len(tool_calls),
+                len(response_text),
             )
 
     async def _collect_stream(self, acp_client: ACPClient, prompt: str):
@@ -434,27 +482,33 @@ class TickEngine:
         server_name = self.config.get("server_name")
         if server_name:
             mcp_servers = build_mcp_servers_for_agent(
-                server_name, self.user_id, self.chat_id,
+                server_name,
+                self.user_id,
+                self.chat_id,
                 agent_slug=self.strategy.slug,
                 execution_mode=mode,
             )
         else:
             mcp_servers = build_mcp_servers_for_session(
-                self.user_id, self.chat_id,
+                self.user_id,
+                self.chat_id,
                 execution_mode=mode,
             )
-        permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
+        permission_cb = auto_approve_with_risk_check(
+            self.risk, risk_state, execution_mode=mode
+        )
 
         agent_key = self.config.get("agent_key") or self.strategy.agent_key
         use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
         if use_pydantic_ai:
             import os
+
             base_url = self.config.get("model_base_url") or None
             tool_filter_mode = (
-                self.config.get("tool_filter_mode") or
-                os.environ.get("PYDANTIC_AI_TOOL_FILTER") or
-                None
+                self.config.get("tool_filter_mode")
+                or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
+                or None
             )
             return PydanticAIClient(
                 model=agent_key,
@@ -500,10 +554,12 @@ class TickEngine:
             server_name, server = self._resolve_server()
             if not server:
                 from handlers.bots._shared import get_bots_client
+
                 client, _ = await get_bots_client(self.chat_id)
                 return client
 
             from config_manager import get_config_manager
+
             cm = get_config_manager()
             return await cm.get_client(server_name)
         except Exception:
@@ -526,8 +582,13 @@ class TickEngine:
         if self.journal:
             summary = self.journal.get_summary_dict()
         else:
-            summary = {"total_ticks": 0, "daily_pnl": 0, "total_volume": 0,
-                       "total_exposure": 0, "open_executors": 0}
+            summary = {
+                "total_ticks": 0,
+                "daily_pnl": 0,
+                "total_volume": 0,
+                "total_exposure": 0,
+                "open_executors": 0,
+            }
 
         return {
             "agent_id": self.agent_id,
@@ -544,7 +605,15 @@ class TickEngine:
             "server_name": self.config.get("server_name", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),
-            "risk_limits": risk_limits if isinstance(risk_limits, dict) else risk_limits.model_dump() if hasattr(risk_limits, "model_dump") else {},
+            "risk_limits": (
+                risk_limits
+                if isinstance(risk_limits, dict)
+                else (
+                    risk_limits.model_dump()
+                    if hasattr(risk_limits, "model_dump")
+                    else {}
+                )
+            ),
             "agent_key": self.config.get("agent_key") or self.strategy.agent_key,
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),

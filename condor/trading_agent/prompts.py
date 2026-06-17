@@ -59,6 +59,15 @@ ROUTINES:
 - manage_routines(action="list") to discover routines.
 - Routines tagged "agent" are local to your strategy.
 
+MEMORY (about the user, NOT operational learnings):
+- [USER MEMORY] below is what is known about the OWNER (preferences, profile).
+  This is distinct from [LEARNINGS] (market/execution), which go to the journal.
+- Read detail with manage_memory(action="read", name="...").
+- If you learn something new and stable about the USER (a standing preference,
+  a profile fact, a correction), save it with manage_memory(action="write",
+  name="short-name", description="one line", content="...", type="preference|fact").
+  Operational/market learnings still go to trading_agent_journal_write, NOT here.
+
 NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
 """
@@ -71,6 +80,7 @@ TOOL_PRELOAD_LIVE = (
     "mcp__mcp-hummingbot__explore_geckoterminal,"
     "mcp__condor__trading_agent_journal_write,"
     "mcp__condor__send_notification,"
+    "mcp__condor__manage_memory,"
     'mcp__condor__manage_routines")\n'
     "Do this silently."
 )
@@ -82,6 +92,7 @@ TOOL_PRELOAD_DRY_RUN = (
     "mcp__mcp-hummingbot__explore_geckoterminal,"
     "mcp__condor__trading_agent_journal_write,"
     "mcp__condor__send_notification,"
+    "mcp__condor__manage_memory,"
     'mcp__condor__manage_routines")\n'
     "Do this silently."
 )
@@ -92,13 +103,16 @@ def _build_routines_section(strategy: Strategy) -> str:
     from routines.base import discover_routines, discover_routines_from_path
 
     lines = ["[AVAILABLE ROUTINES]"]
-    lines.append(f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.id}", config={{...}})')
+    lines.append(
+        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.id}", config={{...}})'
+    )
     lines.append("")
 
     # Agent-local routines first
     routines_dir = strategy.agent_dir / "routines"
     if routines_dir.exists():
         from routines.base import discover_routines_from_path
+
         local = discover_routines_from_path(routines_dir)
         if local:
             lines.append("Agent-local:")
@@ -126,6 +140,7 @@ def build_tick_prompt(
     tick_number: int = 1,
     agent_id: str = "",
     cached_routines_section: str | None = None,
+    user_memory: str = "",
 ) -> str:
     """Build the full prompt for one agent tick."""
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
@@ -192,8 +207,12 @@ def build_tick_prompt(
 
     # Current config (exclude keys shown elsewhere or not useful to the LLM)
     _CONFIG_EXCLUDE = {
-        "trading_context", "risk_limits",  # shown in dedicated sections
-        "agent_key", "server_name", "frequency_sec", "execution_mode",  # noise / internal
+        "trading_context",
+        "risk_limits",  # shown in dedicated sections
+        "agent_key",
+        "server_name",
+        "frequency_sec",
+        "execution_mode",  # noise / internal
     }
     config_lines = [
         "[CURRENT CONFIG]",
@@ -207,8 +226,12 @@ def build_tick_prompt(
 
     # Risk state
     rs = risk_state
-    max_dd = rs.get('max_drawdown_pct', -1)
-    dd_display = f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit" if max_dd >= 0 else "disabled"
+    max_dd = rs.get("max_drawdown_pct", -1)
+    dd_display = (
+        f"{rs.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
+        if max_dd >= 0
+        else "disabled"
+    )
     risk_lines = [
         "[RISK STATE]",
         f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
@@ -221,6 +244,14 @@ def build_tick_prompt(
     # Core skill data (pre-computed)
     for name, data_summary in core_data.items():
         sections.append(f"[CORE DATA - {name}]\n{data_summary}")
+
+    # User memory -- what is known about the owner (preferences/profile)
+    if user_memory:
+        sections.append(
+            "[USER MEMORY — what is known about the owner; advisory]\n"
+            'Read detail with manage_memory(action="read", name="...").\n\n'
+            f"{user_memory}"
+        )
 
     # Journal -- compact memory
     if learnings:
