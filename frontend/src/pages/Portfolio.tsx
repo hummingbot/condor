@@ -25,7 +25,7 @@ import {
   type PortfolioHistoryPoint,
   type PortfolioHistoryResponse,
 } from "@/lib/api";
-import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, isExecutorActive } from "@/lib/formatters";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
@@ -67,10 +67,6 @@ function getChartColors() {
 // ── KPI helpers ──
 
 const TIME_PERIODS = ["1D", "1W", "1M"] as const;
-
-function isExecutorActive(status: string) {
-  return status === "active" || status === "running";
-}
 
 function computeExecutorStats(
   executors: ExecutorInfo[],

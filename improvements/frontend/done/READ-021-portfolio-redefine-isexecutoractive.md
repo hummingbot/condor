@@ -5,11 +5,12 @@ category: readability
 impact: low
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/Portfolio.tsx:71-73
   - frontend/src/lib/formatters.ts:76-78
-commits: []
+commits:
+  - 7a9aa42 (refactor) use shared isExecutorActive in Portfolio
 created: 2026-06-10
 ---
 
@@ -27,9 +28,9 @@ Borrar la función local en `Portfolio.tsx:71-73` y agregar `isExecutorActive` a
 desde `@/lib/formatters`.
 
 ## Criterio de aceptación
-- [ ] `Portfolio.tsx` no define `isExecutorActive` localmente e importa la versión central
-- [ ] El cálculo de executors activos en Portfolio es idéntico al actual
-- [ ] tsc y lint pasan
+- [x] `Portfolio.tsx` no define `isExecutorActive` localmente e importa la versión central
+- [x] El cálculo de executors activos en Portfolio es idéntico al actual
+- [x] tsc y lint pasan
 
 ## Notas
 Implementaciones idénticas → comportamiento runtime sin cambios. Cleanup trivial de bajo riesgo.
