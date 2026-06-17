@@ -1142,8 +1142,16 @@ class WebSocketManager:
                 return
             except Exception as e:
                 error_str = str(e)
-                # Detect permanent failures (auth, not found) — don't retry
-                is_permanent = any(code in error_str for code in ("401", "403", "404"))
+                # Detect permanent failures — don't retry. Besides auth/not-found,
+                # an invalid trading pair (wrong symbol for this connector) will
+                # never become valid, so retrying forever just spams logs and
+                # hammers the exchange until Condor restarts (issue #134).
+                lowered = error_str.lower()
+                is_permanent = (
+                    any(code in error_str for code in ("401", "403", "404"))
+                    or "appears to be invalid" in lowered
+                    or "invalid symbol" in lowered
+                )
                 if is_permanent:
                     logger.warning(
                         "Candle stream permanent error for %s: %s — giving up",
@@ -1154,6 +1162,10 @@ class WebSocketManager:
                         channel,
                         {"type": "error", "message": f"Stream failed: {error_str}"},
                     )
+                    # Stop the paired REST poll fallback — nothing valid to poll.
+                    poll_task = self._candle_poll_tasks.pop(channel, None)
+                    if poll_task and not poll_task.done():
+                        poll_task.cancel()
                     return
 
                 logger.warning(
