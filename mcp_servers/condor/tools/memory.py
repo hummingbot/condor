@@ -14,7 +14,8 @@ def _source() -> str:
 
 
 def _store() -> MemoryStore:
-    return MemoryStore(settings.user_id)
+    # agent_slug selects this assistant's store (FEAT-003); empty -> chat condor.
+    return MemoryStore(settings.user_id, settings.agent_slug or None)
 
 
 async def manage_memory(

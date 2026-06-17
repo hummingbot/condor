@@ -305,10 +305,13 @@ class TickEngine:
         try:
             from condor.memory import MemoryStore, SkillStore
 
-            user_memory = MemoryStore(self.user_id).list_index()
+            # Per-assistant store (FEAT-003): this agent's own memory/skills only,
+            # keyed by its strategy slug — not shared with the chat or other agents.
+            slug = self.strategy.slug
+            user_memory = MemoryStore(self.user_id, slug).list_index()
             # Skills read fresh too: the agent can create/refine its own skills,
             # so a skill written this session must show up on the next tick.
-            skills_index = SkillStore(self.user_id).list_index()
+            skills_index = SkillStore(self.user_id, slug).list_index()
         except Exception:
             pass
 
