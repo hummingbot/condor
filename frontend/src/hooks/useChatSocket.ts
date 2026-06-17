@@ -36,14 +36,20 @@ function nextMsgId(): string {
 
 // ── localStorage persistence for chat messages ──
 const STORAGE_KEY = "condor_chat_messages";
+// Cap the persisted history so localStorage can't grow unbounded across
+// long-running sessions (streaming chunks re-serialize on every update).
+// Only the persisted copy is trimmed; the in-memory `slots` stay intact.
+const MAX_PERSISTED_SLOTS = 10; // keep the most recently active slots
+const MAX_PERSISTED_MESSAGES_PER_SLOT = 100; // keep the last N messages per slot
 
 function saveSlotMessages(slots: ChatSlot[]) {
   try {
     const data: Record<string, ChatMessage[]> = {};
-    for (const s of slots) {
-      if (s.messages.length > 0) {
-        data[s.info.slot_id] = s.messages;
-      }
+    // Keep only the last MAX_PERSISTED_SLOTS slots that have messages.
+    const withMessages = slots.filter((s) => s.messages.length > 0);
+    for (const s of withMessages.slice(-MAX_PERSISTED_SLOTS)) {
+      // Keep only the most recent messages per slot.
+      data[s.info.slot_id] = s.messages.slice(-MAX_PERSISTED_MESSAGES_PER_SLOT);
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch { /* quota exceeded or private mode */ }

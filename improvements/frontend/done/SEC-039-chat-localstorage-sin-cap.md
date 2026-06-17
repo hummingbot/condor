@@ -5,11 +5,12 @@ category: security
 impact: low
 effort: M
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/hooks/useChatSocket.ts:40-50
   - frontend/src/hooks/useChatSocket.ts:465-469
-commits: []
+commits:
+  - 6ff550d
 created: 2026-06-10
 ---
 
@@ -31,10 +32,26 @@ acota el crecimiento y mantiene el costo de serialización predecible. Solo reco
 estado en memoria queda intacto.
 
 ## Criterio de aceptación
-- [ ] El historial de chat persistido está capeado a un máximo fijo de mensajes-por-slot y de slots
+- [x] El historial de chat persistido está capeado a un máximo fijo de mensajes-por-slot y de slots
+- [x] La serialización deja de escribir arrays no acotados en cada update
 - [ ] La cuota no se agota silenciosamente por sesiones de larga duración
-- [ ] La serialización deja de escribir arrays no acotados en cada update
 
 ## Notas
+Implementado en `saveSlotMessages` (`useChatSocket.ts`). Antes de `JSON.stringify` se aplican dos topes
+fijos, documentados como constantes:
+- `MAX_PERSISTED_SLOTS = 10` — solo se persisten los slots con mensajes más recientes (`slice(-N)` sobre
+  el array de slots, que ya está ordenado por actividad).
+- `MAX_PERSISTED_MESSAGES_PER_SLOT = 100` — solo se guardan los últimos 100 mensajes de cada slot.
+
+El estado en memoria (`slots`) queda intacto; solo se recorta la copia persistida. Al cargar
+(`loadSlotMessages`) no hace falta recorte adicional: lo restaurado ya viene capeado porque se guardó
+capeado, y queda inmediatamente re-capeado en el siguiente save.
+
+Desviaciones / fuera de alcance (no implementado a propósito, mínimo y correcto):
+- No se agregó TTL/expiración ni key versionada con timestamp (opcional en la propuesta). Los topes de
+  tamaño ya acotan el crecimiento; el tercer criterio (cuota silenciosa) queda mitigado pero el `catch`
+  silencioso sigue ahí — un manejo explícito de `QuotaExceededError` sería otro item.
+- No se recortan payloads individuales de tool-call (la propuesta lo menciona como "considerar").
+
 Distinto de los otros items de `useChatSocket.ts` ([[CORR-009]] setState impuro, [[SEC-017]] JWT en
 URL del WS). La re-serialización la disparan los chunks de streaming, no las teclas.
