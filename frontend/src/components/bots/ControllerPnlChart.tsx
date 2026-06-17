@@ -14,45 +14,8 @@ import {
 } from "recharts";
 
 import { api, type ControllerInfo } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
-
-function toMs(ts: string | number): number {
-  if (typeof ts === "number") return ts > 1e12 ? ts : ts * 1000;
-  const parsed = Date.parse(ts);
-  return isNaN(parsed) ? 0 : parsed;
-}
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
-}
-
-function formatDateTime(ms: number): string {
-  const d = new Date(ms);
-  return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
-}
-
-/** Compute net position value in quote from positions_summary */
-function positionQuoteValue(positions: Record<string, unknown>[]): number {
-  let value = 0;
-  for (const pos of positions) {
-    const amt = Number(pos.amount || pos.net_amount_base || 0);
-    const price = Number(pos.breakeven_price || pos.entry_price || pos.current_price || 0);
-    const side = String(pos.side || pos.position_side || "");
-    const isSell = side.toLowerCase().includes("sell") || side.toLowerCase().includes("short");
-    const notional = amt * price;
-    value += isSell ? -notional : notional;
-  }
-  return value;
-}
-
-interface DataPoint {
-  time: number;
-  realized: number;
-  unrealized: number;
-  total: number;
-  volume: number;
-  position: number;
-}
+import { formatCurrencyVolume, formatCurrencyPnl, formatDateTime, formatTime, pnlColor, toMs } from "@/lib/formatters";
+import { positionQuoteValue, type PnlChartPoint } from "@/lib/pnl-chart";
 
 // ── Tooltips ──
 
@@ -158,7 +121,7 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
     const sorted = [...snapshots].sort((a, b) => toMs(a.timestamp) - toMs(b.timestamp));
     let hasPos = false;
 
-    const pts: DataPoint[] = sorted.map((s) => {
+    const pts: PnlChartPoint[] = sorted.map((s) => {
       let posValue = 0;
       if (s.positions_summary) {
         posValue = positionQuoteValue(s.positions_summary as Record<string, unknown>[]);

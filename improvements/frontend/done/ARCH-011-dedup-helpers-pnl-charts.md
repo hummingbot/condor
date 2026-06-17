@@ -5,11 +5,11 @@ category: architecture
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/bots/ControllerPnlChart.tsx:25-55
   - frontend/src/components/bots/AggregatedPnlChart.tsx:26-60
-commits: []
+commits: [45622d2]
 created: 2026-06-10
 ---
 
@@ -31,11 +31,18 @@ ya maneja overlays de executors) y `formatTime`/`formatDateTime`/`toMs` a `lib/f
 `PnlChartPoint` exportado. Importar desde ambos componentes.
 
 ## Criterio de aceptación
-- [ ] `positionQuoteValue` existe una sola vez en `lib/` y ambos charts lo importan
-- [ ] `formatTime`/`formatDateTime` viven en `lib/formatters.ts` y no están duplicados en los charts
-- [ ] Existe un único tipo de punto de PNL reutilizado por ambos componentes
-- [ ] Los gráficos de PNL por controller y agregado renderizan igual que antes
+- [x] `positionQuoteValue` existe una sola vez en `lib/` y ambos charts lo importan
+- [x] `formatTime`/`formatDateTime` viven en `lib/formatters.ts` y no están duplicados en los charts
+- [x] Existe un único tipo de punto de PNL reutilizado por ambos componentes
+- [x] Los gráficos de PNL por controller y agregado renderizan igual que antes
 
 ## Notas
 Refactor de extracción pura, bajo riesgo. `formatTime`/`formatDateTime` solapan con la duplicación
 de [[ARCH-011]]... ver también [[READ-019]] (`tsToSeconds`) que toca la misma familia de helpers de tiempo.
+
+Resuelto: `formatTime`/`formatDateTime`/`toMs` extraídos a `lib/formatters.ts` (junto a la familia
+de helpers de tiempo). `positionQuoteValue` y el tipo unificado `PnlChartPoint` (antes `DataPoint`/
+`AggPoint`) se movieron a un módulo nuevo `lib/pnl-chart.ts` en vez de `executor-overlays.ts`, que
+es específico de price-lines/markers de executors y no de `positions_summary`. Copias byte-a-byte:
+sin divergencias que reconciliar. `tsc -b` limpio; eslint sin errores nuevos (baseline preexistente
+de Date.now/setState-in-render sin tocar).

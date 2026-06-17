@@ -59,6 +59,24 @@ export function tsToSeconds(ts: number): number {
   return ts > 1e12 ? Math.floor(ts / 1000) : ts;
 }
 
+/** Normalize a timestamp (seconds or ms, number or ISO string) to epoch ms. */
+export function toMs(ts: string | number): number {
+  if (typeof ts === "number") return ts > 1e12 ? ts : ts * 1000;
+  const parsed = Date.parse(ts);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+/** Format an epoch-ms timestamp as a 24h `HH:MM` time label. */
+export function formatTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+}
+
+/** Format an epoch-ms timestamp as a `Mon D HH:MM` (24h) date-time label. */
+export function formatDateTime(ms: number): string {
+  const d = new Date(ms);
+  return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
+}
+
 export function formatAge(timestamp: number): string {
   if (!timestamp) return "\u2014";
   try {
