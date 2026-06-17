@@ -13,6 +13,26 @@ function nonCandleChannels(channels: string[]): string[] {
   return channels.filter((ch) => !ch.startsWith("candles:"));
 }
 
+/**
+ * Merge incoming performance snapshots into existing ones, deduplicating by
+ * `controller_id:timestamp`.
+ */
+function mergeSnapshots(
+  existing: ControllerPerformanceSnapshot[],
+  incoming: ControllerPerformanceSnapshot[],
+): ControllerPerformanceSnapshot[] {
+  const merged = [...existing];
+  const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+  for (const snap of incoming) {
+    const key = `${snap.controller_id}:${snap.timestamp}`;
+    if (!seen.has(key)) {
+      merged.push(snap);
+      seen.add(key);
+    }
+  }
+  return merged;
+}
+
 export function useCondorWebSocket(
   channels: string[],
   server: string | null,
@@ -142,16 +162,7 @@ export function useCondorWebSocket(
             (old: ControllerPerformanceHistoryResponse | undefined) => {
               if (!old) return old;
               // Append new snapshots and deduplicate by controller_id+timestamp
-              const existing = old.snapshots ?? [];
-              const merged = [...existing];
-              const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
-              for (const snap of incoming.snapshots!) {
-                const key = `${snap.controller_id}:${snap.timestamp}`;
-                if (!seen.has(key)) {
-                  merged.push(snap);
-                  seen.add(key);
-                }
-              }
+              const merged = mergeSnapshots(old.snapshots ?? [], incoming.snapshots!);
               return { ...old, snapshots: merged };
             },
           );
@@ -170,16 +181,7 @@ export function useCondorWebSocket(
               ["controller-perf-history", server, cid],
               (old: ControllerPerformanceHistoryResponse | undefined) => {
                 if (!old) return old;
-                const existing = old.snapshots ?? [];
-                const merged = [...existing];
-                const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
-                for (const snap of snaps) {
-                  const key = `${snap.controller_id}:${snap.timestamp}`;
-                  if (!seen.has(key)) {
-                    merged.push(snap);
-                    seen.add(key);
-                  }
-                }
+                const merged = mergeSnapshots(old.snapshots ?? [], snaps);
                 return { ...old, snapshots: merged };
               },
             );

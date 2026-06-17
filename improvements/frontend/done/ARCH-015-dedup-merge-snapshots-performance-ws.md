@@ -5,11 +5,11 @@ category: architecture
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/hooks/useWebSocket.ts:144-157
   - frontend/src/hooks/useWebSocket.ts:173-184
-commits: []
+commits: [493ed82]
 created: 2026-06-10
 ---
 
@@ -27,10 +27,14 @@ Extraer una helper pura
 que encapsule el dedup por `controller_id:timestamp`, y usarla en ambos `setQueryData` (~144 y ~173).
 
 ## Criterio de aceptación
-- [ ] Existe una sola función de merge/dedup de snapshots reutilizada por ambos caches (all y per-controller)
-- [ ] El comportamiento de deduplicación por `controller_id:timestamp` es idéntico al actual
-- [ ] tsc y lint pasan
+- [x] Existe una sola función de merge/dedup de snapshots reutilizada por ambos caches (all y per-controller)
+- [x] El comportamiento de deduplicación por `controller_id:timestamp` es idéntico al actual
+- [x] tsc y lint pasan
 
 ## Notas
 Ambos call sites ya guardan `if (!old) return old`, así que la helper solo corre cuando `old` existe.
 Sin bug funcional hoy; valor moderado de mantenibilidad.
+
+Cierre: helper `mergeSnapshots(existing, incoming)` a module-scope en `useWebSocket.ts`, llamada
+desde ambos `setQueryData`. Comportamiento idéntico (mismo orden de inserción y dedup). `commits:`
+referencia el commit del código previo al amend final que inserta este hash (one-amend-stale).
