@@ -49,13 +49,29 @@ def load_assistant(name: str) -> str:
     return body
 
 
+def _assistant_path(name: str) -> Path | None:
+    """Resolve an assistant's definition file.
+
+    Supports both the flat form (``assistants/{name}.md``) and the folder form
+    (``assistants/{name}/AGENT.md``, FEAT-003), where the assistant's store is
+    co-located under ``assistants/{name}/store/``. Flat form wins if both exist.
+    """
+    flat = _ASSISTANTS_DIR / f"{name}.md"
+    if flat.exists():
+        return flat
+    folder = _ASSISTANTS_DIR / name / "AGENT.md"
+    if folder.exists():
+        return folder
+    return None
+
+
 def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
     """Load metadata + body for an assistant. Cached after first read."""
     if name in _assistant_cache:
         return _assistant_cache[name]
-    path = _ASSISTANTS_DIR / f"{name}.md"
-    if not path.exists():
-        log.warning("Assistant prompt not found: %s", path)
+    path = _assistant_path(name)
+    if path is None:
+        log.warning("Assistant prompt not found: %s", _ASSISTANTS_DIR / name)
         return {"label": name, "description": ""}, ""
     result = _parse_assistant(path)
     _assistant_cache[name] = result
@@ -63,15 +79,20 @@ def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
 
 
 def discover_assistants() -> dict[str, dict[str, str]]:
-    """Auto-discover all assistants from assistants/*.md.
+    """Auto-discover all assistants from ``assistants/``.
 
-    Returns dict like: {"condor": {"label": "Condor", "description": "..."}, ...}
+    Picks up both ``assistants/{name}.md`` (flat) and ``assistants/{name}/AGENT.md``
+    (folder form, FEAT-003). Returns dict like:
+    {"condor": {"label": "Condor", "description": "..."}, ...}
     """
     result: dict[str, dict[str, str]] = {}
     if not _ASSISTANTS_DIR.exists():
         return result
-    for path in sorted(_ASSISTANTS_DIR.glob("*.md")):
-        name = path.stem
+    # Flat form: assistants/{name}.md
+    names = [path.stem for path in sorted(_ASSISTANTS_DIR.glob("*.md"))]
+    # Folder form (FEAT-003): assistants/{name}/AGENT.md
+    names += [path.parent.name for path in sorted(_ASSISTANTS_DIR.glob("*/AGENT.md"))]
+    for name in dict.fromkeys(names):  # dedupe, preserve order
         meta, _ = _load_assistant_full(name)
         result[name] = {
             "label": meta["label"],
@@ -542,9 +563,10 @@ def build_initial_context(
 
         sections.append("\n".join(server_info))
 
-    # User memory index — what the agent remembers about this user (shared with
-    # the user's trading agents). Inject only the index; bodies are read on
-    # demand via manage_memory(action="read"). Nothing injected for new users.
+    # User memory index — what the chat assistant remembers about this user. This
+    # store is the chat's own (FEAT-003), not shared with the user's trading
+    # agents. Inject only the index; bodies are read on demand via
+    # manage_memory(action="read"). Nothing injected for new users.
     try:
         from condor.memory import MemoryStore
 
@@ -560,9 +582,10 @@ def build_initial_context(
     except Exception:
         pass  # Memory is advisory — never block session start on it.
 
-    # Skills index — playbooks the agent can follow (know-how + steps), shared
-    # with the user's trading agents. Inject only the index; bodies are read on
-    # demand via manage_skill(action="read"). Nothing injected when there are none.
+    # Skills index — playbooks the chat assistant can follow (know-how + steps),
+    # from the chat's own store (FEAT-003), not shared with the user's trading
+    # agents. Inject only the index; bodies are read on demand via
+    # manage_skill(action="read"). Nothing injected when there are none.
     try:
         from condor.memory import SkillStore
 

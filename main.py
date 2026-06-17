@@ -513,7 +513,7 @@ async def post_init(application: Application) -> None:
 async def watch_and_reload(application: Application) -> None:
     """Watch for file changes and reload handlers automatically."""
     try:
-        from watchfiles import awatch
+        from watchfiles import DefaultFilter, awatch
     except ImportError:
         logger.warning(
             "watchfiles not installed. Auto-reload disabled. Install with: uv add watchfiles"
@@ -528,7 +528,20 @@ async def watch_and_reload(application: Application) -> None:
         watch_paths.append(assistants_path)
     logger.info(f"👀 Watching for changes in: {', '.join(str(p) for p in watch_paths)}")
 
-    async for changes in awatch(*watch_paths):
+    class _ReloadFilter(DefaultFilter):
+        """Ignore per-assistant runtime stores (FEAT-003).
+
+        ``assistants/{name}/store/`` is co-located with the watched assistant
+        definitions, so without this every chat memory/skill write would thrash
+        a full handler reload. AGENT.md / *.md changes still trigger reloads.
+        """
+
+        def __call__(self, change, path: str) -> bool:
+            if f"{os.sep}store{os.sep}" in path:
+                return False
+            return super().__call__(change, path)
+
+    async for changes in awatch(*watch_paths, watch_filter=_ReloadFilter()):
         logger.info(f"📝 Detected changes: {changes}")
         try:
             # Reload assistants if any .md file in assistants/ changed
