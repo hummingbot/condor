@@ -35,31 +35,22 @@ _pending_login_tokens: dict[str, dict] = {}
 # In-memory rate-limit store: user_id -> list[timestamp] of recent failed redeem attempts
 _login_redeem_failures: dict[int, list[float]] = {}
 
-# Flag so we only warn once per process about the missing dedicated secret.
-_jwt_secret_warned = False
-
 
 def _jwt_secret() -> str:
     """Return the secret used to sign/verify web session JWTs.
 
-    Prefers the dedicated ``WEB_JWT_SECRET`` environment variable so the web
-    session secret can be rotated independently of the Telegram bot token. If
-    it is not set, falls back to deriving the secret from ``TELEGRAM_TOKEN``
-    (the legacy behaviour) to avoid invalidating existing sessions, and logs a
-    warning recommending that ``WEB_JWT_SECRET`` be configured.
+    Prefers the dedicated ``WEB_JWT_SECRET`` environment variable so the secret
+    can be shared across instances or rotated on demand. When it is not set, a
+    strong random secret is generated once and persisted to ``config.yml`` (via
+    :class:`ConfigManager`), so the dashboard is secure by default with no
+    operator configuration and web sessions survive restarts. The secret is
+    never derived from ``TELEGRAM_TOKEN`` — that coupled the two trust domains
+    and broke when the token was empty.
     """
-    global _jwt_secret_warned
     web_secret = os.getenv("WEB_JWT_SECRET")
     if web_secret:
         return web_secret
-    if not _jwt_secret_warned:
-        logger.warning(
-            "WEB_JWT_SECRET is not set; deriving the JWT signing secret from "
-            "TELEGRAM_TOKEN (legacy behaviour). Set WEB_JWT_SECRET to a dedicated "
-            "random value so web sessions can be rotated independently of the bot token."
-        )
-        _jwt_secret_warned = True
-    return hashlib.sha256(TELEGRAM_TOKEN.encode()).hexdigest()
+    return get_config_manager().get_or_create_web_jwt_secret()
 
 
 # ── Telegram Login Widget verification ──

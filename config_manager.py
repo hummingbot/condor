@@ -5,6 +5,7 @@ Manages servers, users, permissions, and settings in a single config.yml file.
 
 import asyncio
 import logging
+import secrets
 import time
 from enum import Enum
 from pathlib import Path
@@ -158,6 +159,7 @@ class ConfigManager:
                 "users": self._data.get("users", {}),
                 "server_access": self._data.get("server_access", {}),
                 "chat_defaults": self._data.get("chat_defaults", {}),
+                "web_jwt_secret": self._data.get("web_jwt_secret"),
                 "version": self._data.get("version", self.VERSION),
             }
             with open(self.config_path, "w") as f:
@@ -325,6 +327,26 @@ class ConfigManager:
         self._save_config()
         logger.info(f"Set default server to '{name}'")
         return True
+
+    def get_or_create_web_jwt_secret(self) -> str:
+        """Return the web dashboard JWT signing secret, generating one on demand.
+
+        On first use a strong random secret is generated and persisted to
+        ``config.yml`` so web sessions survive restarts. The web layer prefers an
+        explicit ``WEB_JWT_SECRET`` env var over this value for multi-instance or
+        rotation scenarios; this is the zero-config default for everyone else.
+        """
+        secret = self._data.get("web_jwt_secret")
+        if secret:
+            return secret
+        secret = secrets.token_urlsafe(32)
+        self._data["web_jwt_secret"] = secret
+        self._save_config()
+        logger.info(
+            "Generated and persisted a new web dashboard JWT secret in %s",
+            self.config_path,
+        )
+        return secret
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
