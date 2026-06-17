@@ -1,4 +1,4 @@
-"""User skill store — hybrid *playbooks* keyed by ``user_id``.
+"""User skill store — hybrid *playbooks* keyed by ``(assistant, user_id)``.
 
 A skill is a markdown *playbook*: know-how the agent can follow (when to apply +
 steps), optionally **referencing** an existing Condor routine for the executable
@@ -10,12 +10,12 @@ never invokes a routine that no longer exists.
 
 Like the memory store this is pure filesystem logic with **no** MCP/Telegram
 dependencies, so it runs from the main process (prompt injection) and from the
-MCP subprocess (the ``manage_skill`` tool) alike. It shares the per-user
+MCP subprocess (the ``manage_skill`` tool) alike. It shares the per-(assistant, user)
 ``audit.log`` with the memory store (target ``skill:<slug>``).
 
-Layout on disk (extends the memory layout, same ``user_{id}`` root)::
+Layout on disk (extends the memory layout, same per-assistant root)::
 
-    data/memory/user_{user_id}/
+    {assistant_home}/store/user_{user_id}/
         skills/
             SKILLS.md            # injectable index: one line per skill
             <slug>/
@@ -27,14 +27,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .store import (
-    _DATA_ROOT,
-    _parse_frontmatter,
-    _render,
-    _slugify,
-    _utcnow,
-    append_audit,
-)
+from .paths import store_root
+from .store import _parse_frontmatter, _render, _slugify, _utcnow, append_audit
 
 
 def _routine_exists(name: str) -> bool:
@@ -53,11 +47,17 @@ def _routine_exists(name: str) -> bool:
 
 
 class SkillStore:
-    """Per-user skill store. One instance per ``user_id``."""
+    """Per-assistant, per-user skill store.
 
-    def __init__(self, user_id: int):
+    Keyed by ``(agent_slug, user_id)`` (FEAT-003), mirroring
+    :class:`condor.memory.store.MemoryStore`: the root is resolved by
+    :func:`condor.memory.paths.store_root` and the per-(assistant, user)
+    ``audit.log`` is shared with the memory store.
+    """
+
+    def __init__(self, user_id: int, agent_slug: str | None = None):
         self.user_id = user_id
-        self.root = _DATA_ROOT / f"user_{user_id}"
+        self.root = store_root(user_id, agent_slug)
         self.skills_dir = self.root / "skills"
         self.index_file = self.skills_dir / "SKILLS.md"
         self.audit_file = self.root / "audit.log"  # shared with MemoryStore

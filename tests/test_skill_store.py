@@ -2,20 +2,18 @@
 
 import pytest
 
+from condor.memory import paths as paths_module
 from condor.memory import skills as skills_module
-from condor.memory import store as store_module
 from condor.memory.skills import SkillStore
 from condor.memory.store import MemoryStore
 
 
 @pytest.fixture
 def memory_root(tmp_path, monkeypatch):
-    """Point both stores' data root at a tmp dir for isolation."""
-    root = tmp_path / "memory"
-    monkeypatch.setattr(store_module, "_DATA_ROOT", root)
-    # skills.py imported _DATA_ROOT by value, so patch its binding too.
-    monkeypatch.setattr(skills_module, "_DATA_ROOT", root)
-    return root
+    """Point the project root at a tmp dir so both stores resolve under it."""
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    # The chat store (agent_slug=None) is what these per-user tests exercise.
+    return tmp_path / "assistants" / "condor" / "store"
 
 
 @pytest.fixture

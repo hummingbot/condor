@@ -4,16 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from condor.memory import store as store_module
+from condor.memory import paths as paths_module
+from condor.memory.paths import store_root
 from condor.memory.store import MemoryStore
 
 
 @pytest.fixture
 def memory_root(tmp_path, monkeypatch):
-    """Point the store's data root at a tmp dir for isolation."""
-    root = tmp_path / "memory"
-    monkeypatch.setattr(store_module, "_DATA_ROOT", root)
-    return root
+    """Point the project root at a tmp dir so stores resolve under it."""
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    # The chat store (agent_slug=None) is what these per-user tests exercise.
+    return tmp_path / "assistants" / "condor" / "store"
 
 
 def test_write_list_read_roundtrip(memory_root):
@@ -155,3 +156,51 @@ def test_atomic_write_leaves_no_tmp(memory_root):
     s.write("One", "a", "first", type="fact")
     tmp_files = list((memory_root / "user_42" / "memories").glob("*.tmp"))
     assert tmp_files == []
+
+
+# -- per-assistant resolver + isolation (FEAT-003) ----------------------------
+
+
+def test_resolver_distinct_roots_per_assistant(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    chat = store_root(42, None)
+    grid = store_root(42, "grid_scalper")
+    ema = store_root(42, "ema_trend_follower")
+    assert chat != grid != ema
+    assert chat == tmp_path / "assistants" / "condor" / "store" / "user_42"
+    assert grid == tmp_path / "trading_agents" / "grid_scalper" / "store" / "user_42"
+    # Same (slug, user) is stable across calls.
+    assert store_root(42, "grid_scalper") == grid
+
+
+def test_resolver_user_isolation_within_assistant(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    assert store_root(1, "grid_scalper") != store_root(2, "grid_scalper")
+
+
+def test_memory_isolated_between_assistants(tmp_path, monkeypatch):
+    """A memory written by one assistant is invisible to another."""
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    grid = MemoryStore(user_id=42, agent_slug="grid_scalper")
+    chat = MemoryStore(user_id=42, agent_slug=None)
+
+    grid.write("Grid fact", "only grid knows this", "grid-only", type="fact")
+
+    assert "grid_fact" in grid.list_index()
+    assert chat.list_index() == ""  # chat sees nothing
+    assert chat.read("Grid fact") is None
+    # Round-trip stays inside the grid store.
+    assert "only grid knows this" in (grid.read("Grid fact") or "")
+
+
+def test_audit_logs_are_per_assistant(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    grid = MemoryStore(user_id=42, agent_slug="grid_scalper")
+    ema = MemoryStore(user_id=42, agent_slug="ema_trend_follower")
+
+    grid.write("G", "b", "d", source="agent:grid_scalper")
+    ema.write("E", "b", "d", source="agent:ema_trend_follower")
+
+    assert grid.audit_file != ema.audit_file
+    assert [e["target"] for e in grid.audit()] == ["memory:g"]
+    assert [e["target"] for e in ema.audit()] == ["memory:e"]

@@ -1,4 +1,4 @@
-"""User memory store — one fact per file, keyed by ``user_id``.
+"""User memory store — one fact per file, keyed by ``(assistant, user_id)``.
 
 Replicates the Claude Code / Hummingbot memory pattern that already lives in
 this repo: a file per fact (YAML frontmatter + markdown body) plus a small
@@ -9,9 +9,10 @@ This module is pure filesystem logic with **no** MCP/Telegram dependencies so
 it can run from the main process (prompt injection) and from the MCP
 subprocess (the ``manage_memory`` tool) alike.
 
-Layout on disk (anchored to the project root, like ``trading_agent/journal``)::
+Each store lives under its assistant's home, keyed by ``user_id`` (FEAT-003);
+:func:`condor.memory.paths.store_root` resolves the root. Layout on disk::
 
-    data/memory/user_{user_id}/
+    {assistant_home}/store/user_{user_id}/
         MEMORY.md            # injectable index: one line per memory
         memories/
             <slug>.md        # one fact per file (frontmatter + body)
@@ -28,8 +29,7 @@ from pathlib import Path
 
 import yaml
 
-# Anchor to the project root (…/condor) so paths are stable regardless of cwd.
-_DATA_ROOT = Path(__file__).parent.parent.parent / "data" / "memory"
+from .paths import store_root
 
 _VALID_TYPES = ("preference", "fact", "feedback", "reference")
 
@@ -80,9 +80,9 @@ def append_audit(
 ) -> None:
     """Append one JSONL entry to a shared ``audit.log``.
 
-    Free function (not a method) so every per-user store under
-    ``data/memory/user_{id}/`` — memories and skills alike — writes the same
-    format to the *same* file. ``target`` is namespaced by caller
+    Free function (not a method) so every per-assistant store — memories and
+    skills alike — writes the same format to the *same* file. ``target`` is
+    namespaced by caller
     (``memory:<slug>`` / ``skill:<slug>``) so ``/memory`` can tell them apart.
     """
     audit_file.parent.mkdir(parents=True, exist_ok=True)
@@ -98,11 +98,17 @@ def append_audit(
 
 
 class MemoryStore:
-    """Per-user memory store. One instance per ``user_id``."""
+    """Per-assistant, per-user memory store.
 
-    def __init__(self, user_id: int):
+    Keyed by ``(agent_slug, user_id)`` (FEAT-003): ``agent_slug`` set selects a
+    trading agent's store, ``None`` the chat ``condor`` store. The root is
+    resolved by :func:`condor.memory.paths.store_root`; the rest of this class
+    (index, audit, atomic write, self-heal) is unchanged.
+    """
+
+    def __init__(self, user_id: int, agent_slug: str | None = None):
         self.user_id = user_id
-        self.root = _DATA_ROOT / f"user_{user_id}"
+        self.root = store_root(user_id, agent_slug)
         self.memories_dir = self.root / "memories"
         self.index_file = self.root / "MEMORY.md"
         self.audit_file = self.root / "audit.log"
