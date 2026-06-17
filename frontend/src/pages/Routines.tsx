@@ -16,6 +16,7 @@ import { useSearchParams } from "react-router-dom";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
+import { formatRelativeTime } from "@/lib/formatters";
 import { formatInterval } from "@/lib/routineUtils";
 
 type SourceTypeFilter = "all" | "routine" | "agent" | string;
@@ -321,7 +322,7 @@ export function Routines() {
                     {info ? (
                       <>
                         <span className="text-[9px] text-[var(--color-text-muted)]/60">
-                          {formatAgo(info.created_at)}
+                          {formatRelativeTime(info.created_at)}
                         </span>
                         {info.tags.slice(0, 2).map((tag) => (
                           <span
@@ -356,12 +357,4 @@ export function Routines() {
       )}
     </>
   );
-}
-
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
 }

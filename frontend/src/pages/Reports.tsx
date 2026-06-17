@@ -12,14 +12,7 @@ import {
 import { useState } from "react";
 
 import { type ReportSummary, api } from "@/lib/api";
-
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+import { formatRelativeTime } from "@/lib/formatters";
 
 export function Reports() {
   const qc = useQueryClient();
@@ -112,7 +105,7 @@ export function Reports() {
                       {r.title}
                     </span>
                     <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">
-                      {formatAgo(r.created_at)}
+                      {formatRelativeTime(r.created_at)}
                     </span>
                   </div>
                   <div className="mt-1.5 flex flex-wrap items-center gap-1.5">

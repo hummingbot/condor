@@ -66,6 +66,32 @@ export function formatAge(timestamp: number): string {
   }
 }
 
+/**
+ * Format a timestamp as a relative "Ns/m/h/d ago" label.
+ * Accepts epoch-seconds (number), or a Date/ISO string. Numeric ms timestamps
+ * (> 1e12) are normalized to seconds. When the value is null/undefined/empty,
+ * returns `fallback` (default "" — pass "never" to match instance-style labels).
+ */
+export function formatRelativeTime(
+  value: number | string | Date | null | undefined,
+  fallback = "",
+): string {
+  if (value == null || value === "") return fallback;
+  let seconds: number;
+  if (typeof value === "number") {
+    seconds = tsToSeconds(value);
+  } else {
+    const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+    if (Number.isNaN(ms)) return fallback;
+    seconds = ms / 1000;
+  }
+  const diff = Date.now() / 1000 - seconds;
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
 export function formatPrice(val: number): string {
   if (!val) return "\u2014";
   if (val >= 1000) return val.toLocaleString("en-US", { maximumFractionDigits: 2 });
