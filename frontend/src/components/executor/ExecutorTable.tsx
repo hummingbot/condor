@@ -7,7 +7,7 @@ import {
   TrendingUp,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
@@ -119,6 +119,115 @@ export function SortHeader({
   );
 }
 
+// ── Executor Row (memoized) ──
+
+type RowFormatter = (val: number, quote: string) => string;
+
+const ExecutorRow = memo(function ExecutorRow({
+  ex,
+  isSelected,
+  isChecked,
+  isStopping,
+  onRowClick,
+  onToggleSelect,
+  onStop,
+  fmtPnl,
+  fmtVol,
+  fmtDet,
+}: {
+  ex: ExecutorInfo;
+  isSelected: boolean;
+  isChecked: boolean;
+  isStopping: boolean;
+  onRowClick: (ex: ExecutorInfo) => void;
+  onToggleSelect: (id: string) => void;
+  onStop: (id: string) => void;
+  fmtPnl: RowFormatter;
+  fmtVol: RowFormatter;
+  fmtDet: RowFormatter;
+}) {
+  const side = ex.side.toUpperCase();
+  const pnlBorder = ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
+  const quote = ex.trading_pair?.split("-")[1] || "USDT";
+  return (
+    <tr
+      className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
+      style={{ borderLeft: `3px solid ${pnlBorder}` }}
+      onClick={() => onRowClick(ex)}
+    >
+      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          checked={isChecked}
+          onChange={() => onToggleSelect(ex.id)}
+          className="rounded border-[var(--color-border)]"
+        />
+      </td>
+      <td className="px-4 py-2.5 text-xs font-mono text-[var(--color-text-muted)]" title={ex.id}>
+        {ex.id.slice(0, 8)}
+      </td>
+      <td className="px-4 py-2.5">
+        <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
+          {ex.type}
+        </span>
+      </td>
+      <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
+        {ex.connector}
+      </td>
+      <td className="px-4 py-2.5 text-sm font-medium">{ex.trading_pair}</td>
+      <td className="px-4 py-2.5">
+        <span
+          className="text-xs font-semibold uppercase"
+          style={{
+            color: side === "BUY" || side === "1" ? "var(--color-green)" : "var(--color-red)",
+          }}
+        >
+          {side}
+        </span>
+      </td>
+      <td
+        className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
+        style={{ color: pnlColor(ex.pnl) }}
+      >
+        {fmtPnl(ex.pnl, quote)}
+      </td>
+      <td
+        className="px-4 py-2.5 text-sm text-right tabular-nums"
+        style={{ color: ex.net_pnl_pct ? pnlColor(ex.net_pnl_pct) : undefined }}
+      >
+        {formatPct(ex.net_pnl_pct)}
+      </td>
+      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+        {fmtVol(ex.volume, quote)}
+      </td>
+      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+        {ex.cum_fees_quote ? fmtDet(ex.cum_fees_quote, quote) : "—"}
+      </td>
+      <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
+        {ex.close_type || "—"}
+      </td>
+      <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
+        <div className="flex items-center gap-1 justify-end">
+          <Clock className="h-3 w-3" />
+          {formatAge(ex.timestamp)}
+        </div>
+      </td>
+      <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+        {isExecutorActive(ex.status) && (
+          <button
+            onClick={() => onStop(ex.id)}
+            disabled={isStopping}
+            className="p-1 rounded hover:bg-[var(--color-red)]/10 text-[var(--color-text-muted)] hover:text-[var(--color-red)] transition-colors disabled:opacity-50"
+            title="Stop executor"
+          >
+            <Square className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+});
+
 // ── Executor Table ──
 
 export function ExecutorTable({
@@ -159,9 +268,18 @@ export function ExecutorTable({
     [executors, sortKey, sortDir],
   );
 
-  const fmtPnl = rateFormatPnl ?? ((val: number) => formatPnl(val));
-  const fmtVol = rateFormatValue ?? ((val: number) => formatVolume(val));
-  const fmtDet = rateFormatDetailed ?? ((val: number) => formatUsd(val));
+  const fmtPnl = useMemo<RowFormatter>(
+    () => rateFormatPnl ?? ((val: number) => formatPnl(val)),
+    [rateFormatPnl],
+  );
+  const fmtVol = useMemo<RowFormatter>(
+    () => rateFormatValue ?? ((val: number) => formatVolume(val)),
+    [rateFormatValue],
+  );
+  const fmtDet = useMemo<RowFormatter>(
+    () => rateFormatDetailed ?? ((val: number) => formatUsd(val)),
+    [rateFormatDetailed],
+  );
 
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
@@ -192,91 +310,21 @@ export function ExecutorTable({
             </tr>
           </thead>
           <tbody>
-            {sorted.map((ex) => {
-              const isSelected = selectedExecutorId === ex.id;
-              const isChecked = selectedIds.has(ex.id);
-              const side = ex.side.toUpperCase();
-              const pnlBorder = ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
-              const quote = ex.trading_pair?.split("-")[1] || "USDT";
-              return (
-                <tr
-                  key={ex.id}
-                  className={`border-b border-[var(--color-border)]/30 hover:bg-[var(--color-surface-hover)]/50 cursor-pointer transition-colors ${isSelected ? "bg-[var(--color-surface-hover)]/70" : ""}`}
-                  style={{ borderLeft: `3px solid ${pnlBorder}` }}
-                  onClick={() => onRowClick(ex)}
-                >
-                  <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={() => onToggleSelect(ex.id)}
-                      className="rounded border-[var(--color-border)]"
-                    />
-                  </td>
-                  <td className="px-4 py-2.5 text-xs font-mono text-[var(--color-text-muted)]" title={ex.id}>
-                    {ex.id.slice(0, 8)}
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <span className="rounded bg-[var(--color-surface)] px-2 py-0.5 text-xs font-medium border border-[var(--color-border)]/50">
-                      {ex.type}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
-                    {ex.connector}
-                  </td>
-                  <td className="px-4 py-2.5 text-sm font-medium">{ex.trading_pair}</td>
-                  <td className="px-4 py-2.5">
-                    <span
-                      className="text-xs font-semibold uppercase"
-                      style={{
-                        color: side === "BUY" || side === "1" ? "var(--color-green)" : "var(--color-red)",
-                      }}
-                    >
-                      {side}
-                    </span>
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-sm text-right tabular-nums font-medium"
-                    style={{ color: pnlColor(ex.pnl) }}
-                  >
-                    {fmtPnl(ex.pnl, quote)}
-                  </td>
-                  <td
-                    className="px-4 py-2.5 text-sm text-right tabular-nums"
-                    style={{ color: ex.net_pnl_pct ? pnlColor(ex.net_pnl_pct) : undefined }}
-                  >
-                    {formatPct(ex.net_pnl_pct)}
-                  </td>
-                  <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-                    {fmtVol(ex.volume, quote)}
-                  </td>
-                  <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-                    {ex.cum_fees_quote ? fmtDet(ex.cum_fees_quote, quote) : "\u2014"}
-                  </td>
-                  <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
-                    {ex.close_type || "\u2014"}
-                  </td>
-                  <td className="px-4 py-2.5 text-sm text-right tabular-nums text-[var(--color-text-muted)]">
-                    <div className="flex items-center gap-1 justify-end">
-                      <Clock className="h-3 w-3" />
-                      {formatAge(ex.timestamp)}
-                    </div>
-                  </td>
-                  <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
-                    {isExecutorActive(ex.status) && (
-                      <button
-                        onClick={() => onStop(ex.id)}
-                        disabled={stoppingIds.has(ex.id)}
-                        className="p-1 rounded hover:bg-[var(--color-red)]/10 text-[var(--color-text-muted)] hover:text-[var(--color-red)] transition-colors disabled:opacity-50"
-                        title="Stop executor"
-                      >
-                        <Square className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
+            {sorted.map((ex) => (
+              <ExecutorRow
+                key={ex.id}
+                ex={ex}
+                isSelected={selectedExecutorId === ex.id}
+                isChecked={selectedIds.has(ex.id)}
+                isStopping={stoppingIds.has(ex.id)}
+                onRowClick={onRowClick}
+                onToggleSelect={onToggleSelect}
+                onStop={onStop}
+                fmtPnl={fmtPnl}
+                fmtVol={fmtVol}
+                fmtDet={fmtDet}
+              />
+            ))}
           </tbody>
         </table>
       </div>
