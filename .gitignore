@@ -173,3 +173,4 @@ data/
 
 # Node
 node_modules/
+/improvements/
