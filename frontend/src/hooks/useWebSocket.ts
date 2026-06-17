@@ -53,8 +53,6 @@ export function useCondorWebSocket(
     // Wire candle store singleton to this WS instance
     candleStore.setWs(ws);
 
-    let lastVersion = ws.version;
-
     ws.onMessage((channel, data) => {
       const prefix = channel.split(":")[0];
 
@@ -196,21 +194,14 @@ export function useCondorWebSocket(
       }
     });
 
-    // Notify React immediately when WS connects
+    // Notify React on each (re)connect. The WS fires onConnect from its onopen
+    // handler after bumping `version`, covering both the initial connect and
+    // every reconnect — no polling needed.
     ws.onConnect(() => setWsVersion((v) => v + 1));
 
     ws.connect();
 
-    // Poll as fallback for reconnects
-    const versionPoll = setInterval(() => {
-      if (ws.version !== lastVersion) {
-        lastVersion = ws.version;
-        setWsVersion(ws.version);
-      }
-    }, 500);
-
     return () => {
-      clearInterval(versionPoll);
       candleStore.setWs(null);
       ws.disconnect();
       wsRef.current = null;
