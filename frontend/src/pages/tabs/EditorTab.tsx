@@ -28,6 +28,7 @@ import {
 } from "@/components/editor/EditorDialogs";
 import { useServer } from "@/hooks/useServer";
 import { api, type ControllerConfigSummary } from "@/lib/api";
+import { configToYaml } from "@/lib/configYaml";
 
 // ── Types ──
 
@@ -887,10 +888,7 @@ function FileContentLoader({
     } else if (tab.file.kind === "config") {
       if (configQuery.data) {
         loadedRef.current = true;
-        const filtered = Object.fromEntries(
-          Object.entries(configQuery.data.config).filter(([k]) => k !== "id"),
-        );
-        const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
+        const dumped = configToYaml(configQuery.data.config);
         onLoaded(dumped, false);
       } else if (configQuery.isError) {
         loadedRef.current = true;

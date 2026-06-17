@@ -19,6 +19,7 @@ import yamlLib from "js-yaml";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { api, type ControllerInfo } from "@/lib/api";
+import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 import { setViewContext } from "@/lib/viewContext";
 
@@ -55,17 +56,6 @@ interface ControllerBrowserProps {
   currencySymbol: string;
 }
 
-// Keys to strip from the YAML display (internal / read-only fields)
-const YAML_HIDDEN_KEYS = new Set(["id", "controller_name", "controller_type"]);
-
-function configToYaml(config: Record<string, unknown>): string {
-  const filtered: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(config)) {
-    if (!YAML_HIDDEN_KEYS.has(k) && !k.startsWith("_")) filtered[k] = v;
-  }
-  return yamlLib.dump(filtered, { lineWidth: -1, noRefs: true, sortKeys: true });
-}
-
 // ── YAML Config Editor ──
 
 function YamlConfigEditor({
@@ -84,7 +74,15 @@ function YamlConfigEditor({
   // Memoize the dump so typing / local-state renders don't re-run yaml.dump, and
   // so WS-tick churn of the `config` object identity that yields the SAME content
   // produces an identical string (compared by value) below.
-  const originalYaml = useMemo(() => configToYaml(config), [config]);
+  const originalYaml = useMemo(
+    () =>
+      configToYaml(config, {
+        hiddenKeys: CONTROLLER_HIDDEN_KEYS,
+        stripUnderscore: true,
+        sortKeys: true,
+      }),
+    [config],
+  );
   const [yamlContent, setYamlContent] = useState(originalYaml);
   const [parseError, setParseError] = useState<string | null>(null);
 

@@ -16,6 +16,7 @@ import yaml from "js-yaml";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
+import { configToYaml } from "@/lib/configYaml";
 
 export function BotDetail() {
   const { id } = useParams<{ id: string }>();
@@ -50,10 +51,7 @@ export function BotDetail() {
     const sig = JSON.stringify(data.config);
     if (sig === prevConfigSig.current) return;
     prevConfigSig.current = sig;
-    const filtered = Object.fromEntries(
-      Object.entries(data.config).filter(([k]) => k !== "id"),
-    );
-    const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
+    const dumped = configToYaml(data.config);
     setYamlValue(dumped);
     setOriginalYaml(dumped);
     setYamlError(null);
