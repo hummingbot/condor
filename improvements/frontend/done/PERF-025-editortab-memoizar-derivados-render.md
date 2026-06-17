@@ -5,12 +5,13 @@ category: performance
 impact: low
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/tabs/EditorTab.tsx:604-606
   - frontend/src/pages/tabs/EditorTab.tsx:562-566
   - frontend/src/pages/tabs/EditorTab.tsx:483
-commits: []
+commits:
+  - 06ab536
 created: 2026-06-10
 ---
 
@@ -33,9 +34,9 @@ Envolver `activeTab`/`splitTab`/`tabsToLoad` en `useMemo` keyed sobre `[openTabs
 cambian `data`, evitando re-renders innecesarios de los diálogos.
 
 ## Criterio de aceptación
-- [ ] `activeTab`, `splitTab` y `tabsToLoad` se derivan vía `useMemo` con dep arrays correctas
-- [ ] `controllerTypes` tiene referencia estable cuando `data` no cambia
-- [ ] Edición, split view y carga lazy de contenido se comportan igual
+- [x] `activeTab`, `splitTab` y `tabsToLoad` se derivan vía `useMemo` con dep arrays correctas
+- [x] `controllerTypes` tiene referencia estable cuando `data` no cambia
+- [x] Edición, split view y carga lazy de contenido se comportan igual
 
 ## Notas
 Impacto bajo. Mismo archivo que [[CORR-026]] y [[CORR-030]] (concerns distintos de EditorTab).

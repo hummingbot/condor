@@ -486,7 +486,7 @@ export function EditorTab() {
     enabled: !!server,
   });
 
-  const controllerTypes = data?.controller_types ?? {};
+  const controllerTypes = useMemo(() => data?.controller_types ?? {}, [data]);
 
   // Build file entries for the active view
   const controllerFiles = useMemo<FileEntry[]>(() => {
@@ -607,9 +607,18 @@ export function EditorTab() {
     }
   }, []);
 
-  const activeTab = openTabs.find((t) => t.file.id === activeTabId);
-  const splitTab = splitMode ? openTabs.find((t) => t.file.id === splitTabId) : null;
-  const tabsToLoad = openTabs.filter((t) => !t.loaded && !t.error);
+  const activeTab = useMemo(
+    () => openTabs.find((t) => t.file.id === activeTabId),
+    [openTabs, activeTabId],
+  );
+  const splitTab = useMemo(
+    () => (splitMode ? openTabs.find((t) => t.file.id === splitTabId) : null),
+    [openTabs, splitMode, splitTabId],
+  );
+  const tabsToLoad = useMemo(
+    () => openTabs.filter((t) => !t.loaded && !t.error),
+    [openTabs],
+  );
 
   if (!server) {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
