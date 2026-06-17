@@ -22,6 +22,7 @@ import { useNavigate } from "react-router-dom";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useRates } from "@/hooks/useRates";
+import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useServer } from "@/hooks/useServer";
 import { api, type ExecutorInfo } from "@/lib/api";
@@ -463,37 +464,17 @@ export function DetailPanel({
 }) {
   const navigate = useNavigate();
   const [panelWidth, setPanelWidth] = useState(480);
-  const isDragging = useRef(false);
-  // Holds the teardown for an in-flight drag so an unmount mid-drag (panel
-  // closed / executor switched) still detaches listeners and restores body.
-  const dragCleanup = useRef<(() => void) | null>(null);
 
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    isDragging.current = true;
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!isDragging.current) return;
-      const newWidth = window.innerWidth - ev.clientX;
-      setPanelWidth(Math.max(300, Math.min(newWidth, window.innerWidth * 0.8)));
-    };
-    const cleanup = () => {
-      isDragging.current = false;
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", cleanup);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      dragCleanup.current = null;
-    };
-    dragCleanup.current = cleanup;
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", cleanup);
-  }, []);
-
-  // Tear down a drag interrupted by unmount.
-  useEffect(() => () => dragCleanup.current?.(), []);
+  const { onMouseDown } = useResizeDrag({
+    axis: "x",
+    value: panelWidth,
+    onChange: setPanelWidth,
+    min: 300,
+    max: () => window.innerWidth * 0.8,
+    compute: (coord) => window.innerWidth - coord,
+    cursor: "col-resize",
+    lockUserSelect: true,
+  });
 
   const sideLabel = executor.side.toUpperCase();
   const sideColor = sideLabel === "BUY" || sideLabel === "1" ? "var(--color-green)" : "var(--color-red)";

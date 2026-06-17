@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -30,6 +30,7 @@ import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { useRates } from "@/hooks/useRates";
+import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import type { ExecutorType } from "@/components/executor/types";
@@ -227,50 +228,25 @@ export function CreateExecutor() {
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
 
-  // Teardown for an in-flight drag, so an unmount mid-drag still detaches the
-  // document listeners and restores the body cursor.
-  const dragCleanup = useRef<(() => void) | null>(null);
+  const { onMouseDown: startHDrag } = useResizeDrag({
+    axis: "x",
+    value: rightPanelWidth,
+    onChange: setRightPanelWidth,
+    min: 260,
+    max: 500,
+    direction: "inverted",
+    cursor: "col-resize",
+  });
 
-  const startHDrag = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = rightPanelWidth;
-    document.body.style.cursor = "col-resize";
-    const onMove = (ev: MouseEvent) => {
-      setRightPanelWidth(Math.max(260, Math.min(500, startW + (startX - ev.clientX))));
-    };
-    const cleanup = () => {
-      document.body.style.cursor = "";
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", cleanup);
-      dragCleanup.current = null;
-    };
-    dragCleanup.current = cleanup;
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", cleanup);
-  }, [rightPanelWidth]);
-
-  const startVDrag = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = bottomPaneHeight;
-    document.body.style.cursor = "row-resize";
-    const onMove = (ev: MouseEvent) => {
-      setBottomPaneHeight(Math.max(100, Math.min(500, startH + (startY - ev.clientY))));
-    };
-    const cleanup = () => {
-      document.body.style.cursor = "";
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", cleanup);
-      dragCleanup.current = null;
-    };
-    dragCleanup.current = cleanup;
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", cleanup);
-  }, [bottomPaneHeight]);
-
-  // Tear down a drag interrupted by unmount.
-  useEffect(() => () => dragCleanup.current?.(), []);
+  const { onMouseDown: startVDrag } = useResizeDrag({
+    axis: "y",
+    value: bottomPaneHeight,
+    onChange: setBottomPaneHeight,
+    min: 100,
+    max: 500,
+    direction: "inverted",
+    cursor: "row-resize",
+  });
 
   const { data: connectors = [] } = useQuery({
     queryKey: ["connected-exchanges", server],
