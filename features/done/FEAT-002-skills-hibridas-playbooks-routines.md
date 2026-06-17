@@ -21,7 +21,7 @@ commits:
   - "7f8f04c feat(skills): SkillStore — playbooks over the FEAT-001 memory substrate (FEAT-002)"
   - "078cb2b feat(skills): manage_skill MCP tool (FEAT-002)"
   - "5b775d5 feat(skills): inject [SKILLS] into /agent + trading-agent ticks; teach assistants (FEAT-002)"
-  - "a5156f8 feat(skills): /memory lists and deletes skills; close FEAT-002"
+  - "fdb52c9 feat(skills): /memory lists and deletes skills; close FEAT-002"
 created: 2026-06-17
 ---
 
