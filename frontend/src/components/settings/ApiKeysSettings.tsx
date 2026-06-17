@@ -34,6 +34,26 @@ const INITIAL_FLOW: AddFlowState = {
   values: {},
 };
 
+// Substrings that mark a connector config field as a sensitive credential.
+// Connector keys vary (api_key, secret_key, passphrase, private_key, api_token,
+// mnemonic, seed, ...), so we match by substring on both the field name and type
+// rather than the few exact names ("secret"/"password") covered before.
+const CREDENTIAL_FIELD_PATTERNS = [
+  "secret",
+  "password",
+  "passphrase",
+  "key",
+  "token",
+  "private",
+  "mnemonic",
+  "seed",
+];
+
+function isCredentialField(key: string, type?: string): boolean {
+  const haystack = `${key} ${type ?? ""}`.toLowerCase();
+  return CREDENTIAL_FIELD_PATTERNS.some((p) => haystack.includes(p));
+}
+
 export function ApiKeysSettings() {
   const { server } = useServer();
   const qc = useQueryClient();
@@ -133,7 +153,7 @@ export function ApiKeysSettings() {
         type: (v.type as string) || "string",
         required: v.required !== false,
         description: (v.description as string) || "",
-        isSecret: (v.type as string)?.toLowerCase().includes("secret") || key.toLowerCase().includes("secret") || key.toLowerCase().includes("password"),
+        isSecret: isCredentialField(key, v.type as string | undefined),
       };
     });
   }, [configMapData]);
@@ -300,6 +320,7 @@ export function ApiKeysSettings() {
                 )}
                 <input
                   type={f.isSecret ? "password" : "text"}
+                  autoComplete={f.isSecret ? "new-password" : "off"}
                   value={flow.values[f.key] || ""}
                   onChange={(e) =>
                     setFlow({ ...flow, values: { ...flow.values, [f.key]: e.target.value } })
