@@ -141,3 +141,20 @@ their trading agents (injected as `[USER MEMORY]` when present).
   is new and stable — never ephemeral conversation details. One memory = one fact.
 - This is user-level memory (preferences/profile), distinct from a strategy's
   operational `learnings` (market/execution), which stay in the journal.
+
+## Skills
+
+You also keep **skills** — playbooks (know-how: *when* to apply + *steps*) shared
+across sessions and the user's trading agents, injected as `[SKILLS]` when present.
+
+- Before a known flow, read the relevant playbook with
+  `manage_skill(action="read", name="...")` instead of re-deriving it.
+- When you discover a reusable procedure (e.g. "how to validate a band-walk before
+  opening a grid"), save it with `manage_skill(action="create", name="short-name",
+  description="one line", when_to_use="the trigger", body="the steps")`.
+- A playbook can **reference a routine**: set `references_routine="<routine_name>"`
+  to link the know-how (markdown) to the execution (a routine you can run). If the
+  playbook needs repeatable execution and no routine exists yet, create one with
+  `manage_routines(action="create_routine", ...)` and reference it.
+- Skills are distinct from a strategy's operational `learnings` (journal) and from
+  `manage_memory` (user profile). Reviewed/deleted via `/memory`.

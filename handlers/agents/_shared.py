@@ -504,6 +504,7 @@ def build_initial_context(
                 "mcp__condor__trading_agent_journal_write",
                 "mcp__condor__send_notification",
                 "mcp__condor__manage_memory",
+                "mcp__condor__manage_skill",
             ]
             tool_preload_hint = (
                 "IMPORTANT: At the very start of the session (before your first response), "
@@ -558,5 +559,24 @@ def build_initial_context(
             )
     except Exception:
         pass  # Memory is advisory — never block session start on it.
+
+    # Skills index — playbooks the agent can follow (know-how + steps), shared
+    # with the user's trading agents. Inject only the index; bodies are read on
+    # demand via manage_skill(action="read"). Nothing injected when there are none.
+    try:
+        from condor.memory import SkillStore
+
+        skills_index = SkillStore(user_id).list_index()
+        if skills_index:
+            sections.append(
+                "[SKILLS — playbooks you can follow]\n"
+                "Before a known flow, read the full playbook with "
+                'manage_skill(action="read", name="..."). If you discover a reusable '
+                "procedure, save it with "
+                'manage_skill(action="create", name="...", when_to_use="...", body="...").\n\n'
+                f"{skills_index}"
+            )
+    except Exception:
+        pass  # Skills are advisory — never block session start on them.
 
     return "\n\n".join(sections)

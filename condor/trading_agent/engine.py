@@ -301,10 +301,14 @@ class TickEngine:
         # by the chat or by the agent itself shows up promptly. It's a small file
         # read, like learnings/summary above; failure never blocks a tick.
         user_memory = ""
+        skills_index = ""
         try:
-            from condor.memory import MemoryStore
+            from condor.memory import MemoryStore, SkillStore
 
             user_memory = MemoryStore(self.user_id).list_index()
+            # Skills read fresh too: the agent can create/refine its own skills,
+            # so a skill written this session must show up on the next tick.
+            skills_index = SkillStore(self.user_id).list_index()
         except Exception:
             pass
 
@@ -321,6 +325,7 @@ class TickEngine:
             agent_id=self.agent_id,
             cached_routines_section=self._cached_routines_section or None,
             user_memory=user_memory,
+            skills_index=skills_index,
         )
 
         # Inject pending user directives

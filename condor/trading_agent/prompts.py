@@ -54,10 +54,17 @@ JOURNAL:
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
 - Do NOT call trading_agent_journal_read — context is already in this prompt.
 
-ROUTINES:
-- manage_routines(action="run", name="...", config={...}) for analysis scripts.
-- manage_routines(action="list") to discover routines.
-- Routines tagged "agent" are local to your strategy.
+SKILLS & ROUTINES:
+- [AVAILABLE SKILLS & ROUTINES] below lists SKILLS (playbooks — know-how: when to
+  act + steps) and ROUTINES (executable scripts).
+- Before a known flow, read the relevant playbook with manage_skill(action="read",
+  name="...") and follow it instead of re-deriving the procedure.
+- A skill may reference a routine (shown as "→ routine: <name>"); run it with
+  manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
+  to discover routines; routines tagged "agent" are local to your strategy.
+- If you discover a reusable procedure, save it with manage_skill(action="create",
+  name="...", description="one line", when_to_use="the trigger", body="the steps").
+  This is HOW-TO know-how — distinct from [LEARNINGS] (market/execution facts).
 
 MEMORY (about the user, NOT operational learnings):
 - [USER MEMORY] below is what is known about the OWNER (preferences, profile).
@@ -81,6 +88,7 @@ TOOL_PRELOAD_LIVE = (
     "mcp__condor__trading_agent_journal_write,"
     "mcp__condor__send_notification,"
     "mcp__condor__manage_memory,"
+    "mcp__condor__manage_skill,"
     'mcp__condor__manage_routines")\n'
     "Do this silently."
 )
@@ -93,6 +101,7 @@ TOOL_PRELOAD_DRY_RUN = (
     "mcp__condor__trading_agent_journal_write,"
     "mcp__condor__send_notification,"
     "mcp__condor__manage_memory,"
+    "mcp__condor__manage_skill,"
     'mcp__condor__manage_routines")\n'
     "Do this silently."
 )
@@ -102,7 +111,7 @@ def _build_routines_section(strategy: Strategy) -> str:
     """Build an [AVAILABLE ROUTINES] section listing agent-local + global routines."""
     from routines.base import discover_routines, discover_routines_from_path
 
-    lines = ["[AVAILABLE ROUTINES]"]
+    lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
         f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.id}", config={{...}})'
     )
@@ -141,6 +150,7 @@ def build_tick_prompt(
     agent_id: str = "",
     cached_routines_section: str | None = None,
     user_memory: str = "",
+    skills_index: str = "",
 ) -> str:
     """Build the full prompt for one agent tick."""
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
@@ -186,14 +196,26 @@ def build_tick_prompt(
     # Strategy instructions
     sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
 
-    # Available routines (use cached version if provided)
-    if cached_routines_section:
-        sections.append(cached_routines_section)
-    else:
+    # Available skills (playbooks) + routines, unified under one header. Skills
+    # are read fresh each tick (the agent may create its own mid-session), so
+    # they arrive via skills_index; routine discovery is cached (it's expensive).
+    routines_section = cached_routines_section
+    if routines_section is None:
         try:
-            sections.append(_build_routines_section(strategy))
+            routines_section = _build_routines_section(strategy)
         except Exception:
-            pass  # Don't fail the tick if routine discovery fails
+            routines_section = ""  # Don't fail the tick if discovery fails
+    skills_routines = ["[AVAILABLE SKILLS & ROUTINES]"]
+    if skills_index:
+        skills_routines.append(
+            "\nSKILLS — playbooks (read before a known flow with "
+            'manage_skill(action="read", name="..."); "→ routine:" links to an '
+            "executable routine):\n"
+            f"{skills_index}"
+        )
+    if routines_section:
+        skills_routines.append(f"\n{routines_section}")
+    sections.append("\n".join(skills_routines))
 
     # Session trading context (natural language directives for this session)
     trading_context = config.get("trading_context", "")
