@@ -55,13 +55,20 @@ def _executor_row(ex: dict) -> dict[str, Any]:
     if not isinstance(custom_info, dict):
         custom_info = {}
 
-    # entry_price: config > top-level > custom_info (position executors store it there)
+    # entry_price is a display-only field; PnL comes straight from the executor's
+    # reported fields via get_executor_pnl() and never depends on it.
+    # Only position executors carry a real entry_price (config > top-level > custom_info).
+    # Grid/DCA executors expose break_even_price instead; use it as the display "entry".
     _cfg_entry = float(cfg.get("entry_price") or 0)
     _top_entry = float(ex.get("entry_price") or 0)
     _ci_entry = float(custom_info.get("current_position_average_price") or 0)
-    entry_price = _cfg_entry if _cfg_entry > 0 else (_top_entry if _top_entry > 0 else (_ci_entry if _ci_entry > 0 else 0.0))
-    if entry_price == 0.0:
-        log.warning("entry_price fell back to 0.0 for executor %s — PnL may be wrong",
+    _be_price = float(custom_info.get("break_even_price") or 0)
+    entry_price = _cfg_entry or _top_entry or _ci_entry or _be_price or 0.0
+    # A position executor with no entry_price is genuinely suspicious; everything
+    # else legitimately lacks one, so don't warn for them.
+    _ex_type = str(cfg.get("type") or ex.get("type") or "").lower()
+    if entry_price == 0.0 and "position" in _ex_type:
+        log.warning("entry_price fell back to 0.0 for position executor %s — PnL may be wrong",
                      ex.get("id") or ex.get("executor_id") or "?")
 
     # current_price / close_price: top-level > custom_info
