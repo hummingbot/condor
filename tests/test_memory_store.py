@@ -51,8 +51,18 @@ def test_empty_index_is_empty_string(memory_root):
 
 def test_search_matches_body_and_description(memory_root):
     s = MemoryStore(user_id=42)
-    s.write("Default exchange", "Binance is the default.", "Default exchange is Binance", type="fact")
-    s.write("Risk style", "Conservative sizing.", "User prefers conservative risk", type="preference")
+    s.write(
+        "Default exchange",
+        "Binance is the default.",
+        "Default exchange is Binance",
+        type="fact",
+    )
+    s.write(
+        "Risk style",
+        "Conservative sizing.",
+        "User prefers conservative risk",
+        type="preference",
+    )
 
     hits = s.search("binance")
     assert len(hits) == 1

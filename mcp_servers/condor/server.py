@@ -7,7 +7,15 @@ All business logic lives in mcp_servers.condor.tools.*
 from mcp.server.fastmcp import FastMCP
 
 from mcp_servers.condor.middleware import handle_errors
-from mcp_servers.condor.tools import context, notes, notification, routines, servers, trading_agent
+from mcp_servers.condor.tools import (
+    context,
+    memory,
+    notes,
+    notification,
+    routines,
+    servers,
+    trading_agent,
+)
 
 mcp = FastMCP("condor")
 
@@ -166,8 +174,65 @@ async def manage_trading_agent(
         Action-specific result dict.
     """
     return await trading_agent.manage_trading_agent(
-        action, agent_id, strategy_id, name, description,
-        instructions, agent_key, skills, config,
+        action,
+        agent_id,
+        strategy_id,
+        name,
+        description,
+        instructions,
+        agent_key,
+        skills,
+        config,
+    )
+
+
+@mcp.tool()
+@handle_errors("manage memory")
+async def manage_memory(
+    action: str,
+    name: str | None = None,
+    content: str | None = None,
+    description: str | None = None,
+    type: str = "fact",
+    query: str | None = None,
+    max_entries: int = 30,
+) -> dict:
+    """Manage your persistent memory ABOUT THE USER (shared across sessions and agents).
+
+    This is what you remember about the user: their preferences, stable facts,
+    feedback they gave you, and reference pointers. It is keyed by the user (not
+    the chat), so the /agent chat and the user's trading agents all share it.
+    The index of your memories is auto-injected into your context as
+    [USER MEMORY]; use "read" to pull the full body of a specific memory.
+
+    WHEN TO WRITE:
+    - Save something only when it is NEW and STABLE about the user — a standing
+      preference ("always report in USD"), a fact ("default exchange is Binance"),
+      a correction the user made, or a reference pointer. Do NOT save ephemeral
+      conversation details. One memory = one fact. Keep `description` to one line.
+
+    Actions:
+    - "write": Create/overwrite a memory (requires name, content, description; optional type).
+    - "read": Get the full body of a memory (requires name).
+    - "search": Keyword search over your memories (requires query).
+    - "list": Return the memory index (one line per memory).
+    - "delete": Remove a memory (requires name).
+    - "audit": Recent write/delete events (who changed what).
+
+    Args:
+        action: write | read | search | list | delete | audit
+        name: Short kebab/snake name for the memory (e.g. "report-in-usd").
+        content: The full fact/body (required for write).
+        description: One-line summary shown in the index (required for write).
+        type: preference | fact | feedback | reference (default "fact").
+        query: Search string (for search).
+        max_entries: Cap for search/audit results (default 30).
+
+    Returns:
+        Action-specific result dict.
+    """
+    return await memory.manage_memory(
+        action, name, content, description, type, query, max_entries
     )
 
 
@@ -178,20 +243,16 @@ async def manage_notes(
     key: str | None = None,
     value: str | None = None,
 ) -> dict:
-    """Manage persistent key-value notes for Condor's memory.
+    """DEPRECATED — use manage_memory instead.
 
-    Use this to remember facts across sessions: client chat IDs, server aliases,
-    trading preferences, or any context the user asks you to remember.
+    Thin alias kept for one release: "set"->write (type="reference"), "get"->read,
+    "list"->list, "delete"->delete. New code should call manage_memory directly.
 
     Actions:
     - "list": List all saved notes
     - "get": Get a specific note (requires key)
     - "set": Save a note (requires key and value)
     - "delete": Delete a note (requires key)
-
-    Naming convention for keys:
-    - Use dot-separated namespaces: "server.brigado_2.group_chat_id"
-    - Common prefixes: "server.", "client.", "routine.", "trading."
 
     Args:
         action: The action to perform (list, get, set, delete)
@@ -268,7 +329,13 @@ async def trading_agent_journal_write(
         {"written": true}
     """
     return trading_agent.journal_write(
-        agent_id, entry_type, text, reasoning, risk_note, tick, category,
+        agent_id,
+        entry_type,
+        text,
+        reasoning,
+        risk_note,
+        tick,
+        category,
     )
 
 

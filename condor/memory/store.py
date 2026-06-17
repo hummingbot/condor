@@ -53,7 +53,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
         return {}, text
 
     frontmatter_str = text[3:end].strip()
-    body = text[end + 3:].strip()
+    body = text[end + 3 :].strip()
 
     try:
         meta = yaml.safe_load(frontmatter_str) or {}
@@ -65,7 +65,9 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 def _render(meta: dict, body: str) -> str:
     """Render YAML frontmatter + markdown body."""
-    frontmatter = yaml.dump(meta, default_flow_style=False, allow_unicode=True, sort_keys=False).strip()
+    frontmatter = yaml.dump(
+        meta, default_flow_style=False, allow_unicode=True, sort_keys=False
+    ).strip()
     return f"---\n{frontmatter}\n---\n\n{body}\n"
 
 
@@ -124,7 +126,12 @@ class MemoryStore:
         self._atomic_write(path, _render(meta, content.strip()))
         self._reindex()
         self._append_audit("write", f"memory:{slug}", meta["description"], source)
-        return {"saved": True, "name": slug, "type": type, "description": meta["description"]}
+        return {
+            "saved": True,
+            "name": slug,
+            "type": type,
+            "description": meta["description"],
+        }
 
     def read(self, name: str) -> str | None:
         """Return the full body of a memory, or ``None`` if absent."""
@@ -143,7 +150,9 @@ class MemoryStore:
         q = (query or "").lower().strip()
         results: list[dict] = []
         for meta, body in self._iter_memories():
-            haystack = f"{meta.get('name', '')} {meta.get('description', '')} {body}".lower()
+            haystack = (
+                f"{meta.get('name', '')} {meta.get('description', '')} {body}".lower()
+            )
             if not q or q in haystack:
                 results.append(
                     {
@@ -180,7 +189,9 @@ class MemoryStore:
         meta, _ = _parse_frontmatter(path.read_text())
         path.unlink()
         self._reindex()
-        self._append_audit("delete", f"memory:{slug}", meta.get("description", ""), source)
+        self._append_audit(
+            "delete", f"memory:{slug}", meta.get("description", ""), source
+        )
         return True
 
     def audit(self, limit: int = 30) -> list[dict]:
@@ -240,7 +251,9 @@ class MemoryStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._atomic_write(self.index_file, "\n".join(lines) + "\n")
 
-    def _append_audit(self, action: str, target: str, summary: str, source: str) -> None:
+    def _append_audit(
+        self, action: str, target: str, summary: str, source: str
+    ) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         entry = {
             "ts": _utcnow(),
