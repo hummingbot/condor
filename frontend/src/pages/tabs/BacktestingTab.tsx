@@ -21,33 +21,12 @@ import type { IChartApi } from "lightweight-charts";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
 import { api } from "@/lib/api";
+import { formatPct, formatPnl, formatUsd, pnlColor } from "@/lib/formatters";
 
 // -- Helpers --
 
 function tsToSeconds(ts: number): number {
   return ts > 1e12 ? Math.floor(ts / 1000) : ts;
-}
-
-function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-}
-
-function formatPnl(val: number) {
-  return (val >= 0 ? "+" : "") + formatUsd(val);
-}
-
-function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
-
-function formatPct(val: number) {
-  return (val >= 0 ? "+" : "") + (val * 100).toFixed(2) + "%";
 }
 
 function tsToDateTime(ts: number): string {
