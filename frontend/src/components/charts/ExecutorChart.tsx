@@ -10,7 +10,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
-import { tsToSeconds } from "@/lib/formatters";
+import { formatCompactUsd, tsToSeconds } from "@/lib/formatters";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
@@ -251,12 +251,6 @@ export function ExecutorChart({
           if (Math.abs(p) >= 1) return p.toFixed(4);
           return p.toPrecision(6);
         };
-        const fmtUsd = (v: number) => {
-          if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
-          if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
-          return "$" + v.toFixed(2);
-        };
-
         const addRow = (label: string, value: string, color?: string) => {
           detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : `color:${textColor}`}">${value}</span></div>`;
         };
@@ -273,7 +267,7 @@ export function ExecutorChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", fmtUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", formatCompactUsd(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);

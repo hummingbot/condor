@@ -15,6 +15,17 @@ export function formatCurrency(val: number, symbol = "$") {
   return symbol + val.toFixed(2);
 }
 
+/**
+ * Compact USD for chart tooltips / stat strips: `>=1M → "$N.NNM"`, `>=10K → "$N.NK"`,
+ * else plain `"$" + toFixed(2)` (no locale grouping). Kept distinct from `formatCurrency`,
+ * which uses `Intl` grouping/sign placement below 10K — switching would change rendered values.
+ */
+export function formatCompactUsd(val: number): string {
+  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
+  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
+  return "$" + val.toFixed(2);
+}
+
 export function formatCurrencyVolume(val: number, symbol = "$") {
   if (Math.abs(val) >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
   if (Math.abs(val) >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";

@@ -5,13 +5,13 @@ category: architecture
 impact: medium
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/agent/AgentSessionContent.tsx:287
   - frontend/src/components/trade/TradeChart.tsx:357
   - frontend/src/components/charts/ExecutorChart.tsx:257
   - frontend/src/lib/formatters.ts
-commits: []
+commits: [f427c8c]
 created: 2026-06-10
 ---
 
@@ -35,9 +35,22 @@ genuinamente necesita un redondeo distinto, agregar UNA variante nombrada (ej. `
 `lib/formatters.ts` y reusarla en vez de re-declarar por componente.
 
 ## Criterio de aceptación
-- [ ] Ningún componente de los 3 define un `fmtUsd` local; todos usan helpers de `lib/formatters`
-- [ ] Los valores USD compactos renderizan idénticos en Agent session, tooltip de TradeChart y tooltip de ExecutorChart
-- [ ] Cambiar la política de redondeo K/M requiere editar solo `lib/formatters.ts`
+- [x] Ningún componente de los 3 define un `fmtUsd` local; todos usan helpers de `lib/formatters`
+- [x] Los valores USD compactos renderizan idénticos en Agent session, tooltip de TradeChart y tooltip de ExecutorChart
+- [x] Cambiar la política de redondeo K/M requiere editar solo `lib/formatters.ts`
 
 ## Notas
 Complementa [[READ-020]] (formatters duplicados en BacktestingTab); no re-tocar ese archivo aquí.
+
+### Reconciliación (desviación del enunciado original)
+El md afirmaba que el `fmtUsd` local era "byte-idéntico" a `formatCurrency`/`formatUsd`. **No lo es**
+en el tramo `< 10_000`:
+- `fmtUsd` local: `"$" + v.toFixed(2)` → `1234.5` ⇒ `"$1234.50"` (sin separador de miles); `-50` ⇒ `"$-50.00"`.
+- `formatCurrency` (rama `$`): `toLocaleString("en-US", {style:"currency"})` → `1234.5` ⇒ `"$1,234.50"`
+  (con coma); `-50` ⇒ `"-$50.00"` (signo antes del `$`).
+
+Reusar `formatCurrency`/`formatUsd` habría **cambiado silenciosamente** los valores renderizados
+(separador de miles y posición del signo). Para no alterar lo que ve el usuario, se extrajo el helper
+exacto como variante nombrada **`formatCompactUsd`** en `lib/formatters.ts` (replica byte-a-byte la
+lógica de los 3 locales) y se importó en los 3 componentes. Así se deduplica sin cambio de comportamiento;
+las ramas K/M ya eran idénticas. Verificado: `npx tsc -b` = 0; eslint sin errores nuevos (baseline 1 error/2 warnings preexistentes, sin relación con estos cambios).

@@ -11,6 +11,7 @@ import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlC
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
+import { formatCompactUsd } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
 import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/pages/Executors";
 
@@ -286,12 +287,6 @@ export function SessionExecutors({
     return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No executors for this session.</p>;
   }
 
-  const fmtUsd = (v: number) => {
-    if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
-    if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
-    return "$" + v.toFixed(2);
-  };
-
   return (
     <div className="space-y-3">
       {/* Stats strip */}
@@ -313,16 +308,16 @@ export function SessionExecutors({
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Net PnL</span>
           <span className={`font-mono text-sm font-semibold ${stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-            {stats.totalPnl >= 0 ? "+" : ""}{fmtUsd(stats.totalPnl)}
+            {stats.totalPnl >= 0 ? "+" : ""}{formatCompactUsd(stats.totalPnl)}
           </span>
         </div>
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
-          <span className="font-mono text-sm text-[var(--color-text)]">{fmtUsd(stats.totalVolume)}</span>
+          <span className="font-mono text-sm text-[var(--color-text)]">{formatCompactUsd(stats.totalVolume)}</span>
         </div>
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
-          <span className="font-mono text-sm text-[var(--color-text-muted)]">{fmtUsd(stats.totalFees)}</span>
+          <span className="font-mono text-sm text-[var(--color-text-muted)]">{formatCompactUsd(stats.totalFees)}</span>
         </div>
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Executors</span>
@@ -408,7 +403,7 @@ export function SessionExecutors({
                 <span className="text-xs font-medium text-[var(--color-text)]">{group[0].trading_pair}</span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
                 <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {pairPnl >= 0 ? "+" : ""}{fmtUsd(pairPnl)}
+                  {pairPnl >= 0 ? "+" : ""}{formatCompactUsd(pairPnl)}
                 </span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group.length} exec</span>
               </div>
