@@ -14,7 +14,8 @@ import { SessionReviewer } from "@/components/agent/SessionReviewer";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
-import { type ExecutorInfo, api } from "@/lib/api";
+import { api } from "@/lib/api";
+import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
 // ── Main Page ──
 
@@ -98,18 +99,10 @@ export function AgentDetail() {
   );
 
   // Group live executors by connector:pair for charts
-  const chartGroups = useMemo(() => {
-    if (!serverName || liveExecutors.length === 0) return [];
-    const groups = new Map<string, ExecutorInfo[]>();
-    for (const ex of liveExecutors) {
-      if (!ex.trading_pair) continue;
-      const key = `${ex.connector}:${ex.trading_pair}`;
-      const arr = groups.get(key);
-      if (arr) arr.push(ex);
-      else groups.set(key, [ex]);
-    }
-    return Array.from(groups.entries());
-  }, [liveExecutors, serverName]);
+  const chartGroups = useMemo(
+    () => (serverName ? groupExecutorsByMarket(liveExecutors) : []),
+    [liveExecutors, serverName],
+  );
 
   // Session/experiment click -> open reviewer
   const handleSessionClick = useCallback((sessionNum: number, kind?: "session" | "experiment") => {

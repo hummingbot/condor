@@ -12,7 +12,8 @@ import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
-import { type AgentDetail, type ExecutorInfo, api } from "@/lib/api";
+import { type AgentDetail, api } from "@/lib/api";
+import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
 // ── Markdown Editor ──
 
@@ -330,18 +331,10 @@ export function OverviewTab({ agent }: { agent: AgentDetail }) {
   );
 
   // Group live executors by connector:pair for charts
-  const chartGroups = useMemo(() => {
-    if (!serverName || liveExecutors.length === 0) return [];
-    const groups = new Map<string, ExecutorInfo[]>();
-    for (const ex of liveExecutors) {
-      if (!ex.trading_pair) continue;
-      const key = `${ex.connector}:${ex.trading_pair}`;
-      const arr = groups.get(key);
-      if (arr) arr.push(ex);
-      else groups.set(key, [ex]);
-    }
-    return Array.from(groups.entries());
-  }, [liveExecutors, serverName]);
+  const chartGroups = useMemo(
+    () => (serverName ? groupExecutorsByMarket(liveExecutors) : []),
+    [liveExecutors, serverName],
+  );
 
   return (
     <div className="space-y-6">

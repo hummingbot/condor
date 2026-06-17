@@ -10,6 +10,7 @@ import { ExecutorChart, type SnapshotBubble } from "@/components/charts/Executor
 import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
+import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
 import { formatCompactUsd } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
@@ -203,18 +204,10 @@ export function SessionExecutors({
   }));
 
   // Group executors by connector:pair for charts
-  const chartGroups = useMemo(() => {
-    if (!serverName || executorInfos.length === 0) return [];
-    const groups = new Map<string, ExecutorInfo[]>();
-    for (const ex of executorInfos) {
-      if (!ex.trading_pair) continue;
-      const key = `${ex.connector}:${ex.trading_pair}`;
-      const arr = groups.get(key);
-      if (arr) arr.push(ex);
-      else groups.set(key, [ex]);
-    }
-    return Array.from(groups.entries());
-  }, [executorInfos, serverName]);
+  const chartGroups = useMemo(
+    () => (serverName ? groupExecutorsByMarket(executorInfos) : []),
+    [executorInfos, serverName],
+  );
 
   // Aggregate stats
   const stats = useMemo(() => {
