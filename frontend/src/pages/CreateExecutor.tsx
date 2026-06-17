@@ -35,124 +35,14 @@ import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import type { ExecutorType } from "@/components/executor/types";
 import {
-  type GridState,
-  type GridAction,
+  gridReducer,
   isSpotConnector,
-} from "@/pages/CreateGridExecutor";
-
-// ── Grid state management (reuse from CreateGridExecutor) ──
-
-const GRID_DEFAULTS: GridState = {
-  connector: "binance_perpetual",
-  pair: "BTC-USDT",
-  interval: "5m",
-  lookbackSeconds: 3 * 86400,
-  side: 1,
-  start_price: 0,
-  end_price: 0,
-  limit_price: 0,
-  total_amount_quote: 300,
-  min_order_amount_quote: 10,
-  min_spread_between_orders: 0.0001,
-  max_open_orders: 5,
-  max_orders_per_batch: 2,
-  order_frequency: 1,
-  leverage: 10,
-  take_profit: 0.0002,
-  open_order_type: 2,
-  take_profit_order_type: 2,
-  activation_bounds: 0.05,
-  keep_position: false,
-  coerce_tp_to_step: false,
-  activePickField: null,
-  showAdvanced: false,
-};
-
-const GRID_STORAGE_KEY = "condor_grid_defaults";
-
-const GRID_PERSISTED_FIELDS: (keyof GridState)[] = [
-  "connector", "pair", "interval", "lookbackSeconds", "side",
-  "total_amount_quote", "min_order_amount_quote", "min_spread_between_orders",
-  "max_open_orders", "max_orders_per_batch", "order_frequency", "leverage",
-  "take_profit", "open_order_type", "take_profit_order_type",
-  "activation_bounds", "keep_position", "coerce_tp_to_step",
-];
-
-const LAST_MARKET_KEY = "condor_last_market";
-
-function loadGridDefaults(): GridState {
-  try {
-    const raw = localStorage.getItem(GRID_STORAGE_KEY);
-    const merged = raw ? { ...GRID_DEFAULTS } : { ...GRID_DEFAULTS };
-    if (raw) {
-      const saved = JSON.parse(raw);
-      for (const key of GRID_PERSISTED_FIELDS) {
-        if (key in saved && saved[key] !== undefined) {
-          (merged as Record<string, unknown>)[key] = saved[key];
-        }
-      }
-    }
-    // Override connector/pair from last-used market
-    try {
-      const market = localStorage.getItem(LAST_MARKET_KEY);
-      if (market) {
-        const { connector, pair } = JSON.parse(market);
-        if (connector) merged.connector = connector;
-        if (pair) merged.pair = pair;
-      }
-    } catch { /* ok */ }
-    return merged;
-  } catch {
-    return GRID_DEFAULTS;
-  }
-}
-
-function saveGridDefaults(state: GridState) {
-  const toSave: Record<string, unknown> = {};
-  for (const key of GRID_PERSISTED_FIELDS) toSave[key] = state[key];
-  localStorage.setItem(GRID_STORAGE_KEY, JSON.stringify(toSave));
-}
-
-function gridReducer(state: GridState, action: GridAction): GridState {
-  switch (action.type) {
-    case "SET_FIELD": {
-      const next = { ...state, [action.field]: action.value };
-      if (action.field === "leverage" && isSpotConnector(next.connector)) {
-        next.leverage = 1;
-      }
-      return next;
-    }
-    case "SET_CONNECTOR": {
-      const spot = isSpotConnector(action.value);
-      return {
-        ...state,
-        connector: action.value,
-        start_price: 0,
-        end_price: 0,
-        limit_price: 0,
-        leverage: spot ? 1 : state.leverage,
-      };
-    }
-    case "SET_PAIR":
-      return { ...state, pair: action.value, start_price: 0, end_price: 0, limit_price: 0 };
-    default:
-      return state;
-  }
-}
-
-// ── Intervals ──
-
-const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"];
-
-const LOOKBACK_OPTIONS: { label: string; seconds: number }[] = [
-  { label: "1h", seconds: 3600 },
-  { label: "6h", seconds: 6 * 3600 },
-  { label: "1d", seconds: 86400 },
-  { label: "3d", seconds: 3 * 86400 },
-  { label: "7d", seconds: 7 * 86400 },
-  { label: "14d", seconds: 14 * 86400 },
-  { label: "30d", seconds: 30 * 86400 },
-];
+  loadGridDefaults,
+  saveGridDefaults,
+  LAST_MARKET_KEY,
+  INTERVALS,
+  LOOKBACK_OPTIONS,
+} from "@/lib/gridExecutor";
 
 // ── Type tabs config ──
 
@@ -190,7 +80,7 @@ export function CreateExecutor() {
   };
 
   // ── Grid state (always initialized for hooks rules) ──
-  const [gridState, gridDispatch] = React.useReducer(gridReducer, undefined, loadGridDefaults);
+  const [gridState, gridDispatch] = React.useReducer(gridReducer, undefined, () => loadGridDefaults(true));
   const gridValidation = useGridValidation(gridState);
 
   // ── Other executor configs ──
