@@ -1,5 +1,15 @@
 // ── Centralized Formatters ──
 
+/** Escape a string for safe interpolation into innerHTML. */
+export function escapeHtml(val: string): string {
+  return val
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function formatCurrency(val: number, symbol = "$") {
   if (Math.abs(val) >= 1_000_000) return symbol + (val / 1_000_000).toFixed(2) + "M";
   if (Math.abs(val) >= 10_000) return symbol + (val / 1_000).toFixed(1) + "K";

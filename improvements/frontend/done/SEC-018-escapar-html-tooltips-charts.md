@@ -5,13 +5,14 @@ category: security
 impact: low
 effort: M
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/trade/TradeChart.tsx:364
   - frontend/src/components/trade/TradeChart.tsx:389-406
   - frontend/src/components/charts/ExecutorChart.tsx:287-304
   - frontend/src/components/charts/ExecutorChart.tsx:724
-commits: []
+commits:
+  - 0e3f5b6
 created: 2026-06-10
 ---
 
@@ -40,10 +41,24 @@ argumentos `value`/`label` de `addRow` en ambos `TradeChart.tsx` y `ExecutorChar
 el escaping que ya se hace en `ExecutorChart.tsx:724`.
 
 ## Criterio de aceptación
-- [ ] Todos los strings dinámicos interpolados en el `innerHTML` de tooltips en `TradeChart.tsx` y `ExecutorChart.tsx` están HTML-escapados (o renderizados vía `textContent`)
-- [ ] Un valor de campo con `<img src=x onerror=alert(1)>` se renderiza como texto inerte en el tooltip, no como markup
-- [ ] Los tooltips siguen mostrando side/status/type/closeType y filas de detalle correctamente
+- [x] Todos los strings dinámicos interpolados en el `innerHTML` de tooltips en `TradeChart.tsx` y `ExecutorChart.tsx` están HTML-escapados (o renderizados vía `textContent`)
+- [x] Un valor de campo con `<img src=x onerror=alert(1)>` se renderiza como texto inerte en el tooltip, no como markup
+- [x] Los tooltips siguen mostrando side/status/type/closeType y filas de detalle correctamente
 
 ## Notas
 Impacto bajo (no alcanzable externamente hoy) pero fix barato y no-breaking; el codebase ya tiene el
 patrón en la línea 724.
+
+### Implementación
+Se añadió un helper `escapeHtml()` en `frontend/src/lib/formatters.ts` (reemplaza `& < > " '`) y se
+reutilizó en ambos charts. Valores escapados antes de `innerHTML`:
+- `TradeChart.tsx` / `ExecutorChart.tsx`: `o.side`, `o.status`, `o.type` (vía `.toUpperCase()`),
+  `o.closeType`, `o.executorId` (slice mostrado) y los argumentos `label`/`value` de `addRow`
+  (este último cubre `String(cfg.amount)` y demás detalle proveniente del backend).
+- Los valores numéricos/conocidos-seguros (precios formateados, PnL, %, colores de tema) se dejaron
+  sin tocar. El texto visible es idéntico al previo.
+- La línea 724 de `ExecutorChart.tsx` (snapshot del trading agent) ya escapaba con `.replace(/</g…)`;
+  se dejó como estaba (fuera del scope de side/status/type/closeType).
+
+Verificación: `npx tsc -b` → exit 0. `npx eslint` de los 3 archivos → 0 errores, 1 warning
+preexistente (`react-hooks/exhaustive-deps` en TradeChart:442, no relacionado con este cambio).

@@ -7,7 +7,7 @@ import { candleStore } from "@/lib/candle-store";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { formatCompactUsd } from "@/lib/formatters";
+import { escapeHtml, formatCompactUsd } from "@/lib/formatters";
 
 type PickField = "start" | "end" | "limit" | null;
 
@@ -357,7 +357,7 @@ export function TradeChart({
           return p.toPrecision(6);
         };
         const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${value}</span></div>`;
+          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
         };
 
         // Grid-specific details
@@ -384,13 +384,13 @@ export function TradeChart({
 
         tooltip.innerHTML = `
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace">${o.executorId.slice(0, 10)}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${o.side}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${o.status}</span>
+            <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(o.side)}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${o.type.toUpperCase()}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${o.closeType}</span>` : ""}
+            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${escapeHtml(o.type.toUpperCase())}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${escapeHtml(o.closeType)}</span>` : ""}
           </div>
           <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
