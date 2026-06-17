@@ -5,7 +5,7 @@ category: performance
 impact: low
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/executor/OrderConfigPanel.tsx:110
   - frontend/src/components/executor/OrderConfigPanel.tsx:184
@@ -13,7 +13,7 @@ files:
   - frontend/src/components/executor/PositionConfigPanel.tsx:226
   - frontend/src/components/executor/DCAConfigPanel.tsx:197
   - frontend/src/components/executor/DCAConfigPanel.tsx:330
-commits: []
+commits: [19e3bec]
 created: 2026-06-10
 ---
 
@@ -40,10 +40,22 @@ resultado del hook, así que pueden forwardear `dcaConfig.validation` etc. Elimi
 por render y garantiza que padre y panel muestren los mismos errores.
 
 ## Criterio de aceptación
-- [ ] Cada panel renderiza errores de validación idénticos a antes
-- [ ] `use*Validation(state)` se invoca una vez por cambio de state, no dos (verificable con un counter/log en dev)
-- [ ] Sin errores de tipos por el prop-drilling; `ValidationMessages` sigue recibiendo el mismo shape de errors/warnings
+- [x] Cada panel renderiza errores de validación idénticos a antes
+- [x] `use*Validation(state)` se invoca una vez por cambio de state, no dos (verificable con un counter/log en dev)
+- [x] Sin errores de tipos por el prop-drilling; `ValidationMessages` sigue recibiendo el mismo shape de errors/warnings
 
 ## Notas
 Estos paneles se usan solo en `CreateExecutor.tsx` (`CreateGridExecutor` usa `GridConfigPanel`, fuera de
 scope). Impacto bajo pero elimina recompute O(n) por keystroke en DCA.
+
+### Implementación
+Se agregó `validation: ExecutorValidation` como prop a `OrderConfigPanel`, `PositionConfigPanel` y
+`DCAConfigPanel`, eliminando la llamada interna `use*Validation(state)`. `CreateExecutor.tsx` ya sostenía
+el resultado del hook (`*Config.validation`) y ahora lo forwardea al panel. Comportamiento de validación
+y UI sin cambios.
+
+Fuera de scope (no tocado): el recompute de `bep` en `DCAConfigPanel` (335-343) sigue local porque
+`useDCAConfig` calcula el BEP dentro del `useMemo` de `chartProps` pero no lo expone en su return;
+exponerlo requeriría cambiar el shape del hook y refactorizar `chartProps`, lo cual excede el cambio
+mínimo de dedup de validación. Tampoco se tocaron los exports de los hooks `use*Validation` (siguen
+exportados; los warnings react-refresh/only-export-components son baseline preexistente).
