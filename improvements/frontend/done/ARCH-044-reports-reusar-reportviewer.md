@@ -5,13 +5,13 @@ category: architecture
 impact: low
 effort: M
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/Reports.tsx:29
   - frontend/src/pages/Reports.tsx:170-176
   - frontend/src/pages/Reports.tsx:207-211
   - frontend/src/components/routines/ReportViewer.tsx
-commits: []
+commits: [57121cc]
 created: 2026-06-10
 ---
 
@@ -33,11 +33,17 @@ iframe en sí en un mini `ReportFrame ({ filename, title, className })` que `Rep
 rendericen.
 
 ## Criterio de aceptación
-- [ ] `pages/Reports.tsx` renderiza el report a través del componente compartido en vez de su propio bloque de iframe
-- [ ] Ver y poner en fullscreen un report desde la página Reports se comporta como antes
-- [ ] El patrón de iframe de report queda centralizado para futuros cambios transversales (ej. sandbox)
+- [x] `pages/Reports.tsx` renderiza el report a través del componente compartido en vez de su propio bloque de iframe
+- [x] Ver y poner en fullscreen un report desde la página Reports se comporta como antes
+- [x] El patrón de iframe de report queda centralizado para futuros cambios transversales (ej. sandbox)
 
 ## Notas
 El hallazgo original también incluía `AgentRoutinesTab.tsx`, pero ese archivo es **dead code** a borrar
 en [[READ-047]], así que se acotó a `Reports.tsx`. Relacionado con [[SEC-016]]/[[SEC-046]] (sandbox de
 iframes de reports): centralizar facilita aplicar el sandbox en un solo punto.
+
+Implementación: se reusó `ReportViewer` directamente (sin factorizar un `ReportFrame`; no fue
+necesario porque el chrome de `ReportViewer` cubre exactamente lo que la página Reports mostraba).
+Beneficios heredados al reusar: el iframe sandboxeado de SEC-046 (`sandbox="allow-scripts allow-popups"`),
+más navegación prev/next y atajos de teclado que la versión bespoke no tenía. La página conserva su
+propio estado de empty ("Select a report to view"). El borrado ahora usa el `onDelete` de `ReportViewer`.
