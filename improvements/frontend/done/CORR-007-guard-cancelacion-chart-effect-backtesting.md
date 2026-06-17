@@ -5,11 +5,12 @@ category: correctness
 impact: high
 effort: M
 risk: low
-status: todo
+status: done
 files:
-  - frontend/src/pages/tabs/BacktestingTab.tsx:167-399
+  - frontend/src/pages/tabs/BacktestingTab.tsx:144-378
   - frontend/src/components/trade/TradeChart.tsx:158-161
-commits: []
+commits:
+  - 69ccc4c
 created: 2026-06-10
 ---
 
@@ -38,9 +39,21 @@ run del efecto sea dueño y haga teardown exactamente de sus propios charts, en 
 el `chartsRef.current` mutable entre runs solapados.
 
 ## Criterio de aceptación
-- [ ] Tras resolver `await import`, el IIFE retorna temprano si el efecto ya fue limpiado (`cancelled === true`)
-- [ ] Cambiar rápido `data`/`theme` o desmontar a mitad del import nunca deja charts huérfanos: el número de `IChartApi` vivos tras estabilizar iguala los renderizados para la última data
-- [ ] No aparecen artefactos "Object is disposed"/canvas duplicado al togglear tema mientras carga un resultado de backtest
+- [x] Tras resolver `await import`, el IIFE retorna temprano si el efecto ya fue limpiado (`cancelled === true`)
+- [x] Cambiar rápido `data`/`theme` o desmontar a mitad del import nunca deja charts huérfanos: el número de `IChartApi` vivos tras estabilizar iguala los renderizados para la última data
+- [x] No aparecen artefactos "Object is disposed"/canvas duplicado al togglear tema mientras carga un resultado de backtest
 
 ## Notas
 Patrón ya resuelto en `TradeChart.tsx:158-161` — copiar ese enfoque.
+
+Implementación: se añadió `let cancelled = false` y un array local `charts: IChartApi[]`
+que cada run del efecto posee. El IIFE retorna temprano con `if (cancelled || !priceRef.current)`
+tras el `await import`. Los tres charts se empujan a `charts` (no a `chartsRef.current`
+compartido); `chartsRef.current = charts` mantiene la ref en sync para el `ResizeObserver`.
+El cleanup pone `cancelled = true`, remueve los charts de *este* run, y solo limpia
+`chartsRef.current` si todavía apunta a este array (`chartsRef.current === charts`) para no
+pisar un run más nuevo que ya hizo swap.
+
+Verificación: `npx tsc -b` → 0. `npx eslint` sobre el archivo no agrega errores nuevos;
+los 2 hallazgos restantes (línea 185 unused-disable, línea 521 set-state-in-effect) son del
+baseline preexistente, fuera del efecto de chart modificado.

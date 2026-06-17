@@ -144,17 +144,21 @@ function BacktestChart({ data }: { data: BacktestData }) {
   useEffect(() => {
     if (!priceRef.current || data.candles.length === 0) return;
     const isDark = theme !== "light";
+    let cancelled = false;
     let ro: ResizeObserver | undefined;
     let isSyncing = false;
+    // This run owns its own charts so overlapping runs never share/teardown each
+    // other's instances. chartsRef tracks them for the ResizeObserver callback.
+    const charts: IChartApi[] = [];
 
     (async () => {
       const mod = await import("lightweight-charts");
-      if (!priceRef.current) return;
+      if (cancelled || !priceRef.current) return;
 
       for (const c of chartsRef.current) {
         try { c.remove(); } catch { /* ok */ }
       }
-      chartsRef.current = [];
+      chartsRef.current = charts;
 
       type TS = import("lightweight-charts").UTCTimestamp;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -168,7 +172,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
         width: containerWidth,
         height: hasPositionHeld ? 350 : hasPnl ? 380 : 450,
       });
-      chartsRef.current.push(priceChart);
+      charts.push(priceChart);
 
       const candleSeries = priceChart.addSeries(mod.CandlestickSeries, {
         upColor: "#26a69a",
@@ -232,7 +236,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
           width: containerWidth,
           height: hasPositionHeld ? 160 : 200,
         });
-        chartsRef.current.push(pnlChart);
+        charts.push(pnlChart);
 
         if (data.pnlTimeseries.length > 0) {
           const totalSeries = pnlChart.addSeries(mod.AreaSeries, {
@@ -293,7 +297,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
           width: containerWidth,
           height: 140,
         });
-        chartsRef.current.push(posChart);
+        charts.push(posChart);
 
         const pts = data.positionHeldTimeseries;
 
@@ -326,7 +330,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
       }
 
       // Sync time scales
-      const allCharts = chartsRef.current;
+      const allCharts = charts;
       for (let i = 0; i < allCharts.length; i++) {
         allCharts[i].timeScale().subscribeVisibleLogicalRangeChange((range) => {
           if (isSyncing || !range) return;
@@ -358,7 +362,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
       ro = new ResizeObserver((entries) => {
         const w = entries[0]?.contentRect?.width;
         if (w) {
-          for (const c of chartsRef.current) {
+          for (const c of charts) {
             c.applyOptions({ width: w });
           }
         }
@@ -367,11 +371,14 @@ function BacktestChart({ data }: { data: BacktestData }) {
     })();
 
     return () => {
+      cancelled = true;
       ro?.disconnect();
-      for (const c of chartsRef.current) {
+      for (const c of charts) {
         try { c.remove(); } catch { /* ok */ }
       }
-      chartsRef.current = [];
+      // Only clear the shared ref if it still points at this run's charts, so a
+      // newer run that already swapped in its own array isn't clobbered.
+      if (chartsRef.current === charts) chartsRef.current = [];
     };
   }, [data, theme, hasPnl, hasPositionHeld]);
 
