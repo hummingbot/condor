@@ -19,14 +19,10 @@ import yamlLib from "js-yaml";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { api, type ControllerInfo } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl } from "@/lib/formatters";
+import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 import { setViewContext } from "@/lib/viewContext";
 
 type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
-
-function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
 
 function parseSide(raw: string): string {
   const dot = raw.lastIndexOf(".");

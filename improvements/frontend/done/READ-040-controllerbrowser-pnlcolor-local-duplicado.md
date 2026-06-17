@@ -5,11 +5,12 @@ category: readability
 impact: low
 effort: S
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/components/bots/ControllerBrowser.tsx:27-29
   - frontend/src/lib/formatters.ts:29-31
-commits: []
+commits:
+  - "0c23888 (refactor) dedup pnlColor in ControllerBrowser"
 created: 2026-06-10
 ---
 
@@ -27,9 +28,14 @@ Borrar el `pnlColor` local en `ControllerBrowser.tsx` e importar `pnlColor` de `
 los imports existentes.
 
 ## Criterio de aceptación
-- [ ] `ControllerBrowser` importa `pnlColor` de `lib/formatters` en vez de definirlo
-- [ ] No queda definición local de `pnlColor` (CSS-variable) en `ControllerBrowser.tsx`
+- [x] `ControllerBrowser` importa `pnlColor` de `lib/formatters` en vez de definirlo
+- [x] No queda definición local de `pnlColor` (CSS-variable) en `ControllerBrowser.tsx`
 
 ## Notas
 Mismo género que [[READ-020]] (formatters locales en BacktestingTab), distinto archivo. Implementaciones
 idénticas → comportamiento sin cambios.
+
+Implementado tal cual la solución propuesta. Nota: `/improvements/` está en `.gitignore`, pero los items
+ya versionados en `done/` están force-added; se usó `git add -f` para mantener la consistencia. tsc -b
+pasa en 0; eslint del archivo conserva 1 error preexistente (`set-state-in-effect` en línea ~95, no
+relacionado) y no introduce nuevos.
