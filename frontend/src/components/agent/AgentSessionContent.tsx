@@ -14,7 +14,7 @@ import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
 import { formatCompactUsd } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
-import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/pages/Executors";
+import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/executor/ExecutorTable";
 
 // ── Helper ──
 
