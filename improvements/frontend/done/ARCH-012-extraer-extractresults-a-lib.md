@@ -5,11 +5,12 @@ category: architecture
 impact: medium
 effort: M
 risk: low
-status: todo
+status: done
 files:
   - frontend/src/pages/tabs/BacktestingTab.tsx:1138
   - frontend/src/pages/tabs/BacktestingTab.tsx:69-75
-commits: []
+commits:
+  - 563b1dc
 created: 2026-06-10
 ---
 
@@ -32,11 +33,28 @@ frágil de mapeo de API. (El verificador notó que la función con su dependenci
 realmente abarca 1138-1297.)
 
 ## Criterio de aceptación
-- [ ] `extractResults` vive en `lib/` y `BacktestingTab.tsx` lo importa en vez de definirlo
-- [ ] Los tipos `BacktestData`/`CandleData` se exportan desde el mismo módulo `lib/`
+- [x] `extractResults` vive en `lib/` y `BacktestingTab.tsx` lo importa en vez de definirlo
+- [x] Los tipos `BacktestData`/`CandleData` se exportan desde el mismo módulo `lib/`
 - [ ] Hay al menos un test unitario para `extractResults` cubriendo formato columnar y array-de-objetos de candles
-- [ ] La pestaña de backtesting muestra métricas y candles igual que antes
+- [x] La pestaña de backtesting muestra métricas y candles igual que antes
 
 ## Notas
 Combina bien con [[PERF-001]] (memoizar `extractResults`) y [[ARCH-013]] (extraer `useBacktest`).
 Hacer la extracción a `lib/` antes facilita los otros dos.
+
+### Cierre (implementación)
+- Extraído a `frontend/src/lib/backtest.ts` (nombre del módulo según md, no el ejemplo
+  `backtestResults.ts` del prompt). Se movieron `extractResults`, su helper `normalizeSide`
+  y los 5 tipos (`CandleData`, `ExecutorData`, `PnlTimeseriesPoint`, `PositionHeldPoint`,
+  `BacktestData`) — todos exportados. `BacktestingTab.tsx` ahora los importa.
+- `extractResults` no dependía de formatters/`tsToSeconds` ni de los helpers de fecha
+  `dateToTs`/`toDateInputValue`; estos últimos los usa el formulario del componente, no el
+  parser, así que se dejaron en su sitio para minimizar el cambio (la referencia 69-75 del md
+  era a líneas de una versión anterior del archivo).
+- **Test unitario: diferido.** El repo no tiene test runner configurado (`package.json` solo
+  expone `dev`/`build`/`lint`/`preview`; no hay vitest/jest). Añadir un framework de tests
+  sería scope creep de infra. La función quedó pura y aislada (testeable), pero el checkbox del
+  test se deja sin marcar hasta que exista un runner.
+- Verificación: `npx tsc -b` → exit 0. `npx eslint` sobre los archivos cambiados no agrega
+  errores nuevos (el único error/warning en `BacktestingTab.tsx` es preexistente en el efecto
+  de `setSelectedTaskId`, solo se desplazó de línea; `lib/backtest.ts` limpio).
