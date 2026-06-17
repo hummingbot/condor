@@ -74,6 +74,9 @@ export function useChatSocket() {
 
   const [isConnected, setIsConnected] = useState(false);
   const [slots, setSlots] = useState<ChatSlot[]>([]);
+  // Mirror of the latest committed `slots` so event handlers can read the
+  // current list synchronously without closing over stale state.
+  const slotsRef = useRef<ChatSlot[]>([]);
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
   // Track whether we've received the initial sessions_list from the backend.
   // Prevents the empty initial slots from overwriting localStorage.
@@ -175,21 +178,20 @@ export function useChatSocket() {
         case "session_destroyed": {
           const destroyedId = data.slot_id as string;
           clearStoredSlot(destroyedId);
-          setSlots((prev) => prev.filter((s) => s.info.slot_id !== destroyedId));
-          setActiveSlotId((prev) => {
-            if (prev === destroyedId) return null;
-            return prev;
-          });
-          // Fix: select another slot if active was destroyed
-          setSlots((prev) => {
-            setActiveSlotId((cur) => {
-              if (cur === destroyedId || cur === null) {
-                return prev.length > 0 ? prev[0].info.slot_id : null;
-              }
-              return cur;
-            });
-            return prev;
-          });
+          // Compute the slots that remain after removal once, outside any
+          // updater, so both setters below stay pure (safe under StrictMode /
+          // concurrent rendering, which may invoke updaters more than once).
+          const remaining = slotsRef.current.filter(
+            (s) => s.info.slot_id !== destroyedId,
+          );
+          setSlots(remaining);
+          // If the destroyed slot was active (or nothing was active), fall back
+          // to the first remaining slot; otherwise keep the current selection.
+          setActiveSlotId((cur) =>
+            cur === destroyedId || cur === null
+              ? (remaining[0]?.info.slot_id ?? null)
+              : cur,
+          );
           break;
         }
 
@@ -463,6 +465,7 @@ export function useChatSocket() {
   // Persist messages to localStorage on every change (but only after initial hydration
   // to avoid the empty initial state wiping saved messages before WS reconnects)
   useEffect(() => {
+    slotsRef.current = slots;
     if (hydrated.current) {
       saveSlotMessages(slots);
     }
