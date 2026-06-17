@@ -311,8 +311,10 @@ class WebSocketManager:
 
     # -- Connection handling --
 
-    async def connect(self, ws: WebSocket, token: str) -> Optional[_Connection]:
-        payload = decode_jwt(token)
+    async def connect(
+        self, ws: WebSocket, token: Optional[str], subprotocol: Optional[str] = None
+    ) -> Optional[_Connection]:
+        payload = decode_jwt(token) if token else None
         if payload is None:
             await ws.close(code=4001, reason="Invalid token")
             return None
@@ -326,7 +328,7 @@ class WebSocketManager:
             await ws.close(code=4003, reason="Forbidden")
             return None
 
-        await ws.accept()
+        await ws.accept(subprotocol=subprotocol)
         conn = _Connection(ws, user_id)
         self._connections.append(conn)
         logger.info("WS connected: user %s", user_id)

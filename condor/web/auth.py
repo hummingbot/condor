@@ -8,7 +8,7 @@ import secrets
 import time
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
@@ -105,6 +105,39 @@ def decode_jwt(token: str) -> Optional[dict]:
         return jwt.decode(token, _jwt_secret(), algorithms=[_ALGORITHM])
     except JWTError:
         return None
+
+
+# ── WebSocket auth (subprotocol header, query-param fallback) ──
+
+# Sentinel subprotocol that marks a JWT-carrying handshake. The client offers
+# ``[WS_AUTH_SUBPROTOCOL, <jwt>]`` as Sec-WebSocket-Protocol values so the token
+# stays out of the URL (and thus out of proxy/access logs and browser history).
+WS_AUTH_SUBPROTOCOL = "condor-jwt"
+
+
+def extract_ws_token(
+    ws: WebSocket, query_token: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Extract the auth JWT from a WebSocket handshake.
+
+    Prefers the ``Sec-WebSocket-Protocol`` subprotocol header: the client offers
+    ``[WS_AUTH_SUBPROTOCOL, <jwt>]`` and we read the token from the second value.
+    Falls back to the (deprecated, log-leaking) ``?token=`` query param so live
+    sessions and older clients keep working during rollout.
+
+    Returns ``(token, accept_subprotocol)``. ``accept_subprotocol`` is the
+    sentinel (never the token) when the subprotocol path is used and must be
+    echoed back in ``ws.accept(subprotocol=...)`` or the browser rejects the
+    handshake; it is ``None`` for the query-param fallback.
+    """
+    subprotocols = ws.scope.get("subprotocols", [])
+    if (
+        subprotocols
+        and subprotocols[0] == WS_AUTH_SUBPROTOCOL
+        and len(subprotocols) >= 2
+    ):
+        return subprotocols[1], WS_AUTH_SUBPROTOCOL
+    return query_token, None
 
 
 # ── FastAPI dependency ──

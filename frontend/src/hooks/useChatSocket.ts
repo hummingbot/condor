@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { getViewContext } from "@/lib/viewContext";
+import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
 
 export interface ToolCall {
   tool_call_id: string;
@@ -113,9 +114,11 @@ export function useChatSocket() {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = import.meta.env.DEV ? "localhost:8088" : window.location.host;
-    const url = `${protocol}//${host}/api/v1/ws/chat?token=${token}`;
+    const url = `${protocol}//${host}/api/v1/ws/chat`;
 
-    const ws = new WebSocket(url);
+    // Pass the JWT via the Sec-WebSocket-Protocol subprotocol header instead of
+    // the URL query string, so it never leaks via proxy logs or history.
+    const ws = new WebSocket(url, [WS_AUTH_SUBPROTOCOL, token]);
     wsRef.current = ws;
 
     ws.onopen = () => setIsConnected(true);

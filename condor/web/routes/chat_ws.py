@@ -22,7 +22,7 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
-from condor.web.auth import decode_jwt, get_current_user
+from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import (
     AGENT_MODES,
@@ -132,15 +132,21 @@ async def _web_permission_callback(
 
 
 @router.websocket("/ws/chat")
-async def chat_websocket(ws: WebSocket, token: str = Query(...)):
-    """Chat WebSocket endpoint. Authenticates via JWT query param."""
-    payload = decode_jwt(token)
+async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None)):
+    """Chat WebSocket endpoint.
+
+    Authenticates via the JWT passed in the ``Sec-WebSocket-Protocol``
+    subprotocol header (preferred), falling back to the deprecated ``?token=``
+    query param for older clients / live sessions.
+    """
+    auth_token, accept_subprotocol = extract_ws_token(ws, token)
+    payload = decode_jwt(auth_token) if auth_token else None
     if not payload:
         await ws.close(code=4001, reason="Invalid token")
         return
 
     user_id = int(payload["sub"])
-    await ws.accept()
+    await ws.accept(subprotocol=accept_subprotocol)
 
     # Send list of existing alive sessions on connect
     sessions = _get_user_sessions(user_id)
