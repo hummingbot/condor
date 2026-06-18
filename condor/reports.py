@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import re
 import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,32 @@ logger = logging.getLogger(__name__)
 # Module-level variable to capture the last saved report ID.
 # Safe in asyncio (single-threaded); reset before each routine execution.
 _last_report_id: str | None = None
+
+# The assistant/expert a report is attributed to (the producer). Reports stay in
+# one flat store; this stamps each entry so the dashboard can filter by who made
+# it. Runners set it around a routine's execution; save() reads it. Defaults to
+# "condor" (the chat) when nothing set it. Task-local, so concurrent runs don't
+# leak attribution into each other.
+_report_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "report_agent", default=None
+)
+
+
+@contextmanager
+def attribute_to(agent: str | None):
+    """Attribute reports saved within this block to ``agent`` (an assistant slug).
+
+    Usage::
+
+        with attribute_to("executor_manager"):
+            await routine.run_fn(cfg, ctx)   # any report it saves is stamped
+    """
+    token = _report_agent.set(agent or None)
+    try:
+        yield
+    finally:
+        _report_agent.reset(token)
+
 
 CHARTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 INDEX_FILE = CHARTS_DIR / "reports_index.json"
@@ -191,6 +219,7 @@ def list_reports(
     source_type: str | None = None,
     tag: str | None = None,
     search: str | None = None,
+    agent: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[dict], int]:
@@ -202,6 +231,8 @@ def list_reports(
         entries = [e for e in entries if e.get("source_type") == source_type]
     if tag:
         entries = [e for e in entries if tag in e.get("tags", [])]
+    if agent:
+        entries = [e for e in entries if e.get("agent") == agent]
     if search:
         q = search.lower()
         entries = [
@@ -403,6 +434,7 @@ class ReportBuilder:
                 "source_type": self._source_type,
                 "source_name": self._source_name,
                 "tags": self._tags,
+                "agent": _report_agent.get() or "condor",
             }
 
             entries = _read_index()

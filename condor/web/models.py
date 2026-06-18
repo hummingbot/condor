@@ -388,6 +388,7 @@ class ReportSummary(BaseModel):
     source_type: str = ""
     source_name: str = ""
     tags: list[str] = []
+    agent: str = ""  # producing assistant/expert (e.g. "condor", "executor_manager")
 
 
 class ReportsListResponse(BaseModel):

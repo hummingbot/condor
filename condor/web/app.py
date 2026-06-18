@@ -9,7 +9,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from condor.web.routes import agents, archived, auth, backtesting, bots, chat_ws, controller_performance, executors, market, portfolio, positions, reports, routines, servers, settings, transcribe, ws
+from condor.web.routes import (
+    agents,
+    archived,
+    auth,
+    backtesting,
+    bots,
+    chat_ws,
+    controller_performance,
+    executors,
+    experts,
+    market,
+    portfolio,
+    positions,
+    reports,
+    routines,
+    servers,
+    settings,
+    transcribe,
+    ws,
+)
 
 
 def _build_cors_origins() -> list[str]:
@@ -54,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(market.router, prefix="/api/v1")
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
+    app.include_router(experts.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(settings.router, prefix="/api/v1")
@@ -69,7 +89,9 @@ def create_app() -> FastAPI:
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
     if dist.is_dir():
         index_html = dist / "index.html"
-        app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="static-assets")
+        app.mount(
+            "/assets", StaticFiles(directory=str(dist / "assets")), name="static-assets"
+        )
 
         @app.get("/{full_path:path}")
         async def serve_spa(request: Request, full_path: str):
