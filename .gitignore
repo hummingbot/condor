@@ -179,3 +179,4 @@ trading_agents/*/store/
 # Node
 node_modules/
 /improvements/
+/features/
