@@ -7,6 +7,7 @@ All business logic lives in mcp_servers.condor.tools.*
 from mcp.server.fastmcp import FastMCP
 
 from mcp_servers.condor.middleware import handle_errors
+from mcp_servers.condor.tools import consult as consult_tool
 from mcp_servers.condor.tools import (
     context,
     memory,
@@ -19,6 +20,27 @@ from mcp_servers.condor.tools import (
 )
 
 mcp = FastMCP("condor")
+
+
+@mcp.tool()
+@handle_errors("consult expert")
+async def consult(expert: str, task: str, context: str = "") -> dict:
+    """Consult a specialized domain-expert agent and get its answer.
+
+    Use this to delegate domain work instead of doing it yourself: the expert runs
+    with its own focused tools and domain memory, then returns an answer you can
+    summarize for the user. Available experts are listed in your [EXPERTS] section.
+    The expert may execute actions (gated by the user's confirmation).
+
+    Args:
+        expert: Expert slug (e.g. "executor_manager").
+        task: The question or task for the expert, in plain language.
+        context: Optional extra context (relevant numbers, the user's intent).
+
+    Returns:
+        {"expert": "...", "answer": "..."} or {"error": "..."}.
+    """
+    return await consult_tool.consult(expert, task, context)
 
 
 @mcp.tool()
@@ -253,42 +275,32 @@ async def manage_skill(
 
     A skill is a markdown *playbook*: a reusable procedure with WHEN to apply it
     and the STEPS to take (e.g. "how to open a grid in a band-walk", "checklist
-    before raising leverage"). It is YOUR know-how about HOW to operate — distinct
-    from manage_memory, which is what you know about the USER. Skills are keyed by
-    the user and shared across the /agent chat and their trading agents. The index
-    of your skills is auto-injected as [SKILLS]; use "read" to pull a full playbook
-    before following it.
+    before raising leverage"). Skills are GENERAL to the assistant — a shared
+    library, the same for everyone using it — distinct from manage_memory, which
+    is what YOU learn about a specific USER (per-user). The skills index is
+    auto-injected as [SKILLS]; use "read" to pull a full playbook before following
+    it, and "create"/"edit" to capture or improve a reusable procedure.
 
-    A skill can REFERENCE a routine: set `references_routine` to the name of an
-    existing Condor routine (see manage_routines list) that the playbook executes.
-    "read" reports `routine_ok` — if false, the referenced routine no longer
-    exists; do NOT invoke it, fix the skill or create the routine first
-    (manage_routines create_routine). A playbook is advisory text; executing what
-    it describes (a routine, an executor) still goes through the normal risk/
-    confirmation controls. The skill is NOT a bypass.
-
-    WHEN TO CREATE/REFINE:
-    - When you discover a reusable procedure worth following next time. Capture the
-      WHEN (`when_to_use`) and the STEPS (`body`). One skill = one playbook.
-    - Refine an existing skill with "edit" as you learn a better way.
+    A skill can REFERENCE a routine: "read" reports `routine_ok` — if false, the
+    referenced routine no longer exists; do NOT invoke it. A playbook is advisory
+    text; executing what it describes (a routine, an executor) still goes through
+    the normal risk/confirmation controls. The skill is NOT a bypass.
 
     Actions:
-    - "create": Create/overwrite a skill (requires name, description, when_to_use,
-      body; optional references_routine).
     - "read": Get a full playbook + routine validation (requires name).
-    - "search": Keyword search over your skills (requires query).
+    - "search": Keyword search over the skills (requires query).
     - "list": Return the skills index (one line per skill).
-    - "edit": Patch fields of a skill (requires name + any of description,
-      when_to_use, body, references_routine; pass references_routine="" to clear).
+    - "create": Add/overwrite a skill (requires name, description, when_to_use, body).
+    - "edit": Patch fields of a skill (requires name + any of description/when_to_use/body/references_routine).
     - "delete": Remove a skill (requires name).
 
     Args:
-        action: create | read | search | list | edit | delete
+        action: read | search | list | create | edit | delete
         name: Short kebab/snake name (e.g. "grid-en-band-walk").
-        description: One-line summary of the playbook (for create/edit).
-        when_to_use: The trigger/condition that makes this skill relevant.
-        body: The steps to follow (markdown).
-        references_routine: Optional name of a routine this playbook executes.
+        description: One-line summary (create/edit).
+        when_to_use: The trigger/condition for the playbook (create/edit).
+        body: The steps / playbook text (create/edit).
+        references_routine: Optional routine name to link; "" clears it (create/edit).
         query: Search string (for search).
         max_entries: Cap for search results (default 30).
 
@@ -297,13 +309,13 @@ async def manage_skill(
     """
     return await skills.manage_skill(
         action,
-        name,
-        description,
-        when_to_use,
-        body,
-        references_routine,
-        query,
-        max_entries,
+        name=name,
+        description=description,
+        when_to_use=when_to_use,
+        body=body,
+        references_routine=references_routine,
+        query=query,
+        max_entries=max_entries,
     )
 
 

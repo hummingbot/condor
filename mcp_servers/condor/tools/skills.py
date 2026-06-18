@@ -1,21 +1,22 @@
-"""User skill tool — thin MCP wrapper over condor.memory.SkillStore.
+"""Skill tool — thin MCP wrapper over condor.memory.SkillStore.
 
-Resolves the store by ``settings.user_id`` (already injected into the MCP
-process) and derives the audit ``source`` from ``settings.agent_slug`` so the
-LLM never has to report who is writing. Mirrors ``tools/memory.py``.
+Skills are general to the assistant (playbooks shared by everyone using it), not
+per-user. The library is selected by ``settings.agent_slug`` (empty -> chat
+condor) and is editable at runtime: read/search/list plus create/edit/delete.
+Mirrors ``tools/memory.py``.
 """
 
 from condor.memory import SkillStore
 from mcp_servers.condor.settings import settings
 
 
+def _store() -> SkillStore:
+    # agent_slug selects this assistant's skill library (FEAT-003); empty -> chat.
+    return SkillStore(settings.agent_slug or None)
+
+
 def _source() -> str:
     return f"agent:{settings.agent_slug}" if settings.agent_slug else "chat"
-
-
-def _store() -> SkillStore:
-    # agent_slug selects this assistant's store (FEAT-003); empty -> chat condor.
-    return SkillStore(settings.user_id, settings.agent_slug or None)
 
 
 async def manage_skill(
@@ -74,12 +75,12 @@ async def manage_skill(
             fields["references_routine"] = references_routine
         if not fields:
             return {"error": "provide at least one field to edit"}
-        return store.edit(name, source=_source(), **fields)
+        return store.edit(name, **fields)
 
     elif action == "delete":
         if not name:
             return {"error": "name is required for delete"}
-        ok = store.delete(name, source=_source())
+        ok = store.delete(name)
         if not ok:
             return {"error": f"Skill '{name}' not found"}
         return {"deleted": True, "name": name}
