@@ -1,34 +1,35 @@
-"""User skill store — hybrid *playbooks* keyed by ``(assistant, user_id)``.
+"""Skill library — editable *playbooks* belonging to an assistant.
 
 A skill is a markdown *playbook*: know-how the agent can follow (when to apply +
 steps), optionally **referencing** an existing Condor routine for the executable
-part. This mirrors :class:`condor.memory.store.MemoryStore` 1:1 — one file per
-skill (YAML frontmatter + markdown body) plus a small ``SKILLS.md`` index that is
-cheap to inject into a prompt. The body is read on-demand via
-:meth:`SkillStore.read`, which also validates ``references_routine`` so the agent
-never invokes a routine that no longer exists.
+part. Skills are **general to the assistant**, not per user: a library belongs to
+an assistant and is shared across everyone using it. (What is *per-user* is memory
+— see :class:`condor.memory.store.MemoryStore`.)
+
+The library is **editable at runtime**: the agent can ``read``/``search`` skills
+and also ``create``/``edit``/``delete`` them via the ``manage_skill`` tool. Repo-
+shipped playbooks are simply files already present in the dir; they live in the
+same library and can be refined like any other (so edits are version-controlled).
 
 Like the memory store this is pure filesystem logic with **no** MCP/Telegram
 dependencies, so it runs from the main process (prompt injection) and from the
-MCP subprocess (the ``manage_skill`` tool) alike. It shares the per-(assistant, user)
-``audit.log`` with the memory store (target ``skill:<slug>``).
+MCP subprocess (the ``manage_skill`` tool) alike.
 
-Layout on disk (extends the memory layout, same per-assistant root)::
+Layout on disk — keyed by the assistant only (``agent_slug``), via
+:func:`condor.memory.paths.builtin_skills_root`::
 
-    {assistant_home}/store/user_{user_id}/
-        skills/
-            SKILLS.md            # injectable index: one line per skill
-            <slug>/
-                SKILL.md         # frontmatter + steps
-        audit.log                # SHARED with MemoryStore (target skill:<slug>)
+    {assistant_home}/skills/
+        <slug>/
+            SKILL.md         # frontmatter + steps
+
+where ``{assistant_home}`` is ``assistants/condor`` for the chat (``agent_slug``
+None) or ``trading_agents/<slug>`` for a trading agent / domain expert.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from .paths import store_root
-from .store import _parse_frontmatter, _render, _slugify, _utcnow, append_audit
+from .paths import builtin_skills_root
+from .store import _parse_frontmatter, _render, _slugify, _utcnow
 
 
 def _routine_exists(name: str) -> bool:
@@ -47,20 +48,17 @@ def _routine_exists(name: str) -> bool:
 
 
 class SkillStore:
-    """Per-assistant, per-user skill store.
+    """Per-assistant, editable skill library.
 
-    Keyed by ``(agent_slug, user_id)`` (FEAT-003), mirroring
-    :class:`condor.memory.store.MemoryStore`: the root is resolved by
-    :func:`condor.memory.paths.store_root` and the per-(assistant, user)
-    ``audit.log`` is shared with the memory store.
+    Keyed by ``agent_slug`` alone (skills are general to the assistant, not
+    per-user): ``None`` resolves the chat ``condor`` library, a slug resolves a
+    trading agent's / expert's library. The root is :func:`builtin_skills_root`.
     """
 
-    def __init__(self, user_id: int, agent_slug: str | None = None):
-        self.user_id = user_id
-        self.root = store_root(user_id, agent_slug)
-        self.skills_dir = self.root / "skills"
-        self.index_file = self.skills_dir / "SKILLS.md"
-        self.audit_file = self.root / "audit.log"  # shared with MemoryStore
+    def __init__(self, agent_slug: str | None = None):
+        self.agent_slug = agent_slug
+        # The assistant's skills dir (repo-shipped + runtime-created playbooks).
+        self.skills_dir = builtin_skills_root(agent_slug)
 
     # -- public API --------------------------------------------------------
 
@@ -73,15 +71,16 @@ class SkillStore:
         references_routine: str | None = None,
         source: str = "chat",
     ) -> dict:
-        """Create or overwrite a skill, then reindex and audit."""
+        """Create or overwrite a skill in this assistant's library."""
+        if not self.skills_dir:
+            return {"error": "this assistant has no skills library"}
         if not name or not description or not when_to_use or not body:
             return {"error": "name, description, when_to_use and body are required"}
 
         slug = _slugify(name)
-        skill_dir = self.skills_dir / slug
-        path = skill_dir / "SKILL.md"
+        path = self.skills_dir / slug / "SKILL.md"
 
-        # Preserve original created date on overwrite.
+        # Preserve the original created date on overwrite.
         created = _utcnow()
         if path.exists():
             existing_meta, _ = _parse_frontmatter(path.read_text())
@@ -99,10 +98,6 @@ class SkillStore:
             meta["references_routine"] = ref
 
         self._atomic_write(path, _render(meta, body.strip()))
-        self._reindex()
-        append_audit(
-            self.audit_file, "write", f"skill:{slug}", meta["description"], source
-        )
         result = {
             "saved": True,
             "name": slug,
@@ -114,19 +109,68 @@ class SkillStore:
             result["routine_ok"] = _routine_exists(ref)
         return result
 
+    def edit(self, name: str, **fields) -> dict:
+        """Patch fields of a skill, preserving the rest.
+
+        Accepts ``description``, ``when_to_use``, ``body``, ``references_routine``
+        (pass ``references_routine=""`` to clear the reference).
+        """
+        if not self.skills_dir:
+            return {"error": "this assistant has no skills library"}
+        slug = _slugify(name)
+        path = self.skills_dir / slug / "SKILL.md"
+        if not path.exists():
+            return {"error": f"Skill '{name}' not found"}
+
+        meta, body = _parse_frontmatter(path.read_text())
+        if fields.get("description"):
+            meta["description"] = fields["description"].strip().replace("\n", " ")
+        if fields.get("when_to_use"):
+            meta["when_to_use"] = fields["when_to_use"].strip().replace("\n", " ")
+        if fields.get("references_routine") is not None:
+            ref = fields["references_routine"].strip()
+            if ref:
+                meta["references_routine"] = ref
+            else:
+                meta.pop("references_routine", None)
+        if fields.get("body"):
+            body = fields["body"].strip()
+
+        self._atomic_write(path, _render(meta, body))
+        return self.read(slug) or {"saved": True, "name": slug}
+
+    def delete(self, name: str) -> bool:
+        """Delete a skill (and its now-empty folder)."""
+        if not self.skills_dir:
+            return False
+        slug = _slugify(name)
+        skill_dir = self.skills_dir / slug
+        path = skill_dir / "SKILL.md"
+        if not path.exists():
+            return False
+        path.unlink()
+        try:
+            skill_dir.rmdir()
+        except OSError:
+            pass  # other files present — leave the folder
+        return True
+
     def read(self, name: str) -> dict | None:
         """Return a skill's frontmatter + body, or ``None`` if absent.
 
         Validates ``references_routine`` against the routine registry and
         surfaces ``routine_ok`` so the agent won't invoke a broken reference.
         """
-        path = self.skills_dir / _slugify(name) / "SKILL.md"
+        slug = _slugify(name)
+        if not self.skills_dir:
+            return None
+        path = self.skills_dir / slug / "SKILL.md"
         if not path.exists():
             return None
         meta, body = _parse_frontmatter(path.read_text())
         ref = meta.get("references_routine")
         result = {
-            "name": meta.get("name", _slugify(name)),
+            "name": meta.get("name", slug),
             "description": meta.get("description", ""),
             "when_to_use": meta.get("when_to_use", ""),
             "body": body,
@@ -166,105 +210,34 @@ class SkillStore:
         return results
 
     def list_index(self) -> str:
-        """Return the contents of ``SKILLS.md`` (for prompt injection).
+        """Injectable skills index: one line per playbook the assistant ships.
 
-        Empty string when the user has no skills yet, so callers inject nothing
-        and avoid noise for new users.
+        Computed live from disk (never persisted). Empty string when the
+        assistant ships no skills, so callers add no noise.
         """
-        if not self.index_file.exists():
-            # Self-heal: rebuild from disk if skills exist but the index is gone.
-            if self.skills_dir.exists() and any(self.skills_dir.glob("*/SKILL.md")):
-                self._reindex()
-            else:
-                return ""
-        return self.index_file.read_text().strip()
-
-    def edit(self, name: str, source: str = "chat", **fields) -> dict:
-        """Patch one or more fields of a skill, preserving the rest.
-
-        Accepts ``description``, ``when_to_use``, ``body``, ``references_routine``
-        (pass ``references_routine=""`` to clear the reference).
-        """
-        slug = _slugify(name)
-        path = self.skills_dir / slug / "SKILL.md"
-        if not path.exists():
-            return {"error": f"Skill '{name}' not found"}
-
-        meta, body = _parse_frontmatter(path.read_text())
-        if "description" in fields and fields["description"]:
-            meta["description"] = fields["description"].strip().replace("\n", " ")
-        if "when_to_use" in fields and fields["when_to_use"]:
-            meta["when_to_use"] = fields["when_to_use"].strip().replace("\n", " ")
-        if "references_routine" in fields and fields["references_routine"] is not None:
-            ref = fields["references_routine"].strip()
-            if ref:
-                meta["references_routine"] = ref
-            else:
-                meta.pop("references_routine", None)
-        if "body" in fields and fields["body"]:
-            body = fields["body"].strip()
-
-        self._atomic_write(path, _render(meta, body))
-        self._reindex()
-        append_audit(
-            self.audit_file,
-            "write",
-            f"skill:{slug}",
-            meta.get("description", ""),
-            source,
-        )
-        return self.read(slug) or {"saved": True, "name": slug}
-
-    def delete(self, name: str, source: str = "user") -> bool:
-        """Delete a skill (and its folder), then reindex and audit."""
-        slug = _slugify(name)
-        skill_dir = self.skills_dir / slug
-        path = skill_dir / "SKILL.md"
-        if not path.exists():
-            return False
-        meta, _ = _parse_frontmatter(path.read_text())
-        path.unlink()
-        # Remove the now-empty skill folder (ignore if other files were added).
-        try:
-            skill_dir.rmdir()
-        except OSError:
-            pass
-        self._reindex()
-        append_audit(
-            self.audit_file,
-            "delete",
-            f"skill:{slug}",
-            meta.get("description", ""),
-            source,
-        )
-        return True
+        return "\n".join(self._index_lines()).strip()
 
     # -- internals ---------------------------------------------------------
 
     def _iter_skills(self):
-        """Yield (meta, body) for every skill, sorted by created date."""
-        if not self.skills_dir.exists():
+        """Yield (meta, body) for every skill, sorted by slug.
+
+        Authored playbooks have no per-user ``created`` ordering, so slug order
+        gives a stable injection order.
+        """
+        if not self.skills_dir or not self.skills_dir.exists():
             return
-        files = sorted(self.skills_dir.glob("*/SKILL.md"))
-        parsed = []
-        for f in files:
+        for f in sorted(self.skills_dir.glob("*/SKILL.md")):
             try:
                 meta, body = _parse_frontmatter(f.read_text())
             except Exception:
                 continue
             meta.setdefault("name", f.parent.name)
-            parsed.append((meta, body))
-        parsed.sort(key=lambda mb: mb[0].get("created", ""))
-        yield from parsed
+            yield meta, body
 
-    def _reindex(self) -> None:
-        """Regenerate SKILLS.md from the skill files on disk.
-
-        Rebuilds from the source of truth (not an in-memory cache) so concurrent
-        writers each reconstruct the full index from what is actually on disk.
-        """
-        lines = ["# User Skills Index", ""]
-        count = 0
+    def _index_lines(self) -> list[str]:
+        """One index line per skill (name + trigger + optional routine link)."""
+        lines: list[str] = []
         for meta, _ in self._iter_skills():
             name = meta.get("name", "")
             when = meta.get("when_to_use", "")
@@ -273,17 +246,10 @@ class SkillStore:
             if ref:
                 line += f"  (→ routine: {ref})"
             lines.append(line)
-            count += 1
-        if count == 0:
-            # Nothing to index — drop a stale index so list_index() returns "".
-            if self.index_file.exists():
-                self.index_file.unlink()
-            return
-        self.skills_dir.mkdir(parents=True, exist_ok=True)
-        self._atomic_write(self.index_file, "\n".join(lines) + "\n")
+        return lines
 
     @staticmethod
-    def _atomic_write(path: Path, text: str) -> None:
+    def _atomic_write(path, text: str) -> None:
         """Write atomically (tmp file + os.replace) within the same dir."""
         import os
 

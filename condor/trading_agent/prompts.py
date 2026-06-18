@@ -62,9 +62,8 @@ SKILLS & ROUTINES:
 - A skill may reference a routine (shown as "→ routine: <name>"); run it with
   manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
   to discover routines; routines tagged "agent" are local to your strategy.
-- If you discover a reusable procedure, save it with manage_skill(action="create",
-  name="...", description="one line", when_to_use="the trigger", body="the steps").
-  This is HOW-TO know-how — distinct from [LEARNINGS] (market/execution facts).
+- Skills are read-only playbooks shipped with this agent — follow them, you can't
+  create or edit them. Operational facts you learn go to [LEARNINGS] (journal).
 
 MEMORY (about the user, NOT operational learnings):
 - [USER MEMORY] below is what is known about the OWNER (preferences, profile).

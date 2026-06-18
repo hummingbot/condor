@@ -20,10 +20,33 @@ log = logging.getLogger(__name__)
 
 ACP_COMMANDS: dict[str, str] = {
     "claude-code": "claude-agent-acp",
+    "claude-acp": "claude-agent-acp",  # model-configurable form: claude-acp:<model>
     "gemini": "npx @google/gemini-cli --acp",
     "copilot": "npx @github/copilot --acp --stdio",
-    "codex": "npx @zed-industries/codex-acp"
+    "codex": "npx @zed-industries/codex-acp",
 }
+
+# ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").
+# The suffix is passed through verbatim as ANTHROPIC_MODEL — claude-agent-acp /
+# Claude Code resolve aliases ("opus", "sonnet", "haiku") and full ids alike, so
+# there are no hardcoded model ids to age here.
+_CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
+
+
+def resolve_acp(agent_key: str) -> tuple[str, dict[str, str]]:
+    """Resolve an ACP ``agent_key`` to its (command, env-overrides).
+
+    Supports an optional model suffix for Claude, e.g. ``"claude-acp:opus"`` or
+    ``"claude-acp:claude-opus-4-8"`` → ``ANTHROPIC_MODEL`` is set so the ACP CLI
+    uses that model. A bare key ("claude-code"/"claude-acp") sets no model, so the
+    CLI keeps its own default. Non-Claude bases ignore any suffix.
+    """
+    base, _, model = agent_key.partition(":")
+    command = ACP_COMMANDS.get(base, ACP_COMMANDS["claude-code"])
+    env: dict[str, str] = {}
+    if model and base in _CLAUDE_ACP_BASES:
+        env["ANTHROPIC_MODEL"] = model
+    return command, env
 
 
 # --- Event types yielded by prompt_stream ---
@@ -66,7 +89,9 @@ class Heartbeat:
     elapsed_seconds: float
 
 
-ACPEvent = TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat
+ACPEvent = (
+    TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat
+)
 
 
 # Type alias for the permission callback
@@ -97,7 +122,9 @@ class ACPClient:
         self._event_queue: asyncio.Queue[ACPEvent | None] = asyncio.Queue()
         self._current_req_id: int | None = None  # tracks in-flight prompt request
         self._peer.register_handler("session/update", self._on_session_update)
-        self._peer.register_handler("session/request_permission", self._on_request_permission)
+        self._peer.register_handler(
+            "session/request_permission", self._on_request_permission
+        )
 
     # --- Lifecycle ---
 
@@ -300,7 +327,9 @@ class ACPClient:
 
         loop = asyncio.get_event_loop()
         start_time = loop.time()
-        max_duration = 1860  # 31 min hard ceiling (slightly above session-level timeout)
+        max_duration = (
+            1860  # 31 min hard ceiling (slightly above session-level timeout)
+        )
 
         while True:
             try:
@@ -329,7 +358,11 @@ class ACPClient:
     # --- Reverse-RPC handlers ---
 
     def _on_session_update(
-        self, sessionId: str, update: dict[str, Any], _meta: dict | None = None, **kw: Any
+        self,
+        sessionId: str,
+        update: dict[str, Any],
+        _meta: dict | None = None,
+        **kw: Any,
     ) -> None:
         kind = update.get("sessionUpdate")
         if kind == "agent_message_chunk":
@@ -381,5 +414,7 @@ class ACPClient:
             if opt.get("kind") in ("allow_once", "allow_always"):
                 return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
         if options:
-            return {"outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}}
+            return {
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+            }
         return {"outcome": {"outcome": "cancelled"}}

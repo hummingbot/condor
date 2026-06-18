@@ -23,8 +23,9 @@ from pathlib import Path
 # Anchor to the project root (…/condor) so paths are stable regardless of cwd.
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# Sentinel home for the interactive chat assistant. Its builder modes
-# (agent_builder / routine_builder) deliberately share this same store.
+# Sentinel home for the interactive chat assistant. It is the single
+# interactive agent; its builder capabilities ship as built-in skills (FEAT-004,
+# see ``builtin_skills_root``) rather than as separate selectable assistants.
 _CHAT_ASSISTANT = "condor"
 
 
@@ -39,6 +40,26 @@ def store_root(user_id: int, agent_slug: str | None = None) -> Path:
     else:
         base = _PROJECT_ROOT / "assistants" / _CHAT_ASSISTANT
     return base / "store" / f"user_{user_id}"
+
+
+def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
+    """Read-only, repo-shipped skills for an agent (FEAT-004).
+
+    These are authored playbooks that ship with Condor and are available without
+    being copied into the mutable per-user store. They live *beside* the agent's
+    store, not inside it — one ``skills/<slug>/SKILL.md`` per playbook:
+
+    - chat ``condor`` (``agent_slug`` None) → ``assistants/condor/skills/``
+      (e.g. agent_builder, routine_builder)
+    - a trading agent / domain expert (``agent_slug`` set) →
+      ``trading_agents/<slug>/skills/`` (e.g. an executor_manager's playbooks)
+
+    Merged into the agent's [SKILLS]/[DOMAIN SKILLS] index alongside its learned
+    skills; read-only (create/edit/delete refuse these slugs).
+    """
+    if agent_slug:
+        return _PROJECT_ROOT / "trading_agents" / agent_slug / "skills"
+    return _PROJECT_ROOT / "assistants" / _CHAT_ASSISTANT / "skills"
 
 
 def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:

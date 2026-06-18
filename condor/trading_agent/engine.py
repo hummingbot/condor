@@ -17,13 +17,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from condor.acp.client import (
-    ACP_COMMANDS,
     ACPClient,
     Heartbeat,
     PromptDone,
     TextChunk,
     ToolCallEvent,
     ToolCallUpdate,
+    resolve_acp,
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
@@ -305,13 +305,13 @@ class TickEngine:
         try:
             from condor.memory import MemoryStore, SkillStore
 
-            # Per-assistant store (FEAT-003): this agent's own memory/skills only,
-            # keyed by its strategy slug — not shared with the chat or other agents.
+            # Per-assistant memory (FEAT-003): this agent's own memory, keyed by
+            # its strategy slug — not shared with the chat or other agents.
             slug = self.strategy.slug
             user_memory = MemoryStore(self.user_id, slug).list_index()
-            # Skills read fresh too: the agent can create/refine its own skills,
-            # so a skill written this session must show up on the next tick.
-            skills_index = SkillStore(self.user_id, slug).list_index()
+            # Skills are read-only playbooks shipped with this agent (general to
+            # the assistant, keyed by slug only — not per-user, not learned).
+            skills_index = SkillStore(slug).list_index()
         except Exception:
             pass
 
@@ -526,12 +526,14 @@ class TickEngine:
                 tool_filter_mode=tool_filter_mode,
             )
         else:
-            agent_cmd = ACP_COMMANDS.get(agent_key, ACP_COMMANDS["claude-code"])
+            # Supports a Claude model suffix, e.g. "claude-acp:opus".
+            agent_cmd, model_env = resolve_acp(agent_key)
             return ACPClient(
                 command=agent_cmd,
                 working_dir=get_project_dir(),
                 mcp_servers=mcp_servers,
                 permission_callback=permission_cb,
+                extra_env=model_env or None,
             )
 
     # ------------------------------------------------------------------

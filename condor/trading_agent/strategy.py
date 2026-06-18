@@ -53,7 +53,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
         return {}, text
 
     frontmatter_str = text[3:end].strip()
-    body = text[end + 3:].strip()
+    body = text[end + 3 :].strip()
 
     try:
         meta = yaml.safe_load(frontmatter_str) or {}
@@ -66,7 +66,9 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 def _render_frontmatter(meta: dict, body: str) -> str:
     """Render YAML frontmatter + markdown body."""
-    frontmatter = yaml.dump(meta, default_flow_style=False, allow_unicode=True, sort_keys=False).strip()
+    frontmatter = yaml.dump(
+        meta, default_flow_style=False, allow_unicode=True, sort_keys=False
+    ).strip()
     return f"---\n{frontmatter}\n---\n\n{body}\n"
 
 
@@ -75,6 +77,12 @@ def _load_strategy_from_file(path: Path, fallback_id: str = "") -> Strategy | No
     try:
         text = path.read_text()
         meta, body = _parse_frontmatter(text)
+        # A dir's AGENT.md may instead define a domain *expert* (role: expert),
+        # not a tick-loop strategy. Skip those so experts never get launched as
+        # strategies. (On case-insensitive filesystems agent.md == AGENT.md, so
+        # the frontmatter role — not the filename case — is the discriminator.)
+        if meta.get("role") == "expert":
+            return None
         return Strategy(
             id=meta.get("id", fallback_id),
             name=meta.get("name", ""),
@@ -101,7 +109,9 @@ class Strategy:
     instructions: str  # The strategy logic text for the LLM
     skills: list[str] = field(default_factory=list)  # Optional skill names
     default_config: dict[str, Any] = field(default_factory=dict)
-    default_trading_context: str = ""  # Default natural language trading context for new sessions
+    default_trading_context: str = (
+        ""  # Default natural language trading context for new sessions
+    )
     created_by: int = 0  # user_id
     created_at: str = ""  # ISO timestamp
 
@@ -132,6 +142,7 @@ class StrategyStore:
         self._migrate_legacy_strategies()
         # Move old hex-ID agent folders to _legacy/
         from .journal import migrate_legacy_agents
+
         migrate_legacy_agents()
 
     def _migrate_legacy_strategies(self) -> None:
@@ -163,7 +174,9 @@ class StrategyStore:
 
         # Remove strategies/ dir if empty
         try:
-            if _LEGACY_STRATEGIES_DIR.exists() and not any(_LEGACY_STRATEGIES_DIR.iterdir()):
+            if _LEGACY_STRATEGIES_DIR.exists() and not any(
+                _LEGACY_STRATEGIES_DIR.iterdir()
+            ):
                 _LEGACY_STRATEGIES_DIR.rmdir()
                 log.info("Removed empty strategies/ directory")
         except Exception:
@@ -196,7 +209,12 @@ class StrategyStore:
             created_by=created_by,
         )
         self._save(strategy)
-        log.info("Created strategy %s: %s (dir: %s)", strategy.id, strategy.name, strategy.slug)
+        log.info(
+            "Created strategy %s: %s (dir: %s)",
+            strategy.id,
+            strategy.name,
+            strategy.slug,
+        )
         return strategy
 
     def get(self, strategy_id: str) -> Strategy | None:
@@ -243,7 +261,9 @@ class StrategyStore:
             agent_md.unlink()
             # Remove the agent dir if it's now empty (no sessions)
             agent_dir = strategy.agent_dir
-            has_sessions = (agent_dir / "sessions").exists() or (agent_dir / "trading_sessions").exists()
+            has_sessions = (agent_dir / "sessions").exists() or (
+                agent_dir / "trading_sessions"
+            ).exists()
             if not has_sessions:
                 try:
                     shutil.rmtree(agent_dir)

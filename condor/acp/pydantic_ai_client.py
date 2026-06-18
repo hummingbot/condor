@@ -51,13 +51,16 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     model_lower = model_name.lower()
 
     # Cloud providers always get full access (they're powerful enough)
-    if any(provider in model_lower for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]):
+    if any(
+        provider in model_lower
+        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]
+    ):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
 
     # Extract parameter count (e.g., "7b", "14b", "72b", "32b")
     # Matches patterns like: 7b, 8b, 14b, 32b, 72b, 1.5b, 2.7b, etc.
-    size_match = re.search(r'(\d+(?:\.\d+)?)\s*[bB](?![a-z])', model_lower)
+    size_match = re.search(r"(\d+(?:\.\d+)?)\s*[bB](?![a-z])", model_lower)
 
     if size_match:
         size = float(size_match.group(1))
@@ -89,10 +92,13 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     log.info(f"Unknown model size, defaulting → tool_filter_mode=moderate")
     return "moderate"
 
+
 # Model prefix → pydantic-ai model string mapping
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
-PYDANTIC_AI_PREFIXES = frozenset({"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"})
+PYDANTIC_AI_PREFIXES = frozenset(
+    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"}
+)
 
 # Default base URLs for local model providers and OpenRouter
 DEFAULT_BASE_URLS: dict[str, str] = {
@@ -161,13 +167,21 @@ class PydanticAIClient:
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
         base_url: str | None = None,
-        tool_filter_mode: str | None = None,  # "essential", "moderate", "full", or None for auto-detect
+        tool_filter_mode: (
+            str | None
+        ) = None,  # "essential", "moderate", "full", or None for auto-detect
+        allowed_tools: (
+            list[str] | None
+        ) = None,  # restrict the agent to these tool names
     ):
         self.model_name = model
         self.mcp_server_configs = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
         self.base_url = base_url
+        # When set, the agent only sees tools whose name is in this allowlist
+        # (used by domain-expert consults to scope an agent to one domain).
+        self.allowed_tools = set(allowed_tools) if allowed_tools else None
         # Auto-detect filter mode based on model if not explicitly set
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
@@ -214,7 +228,9 @@ class PydanticAIClient:
         # including a cold first request where the model is still loading into
         # memory. Default 600s; override via LOCAL_MODEL_READ_TIMEOUT.
         _read_timeout = float(os.environ.get("LOCAL_MODEL_READ_TIMEOUT", "600"))
-        _local_timeout = httpx.Timeout(connect=30.0, read=_read_timeout, write=30.0, pool=30.0)
+        _local_timeout = httpx.Timeout(
+            connect=30.0, read=_read_timeout, write=30.0, pool=30.0
+        )
 
         # OpenRouter: OpenAI-compatible cloud gateway, requires API key.
         # Handled before the generic DEFAULT_BASE_URLS branch because that branch
@@ -235,19 +251,25 @@ class PydanticAIClient:
                 api_key=api_key,
                 timeout=_local_timeout,
             )
-            return OpenAIModel(model_id, provider=OpenAIProvider(openai_client=openai_client))
+            return OpenAIModel(
+                model_id, provider=OpenAIProvider(openai_client=openai_client)
+            )
 
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
             if not model_id:
-                model_id = self._resolve_default_local_model(prefix=prefix, base_url=base_url)
+                model_id = self._resolve_default_local_model(
+                    prefix=prefix, base_url=base_url
+                )
             openai_client = AsyncOpenAI(
                 base_url=base_url,
                 api_key="not-needed",
                 timeout=_local_timeout,
             )
-            return OpenAIModel(model_id, provider=OpenAIProvider(openai_client=openai_client))
+            return OpenAIModel(
+                model_id, provider=OpenAIProvider(openai_client=openai_client)
+            )
 
         # OpenAI with custom base_url (vLLM, TGI, etc.)
         if prefix == "openai" and base_url:
@@ -256,10 +278,13 @@ class PydanticAIClient:
                 api_key="not-needed",
                 timeout=_local_timeout,
             )
-            return OpenAIModel(model_id, provider=OpenAIProvider(openai_client=openai_client))
+            return OpenAIModel(
+                model_id, provider=OpenAIProvider(openai_client=openai_client)
+            )
 
         # Standard pydantic-ai resolution (openai, groq, anthropic, google)
         from pydantic_ai.models import infer_model
+
         return infer_model(self.model_name)
 
     def _resolve_default_local_model(self, prefix: str, base_url: str) -> str:
@@ -364,12 +389,15 @@ class PydanticAIClient:
             self._mcp_servers.append(mcp_server)
 
         model = self._build_model()
-        self._agent = Agent(model, toolsets=toolsets)
+        prepare = self._prepare_tools if self.allowed_tools else None
+        self._agent = Agent(model, toolsets=toolsets, prepare_tools=prepare)
 
         # Resolve the global semaphore for this server's base URL so all client
         # instances targeting the same inference server share one request slot.
         prefix = self.model_name.split(":", 1)[0]
-        resolved_base_url = self.base_url or DEFAULT_BASE_URLS.get(prefix, self.model_name)
+        resolved_base_url = self.base_url or DEFAULT_BASE_URLS.get(
+            prefix, self.model_name
+        )
         self._request_semaphore = _get_server_semaphore(resolved_base_url)
 
         # Spin up a dedicated background task to own the MCP server cancel scopes.
@@ -392,6 +420,30 @@ class PydanticAIClient:
             self.model_name,
             len(self._mcp_servers),
         )
+
+    async def _prepare_tools(self, ctx: Any, tool_defs: list) -> list:
+        """Filter tools to ``self.allowed_tools`` before each run.
+
+        pydantic-ai calls this with the full ``list[ToolDefinition]`` discovered
+        from all MCP servers; we keep only those whose name is allowlisted. Tool
+        names may be namespaced by the MCP layer (e.g. ``mcp__condor__manage_skill``),
+        so we match on either the full name or its last ``__``-delimited segment.
+        """
+        allowed = self.allowed_tools or set()
+
+        def _ok(name: str) -> bool:
+            return name in allowed or name.rsplit("__", 1)[-1] in allowed
+
+        kept = [td for td in tool_defs if _ok(td.name)]
+        dropped = len(tool_defs) - len(kept)
+        if dropped:
+            log.debug(
+                "Tool allowlist: kept %d/%d tools (%s)",
+                len(kept),
+                len(tool_defs),
+                ", ".join(sorted(allowed)),
+            )
+        return kept
 
     async def _run_mcp_lifecycle(self) -> None:
         """Background task that holds the MCP server context open."""
@@ -464,11 +516,15 @@ class PydanticAIClient:
                             elapsed = time.monotonic() - start_time
                             yield Heartbeat(elapsed_seconds=elapsed)
                             # Extract tool return results from request parts
-                            if hasattr(node, 'request') and node.request:
+                            if hasattr(node, "request") and node.request:
                                 for part in node.request.parts:
                                     if isinstance(part, ToolReturnPart):
                                         content = part.content
-                                        output_str = content if isinstance(content, str) else str(content)
+                                        output_str = (
+                                            content
+                                            if isinstance(content, str)
+                                            else str(content)
+                                        )
                                         yield ToolCallUpdate(
                                             tool_call_id=part.tool_call_id or "",
                                             status="completed",
@@ -490,7 +546,8 @@ class PydanticAIClient:
                                         tool_call_info = {
                                             "tool": tool_name,
                                             "title": tool_name,
-                                            "input": _tool_args_to_dict(part.args) or {},
+                                            "input": _tool_args_to_dict(part.args)
+                                            or {},
                                         }
                                         options = [
                                             {"optionId": "allow", "kind": "allow_once"},
@@ -500,7 +557,10 @@ class PydanticAIClient:
                                             tool_call_info, options
                                         )
                                         outcome = result.get("outcome", {})
-                                        if isinstance(outcome, dict) and outcome.get("outcome") == "cancelled":
+                                        if (
+                                            isinstance(outcome, dict)
+                                            and outcome.get("outcome") == "cancelled"
+                                        ):
                                             yield ToolCallEvent(
                                                 tool_call_id=tool_id,
                                                 title=tool_name,
