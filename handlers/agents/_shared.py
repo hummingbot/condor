@@ -103,6 +103,8 @@ def discover_assistants() -> dict[str, dict[str, str]]:
 
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
+    "claude-acp:opus": {"label": "Claude (ACP) — Opus"},
+    "claude-acp:sonnet": {"label": "Claude (ACP) — Sonnet"},
     "gemini": {"label": "Gemini CLI"},
     "copilot": {"label": "GitHub Copilot CLI"},
     "codex": {"label": "ChatGPT Codex"},
@@ -113,7 +115,25 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "openrouter:": {"label": "OpenRouter — Pick Model"},
 }
 
-DEFAULT_AGENT = "claude-code"
+
+def _default_agent() -> str:
+    """Resolve the fallback agent_key for users who haven't picked a model.
+
+    Precedence: ``CONDOR_DEFAULT_AGENT`` env > condor ``AGENT.md`` frontmatter
+    ``agent_key`` > ``"claude-code"``. A user's own /agent → Change LLM choice
+    (``agent_llm``) still overrides this at runtime; this is only the default.
+    Examples for the frontmatter / env: ``claude-code``, ``claude-acp:opus``,
+    ``ollama:qwen3:32b``.
+    """
+    import os
+
+    meta, _ = _load_assistant_full("condor")
+    return (
+        os.environ.get("CONDOR_DEFAULT_AGENT") or meta.get("agent_key") or "claude-code"
+    )
+
+
+DEFAULT_AGENT = _default_agent()
 
 # -- Agent modes (auto-discovered) --
 
@@ -126,53 +146,6 @@ def reload_assistants() -> None:
     _assistant_cache.clear()
     AGENT_MODES.clear()
     AGENT_MODES.update(discover_assistants())
-
-
-# -- Mode context builders --
-
-# Registry of functions that enrich a mode's prompt with dynamic data.
-# Key = assistant name, value = callable() -> str with extra context.
-_MODE_CONTEXT_BUILDERS: dict[str, Any] = {}
-
-
-def _build_agent_builder_context() -> str:
-    """Append live strategy/agent data to the agent_builder prompt."""
-    from condor.trading_agent.engine import get_all_engines
-    from condor.trading_agent.strategy import StrategyStore
-
-    sections: list[str] = []
-
-    store = StrategyStore()
-    strategies = store.list_all()
-    if strategies:
-        strat_lines = ["Existing strategies:"]
-        for s in strategies:
-            skills = ", ".join(s.skills) if s.skills else "none"
-            pair = s.default_config.get("trading_pair", "")
-            strat_lines.append(
-                f"- {s.name} (id={s.id}, agent={s.agent_key}, skills={skills}, pair={pair})"
-            )
-        sections.append("\n".join(strat_lines))
-    else:
-        sections.append(
-            "No strategies exist yet. Help the user create their first one."
-        )
-
-    engines = get_all_engines()
-    if engines:
-        agent_lines = ["Running agents:"]
-        for eid, engine in engines.items():
-            info = engine.get_info()
-            agent_lines.append(
-                f"- {info['strategy']} ({eid}): {info['status']}, "
-                f"PnL=${info['daily_pnl']:+.2f}, snapshots={info['tick_count']}, "
-                f"open={info['open_executors']}"
-            )
-        sections.append("\n".join(agent_lines))
-    else:
-        sections.append("No agents are currently running.")
-
-    return "\n\n".join(sections)
 
 
 # -- Compact prompt templates --
@@ -582,24 +555,95 @@ def build_initial_context(
     except Exception:
         pass  # Memory is advisory — never block session start on it.
 
-    # Skills index — playbooks the chat assistant can follow (know-how + steps),
-    # from the chat's own store (FEAT-003), not shared with the user's trading
-    # agents. Inject only the index; bodies are read on demand via
-    # manage_skill(action="read"). Nothing injected when there are none.
+    # Skills index — read-only playbooks the chat assistant ships (know-how +
+    # steps). Skills are general to the assistant, not learned per user; inject
+    # only the index, bodies are read on demand via manage_skill(action="read").
+    # Nothing injected when the assistant ships none.
     try:
         from condor.memory import SkillStore
 
-        skills_index = SkillStore(user_id).list_index()
+        skills_index = SkillStore().list_index()
         if skills_index:
             sections.append(
                 "[SKILLS — playbooks you can follow]\n"
-                "Before a known flow, read the full playbook with "
-                'manage_skill(action="read", name="..."). If you discover a reusable '
-                "procedure, save it with "
-                'manage_skill(action="create", name="...", when_to_use="...", body="...").\n\n'
+                "These are read-only playbooks shipped with the assistant. Before a "
+                "known flow, read the full playbook with "
+                'manage_skill(action="read", name="...") and follow its steps.\n\n'
                 f"{skills_index}"
             )
     except Exception:
         pass  # Skills are advisory — never block session start on them.
+
+    # Experts index — domain-expert agents condor can consult (FEAT: coordinator
+    # model). condor delegates domain work via consult(...) instead of holding the
+    # domain's tools/context itself. Inject only the index; nothing when none exist.
+    try:
+        from condor.trading_agent.experts import ExpertStore
+
+        experts_index = ExpertStore().list_index()
+        if experts_index:
+            sections.append(
+                "[EXPERTS — domain agents you can consult]\n"
+                "You are a coordinator. When a task is squarely in an expert's "
+                "domain, delegate it with "
+                'consult(expert="<slug>", task="...", context="..."). The expert runs '
+                "with its own focused tools and domain memory and returns an answer; "
+                "summarize that answer for the user rather than holding the domain "
+                "context yourself.\n\n"
+                f"{experts_index}"
+            )
+    except Exception:
+        pass  # Experts are advisory — never block session start on them.
+
+    return "\n\n".join(sections)
+
+
+def build_expert_context(
+    expert: "Expert",  # noqa: F821 — condor.trading_agent.experts.Expert
+    user_id: int,
+    task: str,
+    context: str = "",
+) -> str:
+    """Assemble the prompt for a domain-expert consult.
+
+    Mirrors :func:`build_initial_context` but for a worker run: the expert's own
+    instructions become the system prompt, its domain-scoped memory/skills indexes
+    are injected (keyed by the expert slug, FEAT-003), and the consult task is
+    appended last. Read on demand via manage_memory/manage_skill inside the run.
+    """
+    sections: list[str] = [expert.instructions]
+
+    try:
+        from condor.memory import MemoryStore
+
+        memory_index = MemoryStore(user_id, expert.slug).list_index()
+        if memory_index:
+            sections.append(
+                "[DOMAIN MEMORY — what you remember in this domain]\n"
+                'Read a full memory with manage_memory(action="read", name="..."). '
+                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
+                f"{memory_index}"
+            )
+    except Exception:
+        pass
+
+    try:
+        from condor.memory import SkillStore
+
+        skills_index = SkillStore(expert.slug).list_index()
+        if skills_index:
+            sections.append(
+                "[DOMAIN SKILLS — playbooks you can follow]\n"
+                "Read-only playbooks shipped with this domain expert. Read one with "
+                'manage_skill(action="read", name="...") and follow its steps.\n\n'
+                f"{skills_index}"
+            )
+    except Exception:
+        pass
+
+    consult = f"[CONSULT REQUEST]\n{task}"
+    if context:
+        consult += f"\n\n[CONTEXT FROM CONDOR]\n{context}"
+    sections.append(consult)
 
     return "\n\n".join(sections)

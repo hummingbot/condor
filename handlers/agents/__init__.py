@@ -111,12 +111,10 @@ async def agent_callback_handler(
     data = query.data
     action = data.split(":", 1)[1] if ":" in data else data
 
-    # Mode switching
+    # Start a session (single condor agent)
     if action.startswith("mode:"):
         mode = action.split(":", 1)[1]
         await _handle_mode_start(update, context, mode)
-    elif action == "switch_mode":
-        await _handle_switch_mode_menu(update, context)
 
     # Settings
     elif action == "settings":
@@ -172,7 +170,6 @@ async def agent_callback_handler(
         await query.message.edit_text(text)
 
 
-
 async def _handle_mode_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -183,10 +180,6 @@ async def _handle_mode_start(
     message = query.message if query else update.message
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-
-    # Backward compat: treat "trading" as "agent_builder"
-    if mode == "trading":
-        mode = "agent_builder"
 
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
@@ -238,24 +231,7 @@ async def _handle_mode_start(
         await message.edit_text(f"Failed to start agent: {e}")
 
 
-async def _handle_switch_mode_menu(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Show mode selection menu."""
-    from .menu import _mode_selection_keyboard
-
-    query = update.callback_query
-    lines = ["Select a mode:\n"]
-    for key, info in AGENT_MODES.items():
-        lines.append(f"• {info['label']} — {info['description']}")
-    await query.message.edit_text(
-        "\n".join(lines), reply_markup=_mode_selection_keyboard()
-    )
-
-
-async def _handle_settings(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def _handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show settings sub-menu with LLM picker."""
     from .menu import _settings_keyboard
 
@@ -436,9 +412,7 @@ async def _resolve_openrouter_typed_slug(
                 InlineKeyboardButton(
                     "Use this model", callback_data="agent:or_type_confirm"
                 ),
-                InlineKeyboardButton(
-                    "Cancel", callback_data="agent:or_type_cancel"
-                ),
+                InlineKeyboardButton("Cancel", callback_data="agent:or_type_cancel"),
             ]
         ]
     )
@@ -747,7 +721,9 @@ async def agent_voice_handler(
         return
 
     if not text or not text.strip():
-        await status_msg.edit_text("Could not transcribe any speech from the voice message.")
+        await status_msg.edit_text(
+            "Could not transcribe any speech from the voice message."
+        )
         return
 
     # Show the transcribed text
@@ -812,20 +788,19 @@ async def agent_message_handler(
         await _resolve_openrouter_typed_slug(update, context, text)
         return
 
-    # Backward compat
     mode = context.user_data.get("agent_mode", DEFAULT_MODE)
-    if mode == "trading":
-        mode = "agent_builder"
 
     session = get_session(chat_id)
 
     # Auto-create session if none exists (always-on agent)
     if not session or not session.client.alive:
-        agent_key = context.user_data.get("agent_llm", context.user_data.get("agent_selected", DEFAULT_AGENT))
+        agent_key = context.user_data.get(
+            "agent_llm", context.user_data.get("agent_selected", DEFAULT_AGENT)
+        )
         context.user_data.setdefault("agent_llm", agent_key)
 
-        # Always start in condor mode when auto-creating a session (e.g. after restart).
-        # Users can switch to agent_builder via /agent menu.
+        # Condor is the single interactive agent; its builder capabilities ship
+        # as built-in skills, so there is only ever one mode.
         mode = DEFAULT_MODE
         context.user_data["agent_mode"] = mode
 
@@ -858,7 +833,9 @@ async def agent_message_handler(
                 try:
                     await session.client.prompt(extra_context)
                 except Exception:
-                    log.warning("Failed to inject %s context for chat %d", mode, chat_id)
+                    log.warning(
+                        "Failed to inject %s context for chat %d", mode, chat_id
+                    )
 
         except Exception as e:
             log.exception("Failed to create agent session")
@@ -868,7 +845,8 @@ async def agent_message_handler(
     # Check if busy
     if session.is_busy:
         await update.message.reply_text(
-            r"⏳ Still working on the previous request\.\.\." "\n"
+            r"⏳ Still working on the previous request\.\.\."
+            "\n"
             r"Your message will be queued — or wait for it to finish\.",
             parse_mode="MarkdownV2",
         )
