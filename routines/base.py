@@ -17,6 +17,22 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def assistant_routines_dir(agent_slug: str | None) -> Path:
+    """Per-assistant routines dir, layered on top of the shared ``routines/`` base.
+
+    Each assistant/expert owns its routines, co-located with its skills/memory
+    (FEAT-003), while the shared ``routines/`` library stays available to all:
+
+    - chat ``condor`` (``agent_slug`` None) → ``assistants/condor/routines``
+    - trading agent / domain expert (slug) → ``trading_agents/<slug>/routines``
+    """
+    if agent_slug:
+        return _PROJECT_ROOT / "trading_agents" / agent_slug / "routines"
+    return _PROJECT_ROOT / "assistants" / "condor" / "routines"
+
 
 @dataclass
 class RoutineResult:
@@ -39,6 +55,7 @@ def normalize_result(result) -> RoutineResult:
     if isinstance(result, RoutineResult):
         return result
     return RoutineResult(text=str(result) if result else "Completed")
+
 
 _routines_cache: dict[str, "RoutineInfo"] | None = None
 
@@ -202,14 +219,22 @@ def discover_routines_from_path(
         return routines
 
     source = f"agent:{agent_slug}" if agent_slug else "global"
-    default_category = agent_slug.replace("_", " ").replace("-", " ").title() if agent_slug else "Uncategorized"
+    default_category = (
+        agent_slug.replace("_", " ").replace("-", " ").title()
+        if agent_slug
+        else "Uncategorized"
+    )
 
     for file_path in routines_dir.glob("*.py"):
         if file_path.stem.startswith("_"):
             continue
 
         try:
-            module_name = f"agent_routine_{agent_slug}_{file_path.stem}" if agent_slug else f"agent_routine_{file_path.stem}"
+            module_name = (
+                f"agent_routine_{agent_slug}_{file_path.stem}"
+                if agent_slug
+                else f"agent_routine_{file_path.stem}"
+            )
             spec = importlib.util.spec_from_file_location(module_name, file_path)
             if not spec or not spec.loader:
                 continue
