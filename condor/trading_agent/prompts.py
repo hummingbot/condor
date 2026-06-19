@@ -117,8 +117,10 @@ def _build_routines_section(strategy: Strategy) -> str:
     )
     lines.append("")
 
-    # Strategy-local routines first
-    routines_dir = strategy.dir / "routines"
+    # Agent-level routines first (shared across this agent's strategies)
+    from routines.base import assistant_routines_dir
+
+    routines_dir = assistant_routines_dir(strategy.agent_slug)
     if routines_dir.exists():
         from routines.base import discover_routines_from_path
 

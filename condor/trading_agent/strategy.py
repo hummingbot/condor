@@ -6,18 +6,20 @@ Each strategy is a tick-loop playbook that lives **under its owning Agent**, as
     trading_agents/
         {agent_slug}/
             AGENT.md                       # the owning Agent (see agent.py)
+            routines/                      # routines shared by all of this agent's strategies
+            skills/                        # skill playbooks (the agent "brain")
             strategies/
                 {strategy_slug}/
                     strategy.md            # this playbook: tactics + config
-                    routines/              # routines local to this strategy
                     learnings.md           # cross-session learnings of this strategy
                     sessions/session_N/    # per-run journal (format unchanged)
                     dry_runs/              # experiment snapshots
 
 A strategy is identified by the pair ``(agent_slug, slug)``; its opaque composite
 key ``"{agent_slug}.{slug}"`` is what MCP tools pass around as ``strategy_id``.
-The Agent's memory/skills (the "brain") are shared across all of its strategies
-and its consults — they live one level up, at ``trading_agents/{agent_slug}/``.
+The Agent's memory/skills/routines (the "brain") are shared across all of its
+strategies and its consults — they live one level up, at
+``trading_agents/{agent_slug}/``.
 """
 
 from __future__ import annotations

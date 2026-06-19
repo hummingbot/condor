@@ -64,6 +64,11 @@ class Agent:
         return _DATA_ROOT / self.slug
 
     @property
+    def routines_dir(self) -> Path:
+        """Agent-level routines, shared across all of this agent's strategies."""
+        return self.agent_dir / "routines"
+
+    @property
     def consultable(self) -> bool:
         """DERIVED capability: a non-empty trigger AND a pydantic-ai model.
 

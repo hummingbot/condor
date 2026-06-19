@@ -1259,13 +1259,18 @@ async def get_experiment(
 async def get_strategy_routines(
     slug: str, sslug: str, user: WebUser = Depends(get_current_user)
 ):
-    """List routines scoped to this strategy."""
+    """List routines available to this strategy.
+
+    Routines live at the **agent** level (``trading_agents/{slug}/routines``) and
+    are shared across all of the agent's strategies, so this lists the owning
+    agent's routines (keyed ``{agent_slug}/{name}`` in the store).
+    """
     _get_strategy(slug, sslug)  # validate exists
     from condor.routine_store import get_routine_store
 
     store = get_routine_store()
     all_routines = store.list_routines()
-    prefix = f"{_runkey(slug, sslug)}/"
+    prefix = f"{slug}/"
     return [r for r in all_routines if r.get("name", "").startswith(prefix)]
 
 
