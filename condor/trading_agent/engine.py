@@ -535,6 +535,8 @@ class TickEngine:
                 permission_callback=permission_cb,
                 base_url=base_url,
                 tool_filter_mode=tool_filter_mode,
+                # Same allowlist the agent gets on consult; empty => unrestricted.
+                allowed_tools=self.agent.tools or None,
             )
         else:
             # Supports a Claude model suffix, e.g. "claude-acp:opus".

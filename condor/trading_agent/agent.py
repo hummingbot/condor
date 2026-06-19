@@ -49,7 +49,10 @@ class Agent:
     description: str = ""
     instructions: str = ""  # AGENT.md body: identity + domain knowledge
     agent_key: str = ""  # default model (pydantic-ai to be consultable)
-    tools: list[str] = field(default_factory=list)  # tool-name allowlist (pydantic-ai)
+    # Tool-name allowlist (pydantic-ai only), enforced on BOTH consult and loop.
+    # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
+    # Empty => UNRESTRICTED (all discovered tools, subject to tool_filter_mode).
+    tools: list[str] = field(default_factory=list)
     when_to_consult: str = ""  # empty => not offered as consultable
     server_required: bool = True
     created_by: int = 0
