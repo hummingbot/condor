@@ -1,11 +1,12 @@
-"""Run a domain-expert consult to completion in the main process.
+"""Run an Agent consult to completion in the main process.
 
 ``condor`` (the coordinator) calls the ``consult`` MCP tool, which calls back into
 the main process (where ``ConfigManager`` and the agent runtime live) and lands
-here. We load the expert, build its restricted toolset, run it to completion on a
-pydantic-ai model, and return its answer text.
+here. We load the Agent, build its restricted toolset, run its own brain to
+completion on a pydantic-ai model, and return its answer text. No strategy is
+involved — CONSULT runs the Agent's identity + shared memory/skills.
 
-The expert may call mutating tools; those are gated by the SAME interactive
+The Agent may call mutating tools; those are gated by the SAME interactive
 confirmation flow condor uses (:func:`handlers.agents.confirmation.permission_callback`),
 routed to the user's Telegram chat. The confirmation registry is process-global, so
 the user's Approve/Reject tap resolves the pending future even while condor's own
@@ -18,7 +19,7 @@ import functools
 import logging
 
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
-from condor.trading_agent.experts import ExpertStore
+from condor.trading_agent.agent import AgentStore
 
 log = logging.getLogger(__name__)
 
@@ -31,26 +32,26 @@ async def run_consult(
     task: str,
     context: str = "",
 ) -> str:
-    """Consult the domain expert ``slug`` with ``task`` and return its answer."""
-    expert = ExpertStore().get(slug)
-    if expert is None:
-        return f"No expert named '{slug}' is available."
-    if not is_pydantic_ai_model(expert.agent_key):
+    """Consult the Agent ``slug`` with ``task`` and return its answer."""
+    agent = AgentStore().get(slug)
+    if agent is None:
+        return f"No agent named '{slug}' is available."
+    if not is_pydantic_ai_model(agent.agent_key):
         return (
-            f"Expert '{slug}' is configured with agent_key='{expert.agent_key}', but "
+            f"Agent '{slug}' is configured with agent_key='{agent.agent_key}', but "
             "consults require a pydantic-ai model (ollama/lmstudio/openai/groq/"
             "openrouter) so the tool allowlist can be enforced."
         )
 
-    # Build the expert's MCP toolset in the main process (ConfigManager is here).
-    # agent_slug scopes the condor MCP tools' memory/skills/routines to this expert.
+    # Build the Agent's MCP toolset in the main process (ConfigManager is here).
+    # agent_slug scopes the condor MCP tools' memory/skills to this Agent (its brain).
     from handlers.agents._shared import (
-        build_expert_context,
+        build_agent_context,
         build_mcp_servers_for_agent,
         build_mcp_servers_for_session,
     )
 
-    if expert.server_required and server_name:
+    if agent.server_required and server_name:
         mcp_servers = build_mcp_servers_for_agent(
             server_name,
             user_id,
@@ -81,13 +82,13 @@ async def run_consult(
         )
 
     client = PydanticAIClient(
-        model=expert.agent_key,
+        model=agent.agent_key,
         mcp_servers=mcp_servers,
         permission_callback=permission_cb,
-        allowed_tools=expert.tools or None,
+        allowed_tools=agent.tools or None,
     )
 
-    prompt = build_expert_context(expert, user_id, task, context)
+    prompt = build_agent_context(agent, user_id, task, context)
 
     await client.start()
     try:
@@ -95,4 +96,4 @@ async def run_consult(
     finally:
         await client.stop()
 
-    return answer or "(the expert returned no answer)"
+    return answer or "(the agent returned no answer)"

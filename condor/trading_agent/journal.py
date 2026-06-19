@@ -1,18 +1,20 @@
 """JournalManager -- compact persistent memory for trading agents.
 
-Data is organized by strategy and session::
+Data is organized by strategy (a playbook owned by an Agent) and session::
 
     trading_agents/
-        {strategy_slug}/
-            agent.md            # strategy definition
-            config.yml          # runtime config
-            learnings.md        # cross-session learnings
-            dry_runs/           # experiment snapshots (experiment_N.md)
-            sessions/
-                session_1/
-                    journal.md  # summary + decisions + ticks + executors + snapshots
-                    snapshots/
-                        snapshot_1.md
+        {agent_slug}/
+            strategies/
+                {strategy_slug}/
+                    strategy.md        # strategy definition (tactic + config)
+                    config.yml         # runtime config
+                    learnings.md       # cross-session learnings
+                    dry_runs/          # experiment snapshots (experiment_N.md)
+                    sessions/
+                        session_1/
+                            journal.md  # summary + decisions + ticks + executors
+                            snapshots/
+                                snapshot_1.md
 """
 
 from __future__ import annotations
@@ -31,35 +33,51 @@ _DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
 MAX_LEARNINGS = 20
 
 
-def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
-    """Derive (session_dir, agent_dir) from an agent_id like 'slug_N' or 'slug_eN'.
+def _strategy_base_dir(prefix: str) -> Path:
+    """Resolve the per-strategy base dir from an agent_id prefix.
 
-    Experiment IDs use the format 'slug_eN' (e.g. 'my_strategy_e3').
-    Session IDs use the format 'slug_N' (e.g. 'my_strategy_3').
+    New format prefixes are ``"{agent_slug}.{strategy_slug}"`` →
+    ``trading_agents/{agent_slug}/strategies/{strategy_slug}/``. Legacy flat
+    prefixes (no dot) fall back to ``trading_agents/{slug}/`` so old ids still
+    resolve.
+    """
+    if "." in prefix:
+        agent_slug, sslug = prefix.split(".", 1)
+        return _DATA_ROOT / agent_slug / "strategies" / sslug
+    return _DATA_ROOT / prefix
+
+
+def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
+    """Derive (session_dir, base_dir) from an agent_id.
+
+    agent_id format: ``"{agent_slug}.{strategy_slug}_{N}"`` (session) or
+    ``"..._e{N}"`` (experiment). ``base_dir`` is the strategy folder that holds
+    ``sessions/`` and ``learnings.md``.
 
     Returns (None, None) if the path doesn't exist on disk.
     """
-    # agent_id format: {slug}_{session_num} or {slug}_e{experiment_num}
     last_sep = agent_id.rfind("_")
     if last_sep == -1:
         return None, None
-    slug = agent_id[:last_sep]
-    num_part = agent_id[last_sep + 1:]
+    prefix = agent_id[:last_sep]
+    num_part = agent_id[last_sep + 1 :]
 
-    agent_dir = _DATA_ROOT / slug
-    if not agent_dir.is_dir():
+    base_dir = _strategy_base_dir(prefix)
+    if not base_dir.is_dir():
         return None, None
 
     # Experiments (e.g. "e3") are flat files, not directories
     if num_part.startswith("e"):
-        return None, agent_dir
+        return None, base_dir
 
     try:
         session_num = int(num_part)
     except ValueError:
         return None, None
-    session_dir = agent_dir / "sessions" / f"session_{session_num}"
-    return session_dir, agent_dir
+    session_dir = base_dir / "sessions" / f"session_{session_num}"
+    return session_dir, base_dir
+
+
 MAX_SNAPSHOTS = 100
 
 JOURNAL_TEMPLATE = """\
@@ -120,9 +138,13 @@ Duration: {duration:.1f}s
 """
 
 
-def get_session_dir(strategy_slug: str, session_number: int) -> Path:
-    """Build the path for a specific session directory."""
-    return _DATA_ROOT / strategy_slug / "sessions" / f"session_{session_number}"
+def get_session_dir(run_key: str, session_number: int) -> Path:
+    """Build the path for a specific session directory.
+
+    ``run_key`` is the ``"{agent_slug}.{strategy_slug}"`` prefix (legacy flat
+    slugs without a dot still resolve to ``trading_agents/{slug}/``).
+    """
+    return _strategy_base_dir(run_key) / "sessions" / f"session_{session_number}"
 
 
 def next_session_number(agent_dir: Path) -> int:
@@ -210,7 +232,11 @@ def save_experiment_snapshot(
 
     # Format risk state
     max_dd = risk_state.get("max_drawdown_pct", -1)
-    dd_display = f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit" if max_dd >= 0 else "disabled"
+    dd_display = (
+        f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
+        if max_dd >= 0
+        else "disabled"
+    )
     risk_lines = [
         f"- Position Size: ${risk_state.get('total_exposure', 0):.2f} / ${risk_state.get('max_position_size', 500):.2f} limit",
         f"- Open Executors: {risk_state.get('executor_count', 0)} / {risk_state.get('max_open_executors', 5)} limit",
@@ -220,13 +246,18 @@ def save_experiment_snapshot(
 
     # Format tool calls
     import json
+
     tool_parts = []
     for i, tc in enumerate(tool_calls, 1):
         tc_name = tc.get("name", tc.get("title", "unknown"))
         tc_status = tc.get("status", "")
         tool_parts.append(f"### {i}. {tc_name} ({tc_status})")
         if tc.get("input"):
-            input_str = json.dumps(tc["input"], indent=2) if isinstance(tc["input"], dict) else str(tc["input"])
+            input_str = (
+                json.dumps(tc["input"], indent=2)
+                if isinstance(tc["input"], dict)
+                else str(tc["input"])
+            )
             tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
         if tc.get("output"):
             output_str = str(tc["output"])[:2000]
@@ -276,7 +307,9 @@ class JournalManager:
         else:
             # Try to resolve from agent_id before falling back
             resolved_session, resolved_agent = resolve_agent_dirs(agent_id)
-            self._session_dir = resolved_session if resolved_session else _DATA_ROOT / agent_id
+            self._session_dir = (
+                resolved_session if resolved_session else _DATA_ROOT / agent_id
+            )
             if not agent_dir and resolved_agent:
                 agent_dir = resolved_agent
         self._agent_dir = agent_dir  # For cross-session learnings
@@ -320,13 +353,19 @@ class JournalManager:
             parts = []
             # Read each category section
             for cat_key, cat_header in LEARNING_CATEGORIES.items():
-                m = re.search(rf"^## {re.escape(cat_header)}\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+                m = re.search(
+                    rf"^## {re.escape(cat_header)}\n(.*?)(?=^## |\Z)",
+                    text,
+                    re.MULTILINE | re.DOTALL,
+                )
                 if m and m.group(1).strip():
                     parts.append(f"**{cat_header}:**\n{m.group(1).strip()}")
             if parts:
                 return "\n\n".join(parts)
             # Legacy fallback: try Active Insights
-            m = re.search(r"^## Active Insights\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+            m = re.search(
+                r"^## Active Insights\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL
+            )
             if m:
                 return m.group(1).strip()
             lines = text.strip().splitlines()
@@ -361,7 +400,9 @@ class JournalManager:
         m = re.search(pattern, full_text, re.MULTILINE | re.DOTALL)
         if m:
             section_content = m.group(2).strip()
-            existing_lines = [l for l in section_content.splitlines() if l.startswith("- ")]
+            existing_lines = [
+                l for l in section_content.splitlines() if l.startswith("- ")
+            ]
         else:
             existing_lines = []
 
@@ -375,7 +416,11 @@ class JournalManager:
             for line in cm.group(1).strip().splitlines():
                 if not line.startswith("- "):
                     continue
-                existing_text = re.sub(r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?", "", line)
+                existing_text = re.sub(
+                    r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?",
+                    "",
+                    line,
+                )
                 if _normalize(existing_text) == normalized_new:
                     return
                 if _word_overlap(normalized_new, _normalize(existing_text)) > 0.5:
@@ -389,7 +434,9 @@ class JournalManager:
 
         new_section = "\n".join(existing_lines)
         if m:
-            new_text = full_text[:m.start(2)] + new_section + "\n\n" + full_text[m.end(2):]
+            new_text = (
+                full_text[: m.start(2)] + new_section + "\n\n" + full_text[m.end(2) :]
+            )
         else:
             new_text = full_text.rstrip() + f"\n\n## {section_header}\n{new_section}\n"
         path.write_text(new_text)
@@ -444,7 +491,11 @@ class JournalManager:
             for snap in snapshots:
                 content = self.read_snapshot(snap["tick"])
                 if content:
-                    m = re.search(r"^## Agent Response\n(.*?)(?=^## |\Z|^<details)", content, re.MULTILINE | re.DOTALL)
+                    m = re.search(
+                        r"^## Agent Response\n(.*?)(?=^## |\Z|^<details)",
+                        content,
+                        re.MULTILINE | re.DOTALL,
+                    )
                     if m:
                         decision = m.group(1).strip()[:200]
                         parts.append(f"- **#{snap['tick']}** {decision}")
@@ -458,7 +509,11 @@ class JournalManager:
             for run in runs:
                 content = self._read_legacy_run(run["tick"])
                 if content:
-                    m = re.search(r"^## Decision\n(.*?)(?=^## |\Z)", content, re.MULTILINE | re.DOTALL)
+                    m = re.search(
+                        r"^## Decision\n(.*?)(?=^## |\Z)",
+                        content,
+                        re.MULTILINE | re.DOTALL,
+                    )
                     if m:
                         parts.append(f"- **#{run['tick']}** {m.group(1).strip()}")
             if parts:
@@ -488,8 +543,12 @@ class JournalManager:
         self._snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Format risk state
-        max_dd = risk_state.get('max_drawdown_pct', -1)
-        dd_display = f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit" if max_dd >= 0 else "disabled"
+        max_dd = risk_state.get("max_drawdown_pct", -1)
+        dd_display = (
+            f"{risk_state.get('drawdown_pct', 0):.1f}% / {max_dd:.1f}% limit"
+            if max_dd >= 0
+            else "disabled"
+        )
         risk_lines = [
             f"- Position Size: ${risk_state.get('total_exposure', 0):.2f} / ${risk_state.get('max_position_size', 500):.2f} limit",
             f"- Open Executors: {risk_state.get('executor_count', 0)} / {risk_state.get('max_open_executors', 5)} limit",
@@ -504,7 +563,11 @@ class JournalManager:
             tc_status = tc.get("status", "")
             tool_parts.append(f"### {i}. {tc_name} ({tc_status})")
             if tc.get("input"):
-                input_str = json.dumps(tc["input"], indent=2) if isinstance(tc["input"], dict) else str(tc["input"])
+                input_str = (
+                    json.dumps(tc["input"], indent=2)
+                    if isinstance(tc["input"], dict)
+                    else str(tc["input"])
+                )
                 tool_parts.append(f"**Input:**\n```json\n{input_str}\n```")
             if tc.get("output"):
                 output_str = str(tc["output"])[:2000]
@@ -543,15 +606,21 @@ class JournalManager:
 
         # Check new snapshots/ dir
         if self._snapshots_dir.exists():
-            files = sorted(self._snapshots_dir.glob("snapshot_*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+            files = sorted(
+                self._snapshots_dir.glob("snapshot_*.md"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
             for f in files[:limit]:
                 m = re.match(r"snapshot_(\d+)\.md", f.name)
                 if m:
-                    results.append({
-                        "tick": int(m.group(1)),
-                        "file": f.name,
-                        "size": f.stat().st_size,
-                    })
+                    results.append(
+                        {
+                            "tick": int(m.group(1)),
+                            "file": f.name,
+                            "size": f.stat().st_size,
+                        }
+                    )
 
         # If none found, check legacy runs/
         if not results:
@@ -578,7 +647,7 @@ class JournalManager:
             return
         files = sorted(self._snapshots_dir.glob("snapshot_*.md"))
         if len(files) > MAX_SNAPSHOTS:
-            for f in files[:len(files) - MAX_SNAPSHOTS]:
+            for f in files[: len(files) - MAX_SNAPSHOTS]:
                 f.unlink()
 
     # ------------------------------------------------------------------
@@ -594,16 +663,22 @@ class JournalManager:
     def _list_legacy_runs(self, limit: int = 10) -> list[dict[str, Any]]:
         if not self._legacy_runs_dir.exists():
             return []
-        files = sorted(self._legacy_runs_dir.glob("run_*.md"), key=lambda f: f.stat().st_mtime, reverse=True)
+        files = sorted(
+            self._legacy_runs_dir.glob("run_*.md"),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
         results = []
         for f in files[:limit]:
             m = re.match(r"run_(\d+)\.md", f.name)
             if m:
-                results.append({
-                    "tick": int(m.group(1)),
-                    "file": f.name,
-                    "size": f.stat().st_size,
-                })
+                results.append(
+                    {
+                        "tick": int(m.group(1)),
+                        "file": f.name,
+                        "size": f.stat().st_size,
+                    }
+                )
         return results
 
     # Keep for backward compat with existing code that calls these
@@ -616,8 +691,10 @@ class JournalManager:
             response_text=kwargs.get("response_text", ""),
             tool_calls=kwargs.get("tool_calls", []),
             executors_data="\n".join(
-                f"### {name}\n{summary}" for name, summary in kwargs.get("core_data_summaries", {}).items()
-            ) or "",
+                f"### {name}\n{summary}"
+                for name, summary in kwargs.get("core_data_summaries", {}).items()
+            )
+            or "",
             risk_state=kwargs.get("risk_state", {}),
             duration=kwargs.get("duration", 0),
         )
@@ -634,7 +711,9 @@ class JournalManager:
     # Writing (journal)
     # ------------------------------------------------------------------
 
-    def write_summary(self, tick: int, status: str, pnl: float, open_count: int, last_action: str) -> None:
+    def write_summary(
+        self, tick: int, status: str, pnl: float, open_count: int, last_action: str
+    ) -> None:
         """Update the Summary section."""
         now = datetime.now(timezone.utc).strftime("%H:%M UTC")
         summary = (
@@ -731,7 +810,9 @@ class JournalManager:
         )
         self._append_to_section("Executors", entry)
 
-    def update_executor(self, executor_id: str, pnl: float, volume: float, stopped: bool = False) -> None:
+    def update_executor(
+        self, executor_id: str, pnl: float, volume: float, stopped: bool = False
+    ) -> None:
         text = self.read_full()
         pattern = rf"(- executor={re.escape(executor_id)} \|.*)"
         m = re.search(pattern, text)
@@ -753,7 +834,13 @@ class JournalManager:
     # Metric snapshots (inline in journal)
     # ------------------------------------------------------------------
 
-    def record_snapshot(self, total_pnl: float, total_volume: float, open_count: int, position_size: float) -> None:
+    def record_snapshot(
+        self,
+        total_pnl: float,
+        total_volume: float,
+        open_count: int,
+        position_size: float,
+    ) -> None:
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         entry = (
             f"- {now} | pnl=${total_pnl:+.2f} | volume=${total_volume:,.0f} "
@@ -812,7 +899,9 @@ class JournalManager:
                 if part.startswith("pnl=$"):
                     entry["pnl"] = float(part.replace("pnl=$", "").replace("+", ""))
                 elif part.startswith("volume=$"):
-                    entry["volume"] = float(part.replace("volume=$", "").replace(",", ""))
+                    entry["volume"] = float(
+                        part.replace("volume=$", "").replace(",", "")
+                    )
                 elif part.startswith("exposure=$"):
                     entry["exposure"] = float(part.replace("exposure=$", ""))
                 elif part.startswith("open="):
@@ -902,7 +991,9 @@ class JournalManager:
         text = self.read_full()
         pattern = rf"(^## {re.escape(name)}\n).*?(?=^## |\Z)"
         replacement = rf"\g<1>{content}\n\n"
-        new_text, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE | re.DOTALL)
+        new_text, count = re.subn(
+            pattern, replacement, text, count=1, flags=re.MULTILINE | re.DOTALL
+        )
         if count == 0:
             new_text = text.rstrip() + f"\n\n## {name}\n{content}\n"
         self._path.write_text(new_text)

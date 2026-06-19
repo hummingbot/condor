@@ -18,7 +18,6 @@ from condor.web.routes import (
     chat_ws,
     controller_performance,
     executors,
-    experts,
     market,
     portfolio,
     positions,
@@ -73,7 +72,6 @@ def create_app() -> FastAPI:
     app.include_router(market.router, prefix="/api/v1")
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
-    app.include_router(experts.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(settings.router, prefix="/api/v1")

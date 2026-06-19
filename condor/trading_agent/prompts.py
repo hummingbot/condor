@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .agent import Agent
 from .strategy import Strategy
 
 BASE_PROMPT_LIVE = """\
@@ -107,17 +108,17 @@ TOOL_PRELOAD_DRY_RUN = (
 
 
 def _build_routines_section(strategy: Strategy) -> str:
-    """Build an [AVAILABLE ROUTINES] section listing agent-local + global routines."""
+    """Build an [AVAILABLE ROUTINES] section listing strategy-local + global routines."""
     from routines.base import discover_routines, discover_routines_from_path
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
-        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.id}", config={{...}})'
+        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.key}", config={{...}})'
     )
     lines.append("")
 
-    # Agent-local routines first
-    routines_dir = strategy.agent_dir / "routines"
+    # Strategy-local routines first
+    routines_dir = strategy.dir / "routines"
     if routines_dir.exists():
         from routines.base import discover_routines_from_path
 
@@ -138,6 +139,7 @@ def _build_routines_section(strategy: Strategy) -> str:
 
 
 def build_tick_prompt(
+    agent: Agent,
     strategy: Strategy,
     config: dict[str, Any],
     core_data: dict[str, str],
@@ -151,12 +153,17 @@ def build_tick_prompt(
     user_memory: str = "",
     skills_index: str = "",
 ) -> str:
-    """Build the full prompt for one agent tick."""
+    """Build the full prompt for one agent tick.
+
+    Composes the Agent's domain identity (``agent.instructions``) with the
+    strategy's tactic (``strategy.instructions``): the Agent says *who you are and
+    what you know*; the strategy says *what to do this tick*.
+    """
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
-    agent_key = config.get("agent_key") or strategy.agent_key
+    agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     # Select base prompt and tool preload based on mode
@@ -192,7 +199,10 @@ def build_tick_prompt(
     # Server credentials are injected via env vars into the MCP process,
     # so no need to include them in the prompt or call configure_server.
 
-    # Strategy instructions
+    # Agent identity + domain knowledge (who you are), then the strategy tactic
+    # (what to do this tick). The Agent body is shared across all its strategies.
+    if agent.instructions.strip():
+        sections.append(f"[AGENT — domain identity & knowledge]\n{agent.instructions}")
     sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
 
     # Available skills (playbooks) + routines, unified under one header. Skills

@@ -1,4 +1,19 @@
-"""Trading Agents API routes."""
+"""Trading Agents API routes.
+
+An **Agent** is the top-level unit: identity + shared brain (memory/skills) that
+``condor`` can *consult*. An Agent **owns strategies** — playbooks that loop via
+``TickEngine``. So the route shape is::
+
+    /agents                                  -> list Agents (+ their strategies)
+    /agents/{slug}                           -> Agent detail
+    /agents/{slug}/consult                   -> run the Agent's brain to completion
+    /agents/{slug}/strategies                -> CRUD strategies under an Agent
+    /agents/{slug}/strategies/{sslug}/...    -> per-strategy run/journal/perf
+
+Per-strategy operational history (sessions, learnings, experiments, routines)
+hangs off ``trading_agents/{slug}/strategies/{sslug}/`` while the Agent's brain
+stays shared at ``trading_agents/{slug}/``.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +52,10 @@ def _cache_set(key: str, val: Any) -> None:
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/agents", tags=["agents"])
 
-_DATA_ROOT = Path(__file__).resolve().parent.parent.parent.parent / "trading_agents"
+
+def _runkey(agent_slug: str, sslug: str) -> str:
+    """Composite run key embedded in agent_ids: ``"{agent_slug}.{strategy_slug}"``."""
+    return f"{agent_slug}.{sslug}"
 
 
 # ── Request/Response Models ──
@@ -66,7 +84,7 @@ class RunningInstance(BaseModel):
     risk_limits: dict[str, Any] = {}
 
 
-class AgentSummary(BaseModel):
+class StrategySummary(BaseModel):
     slug: str
     name: str
     description: str
@@ -80,6 +98,17 @@ class AgentSummary(BaseModel):
     total_volume: float = 0.0
     open_positions: int = 0
     instances: list[RunningInstance] = []
+
+
+class AgentSummary(BaseModel):
+    slug: str
+    name: str
+    description: str
+    consultable: bool = False
+    when_to_consult: str = ""
+    agent_key: str = ""
+    strategy_count: int = 0
+    strategies: list[StrategySummary] = []
 
 
 class AgentPerformanceModel(BaseModel):
@@ -99,7 +128,7 @@ class AgentPerformanceModel(BaseModel):
     executors: list[dict[str, Any]] = []
 
 
-class AgentPerformanceResponse(BaseModel):
+class StrategyPerformanceResponse(BaseModel):
     slug: str
     sessions: list[AgentPerformanceModel] = []
     totals: dict[str, float] = {}
@@ -124,6 +153,20 @@ class AgentDetail(BaseModel):
     name: str
     description: str
     agent_md: str
+    agent_key: str = ""
+    tools: list[str] = []
+    when_to_consult: str = ""
+    consultable: bool = False
+    server_required: bool = True
+    strategies: list[StrategySummary] = []
+
+
+class StrategyDetail(BaseModel):
+    slug: str
+    agent_slug: str
+    name: str
+    description: str
+    strategy_md: str
     config: dict[str, Any] = {}
     default_trading_context: str = ""
     learnings: str = ""
@@ -144,12 +187,26 @@ class CreateAgentRequest(BaseModel):
     name: str
     description: str = ""
     instructions: str = ""
-    agent_key: str = "claude-code"
+    agent_key: str = ""
+    tools: list[str] = []
+    when_to_consult: str = ""
+    server_required: bool = True
+
+
+class UpdateAgentMdRequest(BaseModel):
+    content: str
+
+
+class CreateStrategyRequest(BaseModel):
+    name: str
+    description: str = ""
+    instructions: str = ""
+    agent_key: str | None = None
     default_trading_context: str = ""
     config: dict[str, Any] = {}
 
 
-class UpdateAgentMdRequest(BaseModel):
+class UpdateStrategyMdRequest(BaseModel):
     content: str
 
 
@@ -161,69 +218,75 @@ class UpdateLearningsRequest(BaseModel):
     content: str
 
 
-class StartAgentRequest(BaseModel):
+class ConsultRequest(BaseModel):
+    task: str
+    context: str = ""
+    chat_id: int = 0
+    user_id: int | None = None
+    server_name: str | None = None
+
+
+class StartStrategyRequest(BaseModel):
     config: dict[str, Any] = {}
     trading_context: str = ""
     chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
     user_id: int | None = None  # Override user_id (for internal/MCP calls)
 
 
-# ── Helpers ──
+# ── Stores / lookups ──
 
 
-def _get_store():
+def _agent_store():
+    from condor.trading_agent.agent import AgentStore
+
+    return AgentStore()
+
+
+def _strategy_store():
     from condor.trading_agent.strategy import StrategyStore
 
     return StrategyStore()
 
 
-def _get_strategy_by_slug(slug: str):
-    store = _get_store()
-    strategy = store.get_by_slug(slug)
-    if not strategy:
+def _get_agent(slug: str):
+    agent = _agent_store().get(slug)
+    if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{slug}' not found")
+    return agent
+
+
+def _get_strategy(slug: str, sslug: str):
+    strategy = _strategy_store().get(slug, sslug)
+    if not strategy:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Strategy '{sslug}' not found under agent '{slug}'",
+        )
     return strategy
 
 
-def _get_running_engine(slug: str):
+def _get_engines_for(agent_slug: str, sslug: str) -> list:
+    """All engines (running or paused) for a given (agent, strategy)."""
     from condor.trading_agent.engine import get_all_engines
 
-    for engine in get_all_engines().values():
-        if engine.strategy.slug == slug and engine.is_running:
-            return engine
-    return None
+    return [
+        e
+        for e in get_all_engines().values()
+        if e.agent.slug == agent_slug and e.strategy.slug == sslug
+    ]
 
 
-def _get_engine_for_slug(slug: str):
-    """Get any engine (running or paused) for a slug."""
-    from condor.trading_agent.engine import get_all_engines
-
-    for engine in get_all_engines().values():
-        if engine.strategy.slug == slug:
-            return engine
-    return None
+# ── Disk helpers (keyed by the strategy dir + run_key) ──
 
 
-def _get_engines_for_slug(slug: str) -> list:
-    """Get all engines for a slug (multiple instances possible)."""
-    from condor.trading_agent.engine import get_all_engines
-
-    return [e for e in get_all_engines().values() if e.strategy.slug == slug]
-
-
-def _infer_latest_session_status(agent_dir: Path, slug: str) -> dict[str, Any] | None:
-    """When no engine is in memory, infer status from the latest session on disk.
-
-    Returns a dict with agent_id, status, tick_count, daily_pnl if a recent
-    session exists, or None.
-    """
-    import time
-
-    sessions_dir = agent_dir / "sessions"
+def _infer_latest_session_status(
+    strategy_dir: Path, run_key: str
+) -> dict[str, Any] | None:
+    """Infer status from the latest session on disk when no engine is in memory."""
+    sessions_dir = strategy_dir / "sessions"
     if not sessions_dir.exists():
         return None
 
-    # Find the latest session directory
     session_dirs = sorted(
         [
             d
@@ -242,40 +305,24 @@ def _infer_latest_session_status(agent_dir: Path, slug: str) -> dict[str, Any] |
     except (ValueError, IndexError):
         return None
 
-    # Check if the session has recent activity (snapshot written in last 5 min)
-    snap_dir = latest / "snapshots"
-    last_activity = latest.stat().st_mtime
-    if snap_dir.exists():
-        snaps = list(snap_dir.glob("snapshot_*.md"))
-        if snaps:
-            last_activity = max(f.stat().st_mtime for f in snaps)
-
-    # If no engine is in memory, the agent is not running.
-    # Only mark as "running" if a TickEngine is actively processing
-    # (handled by the caller via get_engines_for_slug).
-    # This function just provides fallback metadata for idle agents.
-    status = "idle"
-
-    # Tick count from journal (PnL now comes from backend performance data)
+    # If no engine is in memory, the agent is not running — idle metadata only.
     tick_count = 0
     journal_path = latest / "journal.md"
     if journal_path.exists():
-        import re as _re
-
         text = journal_path.read_text(errors="replace")
-        tick_count = len(_re.findall(r"^- tick#", text, _re.MULTILINE))
+        tick_count = len(re.findall(r"^- tick#", text, re.MULTILINE))
 
     return {
-        "agent_id": f"{slug}_{num}",
+        "agent_id": f"{run_key}_{num}",
         "session_num": num,
-        "status": status,
+        "status": "idle",
         "tick_count": tick_count,
     }
 
 
-def _count_sessions(agent_dir: Path) -> int:
+def _count_sessions(strategy_dir: Path) -> int:
     for dirname in ("sessions", "trading_sessions"):
-        sessions_dir = agent_dir / dirname
+        sessions_dir = strategy_dir / dirname
         if sessions_dir.exists():
             return len(
                 [
@@ -287,10 +334,10 @@ def _count_sessions(agent_dir: Path) -> int:
     return 0
 
 
-def _count_experiments(agent_dir: Path) -> int:
+def _count_experiments(strategy_dir: Path) -> int:
     count = 0
     for dirname in ("dry_runs", "experiments"):
-        d = agent_dir / dirname
+        d = strategy_dir / dirname
         if d.exists():
             count += len(
                 [
@@ -304,10 +351,10 @@ def _count_experiments(agent_dir: Path) -> int:
     return count
 
 
-def _list_sessions(agent_dir: Path) -> list[SessionInfo]:
+def _list_sessions(strategy_dir: Path) -> list[SessionInfo]:
     sessions = []
     for dirname in ("sessions", "trading_sessions"):
-        sessions_dir = agent_dir / dirname
+        sessions_dir = strategy_dir / dirname
         if not sessions_dir.exists():
             continue
         for d in sorted(sessions_dir.iterdir(), reverse=True):
@@ -317,7 +364,6 @@ def _list_sessions(agent_dir: Path) -> list[SessionInfo]:
                 num = int(d.name.split("_", 1)[1])
             except (ValueError, IndexError):
                 continue
-            # Count snapshots
             snap_count = 0
             for snap_dir_name in ("snapshots", "runs"):
                 snap_dir = d / snap_dir_name
@@ -335,11 +381,11 @@ def _list_sessions(agent_dir: Path) -> list[SessionInfo]:
     return sessions
 
 
-def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
+def _list_experiments(strategy_dir: Path) -> list[ExperimentInfo]:
     experiments = []
     all_files = []
     for dirname in ("dry_runs", "experiments"):
-        d = agent_dir / dirname
+        d = strategy_dir / dirname
         if d.exists():
             all_files.extend(d.glob("experiment_*.md"))
     for f in sorted(all_files, key=lambda x: x.stat().st_mtime, reverse=True):
@@ -347,7 +393,6 @@ def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
         if not m:
             continue
         num = int(m.group(1))
-        # Extract mode, model, and timestamp from file header
         execution_mode = ""
         agent_key = ""
         content = f.read_text(errors="replace")
@@ -357,7 +402,6 @@ def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
         model_match = re.search(r"^Model:\s*(\S+)", content, re.MULTILINE)
         if model_match:
             agent_key = model_match.group(1)
-        # Extract timestamp
         created = ""
         ts_match = re.search(r"^# Experiment #\d+ — (.+)$", content, re.MULTILINE)
         if ts_match:
@@ -374,13 +418,13 @@ def _list_experiments(agent_dir: Path) -> list[ExperimentInfo]:
     return experiments
 
 
-async def _get_client_for_agent(agent_dir: Path, default_config: dict | None = None):
-    """Resolve a Hummingbot API client for an agent, based on its config.yml."""
+async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | None):
+    """Resolve a Hummingbot API client for a strategy, based on its config.yml."""
     from condor.trading_agent.config import load_agent_config
     from config_manager import get_config_manager
 
     try:
-        cfg = load_agent_config(agent_dir, default_config)
+        cfg = load_agent_config(strategy_dir, default_config)
     except Exception:
         return None, ""
     server_name = cfg.server_name or ""
@@ -395,11 +439,13 @@ async def _get_client_for_agent(agent_dir: Path, default_config: dict | None = N
     return client, server_name
 
 
-def _enumerate_agent_ids(slug: str, agent_dir: Path) -> list[tuple[str, int, str]]:
+def _enumerate_agent_ids(
+    run_key: str, strategy_dir: Path
+) -> list[tuple[str, int, str]]:
     """Return (agent_id, session_num, kind) for every session and experiment on disk."""
     ids: list[tuple[str, int, str]] = []
     for dirname in ("sessions", "trading_sessions"):
-        d = agent_dir / dirname
+        d = strategy_dir / dirname
         if not d.exists():
             continue
         for sd in d.iterdir():
@@ -409,9 +455,9 @@ def _enumerate_agent_ids(slug: str, agent_dir: Path) -> list[tuple[str, int, str
                 n = int(sd.name.split("_", 1)[1])
             except (ValueError, IndexError):
                 continue
-            ids.append((f"{slug}_{n}", n, "session"))
+            ids.append((f"{run_key}_{n}", n, "session"))
     for dirname in ("dry_runs", "experiments"):
-        d = agent_dir / dirname
+        d = strategy_dir / dirname
         if not d.exists():
             continue
         for f in d.glob("experiment_*.md"):
@@ -419,8 +465,7 @@ def _enumerate_agent_ids(slug: str, agent_dir: Path) -> list[tuple[str, int, str
             if not m:
                 continue
             n = int(m.group(1))
-            ids.append((f"{slug}_e{n}", n, "experiment"))
-    # Deduplicate while preserving order
+            ids.append((f"{run_key}_e{n}", n, "experiment"))
     seen: set[str] = set()
     unique: list[tuple[str, int, str]] = []
     for tup in ids:
@@ -431,18 +476,18 @@ def _enumerate_agent_ids(slug: str, agent_dir: Path) -> list[tuple[str, int, str
     return unique
 
 
-async def _compute_agent_performance(
-    slug: str, agent_dir: Path, default_config: dict | None
+async def _compute_strategy_performance(
+    run_key: str, strategy_dir: Path, default_config: dict | None
 ):
-    """Return list of AgentPerformanceModel plus rolled-up totals. Cached for ~10s."""
+    """Return list of AgentPerformanceModel plus rolled-up totals. Cached ~30s."""
     from condor.trading_agent.performance import fetch_agent_performance_batch
 
-    cached = _cache_get(f"perf:{slug}")
+    cached = _cache_get(f"perf:{run_key}")
     if cached is not None:
         return cached
 
-    ids = _enumerate_agent_ids(slug, agent_dir)
-    client, _server = await _get_client_for_agent(agent_dir, default_config)
+    ids = _enumerate_agent_ids(run_key, strategy_dir)
+    client, _server = await _get_client_for_strategy(strategy_dir, default_config)
 
     sessions: list[AgentPerformanceModel] = []
     if client and ids:
@@ -450,13 +495,12 @@ async def _compute_agent_performance(
         try:
             perf_map = await fetch_agent_performance_batch(client, agent_ids)
         except Exception as e:
-            log.warning("fetch_agent_performance_batch(%s) failed: %s", slug, e)
+            log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
             perf_map = {}
         for agent_id, num, kind in ids:
             perf = perf_map.get(agent_id)
             if perf is None:
                 continue
-            # Skip experiments with no activity to reduce payload
             if kind == "experiment" and perf.trade_count == 0:
                 continue
             sessions.append(
@@ -477,7 +521,6 @@ async def _compute_agent_performance(
                 )
             )
 
-    # Roll-up totals exclude experiments (dry runs / one-shots).
     real_sessions = [s for s in sessions if s.kind == "session"]
     totals = {
         "total_pnl": sum(s.total_pnl for s in real_sessions),
@@ -489,222 +532,176 @@ async def _compute_agent_performance(
         "trade_count": float(sum(s.trade_count for s in real_sessions)),
     }
     result = (sessions, totals)
-    _cache_set(f"perf:{slug}", result)
+    _cache_set(f"perf:{run_key}", result)
     return result
 
 
-def _get_session_dir(agent_dir: Path, session_num: int) -> Path | None:
+def _get_session_dir(strategy_dir: Path, session_num: int) -> Path | None:
     for dirname in ("sessions", "trading_sessions"):
-        path = agent_dir / dirname / f"session_{session_num}"
+        path = strategy_dir / dirname / f"session_{session_num}"
         if path.exists():
             return path
     return None
 
 
-def _get_experiment_file(agent_dir: Path, experiment_num: int) -> Path | None:
+def _get_experiment_file(strategy_dir: Path, experiment_num: int) -> Path | None:
     for dirname in ("dry_runs", "experiments"):
-        path = agent_dir / dirname / f"experiment_{experiment_num}.md"
+        path = strategy_dir / dirname / f"experiment_{experiment_num}.md"
         if path.exists():
             return path
     return None
 
 
-# ── Routes ──
+def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
+    info = engine.get_info()
+    p = perf_by_id.get(info["agent_id"])
+    return RunningInstance(
+        agent_id=info["agent_id"],
+        session_num=info["session_num"],
+        status=info["status"],
+        tick_count=info["tick_count"],
+        daily_pnl=(p.total_pnl if p else info["daily_pnl"]),
+        realized_pnl=p.realized_pnl if p else 0.0,
+        unrealized_pnl=p.unrealized_pnl if p else 0.0,
+        total_pnl=p.total_pnl if p else 0.0,
+        volume=p.volume if p else 0.0,
+        fees=p.fees if p else 0.0,
+        open_count=p.open_count if p else 0,
+        closed_count=p.closed_count if p else 0,
+        win_rate=p.win_rate if p else 0.0,
+        server_name=info.get("server_name", ""),
+        total_amount_quote=info.get("total_amount_quote", 100),
+        trading_context=info.get("trading_context", ""),
+        frequency_sec=info.get("frequency_sec", 60),
+        agent_key=info.get("agent_key", ""),
+        execution_mode=info.get("execution_mode", "loop"),
+        risk_limits=info.get("risk_limits", {}),
+    )
+
+
+async def _build_strategy_summary(strategy) -> StrategySummary:
+    """Roll up disk + engine + performance state for one strategy."""
+    run_key = _runkey(strategy.agent_slug, strategy.slug)
+    strategy_dir = strategy.dir
+
+    try:
+        sessions_perf, totals = await _compute_strategy_performance(
+            run_key, strategy_dir, strategy.default_config
+        )
+    except Exception as e:
+        log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
+        sessions_perf, totals = [], {}
+    perf_by_id = {p.agent_id: p for p in sessions_perf}
+
+    engines = _get_engines_for(strategy.agent_slug, strategy.slug)
+    status = "idle"
+    agent_id = ""
+    tick_count = 0
+    instances: list[RunningInstance] = []
+    for engine in engines:
+        inst = _instance_from_engine(engine, perf_by_id)
+        instances.append(inst)
+        if not agent_id:
+            status = inst.status
+            agent_id = inst.agent_id
+            tick_count = inst.tick_count
+
+    if not engines:
+        disk_info = _infer_latest_session_status(strategy_dir, run_key)
+        if disk_info:
+            status = disk_info["status"]
+            agent_id = disk_info["agent_id"]
+            tick_count = disk_info["tick_count"]
+
+    latest_session_pnl = 0.0
+    if sessions_perf:
+        latest = max(
+            (p for p in sessions_perf if p.kind == "session"),
+            key=lambda p: p.session_num,
+            default=None,
+        )
+        if latest:
+            latest_session_pnl = latest.total_pnl
+
+    return StrategySummary(
+        slug=strategy.slug,
+        name=strategy.name,
+        description=strategy.description,
+        status=status,
+        agent_id=agent_id,
+        session_count=_count_sessions(strategy_dir),
+        experiment_count=_count_experiments(strategy_dir),
+        tick_count=tick_count,
+        daily_pnl=latest_session_pnl,
+        total_pnl=float(totals.get("total_pnl", 0.0)),
+        total_volume=float(totals.get("volume", 0.0)),
+        open_positions=int(totals.get("open_positions", 0)),
+        instances=instances,
+    )
+
+
+# ── Agent routes ──
 
 
 @router.get("", response_model=list[AgentSummary])
 async def list_agents(user: WebUser = Depends(get_current_user)):
-    """List all trading agents with status."""
+    """List all Agents, each with its strategies and their status."""
     import asyncio as _asyncio
 
-    store = _get_store()
-    strategies = store.list_all()
-    results = []
+    agents = _agent_store().list_all()
+    store = _strategy_store()
+    results: list[AgentSummary] = []
 
-    # Parallelize per-agent performance compute
-    perf_coros = [
-        _compute_agent_performance(s.slug, s.agent_dir, s.default_config)
-        for s in strategies
-    ]
-    perf_results = await _asyncio.gather(*perf_coros, return_exceptions=True)
-
-    for s, pres in zip(strategies, perf_results):
-        engines = _get_engines_for_slug(s.slug)
-        status = "idle"
-        agent_id = ""
-        tick_count = 0
-        instances: list[RunningInstance] = []
-
-        # Parallel-computed performance above
-        if isinstance(pres, Exception):
-            log.warning("compute_agent_performance(%s) failed: %s", s.slug, pres)
-            sessions_perf, totals = [], {}
-        else:
-            sessions_perf, totals = pres
-
-        perf_by_id = {p.agent_id: p for p in sessions_perf}
-
-        for engine in engines:
-            info = engine.get_info()
-            p = perf_by_id.get(info["agent_id"])
-            instances.append(
-                RunningInstance(
-                    agent_id=info["agent_id"],
-                    session_num=info["session_num"],
-                    status=info["status"],
-                    tick_count=info["tick_count"],
-                    daily_pnl=(p.total_pnl if p else info["daily_pnl"]),
-                    realized_pnl=p.realized_pnl if p else 0.0,
-                    unrealized_pnl=p.unrealized_pnl if p else 0.0,
-                    total_pnl=p.total_pnl if p else 0.0,
-                    volume=p.volume if p else 0.0,
-                    fees=p.fees if p else 0.0,
-                    open_count=p.open_count if p else 0,
-                    closed_count=p.closed_count if p else 0,
-                    win_rate=p.win_rate if p else 0.0,
-                    server_name=info.get("server_name", ""),
-                    total_amount_quote=info.get("total_amount_quote", 100),
-                    trading_context=info.get("trading_context", ""),
-                    frequency_sec=info.get("frequency_sec", 60),
-                    agent_key=info.get("agent_key", ""),
-                    execution_mode=info.get("execution_mode", "loop"),
-                    risk_limits=info.get("risk_limits", {}),
-                )
-            )
-            if not agent_id:
-                status = info["status"]
-                agent_id = info["agent_id"]
-                tick_count = info["tick_count"]
-
-        if not engines:
-            disk_info = _infer_latest_session_status(s.agent_dir, s.slug)
-            if disk_info:
-                status = disk_info["status"]
-                agent_id = disk_info["agent_id"]
-                tick_count = disk_info["tick_count"]
-
-        # Find "today's" pnl: prefer the most recent session perf
-        latest_session_pnl = 0.0
-        if sessions_perf:
-            latest = max(
-                (p for p in sessions_perf if p.kind == "session"),
-                key=lambda p: p.session_num,
-                default=None,
-            )
-            if latest:
-                latest_session_pnl = latest.total_pnl
-
+    for agent in agents:
+        strategies = store.list(agent.slug)
+        summaries = await _asyncio.gather(
+            *[_build_strategy_summary(s) for s in strategies],
+            return_exceptions=True,
+        )
+        strat_summaries = [s for s in summaries if isinstance(s, StrategySummary)]
         results.append(
             AgentSummary(
-                slug=s.slug,
-                name=s.name,
-                description=s.description,
-                status=status,
-                agent_id=agent_id,
-                session_count=_count_sessions(s.agent_dir),
-                experiment_count=_count_experiments(s.agent_dir),
-                tick_count=tick_count,
-                daily_pnl=latest_session_pnl,
-                total_pnl=float(totals.get("total_pnl", 0.0)),
-                total_volume=float(totals.get("volume", 0.0)),
-                open_positions=int(totals.get("open_positions", 0)),
-                instances=instances,
+                slug=agent.slug,
+                name=agent.name,
+                description=agent.description,
+                consultable=agent.consultable,
+                when_to_consult=agent.when_to_consult,
+                agent_key=agent.agent_key,
+                strategy_count=len(strat_summaries),
+                strategies=strat_summaries,
             )
         )
-
     return results
 
 
 @router.get("/{slug}", response_model=AgentDetail)
 async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
-    """Get agent detail."""
-    strategy = _get_strategy_by_slug(slug)
-    agent_dir = strategy.agent_dir
+    """Get Agent detail + its strategies."""
+    agent = _get_agent(slug)
+    strategies = _strategy_store().list(slug)
+    import asyncio as _asyncio
 
-    # Read agent.md raw content
-    agent_md_path = agent_dir / "agent.md"
-    agent_md = agent_md_path.read_text() if agent_md_path.exists() else ""
-
-    # Read config
-    from condor.trading_agent.config import load_full_config
-
-    config_dict = load_full_config(agent_dir, strategy.default_config)
-
-    # Read learnings
-    learnings_path = agent_dir / "learnings.md"
-    learnings = learnings_path.read_text() if learnings_path.exists() else ""
-
-    # Compute performance for all sessions (cached)
-    try:
-        sessions_perf, _totals = await _compute_agent_performance(
-            slug,
-            agent_dir,
-            strategy.default_config,
-        )
-    except Exception as e:
-        log.warning("compute_agent_performance(%s) failed: %s", slug, e)
-        sessions_perf = []
-    perf_by_id = {p.agent_id: p for p in sessions_perf}
-
-    # Get engine status
-    engines = _get_engines_for_slug(slug)
-    status = "idle"
-    agent_id = ""
-    instances = []
-    for engine in engines:
-        info = engine.get_info()
-        p = perf_by_id.get(info["agent_id"])
-        instances.append(
-            RunningInstance(
-                agent_id=info["agent_id"],
-                session_num=info["session_num"],
-                status=info["status"],
-                tick_count=info["tick_count"],
-                daily_pnl=(p.total_pnl if p else info["daily_pnl"]),
-                realized_pnl=p.realized_pnl if p else 0.0,
-                unrealized_pnl=p.unrealized_pnl if p else 0.0,
-                total_pnl=p.total_pnl if p else 0.0,
-                volume=p.volume if p else 0.0,
-                fees=p.fees if p else 0.0,
-                open_count=p.open_count if p else 0,
-                closed_count=p.closed_count if p else 0,
-                win_rate=p.win_rate if p else 0.0,
-                server_name=info.get("server_name", ""),
-                total_amount_quote=info.get("total_amount_quote", 100),
-                trading_context=info.get("trading_context", ""),
-                frequency_sec=info.get("frequency_sec", 60),
-                execution_mode=info.get("execution_mode", "loop"),
-                risk_limits=info.get("risk_limits", {}),
-            )
-        )
-        if not agent_id:
-            status = info["status"]
-            agent_id = info["agent_id"]
-
-    # Fallback: infer from latest session on disk when no engine in memory
-    if not engines:
-        disk_info = _infer_latest_session_status(agent_dir, slug)
-        if disk_info:
-            status = disk_info["status"]
-            agent_id = disk_info["agent_id"]
-
-    # List sessions and experiments
-    sessions = _list_sessions(agent_dir)
-    experiments = _list_experiments(agent_dir)
+    summaries = await _asyncio.gather(
+        *[_build_strategy_summary(s) for s in strategies],
+        return_exceptions=True,
+    )
+    strat_summaries = [s for s in summaries if isinstance(s, StrategySummary)]
 
     return AgentDetail(
-        slug=slug,
-        name=strategy.name,
-        description=strategy.description,
-        agent_md=agent_md,
-        config=config_dict,
-        default_trading_context=strategy.default_trading_context,
-        learnings=learnings,
-        status=status,
-        agent_id=agent_id,
-        sessions=sessions,
-        experiments=experiments,
-        instances=instances,
+        slug=agent.slug,
+        name=agent.name,
+        description=agent.description,
+        agent_md=(
+            (agent.agent_dir / "AGENT.md").read_text()
+            if (agent.agent_dir / "AGENT.md").exists()
+            else ""
+        ),
+        agent_key=agent.agent_key,
+        tools=agent.tools,
+        when_to_consult=agent.when_to_consult,
+        consultable=agent.consultable,
+        server_required=agent.server_required,
+        strategies=strat_summaries,
     )
 
 
@@ -712,37 +709,24 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
 async def create_agent(
     req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Create a new trading agent."""
-    store = _get_store()
-    strategy = store.create(
+    """Create a new Agent (identity + brain; strategies are added separately)."""
+    agent = _agent_store().create(
         name=req.name,
         description=req.description,
-        agent_key=req.agent_key,
         instructions=req.instructions,
-        default_config=req.config,
-        default_trading_context=req.default_trading_context,
+        agent_key=req.agent_key,
+        tools=req.tools,
+        when_to_consult=req.when_to_consult,
+        server_required=req.server_required,
         created_by=user.id,
     )
-
-    # Save config.yml
-    if req.config:
-        from condor.trading_agent.config import AgentConfig, save_agent_config
-
-        config = AgentConfig.from_dict(req.config)
-        save_agent_config(strategy.agent_dir, config)
-
-    # Create empty learnings.md
-    learnings_path = strategy.agent_dir / "learnings.md"
-    if not learnings_path.exists():
-        learnings_path.write_text(
-            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n"
-        )
-
     return AgentSummary(
-        slug=strategy.slug,
-        name=strategy.name,
-        description=strategy.description,
-        status="idle",
+        slug=agent.slug,
+        name=agent.name,
+        description=agent.description,
+        consultable=agent.consultable,
+        when_to_consult=agent.when_to_consult,
+        agent_key=agent.agent_key,
     )
 
 
@@ -750,75 +734,245 @@ async def create_agent(
 async def update_agent_md(
     slug: str, req: UpdateAgentMdRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Update agent.md content."""
-    strategy = _get_strategy_by_slug(slug)
-    agent_md_path = strategy.agent_dir / "agent.md"
-    agent_md_path.write_text(req.content)
+    """Update AGENT.md content."""
+    agent = _get_agent(slug)
+    (agent.agent_dir / "AGENT.md").write_text(req.content)
     return {"updated": True}
-
-
-@router.put("/{slug}/config")
-async def update_agent_config(
-    slug: str, req: UpdateConfigRequest, user: WebUser = Depends(get_current_user)
-):
-    """Update agent config."""
-    strategy = _get_strategy_by_slug(slug)
-    from condor.trading_agent.config import load_full_config, save_full_config
-
-    config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
-    config_dict.update(req.config)
-    save_full_config(strategy.agent_dir, config_dict)
-    return {"updated": True, "config": config_dict}
 
 
 @router.delete("/{slug}")
 async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
-    """Delete an agent."""
-    strategy = _get_strategy_by_slug(slug)
-    # Don't delete if any instance is running
-    running = [e for e in _get_engines_for_slug(slug) if e.is_running]
-    if running:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete a running agent. Stop all instances first.",
-        )
-
-    store = _get_store()
-    store.delete(strategy.id)
+    """Delete an Agent. Refuses if any of its strategies has a running instance."""
+    _get_agent(slug)
+    store = _strategy_store()
+    for s in store.list(slug):
+        running = [e for e in _get_engines_for(slug, s.slug) if e.is_running]
+        if running:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete an Agent with running strategies. Stop them first.",
+            )
+    _agent_store().delete(slug)
     return {"deleted": True}
 
 
-# ── Performance ──
+@router.post("/{slug}/consult")
+async def consult_agent(
+    slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
+):
+    """Run an Agent consult (its brain to completion) and return the answer."""
+    from condor.trading_agent.consult import run_consult
 
-
-@router.get("/{slug}/performance", response_model=AgentPerformanceResponse)
-async def get_agent_performance(slug: str, user: WebUser = Depends(get_current_user)):
-    """Return per-session performance and roll-up totals for an agent."""
-    strategy = _get_strategy_by_slug(slug)
-    sessions, totals = await _compute_agent_performance(
-        slug,
-        strategy.agent_dir,
-        strategy.default_config,
+    if not req.task:
+        raise HTTPException(status_code=400, detail="task is required")
+    answer = await run_consult(
+        slug=slug,
+        user_id=req.user_id or user.id,
+        chat_id=req.chat_id,
+        server_name=req.server_name,
+        task=req.task,
+        context=req.context,
     )
-    # Annotate status using running engines
-    running_ids = {e.agent_id for e in _get_engines_for_slug(slug) if e.is_running}
+    return {"agent": slug, "answer": answer}
+
+
+# ── Strategy CRUD ──
+
+
+@router.get("/{slug}/strategies", response_model=list[StrategySummary])
+async def list_strategies(slug: str, user: WebUser = Depends(get_current_user)):
+    """List strategies owned by an Agent with status/perf."""
+    _get_agent(slug)
+    import asyncio as _asyncio
+
+    strategies = _strategy_store().list(slug)
+    summaries = await _asyncio.gather(
+        *[_build_strategy_summary(s) for s in strategies],
+        return_exceptions=True,
+    )
+    return [s for s in summaries if isinstance(s, StrategySummary)]
+
+
+@router.post("/{slug}/strategies", response_model=StrategySummary)
+async def create_strategy(
+    slug: str, req: CreateStrategyRequest, user: WebUser = Depends(get_current_user)
+):
+    """Create a new strategy (playbook) under an Agent."""
+    _get_agent(slug)
+    strategy = _strategy_store().create(
+        agent_slug=slug,
+        name=req.name,
+        description=req.description,
+        instructions=req.instructions,
+        agent_key=req.agent_key,
+        default_config=req.config,
+        default_trading_context=req.default_trading_context,
+        created_by=user.id,
+    )
+
+    if req.config:
+        from condor.trading_agent.config import AgentConfig, save_agent_config
+
+        save_agent_config(strategy.dir, AgentConfig.from_dict(req.config))
+
+    learnings_path = strategy.dir / "learnings.md"
+    if not learnings_path.exists():
+        learnings_path.write_text(
+            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n"
+        )
+
+    return StrategySummary(
+        slug=strategy.slug,
+        name=strategy.name,
+        description=strategy.description,
+        status="idle",
+    )
+
+
+@router.get("/{slug}/strategies/{sslug}", response_model=StrategyDetail)
+async def get_strategy(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """Get strategy detail."""
+    strategy = _get_strategy(slug, sslug)
+    strategy_dir = strategy.dir
+    run_key = _runkey(slug, sslug)
+
+    md_path = strategy_dir / "strategy.md"
+    strategy_md = md_path.read_text() if md_path.exists() else ""
+
+    from condor.trading_agent.config import load_full_config
+
+    config_dict = load_full_config(strategy_dir, strategy.default_config)
+
+    learnings_path = strategy_dir / "learnings.md"
+    learnings = learnings_path.read_text() if learnings_path.exists() else ""
+
+    try:
+        sessions_perf, _totals = await _compute_strategy_performance(
+            run_key, strategy_dir, strategy.default_config
+        )
+    except Exception as e:
+        log.warning("compute_strategy_performance(%s) failed: %s", run_key, e)
+        sessions_perf = []
+    perf_by_id = {p.agent_id: p for p in sessions_perf}
+
+    engines = _get_engines_for(slug, sslug)
+    status = "idle"
+    agent_id = ""
+    instances = []
+    for engine in engines:
+        inst = _instance_from_engine(engine, perf_by_id)
+        instances.append(inst)
+        if not agent_id:
+            status = inst.status
+            agent_id = inst.agent_id
+
+    if not engines:
+        disk_info = _infer_latest_session_status(strategy_dir, run_key)
+        if disk_info:
+            status = disk_info["status"]
+            agent_id = disk_info["agent_id"]
+
+    return StrategyDetail(
+        slug=sslug,
+        agent_slug=slug,
+        name=strategy.name,
+        description=strategy.description,
+        strategy_md=strategy_md,
+        config=config_dict,
+        default_trading_context=strategy.default_trading_context,
+        learnings=learnings,
+        status=status,
+        agent_id=agent_id,
+        sessions=_list_sessions(strategy_dir),
+        experiments=_list_experiments(strategy_dir),
+        instances=instances,
+    )
+
+
+@router.put("/{slug}/strategies/{sslug}")
+async def update_strategy_md(
+    slug: str,
+    sslug: str,
+    req: UpdateStrategyMdRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Update strategy.md content."""
+    strategy = _get_strategy(slug, sslug)
+    (strategy.dir / "strategy.md").write_text(req.content)
+    return {"updated": True}
+
+
+@router.put("/{slug}/strategies/{sslug}/config")
+async def update_strategy_config(
+    slug: str,
+    sslug: str,
+    req: UpdateConfigRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Update a strategy's runtime config."""
+    strategy = _get_strategy(slug, sslug)
+    from condor.trading_agent.config import load_full_config, save_full_config
+
+    config_dict = load_full_config(strategy.dir, strategy.default_config)
+    config_dict.update(req.config)
+    save_full_config(strategy.dir, config_dict)
+    return {"updated": True, "config": config_dict}
+
+
+@router.delete("/{slug}/strategies/{sslug}")
+async def delete_strategy(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """Delete a strategy. Refuses if it has a running instance."""
+    _get_strategy(slug, sslug)
+    running = [e for e in _get_engines_for(slug, sslug) if e.is_running]
+    if running:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete a running strategy. Stop all instances first.",
+        )
+    _strategy_store().delete(slug, sslug)
+    return {"deleted": True}
+
+
+# ── Strategy performance ──
+
+
+@router.get(
+    "/{slug}/strategies/{sslug}/performance",
+    response_model=StrategyPerformanceResponse,
+)
+async def get_strategy_performance(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """Return per-session performance and roll-up totals for a strategy."""
+    strategy = _get_strategy(slug, sslug)
+    run_key = _runkey(slug, sslug)
+    sessions, totals = await _compute_strategy_performance(
+        run_key, strategy.dir, strategy.default_config
+    )
+    running_ids = {e.agent_id for e in _get_engines_for(slug, sslug) if e.is_running}
     for s in sessions:
         s.status = "running" if s.agent_id in running_ids else "closed"
-    return AgentPerformanceResponse(slug=slug, sessions=sessions, totals=totals)
+    return StrategyPerformanceResponse(slug=sslug, sessions=sessions, totals=totals)
 
 
-@router.get("/{slug}/sessions/{session_num}/executors")
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/executors")
 async def get_session_executors(
-    slug: str, session_num: int, user: WebUser = Depends(get_current_user)
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
 ):
     """Return executors + performance for a single session."""
     from condor.trading_agent.performance import fetch_agent_performance
 
-    strategy = _get_strategy_by_slug(slug)
-    agent_id = f"{slug}_{session_num}"
-    client, _server = await _get_client_for_agent(
-        strategy.agent_dir,
-        strategy.default_config,
+    strategy = _get_strategy(slug, sslug)
+    agent_id = f"{_runkey(slug, sslug)}_{session_num}"
+    client, _server = await _get_client_for_strategy(
+        strategy.dir, strategy.default_config
     )
     if client is None:
         return {
@@ -845,38 +999,40 @@ async def get_session_executors(
     return {"executors": perf.executors, "performance": model.model_dump()}
 
 
-# ── Lifecycle ──
+# ── Strategy lifecycle ──
 
 
-@router.post("/{slug}/start")
-async def start_agent(
-    slug: str, req: StartAgentRequest, user: WebUser = Depends(get_current_user)
+@router.post("/{slug}/strategies/{sslug}/start")
+async def start_strategy(
+    slug: str,
+    sslug: str,
+    req: StartStrategyRequest,
+    user: WebUser = Depends(get_current_user),
 ):
-    """Start an agent (creates new session)."""
+    """Start a strategy (creates a new session under its Agent)."""
     from condor.trading_agent.config import load_full_config
     from condor.trading_agent.engine import TickEngine
 
-    strategy = _get_strategy_by_slug(slug)
+    agent = _get_agent(slug)
+    strategy = _get_strategy(slug, sslug)
 
-    # Load config (merge request overrides)
-    config_dict = load_full_config(strategy.agent_dir, strategy.default_config)
+    config_dict = load_full_config(strategy.dir, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
 
-    # Apply trading context: explicit request > strategy default
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
         config_dict["trading_context"] = strategy.default_trading_context
 
     new_engine = TickEngine(
+        agent=agent,
         strategy=strategy,
         config=config_dict,
         chat_id=req.chat_id,
         user_id=req.user_id or user.id,
     )
     await new_engine.start()
-
     return {
         "started": True,
         "agent_id": new_engine.agent_id,
@@ -884,11 +1040,14 @@ async def start_agent(
     }
 
 
-@router.post("/{slug}/stop")
-async def stop_agent(
-    slug: str, agent_id: str | None = None, user: WebUser = Depends(get_current_user)
+@router.post("/{slug}/strategies/{sslug}/stop")
+async def stop_strategy(
+    slug: str,
+    sslug: str,
+    agent_id: str | None = None,
+    user: WebUser = Depends(get_current_user),
 ):
-    """Stop a running agent. If agent_id given, stop that specific instance; otherwise stop all."""
+    """Stop a running strategy. If agent_id given, stop that instance; else all."""
     if agent_id:
         from condor.trading_agent.engine import get_engine
 
@@ -897,19 +1056,22 @@ async def stop_agent(
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         await engine.stop()
     else:
-        engines = _get_engines_for_slug(slug)
+        engines = _get_engines_for(slug, sslug)
         if not engines:
-            raise HTTPException(status_code=404, detail="No running agent found")
+            raise HTTPException(status_code=404, detail="No running strategy found")
         for engine in engines:
             await engine.stop()
     return {"stopped": True}
 
 
-@router.post("/{slug}/pause")
-async def pause_agent(
-    slug: str, agent_id: str | None = None, user: WebUser = Depends(get_current_user)
+@router.post("/{slug}/strategies/{sslug}/pause")
+async def pause_strategy(
+    slug: str,
+    sslug: str,
+    agent_id: str | None = None,
+    user: WebUser = Depends(get_current_user),
 ):
-    """Pause a running agent."""
+    """Pause a running strategy."""
     if agent_id:
         from condor.trading_agent.engine import get_engine
 
@@ -920,18 +1082,21 @@ async def pause_agent(
             )
         engine.pause()
     else:
-        engine = _get_running_engine(slug)
-        if not engine:
-            raise HTTPException(status_code=404, detail="No running agent found")
-        engine.pause()
+        engines = [e for e in _get_engines_for(slug, sslug) if e.is_running]
+        if not engines:
+            raise HTTPException(status_code=404, detail="No running strategy found")
+        engines[0].pause()
     return {"paused": True}
 
 
-@router.post("/{slug}/resume")
-async def resume_agent(
-    slug: str, agent_id: str | None = None, user: WebUser = Depends(get_current_user)
+@router.post("/{slug}/strategies/{sslug}/resume")
+async def resume_strategy(
+    slug: str,
+    sslug: str,
+    agent_id: str | None = None,
+    user: WebUser = Depends(get_current_user),
 ):
-    """Resume a paused agent."""
+    """Resume a paused strategy."""
     if agent_id:
         from condor.trading_agent.engine import get_engine
 
@@ -940,69 +1105,80 @@ async def resume_agent(
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         engine.resume()
     else:
-        engine = _get_engine_for_slug(slug)
-        if not engine:
-            raise HTTPException(status_code=404, detail="No agent found")
-        engine.resume()
+        engines = _get_engines_for(slug, sslug)
+        if not engines:
+            raise HTTPException(status_code=404, detail="No strategy found")
+        engines[0].resume()
     return {"resumed": True}
 
 
 # ── Learnings ──
 
 
-@router.get("/{slug}/learnings")
-async def get_learnings(slug: str, user: WebUser = Depends(get_current_user)):
-    """Read learnings.md."""
-    strategy = _get_strategy_by_slug(slug)
-    learnings_path = strategy.agent_dir / "learnings.md"
+@router.get("/{slug}/strategies/{sslug}/learnings")
+async def get_learnings(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """Read a strategy's learnings.md."""
+    strategy = _get_strategy(slug, sslug)
+    learnings_path = strategy.dir / "learnings.md"
     content = learnings_path.read_text() if learnings_path.exists() else ""
     return {"content": content}
 
 
-@router.put("/{slug}/learnings")
+@router.put("/{slug}/strategies/{sslug}/learnings")
 async def update_learnings(
-    slug: str, req: UpdateLearningsRequest, user: WebUser = Depends(get_current_user)
+    slug: str,
+    sslug: str,
+    req: UpdateLearningsRequest,
+    user: WebUser = Depends(get_current_user),
 ):
-    """Update learnings.md."""
-    strategy = _get_strategy_by_slug(slug)
-    learnings_path = strategy.agent_dir / "learnings.md"
-    learnings_path.write_text(req.content)
+    """Update a strategy's learnings.md."""
+    strategy = _get_strategy(slug, sslug)
+    (strategy.dir / "learnings.md").write_text(req.content)
     return {"updated": True}
 
 
 # ── Sessions ──
 
 
-@router.get("/{slug}/sessions")
-async def list_sessions(slug: str, user: WebUser = Depends(get_current_user)):
-    """List sessions for an agent."""
-    strategy = _get_strategy_by_slug(slug)
-    sessions = _list_sessions(strategy.agent_dir)
+@router.get("/{slug}/strategies/{sslug}/sessions")
+async def list_strategy_sessions(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """List sessions for a strategy."""
+    strategy = _get_strategy(slug, sslug)
+    sessions = _list_sessions(strategy.dir)
     return {"sessions": [s.model_dump() for s in sessions]}
 
 
-@router.get("/{slug}/sessions/{session_num}/journal")
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/journal")
 async def get_journal(
-    slug: str, session_num: int, user: WebUser = Depends(get_current_user)
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
 ):
     """Read journal.md for a session."""
-    strategy = _get_strategy_by_slug(slug)
-    session_dir = _get_session_dir(strategy.agent_dir, session_num)
+    strategy = _get_strategy(slug, sslug)
+    session_dir = _get_session_dir(strategy.dir, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
-
     journal_path = session_dir / "journal.md"
     content = journal_path.read_text() if journal_path.exists() else ""
     return {"content": content}
 
 
-@router.get("/{slug}/sessions/{session_num}/snapshots")
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/snapshots")
 async def list_snapshots(
-    slug: str, session_num: int, user: WebUser = Depends(get_current_user)
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
 ):
     """List snapshots for a session."""
-    strategy = _get_strategy_by_slug(slug)
-    session_dir = _get_session_dir(strategy.agent_dir, session_num)
+    strategy = _get_strategy(slug, sslug)
+    session_dir = _get_session_dir(strategy.dir, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -1017,93 +1193,98 @@ async def list_snapshots(
             m = re.match(r"(?:snapshot|run)_(\d+)\.md", f.name)
             if m:
                 tick = int(m.group(1))
-                # Extract timestamp from file
                 content = f.read_text()
                 ts_match = re.search(
                     r"^# (?:Snapshot|Tick) #\d+ — (.+)$", content, re.MULTILINE
                 )
                 timestamp = ts_match.group(1) if ts_match else ""
-
                 snapshots.append(
-                    SnapshotSummary(
-                        tick=tick,
-                        timestamp=timestamp,
-                        file=f.name,
-                    )
+                    SnapshotSummary(tick=tick, timestamp=timestamp, file=f.name)
                 )
-        break  # Use whichever dir exists first
+        break
 
     return {"snapshots": [s.model_dump() for s in snapshots]}
 
 
-@router.get("/{slug}/sessions/{session_num}/snapshots/{tick}")
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/snapshots/{tick}")
 async def get_snapshot(
-    slug: str, session_num: int, tick: int, user: WebUser = Depends(get_current_user)
+    slug: str,
+    sslug: str,
+    session_num: int,
+    tick: int,
+    user: WebUser = Depends(get_current_user),
 ):
     """Read a specific snapshot."""
-    strategy = _get_strategy_by_slug(slug)
-    session_dir = _get_session_dir(strategy.agent_dir, session_num)
+    strategy = _get_strategy(slug, sslug)
+    session_dir = _get_session_dir(strategy.dir, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
-    # Try new format first, then legacy
     for snap_dir_name, prefix in [("snapshots", "snapshot"), ("runs", "run")]:
         path = session_dir / snap_dir_name / f"{prefix}_{tick}.md"
         if path.exists():
             return {"content": path.read_text(), "tick": tick}
-
     raise HTTPException(status_code=404, detail=f"Snapshot {tick} not found")
 
 
 # ── Experiments ──
 
 
-@router.get("/{slug}/experiments")
-async def list_experiments(slug: str, user: WebUser = Depends(get_current_user)):
-    """List experiments for an agent."""
-    strategy = _get_strategy_by_slug(slug)
-    experiments = _list_experiments(strategy.agent_dir)
+@router.get("/{slug}/strategies/{sslug}/experiments")
+async def list_strategy_experiments(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """List experiments for a strategy."""
+    strategy = _get_strategy(slug, sslug)
+    experiments = _list_experiments(strategy.dir)
     return {"experiments": [e.model_dump() for e in experiments]}
 
 
-@router.get("/{slug}/experiments/{exp_num}")
+@router.get("/{slug}/strategies/{sslug}/experiments/{exp_num}")
 async def get_experiment(
-    slug: str, exp_num: int, user: WebUser = Depends(get_current_user)
+    slug: str, sslug: str, exp_num: int, user: WebUser = Depends(get_current_user)
 ):
     """Read an experiment snapshot."""
-    strategy = _get_strategy_by_slug(slug)
-    path = _get_experiment_file(strategy.agent_dir, exp_num)
+    strategy = _get_strategy(slug, sslug)
+    path = _get_experiment_file(strategy.dir, exp_num)
     if not path:
         raise HTTPException(status_code=404, detail=f"Experiment {exp_num} not found")
     return {"content": path.read_text(), "number": exp_num}
 
 
-# ── Routines ──
+# ── Routines / reports ──
 
 
-@router.get("/{slug}/routines")
-async def get_agent_routines(slug: str, user: WebUser = Depends(get_current_user)):
-    """List routines scoped to this agent."""
-    _get_strategy_by_slug(slug)  # validate slug exists
+@router.get("/{slug}/strategies/{sslug}/routines")
+async def get_strategy_routines(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """List routines scoped to this strategy."""
+    _get_strategy(slug, sslug)  # validate exists
     from condor.routine_store import get_routine_store
 
     store = get_routine_store()
     all_routines = store.list_routines()
-    prefix = f"{slug}/"
+    prefix = f"{_runkey(slug, sslug)}/"
     return [r for r in all_routines if r.get("name", "").startswith(prefix)]
 
 
-@router.get("/{slug}/reports")
-async def get_agent_reports(
+@router.get("/{slug}/strategies/{sslug}/reports")
+async def get_strategy_reports(
     slug: str,
+    sslug: str,
     limit: int = 50,
     user: WebUser = Depends(get_current_user),
 ):
-    """Get reports generated by this agent's routines."""
-    _get_strategy_by_slug(slug)  # validate slug exists
+    """Get reports generated by this strategy's routines."""
+    _get_strategy(slug, sslug)  # validate exists
     from condor.reports import list_reports
 
-    prefix = f"{slug}/"
-    reports, _total = list_reports(source_type="routine", search=slug, limit=limit)
+    run_key = _runkey(slug, sslug)
+    prefix = f"{run_key}/"
+    reports, _total = list_reports(source_type="routine", search=run_key, limit=limit)
     matched = [r for r in reports if r.get("source_name", "").startswith(prefix)]
-    return {"reports": [ReportSummary(**r).model_dump() for r in matched], "total": len(matched)}
+    return {
+        "reports": [ReportSummary(**r).model_dump() for r in matched],
+        "total": len(matched),
+    }

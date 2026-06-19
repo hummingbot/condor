@@ -22,7 +22,7 @@ async def consult(expert: str, task: str, context: str = "") -> dict:
 
     data = await call_main_api(
         "POST",
-        f"/experts/{expert}/consult",
+        f"/agents/{expert}/consult",
         {
             "task": task,
             "context": context,

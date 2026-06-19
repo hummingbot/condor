@@ -574,49 +574,51 @@ def build_initial_context(
     except Exception:
         pass  # Skills are advisory — never block session start on them.
 
-    # Experts index — domain-expert agents condor can consult (FEAT: coordinator
-    # model). condor delegates domain work via consult(...) instead of holding the
-    # domain's tools/context itself. Inject only the index; nothing when none exist.
+    # Agents index — domain Agents condor can consult (FEAT: coordinator model).
+    # condor delegates domain work via consult(...) instead of holding the domain's
+    # tools/context itself. Inject only the index of *consultable* Agents; nothing
+    # when none exist.
     try:
-        from condor.trading_agent.experts import ExpertStore
+        from condor.trading_agent.agent import AgentStore
 
-        experts_index = ExpertStore().list_index()
+        experts_index = AgentStore().list_consultable_index()
         if experts_index:
             sections.append(
                 "[EXPERTS — domain agents you can consult]\n"
-                "You are a coordinator. When a task is squarely in an expert's "
+                "You are a coordinator. When a task is squarely in an agent's "
                 "domain, delegate it with "
-                'consult(expert="<slug>", task="...", context="..."). The expert runs '
+                'consult(expert="<slug>", task="...", context="..."). The agent runs '
                 "with its own focused tools and domain memory and returns an answer; "
                 "summarize that answer for the user rather than holding the domain "
                 "context yourself.\n\n"
                 f"{experts_index}"
             )
     except Exception:
-        pass  # Experts are advisory — never block session start on them.
+        pass  # Consultable agents are advisory — never block session start on them.
 
     return "\n\n".join(sections)
 
 
-def build_expert_context(
-    expert: "Expert",  # noqa: F821 — condor.trading_agent.experts.Expert
+def build_agent_context(
+    agent: "Agent",  # noqa: F821 — condor.trading_agent.agent.Agent
     user_id: int,
     task: str,
     context: str = "",
 ) -> str:
-    """Assemble the prompt for a domain-expert consult.
+    """Assemble the prompt for an Agent consult.
 
-    Mirrors :func:`build_initial_context` but for a worker run: the expert's own
+    Mirrors :func:`build_initial_context` but for a worker run: the Agent's own
     instructions become the system prompt, its domain-scoped memory/skills indexes
-    are injected (keyed by the expert slug, FEAT-003), and the consult task is
-    appended last. Read on demand via manage_memory/manage_skill inside the run.
+    are injected (keyed by the Agent slug, FEAT-003 — the shared brain), and the
+    consult task is appended last. Read on demand via manage_memory/manage_skill
+    inside the run.
     """
-    sections: list[str] = [expert.instructions]
+    sections: list[str] = [agent.instructions]
 
     try:
         from condor.memory import MemoryStore
 
-        memory_index = MemoryStore(user_id, expert.slug).list_index()
+        memory_index = MemoryStore(user_id, agent.slug).list_index()
         if memory_index:
             sections.append(
                 "[DOMAIN MEMORY — what you remember in this domain]\n"
@@ -630,11 +632,11 @@ def build_expert_context(
     try:
         from condor.memory import SkillStore
 
-        skills_index = SkillStore(expert.slug).list_index()
+        skills_index = SkillStore(agent.slug).list_index()
         if skills_index:
             sections.append(
                 "[DOMAIN SKILLS — playbooks you can follow]\n"
-                "Read-only playbooks shipped with this domain expert. Read one with "
+                "Read-only playbooks shipped with this Agent. Read one with "
                 'manage_skill(action="read", name="...") and follow its steps.\n\n'
                 f"{skills_index}"
             )

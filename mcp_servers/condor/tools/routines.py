@@ -9,19 +9,21 @@ from mcp_servers.condor.settings import settings
 def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
     """Resolve the routines directory to write to.
 
-    A strategy_id maps to that agent's dir; otherwise the current assistant's own
-    dir — ``assistants/condor/routines`` for the chat, ``trading_agents/<slug>/
-    routines`` when launched for an agent/expert (``settings.agent_slug``).
+    A strategy_id (composite key "agent_slug.strategy_slug") maps to that
+    strategy's own ``strategies/<sslug>/routines`` dir; otherwise the current
+    assistant's own dir — ``assistants/condor/routines`` for the chat, or
+    ``trading_agents/<slug>/routines`` when launched for an Agent
+    (``settings.agent_slug``).
     """
     from routines.base import assistant_routines_dir
 
     if strategy_id:
         from condor.trading_agent.strategy import StrategyStore
 
-        s = StrategyStore().get(strategy_id)
+        s = StrategyStore().get_by_key(strategy_id)
         if not s:
             return None
-        return assistant_routines_dir(s.slug)
+        return s.dir / "routines"
 
     return assistant_routines_dir(settings.agent_slug or None)
 
@@ -110,7 +112,7 @@ def list_routines(strategy_id: str | None = None) -> dict:
         from condor.trading_agent.strategy import StrategyStore
 
         for s in StrategyStore().list_all():
-            agent_routines_dir = assistant_routines_dir(s.slug)
+            agent_routines_dir = s.dir / "routines"
             if not agent_routines_dir.exists():
                 continue
             agent_routines = discover_routines_from_path(agent_routines_dir)
@@ -121,7 +123,7 @@ def list_routines(strategy_id: str | None = None) -> dict:
                         "description": routine.description,
                         "type": "continuous" if routine.is_continuous else "one-shot",
                         "scope": "agent",
-                        "agent": s.slug,
+                        "agent": s.key,
                     }
                 )
 
@@ -192,15 +194,15 @@ async def run_routine(
 
     context = MCPContext()
 
-    # Attribute the report to its producer: an explicit strategy, else the run
-    # context (expert consult -> its slug; chat condor -> "condor").
+    # Attribute the report to its producer: an explicit strategy (by composite
+    # key), else the run context (Agent consult -> its slug; chat condor -> "condor").
     agent = settings.agent_slug or "condor"
     if strategy_id:
         from condor.trading_agent.strategy import StrategyStore
 
-        s = StrategyStore().get(strategy_id)
+        s = StrategyStore().get_by_key(strategy_id)
         if s:
-            agent = s.slug
+            agent = s.key
 
     try:
         from condor.reports import attribute_to

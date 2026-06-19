@@ -27,6 +27,7 @@ from condor.acp.client import (
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
+from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
@@ -62,7 +63,8 @@ def get_all_engines() -> dict[str, "TickEngine"]:
 
 @dataclass
 class TickEngine:
-    strategy: Strategy
+    agent: Agent  # owning Agent: identity + shared brain (memory/skills)
+    strategy: Strategy  # the playbook this run loops (tactics + config)
     config: dict[str, Any]
     chat_id: int
     user_id: int
@@ -89,20 +91,27 @@ class TickEngine:
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        agent_dir = self.strategy.agent_dir
+        # The journal/sessions/learnings hang off the *strategy* dir (one level
+        # below the Agent), so each playbook keeps its own operational history
+        # while the Agent's brain (memory/skills) stays shared at the parent.
+        strategy_dir = self.strategy.dir
         mode = self.config.get("execution_mode", "loop")
         self.is_experiment = mode in ("dry_run", "run_once")
 
+        # agent_id == controller_id tag: "{agent_slug}.{strategy_slug}_{N}" (and
+        # "..._e{N}" for experiments). The dot separates the two slugs cleanly —
+        # slugs never contain a dot.
+        run_key = f"{self.agent.slug}.{self.strategy.slug}"
         if self.is_experiment:
-            self.session_num = next_experiment_number(agent_dir)
-            self.agent_id = f"{self.strategy.slug}_e{self.session_num}"
+            self.session_num = next_experiment_number(strategy_dir)
+            self.agent_id = f"{run_key}_e{self.session_num}"
             # Experiments: flat folder, no session dir or journal
             self.session_dir = None
             self.journal = None
         else:
-            self.session_num = next_session_number(agent_dir)
-            self.agent_id = f"{self.strategy.slug}_{self.session_num}"
-            self.session_dir = agent_dir / "sessions" / f"session_{self.session_num}"
+            self.session_num = next_session_number(strategy_dir)
+            self.agent_id = f"{run_key}_{self.session_num}"
+            self.session_dir = strategy_dir / "sessions" / f"session_{self.session_num}"
             self.session_dir.mkdir(parents=True, exist_ok=True)
 
             # Save config per session
@@ -115,7 +124,7 @@ class TickEngine:
                 strategy_name=self.strategy.name,
                 strategy_description=self.strategy.description,
                 session_dir=self.session_dir,
-                agent_dir=agent_dir,
+                agent_dir=strategy_dir,
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
@@ -305,18 +314,20 @@ class TickEngine:
         try:
             from condor.memory import MemoryStore, SkillStore
 
-            # Per-assistant memory (FEAT-003): this agent's own memory, keyed by
-            # its strategy slug — not shared with the chat or other agents.
-            slug = self.strategy.slug
+            # Per-Agent memory (FEAT-003): the Agent's shared brain, keyed by the
+            # *Agent* slug — shared across all its strategies and consults, not by
+            # the per-strategy run.
+            slug = self.agent.slug
             user_memory = MemoryStore(self.user_id, slug).list_index()
-            # Skills are read-only playbooks shipped with this agent (general to
-            # the assistant, keyed by slug only — not per-user, not learned).
+            # Skills are read-only playbooks shipped with this Agent (keyed by the
+            # Agent slug only — not per-user, not learned).
             skills_index = SkillStore(slug).list_index()
         except Exception:
             pass
 
         next_tick = self.journal.tick_count + 1 if self.journal else 1
         prompt = build_tick_prompt(
+            agent=self.agent,
             strategy=self.strategy,
             config=self.config,
             core_data=core_data_summaries,
@@ -397,7 +408,7 @@ class TickEngine:
             from .journal import save_experiment_snapshot
 
             save_experiment_snapshot(
-                agent_dir=self.strategy.agent_dir,
+                agent_dir=self.strategy.dir,
                 experiment_num=self.session_num,
                 execution_mode=mode,
                 timestamp=timestamp,
@@ -407,7 +418,7 @@ class TickEngine:
                 executors_data=executors_summary,
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
-                agent_key=self.config.get("agent_key") or self.strategy.agent_key,
+                agent_key=self._agent_key(),
             )
             log.info(
                 "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
@@ -493,7 +504,7 @@ class TickEngine:
                 server_name,
                 self.user_id,
                 self.chat_id,
-                agent_slug=self.strategy.slug,
+                agent_slug=self.agent.slug,
                 execution_mode=mode,
             )
         else:
@@ -506,7 +517,7 @@ class TickEngine:
             self.risk, risk_state, execution_mode=mode
         )
 
-        agent_key = self.config.get("agent_key") or self.strategy.agent_key
+        agent_key = self._agent_key()
         use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
         if use_pydantic_ai:
@@ -539,6 +550,14 @@ class TickEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _agent_key(self) -> str:
+        """Resolve the model for this run: config override > strategy override > Agent."""
+        return (
+            self.config.get("agent_key")
+            or self.strategy.agent_key
+            or self.agent.agent_key
+        )
 
     def _resolve_server(self) -> tuple[str | None, dict | None]:
         """Resolve the server for this agent."""
@@ -624,7 +643,7 @@ class TickEngine:
                     else {}
                 )
             ),
-            "agent_key": self.config.get("agent_key") or self.strategy.agent_key,
+            "agent_key": self._agent_key(),
             "execution_mode": self.config.get("execution_mode", "loop"),
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,

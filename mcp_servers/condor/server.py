@@ -145,6 +145,7 @@ async def manage_trading_agent(
     action: str,
     agent_id: str | None = None,
     strategy_id: str | None = None,
+    agent_slug: str | None = None,
     name: str | None = None,
     description: str | None = None,
     instructions: str | None = None,
@@ -154,10 +155,14 @@ async def manage_trading_agent(
 ) -> dict:
     """Manage trading agents and strategies.
 
+    A strategy is a looping playbook owned by an Agent. ``strategy_id`` is the
+    opaque key returned by list_strategies/create_strategy (form
+    "agent_slug.strategy_slug") — just pass it back.
+
     Actions -- Strategies:
-    - "list_strategies": List all strategies for the current user
+    - "list_strategies": List all strategies (across agents)
     - "get_strategy": Get full strategy details including instructions (requires strategy_id)
-    - "create_strategy": Create a new strategy (requires name, description, instructions)
+    - "create_strategy": Create a new strategy under an Agent (requires agent_slug, name, instructions)
     - "update_strategy": Update an existing strategy (requires strategy_id, plus fields to update)
     - "delete_strategy": Delete a strategy (requires strategy_id)
 
@@ -183,7 +188,8 @@ async def manage_trading_agent(
     Args:
         action: The action to perform.
         agent_id: Agent instance ID (for lifecycle/monitoring/journal actions).
-        strategy_id: Strategy ID (for strategy/routine/start actions).
+        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/routine/start actions).
+        agent_slug: Owning Agent slug (required for create_strategy).
         name: Strategy name (for create/update) or routine name (for run_routine).
         description: Strategy description (for create/update).
         instructions: Strategy instructions text (for create/update).
@@ -200,6 +206,7 @@ async def manage_trading_agent(
         action,
         agent_id,
         strategy_id,
+        agent_slug,
         name,
         description,
         instructions,
