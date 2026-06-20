@@ -109,6 +109,18 @@ class AgentSummary(BaseModel):
     agent_key: str = ""
     strategy_count: int = 0
     strategies: list[StrategySummary] = []
+    # Aggregated performance rolled up across the agent's strategies, used by
+    # the dashboard summary cards (Portfolio strip + Agents page). FEAT-004 moved
+    # perf data onto strategies; these aggregates keep the agent-level views working.
+    status: str = "idle"  # "running" if any strategy is running
+    session_count: int = 0
+    experiment_count: int = 0
+    tick_count: int = 0
+    daily_pnl: float = 0.0
+    total_pnl: float = 0.0
+    total_volume: float = 0.0
+    open_positions: int = 0
+    instances: list[RunningInstance] = []
 
 
 class AgentPerformanceModel(BaseModel):
@@ -669,9 +681,27 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 agent_key=agent.agent_key,
                 strategy_count=len(strat_summaries),
                 strategies=strat_summaries,
+                **_aggregate_strategy_perf(strat_summaries),
             )
         )
     return results
+
+
+def _aggregate_strategy_perf(strategies: list[StrategySummary]) -> dict[str, Any]:
+    """Roll up per-strategy performance into agent-level aggregates for summary cards."""
+    return {
+        "status": "running"
+        if any(s.status == "running" for s in strategies)
+        else "idle",
+        "session_count": sum(s.session_count for s in strategies),
+        "experiment_count": sum(s.experiment_count for s in strategies),
+        "tick_count": sum(s.tick_count for s in strategies),
+        "daily_pnl": sum(s.daily_pnl for s in strategies),
+        "total_pnl": sum(s.total_pnl for s in strategies),
+        "total_volume": sum(s.total_volume for s in strategies),
+        "open_positions": sum(s.open_positions for s in strategies),
+        "instances": [inst for s in strategies for inst in s.instances],
+    }
 
 
 @router.get("/{slug}", response_model=AgentDetail)

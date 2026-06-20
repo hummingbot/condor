@@ -163,8 +163,8 @@ function DashboardStrip({
   const execStats = useMemo(() => computeExecutorStats(allExecutors, period, convert), [allExecutors, period, convert]);
 
   const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
-  const agentPnl = agents.reduce((s, a) => s + a.daily_pnl, 0);
-  const agentSessions = agents.reduce((s, a) => s + a.session_count, 0);
+  const agentPnl = agents.reduce((s, a) => s + (a.daily_pnl ?? 0), 0);
+  const agentSessions = agents.reduce((s, a) => s + (a.session_count ?? 0), 0);
 
   const btnClass = "flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] w-full";
 
