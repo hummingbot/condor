@@ -16,7 +16,7 @@ import {
   SessionOverview,
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
-import { type AgentSummary, type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
+import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 const SUB_TABS = [
@@ -38,6 +38,7 @@ interface SidebarItem {
 
 interface SessionReviewerProps {
   slug: string;
+  sslug: string;
   agentName: string;
   sessions: SessionInfo[];
   experiments?: ExperimentInfo[];
@@ -45,13 +46,12 @@ interface SessionReviewerProps {
   initialKind?: "session" | "experiment";
   serverName: string;
   controllerIds?: string[];
-  allAgents?: AgentSummary[];
   onClose: () => void;
-  onSwitchAgent?: (slug: string, sessionNum?: number) => void;
 }
 
 export function SessionReviewer({
   slug,
+  sslug,
   agentName,
   sessions,
   experiments = [],
@@ -59,9 +59,7 @@ export function SessionReviewer({
   initialKind = "session",
   serverName,
   controllerIds,
-  allAgents: _allAgents,
   onClose,
-  onSwitchAgent: _onSwitchAgent,
 }: SessionReviewerProps) {
   const [selectedNum, setSelectedNum] = useState(initialSessionNum);
   const [selectedKind, setSelectedKind] = useState<"session" | "experiment">(initialKind);
@@ -98,8 +96,8 @@ export function SessionReviewer({
 
   // Journal data (for sessions)
   const { data: journalData } = useQuery({
-    queryKey: ["agent", slug, "session", selectedNum, "journal"],
-    queryFn: () => api.getSessionJournal(slug, selectedNum),
+    queryKey: ["strategy", slug, sslug, "session", selectedNum, "journal"],
+    queryFn: () => api.getSessionJournal(slug, sslug, selectedNum),
     enabled: !isExperiment && selectedNum > 0,
   });
 
@@ -110,8 +108,8 @@ export function SessionReviewer({
 
   // Experiment snapshot data
   const { data: experimentData } = useQuery({
-    queryKey: ["agent", slug, "experiment", selectedNum],
-    queryFn: () => api.getExperiment(slug, selectedNum),
+    queryKey: ["strategy", slug, sslug, "experiment", selectedNum],
+    queryFn: () => api.getExperiment(slug, sslug, selectedNum),
     enabled: isExperiment && selectedNum > 0,
   });
 
@@ -122,8 +120,8 @@ export function SessionReviewer({
 
   // Session performance data
   const { data: sessionPerfData } = useQuery({
-    queryKey: ["agent-session-executors", slug, selectedNum],
-    queryFn: () => api.getAgentSessionExecutors(slug, selectedNum),
+    queryKey: ["strategy-session-executors", slug, sslug, selectedNum],
+    queryFn: () => api.getStrategySessionExecutors(slug, sslug, selectedNum),
     enabled: !isExperiment && selectedNum > 0,
     refetchInterval: 10000,
   });
@@ -388,6 +386,7 @@ export function SessionReviewer({
                   <div className="space-y-4">
                     <SessionExecutors
                       slug={slug}
+                      sslug={sslug}
                       sessionNum={selectedNum}
                       serverName={serverName}
                       controllerIds={controllerIds}
@@ -399,7 +398,7 @@ export function SessionReviewer({
                 )}
                 {activeSubTab === "activity" && <SessionActivity journal={parsedJournal} />}
                 {activeSubTab === "snapshots" && (
-                  <SessionSnapshots slug={slug} sessionNum={selectedNum} initialTick={pendingSnapshotTick} />
+                  <SessionSnapshots slug={slug} sslug={sslug} sessionNum={selectedNum} initialTick={pendingSnapshotTick} />
                 )}
               </>
             )

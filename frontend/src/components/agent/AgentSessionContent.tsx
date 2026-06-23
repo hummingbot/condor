@@ -111,6 +111,7 @@ export function SessionActivity({ journal }: { journal: ParsedJournal }) {
 
 export function SessionExecutors({
   slug,
+  sslug,
   sessionNum,
   serverName,
   controllerIds,
@@ -118,6 +119,7 @@ export function SessionExecutors({
   sessionSummary,
 }: {
   slug: string;
+  sslug: string;
   sessionNum: number;
   serverName: string;
   controllerIds?: string[];
@@ -126,8 +128,8 @@ export function SessionExecutors({
 }) {
   // REST data (fallback + historical executors)
   const { data: sessionDetail } = useQuery({
-    queryKey: ["agent-session-executors", slug, sessionNum],
-    queryFn: () => api.getAgentSessionExecutors(slug, sessionNum),
+    queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
+    queryFn: () => api.getStrategySessionExecutors(slug, sslug, sessionNum),
     refetchInterval: 10000,
   });
 
@@ -162,14 +164,14 @@ export function SessionExecutors({
 
   // Fetch snapshots for bubble markers
   const { data: snapshotsData } = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshots"],
-    queryFn: () => api.getSessionSnapshots(slug, sessionNum),
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshots"],
+    queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
   // Fetch each snapshot content for agent response previews
   const snapshotSummaries = snapshotsData?.snapshots ?? [];
   const snapshotQueries = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshot-contents", snapshotSummaries.map((s) => s.tick).join(",")],
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot-contents", snapshotSummaries.map((s) => s.tick).join(",")],
     queryFn: async () => {
       // Fetch all snapshots concurrently: Promise.all preserves input order, so
       // the result stays sorted by tick while latency collapses to the slowest
@@ -177,7 +179,7 @@ export function SessionExecutors({
       return Promise.all(
         snapshotSummaries.map(async (snap): Promise<SnapshotBubble> => {
           try {
-            const data = await api.getSnapshot(slug, sessionNum, snap.tick);
+            const data = await api.getSnapshot(slug, sslug, sessionNum, snap.tick);
             if (data?.content) {
               const parsed = parseSnapshot(data.content);
               return {
@@ -449,12 +451,12 @@ export function SessionExecutors({
 
 // ── Session Snapshots ──
 
-export function SessionSnapshots({ slug, sessionNum, initialTick }: { slug: string; sessionNum: number; initialTick?: number | null }) {
+export function SessionSnapshots({ slug, sslug, sessionNum, initialTick }: { slug: string; sslug: string; sessionNum: number; initialTick?: number | null }) {
   const [selectedTick, setSelectedTick] = useState<number>(initialTick ?? 0);
 
   const { data: snapshotsData } = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshots"],
-    queryFn: () => api.getSessionSnapshots(slug, sessionNum),
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshots"],
+    queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
   const snapshots = snapshotsData?.snapshots || [];
@@ -490,7 +492,7 @@ export function SessionSnapshots({ slug, sessionNum, initialTick }: { slug: stri
       {/* Snapshot detail */}
       <div className="min-w-0 flex-1">
         {selectedTick > 0 ? (
-          <SnapshotDetail slug={slug} sessionNum={sessionNum} tick={selectedTick} />
+          <SnapshotDetail slug={slug} sslug={sslug} sessionNum={sessionNum} tick={selectedTick} />
         ) : (
           <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>
         )}
@@ -501,10 +503,10 @@ export function SessionSnapshots({ slug, sessionNum, initialTick }: { slug: stri
 
 // ── Snapshot Detail ──
 
-function SnapshotDetail({ slug, sessionNum, tick }: { slug: string; sessionNum: number; tick: number }) {
+function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
   const { data, isLoading } = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshot", tick],
-    queryFn: () => api.getSnapshot(slug, sessionNum, tick),
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot", tick],
+    queryFn: () => api.getSnapshot(slug, sslug, sessionNum, tick),
     enabled: tick > 0,
   });
 

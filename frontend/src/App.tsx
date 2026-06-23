@@ -15,6 +15,7 @@ import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
 import { Routines } from "@/pages/Routines";
 import { Settings } from "@/pages/Settings";
+import { StrategyDetail } from "@/pages/StrategyDetail";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -69,6 +70,7 @@ export default function App() {
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
                 <Route path="/agents" element={<Agents />} />
                 <Route path="/agents/:slug" element={<AgentDetail />} />
+                <Route path="/agents/:slug/strategies/:sslug" element={<StrategyDetail />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/market" element={<Navigate to="/trade" replace />} />
               </Route>

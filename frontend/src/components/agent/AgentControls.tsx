@@ -19,12 +19,14 @@ export function StartSessionDialog({
   open,
   onClose,
   slug,
+  sslug,
   agentConfig,
   defaultContext,
 }: {
   open: boolean;
   onClose: () => void;
   slug: string;
+  sslug: string;
   agentConfig: Record<string, unknown>;
   defaultContext: string;
 }) {
@@ -59,10 +61,10 @@ export function StartSessionDialog({
           max_drawdown_pct: Number(maxDrawdown),
         },
       };
-      return api.startAgent(slug, config, context);
+      return api.startStrategy(slug, sslug, config, context);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
       onClose();
     },
   });
@@ -259,21 +261,21 @@ export function StartSessionDialog({
 
 // ── Agent Controls ──
 
-export function AgentControls({ slug, status, defaultContext, agentConfig }: { slug: string; status: string; defaultContext: string; agentConfig: Record<string, unknown> }) {
+export function AgentControls({ slug, sslug, status, defaultContext, agentConfig }: { slug: string; sslug: string; status: string; defaultContext: string; agentConfig: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const [showStartDialog, setShowStartDialog] = useState(false);
 
   const stopMut = useMutation({
-    mutationFn: () => api.stopAgent(slug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    mutationFn: () => api.stopStrategy(slug, sslug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
   });
   const pauseMut = useMutation({
-    mutationFn: () => api.pauseAgent(slug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    mutationFn: () => api.pauseStrategy(slug, sslug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
   });
   const resumeMut = useMutation({
-    mutationFn: () => api.resumeAgent(slug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    mutationFn: () => api.resumeStrategy(slug, sslug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
   });
 
   const loading = stopMut.isPending || pauseMut.isPending || resumeMut.isPending;
@@ -329,6 +331,7 @@ export function AgentControls({ slug, status, defaultContext, agentConfig }: { s
         open={showStartDialog}
         onClose={() => setShowStartDialog(false)}
         slug={slug}
+        sslug={sslug}
         agentConfig={agentConfig}
         defaultContext={defaultContext}
       />

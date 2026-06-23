@@ -125,17 +125,17 @@ function CreateAgentDialog({
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [defaultContext, setDefaultContext] = useState("");
+  const [instructions, setInstructions] = useState("");
 
   const createMutation = useMutation({
     mutationFn: () =>
-      api.createAgent({ name, description, default_trading_context: defaultContext }),
+      api.createAgent({ name, description, instructions }),
     onSuccess: (agent) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       onClose();
       setName("");
       setDescription("");
-      setDefaultContext("");
+      setInstructions("");
       navigate(`/agents/${agent.slug}`);
     },
   });
@@ -178,17 +178,17 @@ function CreateAgentDialog({
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Default Trading Context
+              Instructions
             </label>
             <textarea
-              value={defaultContext}
-              onChange={(e) => setDefaultContext(e.target.value)}
-              placeholder="e.g. Trade meme coins aggressively, focus on momentum breakouts with tight stops..."
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              placeholder="e.g. Domain knowledge and identity for this agent's brain — what it specializes in, how it reasons about markets..."
               rows={3}
               className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
             />
             <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              Natural language context that guides trading decisions. Can be overridden per session.
+              The agent's brain (AGENT.md). Add strategies afterward to make it loop.
             </p>
           </div>
         </div>

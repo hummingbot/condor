@@ -334,12 +334,34 @@ export interface RunningInstance {
   risk_limits: Record<string, unknown>;
 }
 
-export interface AgentSummary {
+export interface StrategySummary {
   slug: string;
   name: string;
   description: string;
   status: string;
   agent_id: string;
+  session_count: number;
+  experiment_count: number;
+  tick_count: number;
+  daily_pnl: number;
+  total_pnl: number;
+  total_volume: number;
+  open_positions: number;
+  instances: RunningInstance[];
+}
+
+export interface AgentSummary {
+  slug: string;
+  name: string;
+  description: string;
+  consultable: boolean;
+  when_to_consult: string;
+  agent_key: string;
+  strategy_count: number;
+  strategies: StrategySummary[];
+  // Rolled-up aggregates across the agent's strategies (FEAT-004) for summary cards.
+  status: string;
+  agent_id?: string;
   session_count: number;
   experiment_count: number;
   tick_count: number;
@@ -408,11 +430,28 @@ export interface ExperimentInfo {
   created_at: string;
 }
 
+// Agent = identity + brain (AGENT.md, tools, consult capability) that owns strategies.
 export interface AgentDetail {
   slug: string;
   name: string;
   description: string;
   agent_md: string;
+  agent_key: string;
+  tools: string[];
+  when_to_consult: string;
+  consultable: boolean;
+  server_required: boolean;
+  strategies: StrategySummary[];
+}
+
+// Strategy = a playbook that loops under an Agent. Holds the operational
+// history: sessions, experiments, live instances, config and learnings.
+export interface StrategyDetail {
+  slug: string;
+  agent_slug: string;
+  name: string;
+  description: string;
+  strategy_md: string;
   config: Record<string, unknown>;
   default_trading_context: string;
   learnings: string;
@@ -898,17 +937,9 @@ export const api = {
     return apiFetch<CandleData[]>(url);
   },
 
-  // ── Agents ──
+  // ── Agents (identity + brain) ──
 
   getAgents: () => apiFetch<AgentSummary[]>("/api/v1/agents"),
-
-  getAgentPerformance: (slug: string) =>
-    apiFetch<AgentPerformanceResponse>(`/api/v1/agents/${encodeURIComponent(slug)}/performance`),
-
-  getAgentSessionExecutors: (slug: string, sessionNum: number) =>
-    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/executors`,
-    ),
 
   getAgent: (slug: string) =>
     apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),
@@ -917,8 +948,10 @@ export const api = {
     name: string;
     description?: string;
     instructions?: string;
-    default_trading_context?: string;
-    config?: Record<string, unknown>;
+    agent_key?: string;
+    tools?: string[];
+    when_to_consult?: string;
+    server_required?: boolean;
   }) =>
     apiFetch<AgentSummary>("/api/v1/agents", {
       method: "POST",
@@ -931,63 +964,132 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
-  updateAgentConfig: (slug: string, config: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}/config`, {
-      method: "PUT",
-      body: JSON.stringify({ config }),
-    }),
-
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
       method: "DELETE",
     }),
 
-  startAgent: (slug: string, config: Record<string, unknown> = {}, trading_context = "") =>
+  consultAgent: (
+    slug: string,
+    data: { task: string; context?: string; chat_id?: number; server_name?: string },
+  ) =>
+    apiFetch<{ agent: string; answer: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/consult`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  // ── Strategies (playbooks that loop under an Agent) ──
+
+  getStrategies: (slug: string) =>
+    apiFetch<StrategySummary[]>(`/api/v1/agents/${encodeURIComponent(slug)}/strategies`),
+
+  getStrategy: (slug: string, sslug: string) =>
+    apiFetch<StrategyDetail>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+    ),
+
+  createStrategy: (
+    slug: string,
+    data: {
+      name: string;
+      description?: string;
+      instructions?: string;
+      agent_key?: string;
+      default_trading_context?: string;
+      config?: Record<string, unknown>;
+    },
+  ) =>
+    apiFetch<StrategySummary>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  updateStrategyMd: (slug: string, sslug: string, content: string) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    ),
+
+  updateStrategyConfig: (slug: string, sslug: string, config: Record<string, unknown>) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config`,
+      { method: "PUT", body: JSON.stringify({ config }) },
+    ),
+
+  deleteStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+      { method: "DELETE" },
+    ),
+
+  getStrategyPerformance: (slug: string, sslug: string) =>
+    apiFetch<AgentPerformanceResponse>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/performance`,
+    ),
+
+  getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
+    ),
+
+  startStrategy: (
+    slug: string,
+    sslug: string,
+    config: Record<string, unknown> = {},
+    trading_context = "",
+  ) =>
     apiFetch<{ started: boolean; agent_id: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/start`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/start`,
       { method: "POST", body: JSON.stringify({ config, trading_context }) },
     ),
 
-  stopAgent: (slug: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}/stop`, {
-      method: "POST",
-    }),
+  stopStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ stopped: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/stop`,
+      { method: "POST" },
+    ),
 
-  pauseAgent: (slug: string) =>
-    apiFetch<{ paused: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}/pause`, {
-      method: "POST",
-    }),
+  pauseStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ paused: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/pause`,
+      { method: "POST" },
+    ),
 
-  resumeAgent: (slug: string) =>
-    apiFetch<{ resumed: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}/resume`, {
-      method: "POST",
-    }),
+  resumeStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ resumed: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/resume`,
+      { method: "POST" },
+    ),
 
-  getAgentLearnings: (slug: string) =>
-    apiFetch<{ content: string }>(`/api/v1/agents/${encodeURIComponent(slug)}/learnings`),
-
-  updateAgentLearnings: (slug: string, content: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}/learnings`, {
-      method: "PUT",
-      body: JSON.stringify({ content }),
-    }),
-
-  getAgentSessions: (slug: string) =>
-    apiFetch<{ sessions: SessionInfo[] }>(`/api/v1/agents/${encodeURIComponent(slug)}/sessions`),
-
-  getSessionJournal: (slug: string, sessionNum: number) =>
+  getStrategyLearnings: (slug: string, sslug: string) =>
     apiFetch<{ content: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/journal`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
     ),
 
-  getSessionSnapshots: (slug: string, sessionNum: number) =>
+  updateStrategyLearnings: (slug: string, sslug: string, content: string) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    ),
+
+  getStrategySessions: (slug: string, sslug: string) =>
+    apiFetch<{ sessions: SessionInfo[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions`,
+    ),
+
+  getSessionJournal: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ content: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/journal`,
+    ),
+
+  getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/snapshots`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
     ),
 
-  getSnapshot: (slug: string, sessionNum: number, tick: number) =>
+  getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>
     apiFetch<{ content: string; tick: number }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/snapshots/${tick}`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots/${tick}`,
     ),
 
   // ── Backtesting ──
@@ -1032,12 +1134,14 @@ export const api = {
 
   // ── Experiments ──
 
-  getAgentExperiments: (slug: string) =>
-    apiFetch<{ experiments: ExperimentInfo[] }>(`/api/v1/agents/${encodeURIComponent(slug)}/experiments`),
+  getAgentExperiments: (slug: string, sslug: string) =>
+    apiFetch<{ experiments: ExperimentInfo[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments`,
+    ),
 
-  getExperiment: (slug: string, expNum: number) =>
+  getExperiment: (slug: string, sslug: string, expNum: number) =>
     apiFetch<{ content: string; number: number }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/experiments/${expNum}`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments/${expNum}`,
     ),
 
   // ── Archived Bots ──
