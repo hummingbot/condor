@@ -196,6 +196,9 @@ class PydanticAIClient:
         self._ready_event: asyncio.Event | None = None
         self._shutdown_event: asyncio.Event | None = None
         self._startup_error: BaseException | None = None
+        # Accumulated turn history — grows with each prompt_stream() call so
+        # the model sees prior turns. Reset via clear_history().
+        self._message_history: list = []
 
     def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
@@ -456,6 +459,10 @@ class PydanticAIClient:
                 self._startup_error = exc
                 self._ready_event.set()
 
+    def clear_history(self) -> None:
+        """Discard accumulated message history, starting a fresh conversation."""
+        self._message_history.clear()
+
     async def stop(self) -> None:
         """Signal the MCP lifecycle task to shut down and wait for it."""
         if self._mcp_task is not None:
@@ -502,7 +509,9 @@ class PydanticAIClient:
                 from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
                 from pydantic_graph import End
 
-                async with self._agent.iter(text) as run:
+                async with self._agent.iter(
+                    text, message_history=self._message_history
+                ) as run:
                     async for node in run:
                         if isinstance(node, End):
                             # Final result -- extract text from the result
@@ -582,6 +591,11 @@ class PydanticAIClient:
                                         tool_call_id=tool_id,
                                         status="completed",
                                     )
+
+                    # Accumulate messages so the next prompt_stream() call sees
+                    # this turn's context via message_history.
+                    if run.result is not None:
+                        self._message_history.extend(run.result.new_messages())
 
                 yield PromptDone(stop_reason="end_turn")
 
