@@ -258,7 +258,7 @@ class TickEngine:
             self._last_skill_data.get("total_exposure", 0.0) or 0.0
         )
 
-        if risk_state.is_blocked and not self.is_experiment and live_open_count == 0:
+        if risk_state.is_blocked and not self.is_experiment:
             self.journal.append_action(
                 self.journal.tick_count + 1,
                 "tick_blocked",

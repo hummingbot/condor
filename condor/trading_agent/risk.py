@@ -92,9 +92,6 @@ class RiskEngine:
         if action != "create":
             return True, ""
 
-        if current_state.is_blocked:
-            return False, current_state.block_reason or "Risk state is blocked"
-
         # Check executor count
         if current_state.executor_count >= self.limits.max_open_executors:
             return False, f"Max open executors ({self.limits.max_open_executors}) reached"

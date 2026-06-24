@@ -77,16 +77,8 @@ def _executor_row(ex: dict) -> dict[str, Any]:
     amount = float(cfg.get("total_amount_quote") or cfg.get("amount") or 0)
     if amount <= 0:
         amount = float(
-            custom_info.get("total_value_quote") or ex.get("filled_amount_quote") or 0
+            custom_info.get("total_value_quote") or 0
         )
-    if amount <= 0:
-        base_amount = float(
-            custom_info.get("base_amount") or cfg.get("base_amount") or 0
-        )
-        quote_amount = float(
-            custom_info.get("quote_amount") or cfg.get("quote_amount") or 0
-        )
-        amount = quote_amount + (base_amount * current_price)
 
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
