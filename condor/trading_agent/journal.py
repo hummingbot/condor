@@ -2,7 +2,7 @@
 
 Data is organized by strategy (a playbook owned by an Agent) and session::
 
-    trading_agents/
+    agents/
         {agent_slug}/
             strategies/
                 {strategy_slug}/
@@ -28,7 +28,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
+_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 MAX_LEARNINGS = 20
 
@@ -37,8 +37,8 @@ def _strategy_base_dir(prefix: str) -> Path:
     """Resolve the per-strategy base dir from an agent_id prefix.
 
     New format prefixes are ``"{agent_slug}.{strategy_slug}"`` →
-    ``trading_agents/{agent_slug}/strategies/{strategy_slug}/``. Legacy flat
-    prefixes (no dot) fall back to ``trading_agents/{slug}/`` so old ids still
+    ``agents/{agent_slug}/strategies/{strategy_slug}/``. Legacy flat
+    prefixes (no dot) fall back to ``agents/{slug}/`` so old ids still
     resolve.
     """
     if "." in prefix:
@@ -142,7 +142,7 @@ def get_session_dir(run_key: str, session_number: int) -> Path:
     """Build the path for a specific session directory.
 
     ``run_key`` is the ``"{agent_slug}.{strategy_slug}"`` prefix (legacy flat
-    slugs without a dot still resolve to ``trading_agents/{slug}/``).
+    slugs without a dot still resolve to ``agents/{slug}/``).
     """
     return _strategy_base_dir(run_key) / "sessions" / f"session_{session_number}"
 

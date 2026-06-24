@@ -23,7 +23,7 @@ Layout on disk — keyed by the assistant only (``agent_slug``), via
             SKILL.md         # frontmatter + steps
 
 where ``{assistant_home}`` is ``assistants/condor`` for the chat (``agent_slug``
-None) or ``trading_agents/<slug>`` for a trading agent / domain expert.
+None) or ``agents/<slug>`` for a trading agent / domain expert.
 """
 
 from __future__ import annotations

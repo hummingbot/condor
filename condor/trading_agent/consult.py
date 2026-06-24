@@ -3,7 +3,8 @@
 ``condor`` (the coordinator) calls the ``consult`` MCP tool, which calls back into
 the main process (where ``ConfigManager`` and the agent runtime live) and lands
 here. We load the Agent, build its restricted toolset, run its own brain to
-completion on a pydantic-ai model, and return its answer text. No strategy is
+completion on its configured pydantic-ai model — or, if that model's local backend
+is down, on a claude-code/ACP fallback — and return its answer text. No strategy is
 involved — CONSULT runs the Agent's identity + shared memory/skills.
 
 The Agent may call mutating tools; those are gated by the SAME interactive
@@ -17,8 +18,13 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 
-from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
+from condor.acp.pydantic_ai_client import (
+    PydanticAIClient,
+    healthcheck_local_backend,
+    is_pydantic_ai_model,
+)
 from condor.trading_agent.agent import AgentStore
 
 log = logging.getLogger(__name__)
@@ -33,9 +39,12 @@ async def run_consult(
     context: str = "",
 ) -> str:
     """Consult the Agent ``slug`` with ``task`` and return its answer."""
-    agent = AgentStore().get(slug)
+    store = AgentStore()
+    agent = store.get(slug)
     if agent is None:
-        return f"No agent named '{slug}' is available."
+        index = store.list_consultable_index()
+        available = f"\n\nAvailable experts:\n{index}" if index else ""
+        return f"No agent named '{slug}' is available.{available}"
     if not is_pydantic_ai_model(agent.agent_key):
         return (
             f"Agent '{slug}' is configured with agent_key='{agent.agent_key}', but "
@@ -43,12 +52,41 @@ async def run_consult(
             "openrouter) so the tool allowlist can be enforced."
         )
 
+    # Preflight the model backend so a stopped Ollama/LM Studio fails fast with a
+    # clear reason instead of a deep httpx error mid-run. If a local backend is
+    # down we fall back to claude-code (ACP), which needs no local backend.
+    # Override the fallback with CONSULT_FALLBACK_MODEL, or set it to "" to disable.
+    model_key = agent.agent_key
+    fallback_note = ""
+    backend_err = await healthcheck_local_backend(model_key)
+    if backend_err:
+        fallback = os.environ.get("CONSULT_FALLBACK_MODEL", "claude-code").strip()
+        if fallback and fallback != model_key:
+            log.warning(
+                "Consult backend for '%s' unavailable (%s); falling back to %s",
+                slug,
+                backend_err,
+                fallback,
+            )
+            model_key = fallback
+            fallback_note = (
+                f"_(note: {agent.name}'s configured model was unavailable — "
+                f"{backend_err} Answered with fallback `{fallback}`.)_\n\n"
+            )
+        else:
+            return (
+                f"The '{slug}' expert is unavailable: {backend_err}\n\n"
+                "Start the model backend, or set CONSULT_FALLBACK_MODEL to a "
+                "reachable model to auto-fall-back."
+            )
+
     # Build the Agent's MCP toolset in the main process (ConfigManager is here).
     # agent_slug scopes the condor MCP tools' memory/skills to this Agent (its brain).
     from handlers.agents._shared import (
         build_agent_context,
         build_mcp_servers_for_agent,
         build_mcp_servers_for_session,
+        get_project_dir,
     )
 
     if agent.server_required and server_name:
@@ -81,12 +119,28 @@ async def run_consult(
             "Could not build consult permission callback; mutations will error"
         )
 
-    client = PydanticAIClient(
-        model=agent.agent_key,
-        mcp_servers=mcp_servers,
-        permission_callback=permission_cb,
-        allowed_tools=agent.tools or None,
-    )
+    # Build the client for the (possibly fallback) model. A pydantic-ai model gets
+    # the agent's tool allowlist enforced; an ACP fallback (claude-code) cannot
+    # enforce an allowlist, so it runs the consult unrestricted — acceptable since
+    # it is the trusted coordinator model and mutations are still confirmation-gated.
+    if is_pydantic_ai_model(model_key):
+        client = PydanticAIClient(
+            model=model_key,
+            mcp_servers=mcp_servers,
+            permission_callback=permission_cb,
+            allowed_tools=agent.tools or None,
+        )
+    else:
+        from condor.acp.client import ACPClient, resolve_acp
+
+        agent_cmd, model_env = resolve_acp(model_key)
+        client = ACPClient(
+            command=agent_cmd,
+            working_dir=get_project_dir(),
+            mcp_servers=mcp_servers,
+            permission_callback=permission_cb,
+            extra_env=model_env or None,
+        )
 
     prompt = build_agent_context(agent, user_id, task, context)
 
@@ -96,4 +150,4 @@ async def run_consult(
     finally:
         await client.stop()
 
-    return answer or "(the agent returned no answer)"
+    return fallback_note + (answer or "(the agent returned no answer)")

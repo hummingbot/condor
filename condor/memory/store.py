@@ -139,8 +139,9 @@ class MemoryStore:
 
         # Preserve original created date on overwrite.
         path = self.memories_dir / f"{slug}.md"
+        existed = path.exists()
         created = _utcnow()
-        if path.exists():
+        if existed:
             existing_meta, _ = _parse_frontmatter(path.read_text())
             created = existing_meta.get("created", created)
 
@@ -153,7 +154,8 @@ class MemoryStore:
         }
         self._atomic_write(path, _render(meta, content.strip()))
         self._reindex()
-        self._append_audit("write", f"memory:{slug}", meta["description"], source)
+        action = "update" if existed else "create"
+        self._append_audit(action, f"memory:{slug}", meta["description"], source)
         return {
             "saved": True,
             "name": slug,

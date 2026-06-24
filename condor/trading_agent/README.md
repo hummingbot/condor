@@ -61,7 +61,7 @@ In short: executors give us the cleanest possible boundary between "what this ag
 | File | Role |
 |---|---|
 | `engine.py` | `TickEngine` — one instance per running agent. Runs the tick loop, builds prompts, drives ACP sessions, captures tool calls, persists snapshots. |
-| `strategy.py` | `Strategy` + `StrategyStore`. Strategies live as `agent.md` files (YAML frontmatter + markdown body) under `trading_agents/{slug}/`. |
+| `strategy.py` | `Strategy` + `StrategyStore`. Strategies live as `agent.md` files (YAML frontmatter + markdown body) under `agents/{slug}/`. |
 | `journal.py` | `JournalManager` — compact, human-readable per-session memory: summary, decisions, ticks, snapshots, executors. Also `learnings.md` cross-session. |
 | `prompts.py` | Builds the per-tick prompt: system prompt + strategy + provider summaries + journal context + risk state + user directives. |
 | `risk.py` | `RiskEngine` + `RiskLimits`. Hard guardrails (max exposure, max drawdown, max open executors) and the permission callback that auto-approves tool calls only if they pass the risk check. |
@@ -71,7 +71,7 @@ In short: executors give us the cleanest possible boundary between "what this ag
 ### File layout per agent
 
 ```
-trading_agents/
+agents/
   river_scalper/
     agent.md                  # strategy definition (frontmatter + LLM instructions)
     learnings.md              # cross-session lessons the agent writes itself
@@ -139,7 +139,7 @@ This is the closest thing to giving each LLM its own virtual sub-account without
 
 ### 4.1 Create a strategy
 
-A strategy is just `trading_agents/{slug}/agent.md`:
+A strategy is just `agents/{slug}/agent.md`:
 
 ```markdown
 ---
@@ -220,10 +220,10 @@ In production, agents are normally started/stopped from the Telegram `/agent` fl
 
 ### 4.4 Inspecting what the agent did
 
-- `trading_agents/{slug}/sessions/session_N/journal.md` — chronological summary, last decisions, tick log, executors, snapshot index.
-- `trading_agents/{slug}/sessions/session_N/snapshots/snapshot_K.md` — the *full* tick: system prompt, response text, every tool call with arguments and status, executor snapshot, risk state, duration.
-- `trading_agents/{slug}/learnings.md` — lessons the agent has chosen to keep across sessions.
-- `trading_agents/{slug}/dry_runs/experiment_N.md` — dry-run / run-once results.
+- `agents/{slug}/sessions/session_N/journal.md` — chronological summary, last decisions, tick log, executors, snapshot index.
+- `agents/{slug}/sessions/session_N/snapshots/snapshot_K.md` — the *full* tick: system prompt, response text, every tool call with arguments and status, executor snapshot, risk state, duration.
+- `agents/{slug}/learnings.md` — lessons the agent has chosen to keep across sessions.
+- `agents/{slug}/dry_runs/experiment_N.md` — dry-run / run-once results.
 
 ### 4.5 Injecting directives mid-flight
 

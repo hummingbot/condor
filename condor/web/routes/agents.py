@@ -11,8 +11,8 @@ An **Agent** is the top-level unit: identity + shared brain (memory/skills) that
     /agents/{slug}/strategies/{sslug}/...    -> per-strategy run/journal/perf
 
 Per-strategy operational history (sessions, learnings, experiments, routines)
-hangs off ``trading_agents/{slug}/strategies/{sslug}/`` while the Agent's brain
-stays shared at ``trading_agents/{slug}/``.
+hangs off ``agents/{slug}/strategies/{sslug}/`` while the Agent's brain
+stays shared at ``agents/{slug}/``.
 """
 
 from __future__ import annotations
@@ -1291,7 +1291,7 @@ async def get_strategy_routines(
 ):
     """List routines available to this strategy.
 
-    Routines live at the **agent** level (``trading_agents/{slug}/routines``) and
+    Routines live at the **agent** level (``agents/{slug}/routines``) and
     are shared across all of the agent's strategies, so this lists the owning
     agent's routines (keyed ``{agent_slug}/{name}`` in the store).
     """

@@ -8,7 +8,7 @@ with its definition, and nothing is shared across assistants (FEAT-003).
 The key of a store is ``(assistant, user_id)`` — "per-assistant" *composes with*
 ``user_id``, it does not replace it (group chats share a chat but each user keeps
 their own memory). Two assistants never resolve to the same root: the chat lives
-under ``assistants/condor/`` and trading agents under ``trading_agents/{slug}/``,
+under ``assistants/condor/`` and trading agents under ``agents/{slug}/``,
 which are different top-level dirs, so even a strategy literally named ``condor``
 cannot collide with the chat.
 
@@ -32,11 +32,11 @@ _CHAT_ASSISTANT = "condor"
 def store_root(user_id: int, agent_slug: str | None = None) -> Path:
     """Root of an assistant's per-user store.
 
-    ``agent_slug`` set  -> trading agent: ``trading_agents/{slug}/store/user_{id}``
+    ``agent_slug`` set  -> trading agent: ``agents/{slug}/store/user_{id}``
     ``agent_slug`` None  -> chat condor:   ``assistants/condor/store/user_{id}``
     """
     if agent_slug:
-        base = _PROJECT_ROOT / "trading_agents" / agent_slug
+        base = _PROJECT_ROOT / "agents" / agent_slug
     else:
         base = _PROJECT_ROOT / "assistants" / _CHAT_ASSISTANT
     return base / "store" / f"user_{user_id}"
@@ -52,13 +52,13 @@ def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
     - chat ``condor`` (``agent_slug`` None) → ``assistants/condor/skills/``
       (e.g. agent_builder, routine_builder)
     - a trading agent / domain expert (``agent_slug`` set) →
-      ``trading_agents/<slug>/skills/`` (e.g. an executor_manager's playbooks)
+      ``agents/<slug>/skills/`` (e.g. an executor_manager's playbooks)
 
     Merged into the agent's [SKILLS]/[DOMAIN SKILLS] index alongside its learned
     skills; read-only (create/edit/delete refuse these slugs).
     """
     if agent_slug:
-        return _PROJECT_ROOT / "trading_agents" / agent_slug / "skills"
+        return _PROJECT_ROOT / "agents" / agent_slug / "skills"
     return _PROJECT_ROOT / "assistants" / _CHAT_ASSISTANT / "skills"
 
 
@@ -66,7 +66,7 @@ def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
     """``(label, agent_slug, root)`` for each existing store of ``user_id``.
 
     Used by ``/memory`` to show one section per assistant. Scans
-    ``assistants/*/store/user_{id}`` and ``trading_agents/*/store/user_{id}`` and
+    ``assistants/*/store/user_{id}`` and ``agents/*/store/user_{id}`` and
     returns only the stores that exist on disk (so empty assistants don't clutter
     the view). ``agent_slug`` is ``None`` for the chat and the slug for a trading
     agent, so a caller can rebuild the store via ``MemoryStore(user_id, agent_slug)``.
@@ -80,7 +80,7 @@ def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
     if chat_root.exists():
         found.append((f"{_CHAT_ASSISTANT} (chat)", None, chat_root))
 
-    agents_dir = _PROJECT_ROOT / "trading_agents"
+    agents_dir = _PROJECT_ROOT / "agents"
     if agents_dir.exists():
         for d in sorted(agents_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("_") or d.name == "strategies":

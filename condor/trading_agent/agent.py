@@ -15,7 +15,7 @@ it can be both.
 
 Disk layout::
 
-    trading_agents/{slug}/
+    agents/{slug}/
         AGENT.md                       # Agent identity + domain knowledge (no `role`)
         skills/<slug>/SKILL.md         # shared skills (consult + every strategy) [FEAT-002/003]
         store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
@@ -39,7 +39,7 @@ from .strategy import _render_frontmatter, _slugify
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
+_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 
 @dataclass
@@ -106,7 +106,7 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
 
 
 class AgentStore:
-    """Discovery + CRUD for Agents under ``trading_agents/*/AGENT.md``.
+    """Discovery + CRUD for Agents under ``agents/*/AGENT.md``.
 
     Replaces ``ExpertStore`` and the identity half of ``StrategyStore``. There is
     no ``role`` discriminator anymore: every directory with an ``AGENT.md`` is an

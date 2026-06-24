@@ -155,8 +155,8 @@ class RoutineStore:
             for rname, rinfo in discover_routines_from_path(condor_dir).items():
                 all_routines[rname] = rinfo
 
-        # Scan trading_agents/*/routines/
-        agents_dir = Path(__file__).resolve().parent.parent / "trading_agents"
+        # Scan agents/*/routines/
+        agents_dir = Path(__file__).resolve().parent.parent / "agents"
         if agents_dir.exists():
             for agent_dir in sorted(agents_dir.iterdir()):
                 routines_path = agent_dir / "routines"
@@ -287,7 +287,7 @@ class RoutineStore:
             slug, rname = routine_name.split("/", 1)
             agents_dir = (
                 Path(__file__).resolve().parent.parent
-                / "trading_agents"
+                / "agents"
                 / slug
                 / "routines"
             )

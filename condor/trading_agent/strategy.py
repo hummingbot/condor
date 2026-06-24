@@ -3,7 +3,7 @@
 Each strategy is a tick-loop playbook that lives **under its owning Agent**, as
 ``strategy.md`` (YAML frontmatter + markdown body) inside a per-strategy folder::
 
-    trading_agents/
+    agents/
         {agent_slug}/
             AGENT.md                       # the owning Agent (see agent.py)
             routines/                      # routines shared by all of this agent's strategies
@@ -19,7 +19,7 @@ A strategy is identified by the pair ``(agent_slug, slug)``; its opaque composit
 key ``"{agent_slug}.{slug}"`` is what MCP tools pass around as ``strategy_id``.
 The Agent's memory/skills/routines (the "brain") are shared across all of its
 strategies and its consults — they live one level up, at
-``trading_agents/{agent_slug}/``.
+``agents/{agent_slug}/``.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-_DATA_ROOT = Path(__file__).parent.parent.parent / "trading_agents"
+_DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 
 def _slugify(name: str) -> str:
@@ -109,7 +109,7 @@ class Strategy:
 
     @property
     def dir(self) -> Path:
-        """This strategy's folder: trading_agents/{agent_slug}/strategies/{slug}/."""
+        """This strategy's folder: agents/{agent_slug}/strategies/{slug}/."""
         return _DATA_ROOT / self.agent_slug / "strategies" / self.slug
 
 
