@@ -29,7 +29,9 @@ class ExecutorsProvider(BaseProvider):
             )
 
         try:
-            perf = await fetch_agent_performance(client, agent_id)
+            perf = await fetch_agent_performance(
+                client, agent_id, bot_name=config.get("bot_name", "")
+            )
         except Exception as e:
             return ProviderResult(
                 name=self.name,

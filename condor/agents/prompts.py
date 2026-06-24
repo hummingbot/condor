@@ -257,6 +257,22 @@ def build_tick_prompt(
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))
 
+    # Controller mode: the agent steers a named bot's controllers instead of
+    # spawning standalone executors. Triggered solely by a non-empty bot_name.
+    bot_name = config.get("bot_name", "")
+    if bot_name:
+        sections.append(
+            "[CONTROLLER MODE]\n"
+            f"You operate the Hummingbot bot '{bot_name}'. Steer its controllers "
+            "instead of creating standalone executors:\n"
+            '- Check current state first: manage_bots(action="status").\n'
+            "- Define/update controller config templates with manage_controllers.\n"
+            f"- Apply them with manage_bots: deploy if '{bot_name}' is not running, "
+            "otherwise update_config / start_controllers / stop_controllers.\n"
+            "Do NOT create standalone executors unless the strategy instructions "
+            "explicitly tell you to. The bot's PnL is attributed to you automatically."
+        )
+
     # Risk state
     rs = risk_state
     max_dd = rs.get("max_drawdown_pct", -1)

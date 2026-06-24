@@ -492,6 +492,7 @@ async def _compute_strategy_performance(
     run_key: str, strategy_dir: Path, default_config: dict | None
 ):
     """Return list of AgentPerformanceModel plus rolled-up totals. Cached ~30s."""
+    from condor.agents.config import load_full_config
     from condor.agents.performance import fetch_agent_performance_batch
 
     cached = _cache_get(f"perf:{run_key}")
@@ -501,11 +502,17 @@ async def _compute_strategy_performance(
     ids = _enumerate_agent_ids(run_key, strategy_dir)
     client, _server = await _get_client_for_strategy(strategy_dir, default_config)
 
+    # Controller mode: a strategy with a configured bot_name attributes that bot's
+    # PnL to every one of its agent sessions. The bot is persistent infrastructure
+    # tied to the stable run_key, so the name is shared across sessions.
+    bot_name = load_full_config(strategy_dir, default_config).get("bot_name", "")
+    bot_names = {aid: bot_name for aid, _, _ in ids} if bot_name else None
+
     sessions: list[AgentPerformanceModel] = []
     if client and ids:
         agent_ids = [aid for aid, _, _ in ids]
         try:
-            perf_map = await fetch_agent_performance_batch(client, agent_ids)
+            perf_map = await fetch_agent_performance_batch(client, agent_ids, bot_names)
         except Exception as e:
             log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
             perf_map = {}
@@ -690,9 +697,9 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
 def _aggregate_strategy_perf(strategies: list[StrategySummary]) -> dict[str, Any]:
     """Roll up per-strategy performance into agent-level aggregates for summary cards."""
     return {
-        "status": "running"
-        if any(s.status == "running" for s in strategies)
-        else "idle",
+        "status": (
+            "running" if any(s.status == "running" for s in strategies) else "idle"
+        ),
         "session_count": sum(s.session_count for s in strategies),
         "experiment_count": sum(s.experiment_count for s in strategies),
         "tick_count": sum(s.tick_count for s in strategies),

@@ -14,20 +14,47 @@ from pydantic import BaseModel, Field
 
 
 class RiskLimitsConfig(BaseModel):
-    max_position_size_quote: float = Field(default=500.0, description="Max total position size in quote currency")
+    max_position_size_quote: float = Field(
+        default=500.0, description="Max total position size in quote currency"
+    )
     max_open_executors: int = Field(default=5, description="Max simultaneous executors")
-    max_drawdown_pct: float = Field(default=-1.0, description="Max drawdown percentage; -1 = disabled")
+    max_drawdown_pct: float = Field(
+        default=-1.0, description="Max drawdown percentage; -1 = disabled"
+    )
 
 
 class AgentConfig(BaseModel):
     server_name: str = Field(default="local", description="Hummingbot API server name")
-    agent_key: str = Field(default="", description="LLM model to use (e.g. 'claude-code', 'ollama:llama3.1'). Empty = use strategy default.")
-    model_base_url: str = Field(default="", description="Custom base URL for OpenAI-compatible endpoints (LM Studio, vLLM). Leave empty for standard providers.")
-    total_amount_quote: float = Field(default=100.0, description="Total capital budget for this session in quote currency")
+    agent_key: str = Field(
+        default="",
+        description="LLM model to use (e.g. 'claude-code', 'ollama:llama3.1'). Empty = use strategy default.",
+    )
+    model_base_url: str = Field(
+        default="",
+        description="Custom base URL for OpenAI-compatible endpoints (LM Studio, vLLM). Leave empty for standard providers.",
+    )
+    total_amount_quote: float = Field(
+        default=100.0,
+        description="Total capital budget for this session in quote currency",
+    )
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
-    trading_context: str = Field(default="", description="Natural language session context that guides the agent's trading decisions")
-    execution_mode: Literal["dry_run", "run_once", "loop"] = Field(default="loop", description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)")
-    max_ticks: int = Field(default=0, description="Max ticks before auto-stop; 0 = unlimited")
+    trading_context: str = Field(
+        default="",
+        description="Natural language session context that guides the agent's trading decisions",
+    )
+    execution_mode: Literal["dry_run", "run_once", "loop"] = Field(
+        default="loop",
+        description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)",
+    )
+    max_ticks: int = Field(
+        default=0, description="Max ticks before auto-stop; 0 = unlimited"
+    )
+    bot_name: str = Field(
+        default="",
+        description="If set, the agent operates this Hummingbot bot's controllers "
+        "(deploy/retune) instead of creating standalone executors, and the bot's "
+        "PnL is merged into the agent's reported performance. Empty = executor mode.",
+    )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:
@@ -45,7 +72,9 @@ class AgentConfig(BaseModel):
         return cls(**cleaned)
 
 
-def load_agent_config(agent_dir: Path, defaults: dict[str, Any] | None = None) -> AgentConfig:
+def load_agent_config(
+    agent_dir: Path, defaults: dict[str, Any] | None = None
+) -> AgentConfig:
     """Load config from config.yml in the agent directory, falling back to defaults."""
     config_path = agent_dir / "config.yml"
     if config_path.exists():
@@ -63,10 +92,14 @@ def save_agent_config(agent_dir: Path, config: AgentConfig) -> None:
     """Save config to config.yml in the agent directory."""
     config_path = agent_dir / "config.yml"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False))
+    config_path.write_text(
+        yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False)
+    )
 
 
-def load_full_config(agent_dir: Path, defaults: dict[str, Any] | None = None) -> dict[str, Any]:
+def load_full_config(
+    agent_dir: Path, defaults: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Load config preserving both AgentConfig fields and strategy-specific keys.
 
     Starts from strategy defaults, overlays saved config.yml, then validates

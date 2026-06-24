@@ -28,6 +28,10 @@ class AgentPerformance:
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = field(default_factory=list)
+    # Controller-mode attribution: when the agent operates a named bot, the bot's
+    # aggregate PnL is merged into the totals above and surfaced here for transparency.
+    bot_name: str = ""
+    controllers: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -68,8 +72,10 @@ def _executor_row(ex: dict) -> dict[str, Any]:
     # else legitimately lacks one, so don't warn for them.
     _ex_type = str(cfg.get("type") or ex.get("type") or "").lower()
     if entry_price == 0.0 and "position" in _ex_type:
-        log.warning("entry_price fell back to 0.0 for position executor %s — PnL may be wrong",
-                     ex.get("id") or ex.get("executor_id") or "?")
+        log.warning(
+            "entry_price fell back to 0.0 for position executor %s — PnL may be wrong",
+            ex.get("id") or ex.get("executor_id") or "?",
+        )
 
     # current_price / close_price: top-level > custom_info
     _top_cur = float(ex.get("current_price") or 0)
@@ -79,7 +85,11 @@ def _executor_row(ex: dict) -> dict[str, Any]:
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
         "type": cfg.get("type") or ex.get("type") or "",
-        "connector": cfg.get("connector_name") or ex.get("connector_name") or cfg.get("connector") or ex.get("connector") or "",
+        "connector": cfg.get("connector_name")
+        or ex.get("connector_name")
+        or cfg.get("connector")
+        or ex.get("connector")
+        or "",
         "pair": cfg.get("trading_pair") or ex.get("trading_pair") or "",
         "side": str(cfg.get("side") or ex.get("side") or ""),
         "status": str(ex.get("status") or "").upper(),
@@ -98,10 +108,33 @@ def _executor_row(ex: dict) -> dict[str, Any]:
     }
 
 
-async def fetch_agent_performance(client: Any, agent_id: str) -> AgentPerformance:
-    """Fetch authoritative performance for a single ``agent_id``."""
-    batch = await fetch_agent_performance_batch(client, [agent_id])
-    return batch.get(agent_id, AgentPerformance(agent_id=agent_id))
+async def fetch_agent_performance(
+    client: Any, agent_id: str, bot_name: str = ""
+) -> AgentPerformance:
+    """Fetch authoritative performance for a single ``agent_id``.
+
+    When ``bot_name`` is given, the agent is in controller mode: the named bot's
+    aggregate PnL is merged into the returned totals (see
+    :func:`fetch_agent_performance_batch`).
+    """
+    bot_names = {agent_id: bot_name} if bot_name else None
+    batch = await fetch_agent_performance_batch(client, [agent_id], bot_names)
+    return batch.get(agent_id, AgentPerformance(agent_id=agent_id, bot_name=bot_name))
+
+
+def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
+    """Fold a bot's aggregate into an executor-derived ``AgentPerformance`` in place.
+
+    The two sources are disjoint (bot controllers tag executors with their own
+    config ids, never the ``agent_id``), so the merge is plain addition — no
+    de-duplication. Fees are left untouched: the bot snapshot carries no fee field.
+    """
+    perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
+    perf.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
+    perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
+    perf.volume += float(bot.get("volume_traded", 0) or 0)
+    perf.bot_name = bot.get("bot_name", perf.bot_name)
+    perf.controllers = bot.get("controllers", [])
 
 
 def _build_perf_from_rows(
@@ -142,9 +175,16 @@ def _build_perf_from_rows(
 
 
 async def fetch_agent_performance_batch(
-    client: Any, agent_ids: list[str]
+    client: Any,
+    agent_ids: list[str],
+    bot_names: dict[str, str] | None = None,
 ) -> dict[str, AgentPerformance]:
-    """Batched multi-agent fetch via a single cursor-paginated executor search."""
+    """Batched multi-agent fetch via a single cursor-paginated executor search.
+
+    ``bot_names`` maps ``agent_id -> bot_name`` for agents running in controller
+    mode; each such agent's bot aggregate (one shared snapshot fetch for the whole
+    batch) is merged into its executor-derived totals.
+    """
     out: dict[str, AgentPerformance] = {
         aid: AgentPerformance(agent_id=aid) for aid in agent_ids
     }
@@ -193,4 +233,23 @@ async def fetch_agent_performance_batch(
     rows_lists = await asyncio.gather(*[_fetch_rows(aid) for aid in agent_ids])
     for aid, rows in zip(agent_ids, rows_lists):
         out[aid] = _build_perf_from_rows(aid, rows)
+
+    # Controller mode: merge each agent's bot aggregate. One snapshot fetch is
+    # shared across the whole batch since the API returns all bots at once.
+    wanted = {bn for bn in (bot_names or {}).values() if bn}
+    if wanted:
+        from condor.fetchers.bot_performance import fetch_all_bot_performance
+
+        try:
+            all_bot_perf = await fetch_all_bot_performance(client)
+        except Exception as e:
+            log.warning("fetch_all_bot_performance failed: %s", e)
+            all_bot_perf = {}
+        for aid, bn in (bot_names or {}).items():
+            if not bn or aid not in out:
+                continue
+            out[aid].bot_name = bn
+            bot = all_bot_perf.get(bn)
+            if bot:
+                _merge_bot_perf(out[aid], bot)
     return out

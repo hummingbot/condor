@@ -133,6 +133,25 @@ Throughout this flow:
 
 This is the closest thing to giving each LLM its own virtual sub-account without actually opening one.
 
+### 3.1 Controller mode — operating a named bot
+
+By default an agent acts through standalone executors tagged with its `controller_id`. As an alternative, an agent can **operate a Hummingbot bot's controllers** — deploy a bot under a stable name and retune its controller configs each tick — instead of (or in addition to) spawning executors.
+
+Controller mode is triggered solely by setting a non-empty **`bot_name`** in the strategy config (`default_config.bot_name`, overridable at start time). There is no separate mode flag: "has a `bot_name`" *is* the mode. When set:
+
+- The tick prompt gains a `[CONTROLLER MODE]` block telling the agent it owns bot `{bot_name}` and should steer it via `manage_controllers` (define/update controller configs) + `manage_bots` (`deploy` / `update_config` / `start_controllers` / `stop_controllers`), not standalone executors.
+- The agent's reported PnL becomes `executor_pnl(controller_id == agent_id)` **+** `bot_pnl(bot_name == config.bot_name)`. The two sources are disjoint — bot controllers tag their executors with their own config ids, never the `agent_id` — so the merge is plain addition with no double counting (`condor/fetchers/bot_performance.py` aggregates the bot side; `condor/agents/performance.py` folds it in).
+
+**Stable identity.** The bot is persistent infrastructure, so its name should derive from the **stable** `run_key` (`{agent_slug}.{strategy_slug}`), not the per-session `agent_id`. The suggested default is `sanitize(run_key)` = `{agent_slug}-{strategy_slug}`; a restarted agent then reattaches to the same bot. If you hardcode a `bot_name`, keep it stable across restarts.
+
+**Enablement (data, not code).** A controller-mode agent needs `manage_bots` **and** `manage_controllers` in its `AGENT.md` `tools:` allowlist (the allowlist is enforced in `condor/acp/pydantic_ai_client.py`). Example `default_config`:
+
+```yaml
+default_config:
+  bot_name: river-scalper      # stable; defaults to {agent_slug}-{strategy_slug}
+  total_amount_quote: 500
+```
+
 ---
 
 ## 4. Usage
