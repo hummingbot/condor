@@ -18,7 +18,7 @@ def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
     from routines.base import assistant_routines_dir
 
     if strategy_id:
-        from condor.trading_agent.strategy import StrategyStore
+        from condor.agents.strategy import StrategyStore
 
         s = StrategyStore().get_by_key(strategy_id)
         if not s:
@@ -109,7 +109,7 @@ def list_routines(strategy_id: str | None = None) -> dict:
                     }
                 )
 
-        from condor.trading_agent.agent import AgentStore
+        from condor.agents.agent import AgentStore
 
         for a in AgentStore().list_all():
             agent_routines_dir = a.routines_dir
@@ -198,7 +198,7 @@ async def run_routine(
     # key), else the run context (Agent consult -> its slug; chat condor -> "condor").
     agent = settings.agent_slug or "condor"
     if strategy_id:
-        from condor.trading_agent.strategy import StrategyStore
+        from condor.agents.strategy import StrategyStore
 
         s = StrategyStore().get_by_key(strategy_id)
         if s:

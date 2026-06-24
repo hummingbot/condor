@@ -618,7 +618,7 @@ def main() -> None:
         await destroy_all_sessions()
 
         # Stop all trading agents
-        from condor.trading_agent.engine import get_all_engines
+        from condor.agents.engine import get_all_engines
 
         for engine in list(get_all_engines().values()):
             try:

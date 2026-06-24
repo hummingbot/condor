@@ -9,10 +9,10 @@ import asyncio
 from types import SimpleNamespace
 
 from condor.acp.pydantic_ai_client import PydanticAIClient
-from condor.trading_agent import agent as agent_module
-from condor.trading_agent import strategy as strategy_module
-from condor.trading_agent.agent import AgentStore
-from condor.trading_agent.strategy import StrategyStore
+from condor.agents import agent as agent_module
+from condor.agents import strategy as strategy_module
+from condor.agents.agent import AgentStore
+from condor.agents.strategy import StrategyStore
 
 
 def _write_agent(root, slug, *, body="Body.", **frontmatter):
@@ -233,6 +233,59 @@ def test_assistant_routines_dir_layout():
         "executor_manager",
         "routines",
     )
+
+
+# ── MCP subprocess env (CONDOR_USER_ID injection) ──
+
+
+class _FakeACPClient:
+    """Captures the env passed to the ACP subprocess without launching it."""
+
+    last_extra_env: dict | None = None
+
+    def __init__(self, **kwargs):
+        type(self).last_extra_env = kwargs.get("extra_env")
+        self.alive = True
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
+
+    async def prompt(self, text):
+        pass
+
+
+def _run_create_session(monkeypatch, **kwargs):
+    """Invoke get_or_create_session with the ACP client + context stubbed out."""
+    from handlers.agents import session as session_module
+
+    monkeypatch.setattr(session_module, "_sessions", {})
+    monkeypatch.setattr(session_module, "ACPClient", _FakeACPClient)
+    monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
+    monkeypatch.setattr(
+        session_module, "build_mcp_servers_for_session", lambda *a, **k: []
+    )
+    _FakeACPClient.last_extra_env = None
+    asyncio.run(
+        session_module.get_or_create_session(agent_key="claude-code", **kwargs)
+    )
+    return _FakeACPClient.last_extra_env
+
+
+def test_extra_env_uses_user_id(monkeypatch):
+    """CONDOR_USER_ID is injected from the explicit user_id."""
+    env = _run_create_session(monkeypatch, chat_id=555, user_id=42)
+    assert env["CONDOR_USER_ID"] == "42"
+    assert env["CONDOR_CHAT_ID"] == "555"
+
+
+def test_extra_env_falls_back_to_chat_id(monkeypatch):
+    """With no user_id, CONDOR_USER_ID falls back to the chat_id, not '0'."""
+    env = _run_create_session(monkeypatch, chat_id=777, user_id=None)
+    assert env["CONDOR_USER_ID"] == "777"
+    assert env["CONDOR_USER_ID"] != "0"
 
 
 def test_resolve_acp_model_suffix():

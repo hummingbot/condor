@@ -26,7 +26,7 @@ def _manage_strategy(
     skills: list[str] | None,
     config: dict | None,
 ) -> dict:
-    from condor.trading_agent.strategy import StrategyStore, split_key
+    from condor.agents.strategy import StrategyStore, split_key
 
     store = StrategyStore()
 
@@ -73,7 +73,7 @@ def _manage_strategy(
             return {
                 "error": "agent_slug (the owning Agent) is required to create a strategy"
             }
-        from condor.trading_agent.agent import AgentStore
+        from condor.agents.agent import AgentStore
 
         if AgentStore().get(agent_slug) is None:
             return {"error": f"Agent '{agent_slug}' not found"}
@@ -135,8 +135,8 @@ def _list_agent_definitions() -> dict:
     surfaces consultable experts and loopable agents that ``list_strategies`` /
     ``list_agents`` (instances) never show.
     """
-    from condor.trading_agent.agent import AgentStore
-    from condor.trading_agent.strategy import StrategyStore
+    from condor.agents.agent import AgentStore
+    from condor.agents.strategy import StrategyStore
 
     strat_names: dict[str, list[str]] = {}
     for s in StrategyStore().list_all():
@@ -227,14 +227,14 @@ async def _agent_lifecycle(
             if not strategy_id:
                 return {"error": "strategy_id is required"}
 
-            from condor.trading_agent.strategy import StrategyStore
+            from condor.agents.strategy import StrategyStore
 
             store = StrategyStore()
             strategy = store.get_by_key(strategy_id)
             if not strategy:
                 return {"error": f"Strategy '{strategy_id}' not found"}
 
-            from condor.trading_agent.config import load_full_config
+            from condor.agents.config import load_full_config
             from config_manager import get_config_manager, get_effective_server
 
             config_dict = load_full_config(strategy.dir, strategy.default_config)
@@ -292,8 +292,8 @@ async def _agent_lifecycle(
 
 def _resolve_journal_manager(agent_id: str):
     """Get JournalManager for an agent, returns (jm, error_dict)."""
-    from condor.trading_agent.engine import get_engine
-    from condor.trading_agent.journal import JournalManager
+    from condor.agents.engine import get_engine
+    from condor.agents.journal import JournalManager
 
     engine = get_engine(agent_id)
     if engine:
@@ -304,7 +304,7 @@ def _resolve_journal_manager(agent_id: str):
         session_dir = engine.session_dir
         agent_dir = engine.strategy.dir
     else:
-        from condor.trading_agent.journal import resolve_agent_dirs
+        from condor.agents.journal import resolve_agent_dirs
 
         session_dir, agent_dir = resolve_agent_dirs(agent_id)
     if not session_dir:
@@ -358,8 +358,8 @@ def journal_write(
     if not text:
         return {"error": "text is required"}
 
-    from condor.trading_agent.engine import get_engine
-    from condor.trading_agent.journal import JournalManager
+    from condor.agents.engine import get_engine
+    from condor.agents.journal import JournalManager
 
     engine = get_engine(agent_id)
     if engine:
@@ -370,7 +370,7 @@ def journal_write(
         session_dir = engine.session_dir
         agent_dir = engine.strategy.dir
     else:
-        from condor.trading_agent.journal import resolve_agent_dirs
+        from condor.agents.journal import resolve_agent_dirs
 
         session_dir, agent_dir = resolve_agent_dirs(agent_id)
     if not session_dir:

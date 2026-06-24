@@ -141,6 +141,7 @@ async def get_or_create_session(
     effective_chat_id = chat_id if isinstance(chat_id, int) else (user_id or 0)
     extra_env = {
         "CONDOR_CHAT_ID": str(effective_chat_id),
+        "CONDOR_USER_ID": str(user_id or effective_chat_id),
     }
 
     # Build dynamic MCP servers from user's Condor permissions

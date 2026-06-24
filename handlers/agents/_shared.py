@@ -579,7 +579,7 @@ def build_initial_context(
     # tools/context itself. Inject only the index of *consultable* Agents; nothing
     # when none exist.
     try:
-        from condor.trading_agent.agent import AgentStore
+        from condor.agents.agent import AgentStore
 
         experts_index = AgentStore().list_consultable_index()
         if experts_index:
@@ -600,7 +600,7 @@ def build_initial_context(
 
 
 def build_agent_context(
-    agent: "Agent",  # noqa: F821 — condor.trading_agent.agent.Agent
+    agent: "Agent",  # noqa: F821 — condor.agents.agent.Agent
     user_id: int,
     task: str,
     context: str = "",
