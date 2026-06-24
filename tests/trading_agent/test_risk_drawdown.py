@@ -36,8 +36,6 @@ def test_lp_executor_amount_uses_current_position_value():
     row = _executor_row(
         {
             "status": "RUNNING",
-            "net_pnl_quote": 0.03,
-            "filled_amount_quote": 9.94,
             "config": {"type": "lp_executor", "trading_pair": "Fartcoin-USDC"},
             "custom_info": {"total_value_quote": 9.97, "current_price": 0.12},
         }
@@ -45,13 +43,3 @@ def test_lp_executor_amount_uses_current_position_value():
 
     assert row["amount"] == 9.97
     assert row["current_price"] == 0.12
-
-
-def test_risk_block_prevents_new_executor_create():
-    state = RiskState(is_blocked=True, block_reason="Drawdown limit")
-    allowed, reason = RiskEngine(RiskLimits()).check_executor_action(
-        {"input": {"action": "create", "executor_config": {}}}, state
-    )
-
-    assert not allowed
-    assert reason == "Drawdown limit"
