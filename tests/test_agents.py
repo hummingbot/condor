@@ -176,7 +176,7 @@ def test_agent_skill_library_read_and_edit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     skill_dir = (
-        tmp_path / "trading_agents" / "executor_manager" / "skills" / "size_grid"
+        tmp_path / "agents" / "executor_manager" / "skills" / "size_grid"
     )
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
@@ -229,7 +229,7 @@ def test_assistant_routines_dir_layout():
         "routines",
     )
     assert assistant_routines_dir("executor_manager").parts[-3:] == (
-        "trading_agents",
+        "agents",
         "executor_manager",
         "routines",
     )

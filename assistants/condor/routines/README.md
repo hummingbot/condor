@@ -6,7 +6,7 @@ condor's **own** routines, co-located with its skills (`../skills/`) and store
 
 - Created/edited at runtime via `manage_routines(action="create_routine"/"edit_routine", ...)`
   (no `strategy_id` → lands here) and discovered the same way as the shared base.
-- Domain experts have the equivalent at `trading_agents/<slug>/routines/`.
+- Domain experts have the equivalent at `agents/<slug>/routines/`.
 - Generic, cross-domain tools belong in the shared `routines/`; condor-specific
   ones belong here.
 

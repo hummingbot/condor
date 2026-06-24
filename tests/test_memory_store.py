@@ -113,7 +113,7 @@ def test_delete_removes_and_audits(memory_root):
     assert s.delete("Temp") is False  # already gone
 
     actions = [e["action"] for e in s.audit()]
-    assert "write" in actions
+    assert "create" in actions
     assert "delete" in actions
     delete_entry = [e for e in s.audit() if e["action"] == "delete"][0]
     assert delete_entry["source"] == "user"
@@ -125,7 +125,15 @@ def test_audit_records_source(memory_root):
     s.write("From agent", "body", "desc", source="agent:grid_scalper")
     entry = s.audit()[-1]
     assert entry["source"] == "agent:grid_scalper"
-    assert entry["action"] == "write"
+    assert entry["action"] == "create"
+
+
+def test_audit_distinguishes_create_and_update(memory_root):
+    s = MemoryStore(user_id=42)
+    s.write("Pair", "v1", "desc v1", type="fact")
+    s.write("Pair", "v2", "desc v2", type="fact")  # same slug -> overwrite
+    actions = [e["action"] for e in s.audit() if e["target"] == "memory:pair"]
+    assert actions == ["create", "update"]
 
 
 def test_reindex_never_stale(memory_root):
@@ -168,7 +176,7 @@ def test_resolver_distinct_roots_per_assistant(tmp_path, monkeypatch):
     ema = store_root(42, "ema_trend_follower")
     assert chat != grid != ema
     assert chat == tmp_path / "assistants" / "condor" / "store" / "user_42"
-    assert grid == tmp_path / "trading_agents" / "grid_scalper" / "store" / "user_42"
+    assert grid == tmp_path / "agents" / "grid_scalper" / "store" / "user_42"
     # Same (slug, user) is stable across calls.
     assert store_root(42, "grid_scalper") == grid
 

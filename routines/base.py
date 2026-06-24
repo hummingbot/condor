@@ -27,10 +27,10 @@ def assistant_routines_dir(agent_slug: str | None) -> Path:
     (FEAT-003), while the shared ``routines/`` library stays available to all:
 
     - chat ``condor`` (``agent_slug`` None) → ``assistants/condor/routines``
-    - trading agent / domain expert (slug) → ``trading_agents/<slug>/routines``
+    - trading agent / domain expert (slug) → ``agents/<slug>/routines``
     """
     if agent_slug:
-        return _PROJECT_ROOT / "trading_agents" / agent_slug / "routines"
+        return _PROJECT_ROOT / "agents" / agent_slug / "routines"
     return _PROJECT_ROOT / "assistants" / "condor" / "routines"
 
 

@@ -126,6 +126,75 @@ def is_pydantic_ai_model(agent_key: str) -> bool:
     return prefix in PYDANTIC_AI_PREFIXES
 
 
+def resolve_base_url(model_name: str, base_url: str | None = None) -> str | None:
+    """Return the OpenAI-compatible base URL a model would use.
+
+    Returns ``base_url`` when given, else the provider default (ollama/lmstudio/
+    openrouter). ``None`` for cloud providers pydantic-ai resolves natively
+    (anthropic, groq, default openai/google).
+    """
+    if base_url:
+        return base_url
+    prefix = model_name.split(":", 1)[0]
+    return DEFAULT_BASE_URLS.get(prefix)
+
+
+async def healthcheck_local_backend(
+    model_name: str, base_url: str | None = None
+) -> str | None:
+    """Preflight a LOCAL OpenAI-compatible backend before a run.
+
+    For ollama / lmstudio (or openai:* with a custom base_url) this verifies the
+    inference server is reachable and, when a model id is given, that the model is
+    actually loaded. Returns ``None`` when healthy or when ``model_name`` is not a
+    local backend (cloud providers are left to fail with their own formatted error);
+    otherwise a short, human-readable reason string.
+    """
+    import httpx
+
+    prefix, _, model_id = model_name.partition(":")
+    is_local = prefix in ("ollama", "lmstudio") or (prefix == "openai" and base_url)
+    if not is_local:
+        return None
+
+    url = resolve_base_url(model_name, base_url)
+    if not url:
+        return None
+
+    models_url = f"{url.rstrip('/')}/models"
+    try:
+        timeout = httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(models_url)
+    except Exception as e:
+        return (
+            f"the model backend at {url} is unreachable ({type(e).__name__}) — "
+            f"is the {prefix} server running?"
+        )
+
+    if resp.status_code != 200:
+        return f"the model backend at {url} returned HTTP {resp.status_code}."
+
+    if model_id:
+        try:
+            ids = {
+                m.get("id") for m in resp.json().get("data", []) if isinstance(m, dict)
+            }
+        except Exception:
+            ids = set()
+        ids = {i for i in ids if isinstance(i, str) and i}
+        # Ollama reports ids like "qwen3:32b"; match exact or tag-prefix.
+        loaded = any(i == model_id or i.startswith(f"{model_id}:") for i in ids)
+        if ids and not loaded:
+            available = ", ".join(sorted(ids)) or "(none)"
+            return (
+                f"model '{model_id}' is not loaded on the {prefix} backend at {url}. "
+                f"Available: {available}."
+            )
+
+    return None
+
+
 def _tool_args_to_dict(args: Any) -> dict | None:
     """Normalise a pydantic-ai tool-call `args` value to a dict.
 

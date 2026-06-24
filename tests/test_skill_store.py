@@ -41,7 +41,7 @@ def _write_skill(
 ):
     """Author a builtin SKILL.md under the right assistant home."""
     if agent_slug:
-        base = root / "trading_agents" / agent_slug / "skills"
+        base = root / "agents" / agent_slug / "skills"
     else:
         base = root / "assistants" / "condor" / "skills"
     d = base / slug
