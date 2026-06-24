@@ -86,7 +86,7 @@ async def manage_routines(
     - "edit_routine": Update an agent-local routine (requires name, code)
     - "delete_routine": Delete an agent-local routine (requires name)
 
-    Agent-local routines live in trading_agents/{slug}/routines/ and are only
+    Agent-local routines live in agents/{slug}/routines/ and are only
     visible to that strategy's agent. They follow the same pattern as global
     routines: a Config(BaseModel) class and an async run(config, context) function.
 
@@ -155,9 +155,19 @@ async def manage_trading_agent(
 ) -> dict:
     """Manage trading agents and strategies.
 
-    A strategy is a looping playbook owned by an Agent. ``strategy_id`` is the
-    opaque key returned by list_strategies/create_strategy (form
-    "agent_slug.strategy_slug") — just pass it back.
+    An *agent* (e.g. "executor_manager", "brigado") is an identity defined in
+    agents/{slug}/AGENT.md. It is distinct from a *strategy* (a looping
+    playbook it owns) and from a running *instance*. A strategy is a looping
+    playbook owned by an Agent. ``strategy_id`` is the opaque key returned by
+    list_strategies/create_strategy (form "agent_slug.strategy_slug") — just pass
+    it back.
+
+    Actions -- Agents (identities):
+    - "list_agent_definitions": List all agents (AGENT.md identities) with their
+      capabilities — consultable (can be used via the `consult` tool),
+      when_to_consult, loopable, owned strategies, agent_key, tools. Use this to
+      answer "what agents/experts exist?" — list_strategies and list_agents
+      (instances) do NOT show consult-only experts.
 
     Actions -- Strategies:
     - "list_strategies": List all strategies (across agents)

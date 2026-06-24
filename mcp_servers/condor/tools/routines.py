@@ -9,7 +9,7 @@ from mcp_servers.condor.settings import settings
 def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
     """Resolve the routines directory to write to.
 
-    Routines live at the **Agent** level (``trading_agents/<slug>/routines``),
+    Routines live at the **Agent** level (``agents/<slug>/routines``),
     shared across all of that agent's strategies. A strategy_id (composite key
     "agent_slug.strategy_slug") resolves to its owning agent's routines dir;
     otherwise the current assistant's own dir — ``assistants/condor/routines``

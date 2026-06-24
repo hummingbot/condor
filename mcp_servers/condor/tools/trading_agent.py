@@ -123,6 +123,45 @@ def _manage_strategy(
 
 
 # ---------------------------------------------------------------------------
+# Agent definitions (the AGENT.md identities — distinct from strategies/instances)
+# ---------------------------------------------------------------------------
+
+
+def _list_agent_definitions() -> dict:
+    """List the Agent identities (agents/*/AGENT.md), with capabilities.
+
+    An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
+    *strategy* (a looping playbook it owns) and from a running *instance*. This
+    surfaces consultable experts and loopable agents that ``list_strategies`` /
+    ``list_agents`` (instances) never show.
+    """
+    from condor.trading_agent.agent import AgentStore
+    from condor.trading_agent.strategy import StrategyStore
+
+    strat_names: dict[str, list[str]] = {}
+    for s in StrategyStore().list_all():
+        strat_names.setdefault(s.agent_slug, []).append(s.name)
+
+    agents = []
+    for a in AgentStore().list_all():
+        owned = strat_names.get(a.slug, [])
+        agents.append(
+            {
+                "slug": a.slug,
+                "name": a.name,
+                "description": a.description,
+                "agent_key": a.agent_key,
+                "consultable": a.consultable,
+                "when_to_consult": a.when_to_consult,
+                "loopable": bool(owned),
+                "strategies": owned,
+                "tools": a.tools,
+            }
+        )
+    return {"agents": agents}
+
+
+# ---------------------------------------------------------------------------
 # Strategy-scoped routine listing
 # ---------------------------------------------------------------------------
 
@@ -406,6 +445,10 @@ async def manage_trading_agent(
     tick: int = 0,
     category: str = "",
 ) -> dict:
+    # Agent definitions (identities) — distinct from strategies and instances
+    if action == "list_agent_definitions":
+        return _list_agent_definitions()
+
     # Strategy operations
     local_strategy_actions = {
         "list_strategies",
