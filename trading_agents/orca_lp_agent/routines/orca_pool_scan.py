@@ -186,7 +186,7 @@ class Config(BaseModel):
         description="Allowed quote symbols",
     )
     preferred_quote_symbols: list[str] = Field(default_factory=lambda: list(DEFAULT_PREFERRED_QUOTE_SYMBOLS), description="Preferred quote symbols")
-    reject_has_warning: bool = Field(default=True, description="Reject Orca warning pools")
+    reject_has_warning: bool = Field(default=True, description="Deprecated: Orca warning pools are always rejected")
     require_token_metadata: bool = Field(default=True, description="Require symbols, decimals, and mints")
     require_price_delta: bool = Field(default=False, description="Require price delta even in dry-run mode")
     require_price_delta_in_live: bool = Field(default=True, description="Require price delta for run_once/loop")
@@ -659,7 +659,7 @@ def _gate(candidate: dict[str, Any], config: Config) -> tuple[bool, str | None, 
         return False, "missing_pool_address", warnings
     if config.require_token_metadata and not _metadata_ok(candidate):
         return False, "missing_token_metadata", warnings
-    if config.reject_has_warning and candidate.get("has_warning"):
+    if candidate.get("has_warning"):
         return False, "has_warning", warnings
     if candidate.get("tvl_usd") is None or candidate["tvl_usd"] < config.min_tvl_usd:
         return False, "tvl_below_minimum", warnings
@@ -1157,5 +1157,44 @@ async def run(config: Config, context: Any) -> str:
         return _format_scan_text(payload)
 
 
+def _self_check() -> None:
+    warned_candidate = {
+        "address": "pool",
+        "token_a": {"symbol": "SOL", "mint": "sol", "decimals": 9},
+        "token_b": {"symbol": "USDC", "mint": "usdc", "decimals": 6},
+        "has_warning": True,
+    }
+    assert _gate(warned_candidate, Config(reject_has_warning=False))[0:2] == (
+        False,
+        "has_warning",
+    )
+
+    sol_quote_candidate = {
+        "address": "pool",
+        "token_a": {"symbol": "FARTCOIN", "mint": "fart", "decimals": 6},
+        "token_b": {"symbol": "SOL", "mint": "sol", "decimals": 9},
+        "price_raw": 0.001,
+        "tvl_usd": 600000,
+        "volume_24h_usd": 100000,
+        "volume_7d_usd": 500000,
+        "has_warning": False,
+    }
+    usdc_only = Config(
+        allowed_quote_symbols=["USDC"],
+        preferred_quote_symbols=["USDC"],
+        require_gateway_pool_info=False,
+    )
+    assert _gate(sol_quote_candidate, usdc_only)[0:2] == (
+        False,
+        "disallowed_quote_symbol",
+    )
+
+
 if __name__ == "__main__":
+    import sys
+
+    if "--self-check" in sys.argv:
+        _self_check()
+        print("self-check passed")
+        raise SystemExit(0)
     print(asyncio.run(run(Config(), None)))

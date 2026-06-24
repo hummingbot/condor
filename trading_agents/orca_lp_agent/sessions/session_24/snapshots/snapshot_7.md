@@ -1,93 +1,51 @@
----
-id: orca_lp_agent_v1
-name: Orca LP Agent
-description: Cautious V1 Orca Whirlpool CLMM LP agent with public-data scan, hard gates, one LP executor, and audit-first supervision.
-agent_key: codex
-skills: []
-default_config:
-  execution_mode: dry_run
-  risk_profile: default_cautious
-  frequency_sec: 300
-  total_amount_quote: 10
-  agent_id: orca_lp_agent
-  controller_id: orca_lp_agent
-  max_open_executors: 1
-  connector_name: solana-mainnet-beta
-  lp_provider: orca/clmm
-  side: 3
-  keep_position: false
-  allowed_live_presets:
-    - conservative
-    - balanced
-    - wide
-  orca_api:
-    base_url: https://api.orca.so/v2/solana
-    pool_endpoint: /pools
-    request_timeout_seconds: 15
-    page_size: 25
-    stats_windows:
-      - 24h
-      - 7d
-    categories: []
-  gates:
-    min_tvl_usd: 500000
-    min_volume_24h_usd: 100000
-    min_volume_7d_usd: 500000
-    max_abs_price_delta_24h: 0.20
-    allowed_quote_symbols:
-      - USDC
-      - SOL
-      - mSOL
-      - JitoSOL
-    preferred_quote_symbols:
-      - USDC
-      - SOL
-    reject_has_warning: true
-    require_token_metadata: true
-    require_gateway_pool_info: true
-  risk_limits:
-    max_total_exposure_quote: 10
-    max_position_size_quote: 10
-    max_drawdown_pct: 2
-    max_open_executors: 1
-  lp_risk:
-    max_capital_allocation_quote: 10
-    max_capital_pct_of_account: 0.25
-    max_pool_tvl_share: 0.001
-    max_pool_24h_volume_share: 0.001
-    take_profit_pct_after_costs: 0.005
-    stop_loss_pct_after_costs: 0.01
-    max_tx_fee_quote: 0.25
-    min_sol_fee_buffer: 0.05
-    max_consecutive_api_failures: 2
-    max_consecutive_gateway_failures: 1
-  v2:
-    enable_multi_pool: false
-    max_active_pools: 1
-default_trading_context: |
-  # SESSION INPUT GUIDE
-  SESSION_MODE options: dry_run, run_once, loop.
-  SCAN_PROFILE options: safe_conservative, default_cautious, balanced_fee_capture, risk_on_volatile, meme_scout, meme_tiny_live.
-  OPTIONAL_CATEGORIES options: blank, memecoin, utility, governance, liquid_staking_token, security, stablecoin.
-  MAX_POSITION_AGE_MINUTES is the time limit; 1440 = 1 day.
-  TAKE_PROFIT_PCT_AFTER_COSTS and STOP_LOSS_PCT_AFTER_COSTS are percentages, e.g. 5 = 5%.
-  ALLOW_PRE_LP_REBALANCE allows a Gateway swap to fund centered LP ranges.
-  NOTES examples: only USDC quote pools; avoid SOL quote; avoid wide preset; inspect pool <address>.
-  Use exact option names. Do not put numeric limits in NOTES.
+# Snapshot #7 — 2026-06-23 12:01 UTC
 
-  # SESSION INPUT
-  SESSION_MODE: dry_run
-  SCAN_PROFILE: safe_conservative
-  OPTIONAL_CATEGORIES:
-  MAX_POSITION_AGE_MINUTES: 480
-  TAKE_PROFIT_PCT_AFTER_COSTS: 0.5
-  STOP_LOSS_PCT_AFTER_COSTS: 1
-  ALLOW_PRE_LP_REBALANCE: true
-  NOTES:
-created_by: wojak
-created_at: 2026-06-15T00:00:00Z
----
+<details><summary>System Prompt (26926 chars)</summary>
 
+You are an autonomous trading agent running inside Condor.
+
+RULES:
+- Trade ONLY via manage_executors(action="create"). NEVER use place_order.
+- Be conservative. When in doubt, hold and journal why.
+
+ERROR RECOVERY:
+- If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") to fetch the full config schema, compare it against what you sent, fix the missing/wrong fields, and retry ONCE. Journal the error and fix as a learning.
+
+
+GENERAL:
+- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
+- Keep tool chains short (1-5 calls per tick).
+- Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
+
+JOURNAL:
+- Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
+- Learnings must specify a category: "market" or "execution".
+  trading_agent_journal_write(entry_type="learning", category="market|execution", text="...")
+  - market: band behavior, volatility regimes, S/R patterns, routine observations.
+  - execution: executor errors, schema issues, fill problems, timing.
+- Keep learnings factual and short (1 line). No speculation.
+- Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
+- Do NOT call trading_agent_journal_read — context is already in this prompt.
+
+ROUTINES:
+- manage_routines(action="run", name="...", config={...}) for analysis scripts.
+- manage_routines(action="list") to discover routines.
+- Routines tagged "agent" are local to your strategy.
+
+NOTIFICATIONS:
+- Use send_notification(text="...") to message the user on Telegram.
+
+
+IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:
+ToolSearch(query="select:mcp__mcp-hummingbot__get_market_data,mcp__mcp-hummingbot__manage_executors,mcp__mcp-hummingbot__search_history,mcp__mcp-hummingbot__explore_geckoterminal,mcp__condor__trading_agent_journal_write,mcp__condor__send_notification,mcp__condor__manage_routines")
+Do this silently.
+
+[TICK INFO]
+This is tick #7. Use this number in journal entries and notifications.
+Agent ID: orca_lp_agent_24
+Pass controller_id="orca_lp_agent_24" as a TOP-LEVEL arg to manage_executors (not inside executor_config).
+
+[STRATEGY INSTRUCTIONS]
 ## Objective
 
 You are Orca LP Agent V1, a cautious Orca Whirlpool CLMM liquidity manager for Condor. Your job is to scan public Orca pool data, reject unsafe pools with hard gates, score surviving pools transparently, choose at most one named preset, and supervise one LP executor until a defined exit or audit condition fires.
@@ -261,3 +219,127 @@ Every tick must call `trading_agent_journal_write` with:
 - expected next state.
 
 Post-close audits should include selected pool, preset, open/close reason, expected versus actual deposited amounts if available, time active, time in/out of range, fees, transaction/rent costs, inventory drift, estimated or realized PnL, and one or two durable lessons only if proven by the session.
+
+[AVAILABLE ROUTINES]
+Call via: manage_routines(action="run", name="<name>", strategy_id="orca_lp_agent_v1", config={...})
+
+Agent-local:
+  - lp_position_report: Fetch an LP executor from the API, summarize state, and recommend supervision action.
+  - orca_pool_scan: Scan public Orca Whirlpool pools and return one gated LP candidate.
+  - pre_lp_rebalance: Quote or execute a quote-to-base rebalance before Orca LP open.
+Global:
+  - arb_check: Compare order books across multiple CEX exchanges to find arbitrage opportunities.
+  - error_test: Test error handling in the web dashboard
+  - market_scanner: Scan top perpetual markets for volume/volatility profiles and classify as mature or degen.
+  - price_monitor: Live price monitor with configurable alerts.
+
+[SESSION CONTEXT]
+The user provided the following natural language context for this trading session. Use this to guide your market selection, risk appetite, and trading style:
+
+# SESSION INPUT GUIDE
+SESSION_MODE options: dry_run, run_once, loop.
+SCAN_PROFILE options: safe_conservative, default_cautious, balanced_fee_capture, risk_on_volatile, meme_scout, meme_tiny_live.
+OPTIONAL_CATEGORIES options: blank, memecoin, utility, governance, liquid_staking_token, security, stablecoin.
+MAX_POSITION_AGE_MINUTES is the time limit; 1440 = 1 day.
+TAKE_PROFIT_PCT_AFTER_COSTS and STOP_LOSS_PCT_AFTER_COSTS are percentages, e.g. 5 = 5%.
+ALLOW_PRE_LP_REBALANCE allows a Gateway swap to fund centered LP ranges.
+NOTES examples: only USDC quote pools; avoid SOL quote; avoid wide preset; inspect pool <address>.
+Use exact option names. Do not put numeric limits in NOTES.
+
+# SESSION INPUT
+SESSION_MODE: loop
+SCAN_PROFILE: meme_scout
+OPTIONAL_CATEGORIES:
+MAX_POSITION_AGE_MINUTES: 480
+TAKE_PROFIT_PCT_AFTER_COSTS: 100
+STOP_LOSS_PCT_AFTER_COSTS: 50
+ALLOW_PRE_LP_REBALANCE: true
+NOTES:   only USDC quote pools
+
+
+[CURRENT CONFIG]
+These are the ACTIVE values for this session. If the strategy instructions mention different defaults, IGNORE them and use these values instead.
+risk_profile: default_cautious
+total_amount_quote: 10
+agent_id: orca_lp_agent
+controller_id: orca_lp_agent
+max_open_executors: 1
+connector_name: solana-mainnet-beta
+lp_provider: orca/clmm
+side: 3
+keep_position: False
+allowed_live_presets: ['conservative', 'balanced', 'wide']
+orca_api: {'base_url': 'https://api.orca.so/v2/solana', 'pool_endpoint': '/pools', 'request_timeout_seconds': 15, 'page_size': 25, 'stats_windows': ['24h', '7d'], 'categories': []}
+gates: {'min_tvl_usd': 500000, 'min_volume_24h_usd': 100000, 'min_volume_7d_usd': 500000, 'max_abs_price_delta_24h': 0.2, 'allowed_quote_symbols': ['USDC', 'SOL', 'mSOL', 'JitoSOL'], 'preferred_quote_symbols': ['USDC', 'SOL'], 'reject_has_warning': True, 'require_token_metadata': True, 'require_gateway_pool_info': True}
+lp_risk: {'max_capital_allocation_quote': 10, 'max_capital_pct_of_account': 0.25, 'max_pool_tvl_share': 0.001, 'max_pool_24h_volume_share': 0.001, 'take_profit_pct_after_costs': 0.005, 'stop_loss_pct_after_costs': 0.01, 'max_tx_fee_quote': 0.25, 'min_sol_fee_buffer': 0.05, 'max_consecutive_api_failures': 2, 'max_consecutive_gateway_failures': 1}
+v2: {'enable_multi_pool': False, 'max_active_pools': 1}
+model_base_url: 
+max_ticks: 0
+
+[RISK STATE]
+Position Size: $0.00 / $10.00 limit
+Open Executors: 0 / 1 limit
+Drawdown: 0.0% / 2.0% limit
+Status: ACTIVE
+
+[CORE DATA - executors]
+Active Executors (1) [agent: orca_lp_agent_24]:
+  Fartcoin-USDC RANGE $+0.04 (V:$10)
+  Realized: $+0.00 | Unrealized: $+0.04 | Total PnL: $+0.04 | Volume: $10
+
+[CORE DATA - positions]
+Positions Summary [agent: orca_lp_agent_24]: no open positions
+
+[LEARNINGS — do NOT repeat these, only add genuinely new insights]
+**Market Observations:**
+- [2026-06-22 16:09] meme_scout can surface USDC-quoted meme pools with sub-$50k TVL despite strong 24h volume.
+
+**Execution Notes:**
+- [2026-06-22 14:59] orca_pool_scan can return SOL-quoted candidates even when session notes request USDC-only pools.
+- [2026-06-22 15:16] Invalid SCAN_PROFILE values must be treated as no-trade and block scanning.
+- [2026-06-22 15:21] Numeric NOTES that conflict with structured LP risk settings must block scanning and opening until clarified.
+- [2026-06-22 16:21] Centered Orca LP opens can be blocked when direct `manage_gateway_swaps` is unavailable and the wallet holds only quote inventory; use `pre_lp_rebalance` through `manage_routines` before holding.
+- [2026-06-23 05:24] A submitted pre_lp_rebalance swap may not appear in the immediate refreshed portfolio, so LP creation must wait for balance confirmation.
+- [2026-06-23 10:36] Confirmed swap history is not spendable inventory; `pre_lp_rebalance` should use only current wallet base balance when deciding `no_swap_needed`.
+- [2026-06-23 11:08] pre_lp_rebalance can recover a usable Jupiter quote with fallback_trading_pair after symbol routing returns unusable cost.
+- [2026-06-23 11:14] If a candidate passed `SCAN_PROFILE` gates and `wide` is allowed live, do not invent a separate sub-$50k TVL or first-live-tick hold rule.
+
+[CURRENT STATUS]
+Last tick: #6 at 11:55 UTC
+Status: Running | PnL: $+0.03 | Open: 1 executors
+Last action: Reviewing the active executor path for tick `#6` and pulling only the tools needed for supervision a
+
+[RECENT DECISIONS — last 3 snapshots]
+- **#4** (11:44) 2026-06-23T18:38:00+07:00 active=true routine=lp_position_report:success action=hold executor=6vn6fUwfozuGiu8GVSS4sKescefQNdbcrNndUx8ikGbh state=RUNNING pair=Fartcoin-USDC pool=J5jzvT22u1Mt6de4gkBhEsTSTjBfYS7A6aF5jzu9ihkC preset=wide range=in-range pnl=+37.12% tvl=41143.68 vol24h=845006.36 vol7d=0 price_delta=n/a score=4.3646 gates=active-state-supervision passed risk=maxOpen1/maxAge480/tp100/sl50 passed reason=report recommends continue normal_supervision next=monitor same executor -- Active-state policy blocks new scans while one LP executor is active, and the supervision routine recommended continue. [Single $10 meme_scout LP remains high-volatility but stays within the one-executor and session risk limits.]
+- **#5** (11:49) 2026-06-23T18:49:39+07:00 active=true routine=lp_position_report:success action=hold executor=6vn6fUwfozuGiu8GVSS4sKescefQNdbcrNndUx8ikGbh state=RUNNING pair=Fartcoin-USDC pool=J5jzvT22u1Mt6de4gkBhEsTSTjBfYS7A6aF5jzu9ihkC preset=wide range=in-range pnl=+29.98% tvl=41143.68 vol24h=845006.36 vol7d=0 price_delta=n/a score=4.3646 gates=active-state-supervision passed risk=maxOpen1/maxAge480/tp100/sl50 passed reason=report recommends continue normal_supervision next=monitor same executor -- Active-state policy forbids scanning or opening while one LP executor is active, and the supervision routine recommended continue. [Single $10 meme_scout LP remains within the one-executor cap; no new action until exit criteria or manual-review signal.]
+- **#6** (11:55) 2026-06-23T18:56:00+07:00 active=true routine=lp_position_report:success action=hold executor=6vn6fUwfozuGiu8GVSS4sKescefQNdbcrNndUx8ikGbh state=RUNNING pair=Fartcoin-USDC pool=J5jzvT22u1Mt6de4gkBhEsTSTjBfYS7A6aF5jzu9ihkC preset=wide range=in-range pnl=+28.37% tvl=41143.68 vol24h=845006.36 vol7d=0 price_delta=n/a score=4.3646 gates=active-state-supervision passed risk=maxOpen1/maxAge480/tp100/sl50 passed reason=report recommends continue normal_supervision next=monitor same executor -- Active-state policy blocks scanning while one LP executor is running, and the supervision routine recommends continue. [Single $10 meme_scout LP remains within one-executor and session exit limits.]
+
+</details>
+
+## Executor State
+Active Executors (1) [agent: orca_lp_agent_24]:
+  Fartcoin-USDC RANGE $+0.04 (V:$10)
+  Realized: $+0.00 | Unrealized: $+0.04 | Total PnL: $+0.04 | Volume: $10
+
+## Risk State
+- Position Size: $0.00 / $10.00 limit
+- Open Executors: 0 / 1 limit
+- Drawdown: 0.0% / 2.0% limit
+- Status: ACTIVE
+
+## Agent Response
+Supervising tick `#7` in active-state mode. I’m checking the single LP executor with `lp_position_report` and will either hold, stop, or flag manual review based on the routine output.The supervision report came back clean: the LP is still `RUNNING`, `in-range`, and the routine recommends `continue`. I’m writing the single tick journal entry now with the active-state hold decision and the latest measured PnL.Tick `#7` held the existing LP.
+
+`lp_position_report` returned `success` for executor `6vn6fUwfozuGiu8GVSS4sKescefQNdbcrNndUx8ikGbh`: state `RUNNING`, action `continue`, reason `normal_supervision`, pair `Fartcoin-USDC`, range `in-range`, PnL `+38.14%`. Active-state policy therefore blocked any new scan or open. The required action journal entry was written for agent `orca_lp_agent_24`.
+
+No stop was issued and no notification was needed this tick.
+
+## Tool Calls (2)
+
+### 1. Tool: condor/manage_routines (completed)
+
+### 2. Tool: condor/trading_agent_journal_write (completed)
+
+
+## Stats
+Duration: 37.0s

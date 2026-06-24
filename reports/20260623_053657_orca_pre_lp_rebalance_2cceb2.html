@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Orca Pre-LP Rebalance</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --text-muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+  }
+  :root.light {
+    --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de;
+    --text: #1f2328; --text-muted: #656d76;
+    --green: #1a7f37; --red: #cf222e; --blue: #0969da;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.6; padding: 24px; max-width: 1400px; margin: 0 auto;
+  }
+  .report-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px;
+  }
+  .report-header h1 { font-size: 20px; }
+  .report-header .meta { color: var(--text-muted); font-size: 12px; }
+  .report-header .meta span { margin-left: 16px; }
+  .kpi-bar { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+  .kpi-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 150px; flex: 1;
+  }
+  .kpi-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+  .kpi-card .value { font-size: 24px; font-weight: 700; margin: 4px 0; }
+  .kpi-card .delta { font-size: 12px; }
+  .kpi-card .delta.up { color: var(--green); }
+  .kpi-card .delta.down { color: var(--red); }
+  .section { margin-bottom: 32px; }
+  .section-md { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; }
+  .section-md h1, .section-md h2, .section-md h3 { color: var(--text); margin: 12px 0 6px; }
+  .section-md h1 { font-size: 18px; } .section-md h2 { font-size: 16px; } .section-md h3 { font-size: 14px; }
+  .section-md p { margin: 6px 0; }
+  .section-md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 13px; }
+  .section-md code { background: var(--bg); padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  .section-md pre code { background: none; padding: 0; }
+  .section-md ul, .section-md ol { padding-left: 20px; }
+  .section-md a { color: var(--blue); }
+  .section-table { overflow-x: auto; }
+  .section-table table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .section-table th {
+    background: var(--bg); text-align: left; padding: 8px 12px;
+    font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); border-bottom: 1px solid var(--border);
+  }
+  .section-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .section-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .section-table tr:last-child td { border-bottom: none; }
+  .plotly-chart { min-height: 400px; margin-bottom: 24px; width: 100%; overflow: hidden; }
+  .plotly-chart .js-plotly-plot, .plotly-chart .plot-container, .plotly-chart .plotly { width: 100% !important; }
+</style>
+</head>
+<body>
+<div class="report-header">
+  <h1>Orca Pre-LP Rebalance</h1>
+  <div class="meta">
+    <span>2026-06-23 05:36 UTC</span>
+    <span>routine: pre_lp_rebalance</span><span>#orca</span><span>#lp</span><span>#rebalance</span><span>#agent</span>
+  </div>
+</div>
+<div class="kpi-bar"><div class="kpi-card"><div class="label">Status</div><div class="value">executed</div></div><div class="kpi-card"><div class="label">Action</div><div class="value">execute</div></div><div class="kpi-card"><div class="label">Pair</div><div class="value">FARTCOIN-USDC</div></div><div class="kpi-card"><div class="label">Swap Base</div><div class="value">37.63176563</div></div></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>## Agent Summary
+Pre-LP rebalance execute finished with executed (swap_confirmed).</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>## Planned Rebalance</pre></div>
+<div class="section section-table"><table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody><tr><td>status</td><td>ready</td></tr>
+<tr><td>reason</td><td>rebalance_needed</td></tr>
+<tr><td>trading_pair</td><td>FARTCOIN-USDC</td></tr>
+<tr><td>fallback_trading_pair</td><td>9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v</td></tr>
+<tr><td>current_price</td><td>0.12650638656</td></tr>
+<tr><td>lower_price</td><td>0.123882</td></tr>
+<tr><td>upper_price</td><td>0.128938</td></tr>
+<tr><td>budget_quote</td><td>10.0</td></tr>
+<tr><td>target_base</td><td>37.63176563</td></tr>
+<tr><td>target_quote</td><td>5.23934131</td></tr>
+<tr><td>swap_amount_base</td><td>37.63176563</td></tr>
+<tr><td>estimated_quote_spend</td><td>4.774057</td></tr>
+<tr><td>required_quote_balance</td><td>10.01</td></tr>
+<tr><td>post_swap_base_amount</td><td>37.63176563</td></tr>
+<tr><td>post_swap_quote_amount</td><td>5.23934131</td></tr>
+<tr><td>available_base</td><td>0.0</td></tr>
+<tr><td>available_quote</td><td>10.677</td></tr>
+<tr><td>available_sol</td><td>0.3957</td></tr>
+<tr><td>min_sol_fee_buffer</td><td>0.05</td></tr></tbody></table></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>## Routine Input Config
+```json
+{
+  "action": "execute",
+  "available_base": 0.0,
+  "available_quote": 10.677,
+  "available_sol": 0.3957,
+  "connector": "jupiter",
+  "current_price": 0.12650638655987254,
+  "fallback_trading_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "lower_price": 0.123882,
+  "max_quote_spend": 10.0,
+  "min_sol_fee_buffer": 0.05,
+  "network": "solana-mainnet-beta",
+  "post_confirm_delay_seconds": 3,
+  "quote_buffer": 0.01,
+  "settlement_poll_interval_seconds": 5,
+  "settlement_wait_seconds": 45,
+  "slippage_pct": 1.0,
+  "total_amount_quote": 10.0,
+  "trading_pair": "FARTCOIN-USDC",
+  "upper_price": 0.128938,
+  "wallet_address": null
+}
+```</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>## Swap Quote Debug
+```json
+{
+  "amount": "37.63176563",
+  "amount_in": "4.774057",
+  "amount_out": "37.63176563",
+  "base": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+  "expected_amount": "37.63176563",
+  "gas_estimate": null,
+  "price": "0.12686242593192212",
+  "quote": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "slippage_pct": "1.0"
+}
+```</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>## Execute Result Debug
+```json
+{
+  "amount": "37.63176563",
+  "side": "BUY",
+  "status": "submitted",
+  "trading_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "transaction_hash": "b2jPJzFvbo1VVvqsQSuFU9ZxZGG2gCAqaREYB3RaTmLrauR6AE584Fzn4gtvLFqrA67NnzrRLBK5Ja7vPrpjhwD"
+}
+```</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>## Settlement Debug
+```json
+{
+  "attempts": [
+    {
+      "result": {
+        "base_token": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+        "connector": "jupiter",
+        "error_message": null,
+        "gas_fee": null,
+        "gas_token": null,
+        "input_amount": 4.774057000000001,
+        "network": "solana-mainnet-beta",
+        "output_amount": 37.631764999999994,
+        "pool_address": null,
+        "price": 7.882554607119267,
+        "quote_id": null,
+        "quote_token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "side": "BUY",
+        "slippage_pct": 1.0,
+        "status": "CONFIRMED",
+        "timestamp": "2026-06-23T05:36:54.113652+00:00",
+        "trading_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "transaction_hash": "b2jPJzFvbo1VVvqsQSuFU9ZxZGG2gCAqaREYB3RaTmLrauR6AE584Fzn4gtvLFqrA67NnzrRLBK5Ja7vPrpjhwD",
+        "wallet_address": "Cs8TbwfyEN1paECV8aarY4oi9FMevWDBdEdb2afxpWgP"
+      },
+      "status": "CONFIRMED"
+    }
+  ],
+  "status": "CONFIRMED"
+}
+```</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>## Debug JSON Payload
+```json
+{
+  "action": "execute",
+  "agent_prompt_summary": "Pre-LP rebalance execute finished with executed (swap_confirmed).",
+  "execute_result": {
+    "amount": "37.63176563",
+    "side": "BUY",
+    "status": "submitted",
+    "trading_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "transaction_hash": "b2jPJzFvbo1VVvqsQSuFU9ZxZGG2gCAqaREYB3RaTmLrauR6AE584Fzn4gtvLFqrA67NnzrRLBK5Ja7vPrpjhwD"
+  },
+  "input_config": {
+    "action": "execute",
+    "available_base": 0.0,
+    "available_quote": 10.677,
+    "available_sol": 0.3957,
+    "connector": "jupiter",
+    "current_price": 0.12650638655987254,
+    "fallback_trading_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "lower_price": 0.123882,
+    "max_quote_spend": 10.0,
+    "min_sol_fee_buffer": 0.05,
+    "network": "solana-mainnet-beta",
+    "post_confirm_delay_seconds": 3,
+    "quote_buffer": 0.01,
+    "settlement_poll_interval_seconds": 5,
+    "settlement_wait_seconds": 45,
+    "slippage_pct": 1.0,
+    "total_amount_quote": 10.0,
+    "trading_pair": "FARTCOIN-USDC",
+    "upper_price": 0.128938,
+    "wallet_address": null
+  },
+  "plan": {
+    "available_base": 0.0,
+    "available_quote": 10.677,
+    "available_sol": 0.3957,
+    "budget_quote": 10.0,
+    "current_price": 0.12650638656,
+    "estimated_quote_spend": 4.774057,
+    "fallback_trading_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "lower_price": 0.123882,
+    "min_sol_fee_buffer": 0.05,
+    "post_swap_base_amount": 37.63176563,
+    "post_swap_quote_amount": 5.23934131,
+    "reason": "rebalance_needed",
+    "required_quote_balance": 10.01,
+    "status": "ready",
+    "swap_amount_base": 37.63176563,
+    "target_base": 37.63176563,
+    "target_quote": 5.23934131,
+    "trading_pair": "FARTCOIN-USDC",
+    "upper_price": 0.128938
+  },
+  "quote": {
+    "amount": "37.63176563",
+    "amount_in": "4.774057",
+    "amount_out": "37.63176563",
+    "base": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+    "expected_amount": "37.63176563",
+    "gas_estimate": null,
+    "price": "0.12686242593192212",
+    "quote": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "slippage_pct": "1.0"
+  },
+  "quote_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  "reason": "swap_confirmed",
+  "settlement": {
+    "attempts": [
+      {
+        "result": {
+          "base_token": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+          "connector": "jupiter",
+          "error_message": null,
+          "gas_fee": null,
+          "gas_token": null,
+          "input_amount": 4.774057000000001,
+          "network": "solana-mainnet-beta",
+          "output_amount": 37.631764999999994,
+          "pool_address": null,
+          "price": 7.882554607119267,
+          "quote_id": null,
+          "quote_token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "side": "BUY",
+          "slippage_pct": 1.0,
+          "status": "CONFIRMED",
+          "timestamp": "2026-06-23T05:36:54.113652+00:00",
+          "trading_pair": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump-EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "transaction_hash": "b2jPJzFvbo1VVvqsQSuFU9ZxZGG2gCAqaREYB3RaTmLrauR6AE584Fzn4gtvLFqrA67NnzrRLBK5Ja7vPrpjhwD",
+          "wallet_address": "Cs8TbwfyEN1paECV8aarY4oi9FMevWDBdEdb2afxpWgP"
+        },
+        "status": "CONFIRMED"
+      }
+    ],
+    "status": "CONFIRMED"
+  },
+  "status": "executed",
+  "timestamp": "2026-06-23T05:36:52.562021+00:00",
+  "transaction_hash": "b2jPJzFvbo1VVvqsQSuFU9ZxZGG2gCAqaREYB3RaTmLrauR6AE584Fzn4gtvLFqrA67NnzrRLBK5Ja7vPrpjhwD",
+  "warnings": [
+    "symbol quote returned unusable cost; trying fallback_trading_pair",
+    "symbol quote unusable; used fallback_trading_pair"
+  ]
+}
+```</pre></div>
+<script>
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'set-theme') {
+    document.documentElement.classList.toggle('light', e.data.theme === 'light');
+  }
+});
+window.addEventListener('load', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.relayout(el, { autosize: true, width: undefined });
+  });
+});
+window.addEventListener('resize', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.Plots.resize(el);
+  });
+});
+</script>
+</body>
+</html>

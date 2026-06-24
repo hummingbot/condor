@@ -4,9 +4,9 @@ Orca LP Agent is a Condor trading agent for the Orca hackathon track. V1 demonst
 
 ## What It Does
 
-The agent scans public Orca pool data using configured risk profiles and Orca category filters, rejects unsuitable pools with hard gates, scores the remaining pools with a simple MCDA model, chooses one named preset, and then uses the Hummingbot LP executor path to manage one Orca CLMM position.
+The agent scans public Orca pool data using an explicit session scan profile and optional Orca category filters, rejects unsuitable pools with hard gates, scores the remaining pools with a simple MCDA model, chooses one named preset, and then uses the Hummingbot LP executor path to manage one Orca CLMM position.
 
-Default execution mode is `dry_run`. Live execution requires Condor runtime config to explicitly set `execution_mode: run_once` or `execution_mode: loop`.
+Default execution mode is `dry_run`. Live execution requires the session context to explicitly set `SESSION_MODE: run_once` or `SESSION_MODE: loop` and a valid `SCAN_PROFILE`.
 
 ## Public Data
 
@@ -24,13 +24,13 @@ The selection path uses Orca public pool data only:
 
 The live path must additionally verify the selected pool through Gateway and portfolio/balance checks before opening.
 
-Risk profiles can narrow discovery by Orca category. `meme_scout` and `meme_tiny_live` default to `memecoin` category scans, while explicit empty categories scan all pools. Manual `include_pool_addresses` should be used only for debug or forced inspection of known pools.
+Scan profiles can narrow discovery by Orca category and adjust TVL, volume, volatility, and scoring gates. The chosen scan profile is the TVL hard floor; do not apply a second live TVL floor from default config or model judgment after a scan succeeds. `safe_conservative` avoids memecoin focus, `balanced_fee_capture` targets non-meme fee pools, `risk_on_volatile` allows memecoin exposure, and `meme_scout` / `meme_tiny_live` default to memecoin category scans. Manual `include_pool_addresses` should be used only for debug or forced inspection of known pools.
 
 ## Hard Gates
 
 Hard gates run before scoring. A weighted score can never rescue a pool that fails a gate.
 
-V1 rejects malformed records, missing pool addresses, missing token metadata, Orca warning pools, low TVL, low 24h or 7d volume, disallowed quote assets, missing required price data, extreme 24h price movement, explicit exclude-list pools, and any pool that cannot pass Gateway preflight before live execution.
+V1 always rejects malformed records, missing pool addresses, missing token metadata, Orca API warning pools, profile-low TVL, low 24h or 7d volume, disallowed quote assets, missing required price data, extreme 24h price movement, explicit exclude-list pools, and any pool that cannot pass Gateway preflight before live execution. Routine notes like missing Gateway preflight or high fee/TVL productivity are cautions unless a selected-pool gate or live preflight fails.
 
 Allowed quote symbols are configurable and are not limited to SOL-USDC. The default major quote set is `USDC`, `SOL`, `mSOL`, and `JitoSOL`, with `USDC` and `SOL` preferred for simpler accounting.
 
@@ -58,7 +58,7 @@ The routine may recommend only four outcomes: `no-trade`, `conservative`, `balan
 - `wide` is available in live mode within risk caps when volatility is high but still allowed and fee/activity evidence is strong.
 - `no-trade` is mandatory when gates, confidence, Gateway preflight, or risk checks fail.
 
-The agent can downgrade risk, but it should not invent custom presets or free-form ranges.
+The agent can downgrade only for a concrete failed gate, preflight failure, missing required data, or explicit session constraint. It should not invent custom presets, free-form ranges, or extra live-entry thresholds.
 
 ## LP Executor Rails
 
@@ -75,11 +75,14 @@ V1 uses one `lp_executor` with:
 - `keep_position: false` so post-close handling targets clean quote inventory;
 - `controller_id` supplied as Condor requires.
 
+If the centered LP range needs base inventory and the wallet only has quote, the agent may run the agent-local `pre_lp_rebalance` routine through `manage_routines` to perform one Gateway Jupiter quote-to-base swap before creating the executor, but only when `ALLOW_PRE_LP_REBALANCE: true`, the swap quote succeeds, the swap confirms, the SOL fee buffer remains intact, and the total LP spend stays inside the session budget and pool-share caps.
+
 The tiny live-test budget is capped at 10 quote units by default. The agent must also respect pool TVL share, pool volume share, account-cap, fee-buffer, and max-open-executor limits.
 
 ## Exits
 
 The active LP position is supervised by `lp_position_report`.
+The routine fetches executor and LP position facts from the Hummingbot API; its inputs should be limited to exit-policy knobs such as max age, take-profit, stop-loss, out-of-range grace, and missing-position grace.
 
 Exit or escalation conditions include:
 
@@ -102,7 +105,7 @@ V2 is feature-flagged with `v2.enable_multi_pool: false` by default. When enable
 
 ## Evidence Status
 
-This V1 implementation starts with dry-run readiness. No live executor should be created by the files alone. Condor runtime configuration, Gateway health, wallet balances, and user intent are required for live tests.
+This V1 implementation starts with dry-run readiness. No live executor should be created by the files alone. Explicit session mode, scan profile, Gateway health, wallet balances, and user intent are required for live tests.
 
 ## Outside Scope
 
