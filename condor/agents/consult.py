@@ -25,7 +25,7 @@ from condor.acp.pydantic_ai_client import (
     healthcheck_local_backend,
     is_pydantic_ai_model,
 )
-from condor.trading_agent.agent import AgentStore
+from condor.agents.agent import AgentStore
 
 log = logging.getLogger(__name__)
 

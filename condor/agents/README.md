@@ -56,7 +56,7 @@ In short: executors give us the cleanest possible boundary between "what this ag
                                   (filtered by controller_id == agent_id)
 ```
 
-### Components in `condor/trading_agent/`
+### Components in `condor/agents/`
 
 | File | Role |
 |---|---|
@@ -189,8 +189,8 @@ The `trading-agent-builder` skill walks you through the canonical 5-phase flow:
 ### 4.3 Run an agent (programmatic)
 
 ```python
-from condor.trading_agent.engine import TickEngine
-from condor.trading_agent.strategy import StrategyStore
+from condor.agents.engine import TickEngine
+from condor.agents.strategy import StrategyStore
 
 store = StrategyStore()
 strategy = store.get_by_slug("river_scalper")

@@ -249,13 +249,13 @@ class StartStrategyRequest(BaseModel):
 
 
 def _agent_store():
-    from condor.trading_agent.agent import AgentStore
+    from condor.agents.agent import AgentStore
 
     return AgentStore()
 
 
 def _strategy_store():
-    from condor.trading_agent.strategy import StrategyStore
+    from condor.agents.strategy import StrategyStore
 
     return StrategyStore()
 
@@ -279,7 +279,7 @@ def _get_strategy(slug: str, sslug: str):
 
 def _get_engines_for(agent_slug: str, sslug: str) -> list:
     """All engines (running or paused) for a given (agent, strategy)."""
-    from condor.trading_agent.engine import get_all_engines
+    from condor.agents.engine import get_all_engines
 
     return [
         e
@@ -432,7 +432,7 @@ def _list_experiments(strategy_dir: Path) -> list[ExperimentInfo]:
 
 async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | None):
     """Resolve a Hummingbot API client for a strategy, based on its config.yml."""
-    from condor.trading_agent.config import load_agent_config
+    from condor.agents.config import load_agent_config
     from config_manager import get_config_manager
 
     try:
@@ -492,7 +492,7 @@ async def _compute_strategy_performance(
     run_key: str, strategy_dir: Path, default_config: dict | None
 ):
     """Return list of AgentPerformanceModel plus rolled-up totals. Cached ~30s."""
-    from condor.trading_agent.performance import fetch_agent_performance_batch
+    from condor.agents.performance import fetch_agent_performance_batch
 
     cached = _cache_get(f"perf:{run_key}")
     if cached is not None:
@@ -791,7 +791,7 @@ async def consult_agent(
     slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
 ):
     """Run an Agent consult (its brain to completion) and return the answer."""
-    from condor.trading_agent.consult import run_consult
+    from condor.agents.consult import run_consult
 
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
@@ -841,7 +841,7 @@ async def create_strategy(
     )
 
     if req.config:
-        from condor.trading_agent.config import AgentConfig, save_agent_config
+        from condor.agents.config import AgentConfig, save_agent_config
 
         save_agent_config(strategy.dir, AgentConfig.from_dict(req.config))
 
@@ -871,7 +871,7 @@ async def get_strategy(
     md_path = strategy_dir / "strategy.md"
     strategy_md = md_path.read_text() if md_path.exists() else ""
 
-    from condor.trading_agent.config import load_full_config
+    from condor.agents.config import load_full_config
 
     config_dict = load_full_config(strategy_dir, strategy.default_config)
 
@@ -943,7 +943,7 @@ async def update_strategy_config(
 ):
     """Update a strategy's runtime config."""
     strategy = _get_strategy(slug, sslug)
-    from condor.trading_agent.config import load_full_config, save_full_config
+    from condor.agents.config import load_full_config, save_full_config
 
     config_dict = load_full_config(strategy.dir, strategy.default_config)
     config_dict.update(req.config)
@@ -997,7 +997,7 @@ async def get_session_executors(
     user: WebUser = Depends(get_current_user),
 ):
     """Return executors + performance for a single session."""
-    from condor.trading_agent.performance import fetch_agent_performance
+    from condor.agents.performance import fetch_agent_performance
 
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
@@ -1040,8 +1040,8 @@ async def start_strategy(
     user: WebUser = Depends(get_current_user),
 ):
     """Start a strategy (creates a new session under its Agent)."""
-    from condor.trading_agent.config import load_full_config
-    from condor.trading_agent.engine import TickEngine
+    from condor.agents.config import load_full_config
+    from condor.agents.engine import TickEngine
 
     agent = _get_agent(slug)
     strategy = _get_strategy(slug, sslug)
@@ -1079,7 +1079,7 @@ async def stop_strategy(
 ):
     """Stop a running strategy. If agent_id given, stop that instance; else all."""
     if agent_id:
-        from condor.trading_agent.engine import get_engine
+        from condor.agents.engine import get_engine
 
         engine = get_engine(agent_id)
         if not engine:
@@ -1103,7 +1103,7 @@ async def pause_strategy(
 ):
     """Pause a running strategy."""
     if agent_id:
-        from condor.trading_agent.engine import get_engine
+        from condor.agents.engine import get_engine
 
         engine = get_engine(agent_id)
         if not engine or not engine.is_running:
@@ -1128,7 +1128,7 @@ async def resume_strategy(
 ):
     """Resume a paused strategy."""
     if agent_id:
-        from condor.trading_agent.engine import get_engine
+        from condor.agents.engine import get_engine
 
         engine = get_engine(agent_id)
         if not engine:

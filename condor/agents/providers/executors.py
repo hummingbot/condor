@@ -1,6 +1,6 @@
 """Core data provider: active executors with PnL and volume.
 
-Delegates number-crunching to ``condor.trading_agent.performance`` so that
+Delegates number-crunching to ``condor.agents.performance`` so that
 live ticks and the web API always agree.
 """
 
@@ -19,7 +19,7 @@ class ExecutorsProvider(BaseProvider):
     async def execute(
         self, client: Any, config: dict, agent_id: str = ""
     ) -> ProviderResult:
-        from condor.trading_agent.performance import fetch_agent_performance
+        from condor.agents.performance import fetch_agent_performance
 
         if not agent_id:
             return ProviderResult(

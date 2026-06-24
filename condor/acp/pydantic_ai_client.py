@@ -195,6 +195,44 @@ async def healthcheck_local_backend(
     return None
 
 
+_NULL_SAFE_MODEL_CLS: Any = None
+
+
+def _make_openai_compat_model(model_id: str, provider: Any) -> Any:
+    """Build an OpenAIModel that never sends an assistant ``content: null``.
+
+    Ollama's OpenAI-compatible ``/v1/chat/completions`` endpoint rejects any
+    message whose ``content`` is null with ``invalid message content type:
+    <nil>``. pydantic-ai serializes an assistant turn that is *only* tool calls
+    (no accompanying text) with ``content=None`` — which happens routinely the
+    moment a model decides to call a tool without narrating first. Coerce those
+    nulls to an empty string so strict local backends (Ollama, some LM Studio /
+    vLLM builds) accept the follow-up request inside a multi-step tool run.
+
+    The subclass is defined lazily and cached so the heavy pydantic-ai import
+    only happens when a model is actually built.
+    """
+    global _NULL_SAFE_MODEL_CLS
+    if _NULL_SAFE_MODEL_CLS is None:
+        from pydantic_ai.models.openai import OpenAIModel
+
+        class _NullContentSafeOpenAIModel(OpenAIModel):
+            async def _map_messages(self, *args: Any, **kwargs: Any) -> Any:
+                mapped = await super()._map_messages(*args, **kwargs)
+                for msg in mapped:
+                    if (
+                        isinstance(msg, dict)
+                        and msg.get("role") == "assistant"
+                        and msg.get("content") is None
+                    ):
+                        msg["content"] = ""
+                return mapped
+
+        _NULL_SAFE_MODEL_CLS = _NullContentSafeOpenAIModel
+
+    return _NULL_SAFE_MODEL_CLS(model_id, provider=provider)
+
+
 def _tool_args_to_dict(args: Any) -> dict | None:
     """Normalise a pydantic-ai tool-call `args` value to a dict.
 
@@ -287,7 +325,6 @@ class PydanticAIClient:
         """
         import httpx
         from openai import AsyncOpenAI
-        from pydantic_ai.models.openai import OpenAIModel
         from pydantic_ai.providers.openai import OpenAIProvider
 
         prefix, _, model_id = self.model_name.partition(":")
@@ -323,8 +360,8 @@ class PydanticAIClient:
                 api_key=api_key,
                 timeout=_local_timeout,
             )
-            return OpenAIModel(
-                model_id, provider=OpenAIProvider(openai_client=openai_client)
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
             )
 
         # Local providers: always use OpenAI-compatible endpoint with default URL
@@ -339,8 +376,8 @@ class PydanticAIClient:
                 api_key="not-needed",
                 timeout=_local_timeout,
             )
-            return OpenAIModel(
-                model_id, provider=OpenAIProvider(openai_client=openai_client)
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
             )
 
         # OpenAI with custom base_url (vLLM, TGI, etc.)
@@ -350,8 +387,8 @@ class PydanticAIClient:
                 api_key="not-needed",
                 timeout=_local_timeout,
             )
-            return OpenAIModel(
-                model_id, provider=OpenAIProvider(openai_client=openai_client)
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
             )
 
         # Standard pydantic-ai resolution (openai, groq, anthropic, google)
