@@ -855,9 +855,13 @@ class JournalManager:
         pnls = [s.get("pnl", 0) for s in snapshots]
         peak = max(pnls)
         current = pnls[-1]
-        if peak <= 0:
+        drawdown = peak - current
+        if drawdown <= 0:
             return 0.0
-        return max(0, (peak - current) / peak * 100)
+        exposure = snapshots[-1].get("exposure", 0.0)
+        if exposure <= 0:
+            return 0.0
+        return drawdown / exposure * 100
 
     def get_pnl_series(self, hours: int = 24) -> list[dict]:
         return [
