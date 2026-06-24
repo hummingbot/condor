@@ -66,8 +66,27 @@ def _executor_row(ex: dict) -> dict[str, Any]:
 
     # current_price / close_price: top-level > custom_info
     _top_cur = float(ex.get("current_price") or 0)
+    _ci_cur = float(custom_info.get("current_price") or 0)
     _ci_close = float(custom_info.get("close_price") or 0)
-    current_price = _top_cur if _top_cur > 0 else (_ci_close if _ci_close > 0 else 0.0)
+    current_price = (
+        _top_cur
+        if _top_cur > 0
+        else (_ci_cur if _ci_cur > 0 else (_ci_close if _ci_close > 0 else 0.0))
+    )
+
+    amount = float(cfg.get("total_amount_quote") or cfg.get("amount") or 0)
+    if amount <= 0:
+        amount = float(
+            custom_info.get("total_value_quote") or ex.get("filled_amount_quote") or 0
+        )
+    if amount <= 0:
+        base_amount = float(
+            custom_info.get("base_amount") or cfg.get("base_amount") or 0
+        )
+        quote_amount = float(
+            custom_info.get("quote_amount") or cfg.get("quote_amount") or 0
+        )
+        amount = quote_amount + (base_amount * current_price)
 
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
@@ -82,7 +101,7 @@ def _executor_row(ex: dict) -> dict[str, Any]:
         "fees": get_executor_fees(ex),
         "entry_price": entry_price,
         "current_price": current_price,
-        "amount": float(cfg.get("total_amount_quote") or cfg.get("amount") or 0),
+        "amount": amount,
         "timestamp": float(cfg.get("timestamp") or ex.get("timestamp") or 0),
         "close_timestamp": float(ex.get("close_timestamp") or 0),
         "controller_id": str(cfg.get("controller_id") or ex.get("controller_id") or ""),
