@@ -500,7 +500,6 @@ def build_initial_context(
                 "mcp__mcp-hummingbot__manage_gateway_config",
                 "mcp__mcp-hummingbot__manage_gateway_container",
                 "mcp__mcp-hummingbot__search_history",
-                "mcp__mcp-hummingbot__setup_connector",
                 "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
                 "mcp__condor__manage_routines",
                 "mcp__condor__manage_servers",

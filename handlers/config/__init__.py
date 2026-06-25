@@ -208,7 +208,6 @@ def get_modify_value_handler():
     1. Trading states (cex_state, dex_state) - highest priority
     2. Config states (server modification, API keys, gateway)
     """
-    from .api_keys import handle_api_key_input
     from .gateway import handle_gateway_input
     from .servers import handle_server_input
 
@@ -261,12 +260,7 @@ def get_modify_value_handler():
             await handle_server_input(update, context)
             return
 
-        # 5. Check config flows - API keys
-        if context.user_data.get("awaiting_api_key_input"):
-            await handle_api_key_input(update, context)
-            return
-
-        # 6. Check config flows - gateway
+        # 5. Check config flows - gateway
         if (
             context.user_data.get("awaiting_gateway_input")
             or context.user_data.get("awaiting_wallet_input")
