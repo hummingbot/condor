@@ -404,7 +404,7 @@ export function DetailPanel({
 
         <div className="sticky top-0 bg-[var(--color-bg)] border-b border-[var(--color-border)] px-5 py-4 flex items-center justify-between">
           <h2 className="text-sm font-semibold truncate pr-4 font-mono" title={executor.id}>
-            {executor.id.slice(0, 12)}\u2026
+            {executor.id.slice(0, 12)}{"\u2026"}
           </h2>
           <div className="flex items-center gap-2">
             <button
