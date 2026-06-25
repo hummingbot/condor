@@ -1270,7 +1270,7 @@ export const api = {
   getGatewayStatus: (server: string) =>
     apiFetch<GatewayStatus>(`/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`),
 
-  startGateway: (server: string, data: { image: string; passphrase: string; port?: number; dev_mode?: boolean }) =>
+  startGateway: (server: string, data: { image: string; port?: number }) =>
     apiFetch<{ started: boolean }>(`/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`, {
       method: "POST",
       body: JSON.stringify(data),

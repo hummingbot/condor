@@ -50,7 +50,6 @@ export function GatewaySettings() {
   const [customImage, setCustomImage] = useState("");
   const [pullImage, setPullImage] = useState(IMAGE_OPTIONS[0].value);
   const [pullCustomImage, setPullCustomImage] = useState("");
-  const [passphrase, setPassphrase] = useState("");
   const [port, setPort] = useState(15888);
   const [confirmStop, setConfirmStop] = useState(false);
   const [isPulling, setIsPulling] = useState(false);
@@ -101,11 +100,9 @@ export function GatewaySettings() {
     mutationFn: () =>
       api.startGateway(server!, {
         image: image === "custom" ? customImage : image,
-        passphrase,
         port,
-        dev_mode: true,
       }),
-    onSuccess: () => { invalidate(); setShowDeploy(false); setPassphrase(""); },
+    onSuccess: () => { invalidate(); setShowDeploy(false); },
   });
 
   const stopMut = useMutation({
@@ -387,17 +384,6 @@ export function GatewaySettings() {
               )}
             </div>
 
-            <div>
-              <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Passphrase</label>
-              <input
-                type="password"
-                value={passphrase}
-                onChange={(e) => setPassphrase(e.target.value)}
-                className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-                placeholder="Gateway passphrase"
-              />
-            </div>
-
             <div className="w-32">
               <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Port</label>
               <input
@@ -408,9 +394,14 @@ export function GatewaySettings() {
               />
             </div>
 
+            <p className="text-xs text-[var(--color-text-muted)]">
+              The Gateway runs secured (TLS + mTLS). Certificates and the passphrase are
+              managed automatically by the Hummingbot API — no passphrase needed.
+            </p>
+
             <button
               onClick={() => startMut.mutate()}
-              disabled={startMut.isPending || !passphrase}
+              disabled={startMut.isPending || (image === "custom" && !customImage)}
               className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
             >
               {startMut.isPending && <Loader2 className="h-3 w-3 animate-spin" />}

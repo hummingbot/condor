@@ -208,9 +208,7 @@ async def gateway_start(
     try:
         result = await client.gateway.start({
             "image": req.image,
-            "passphrase": req.passphrase,
             "port": req.port,
-            "dev_mode": req.dev_mode,
         })
         return {"started": True, "result": result}
     except Exception as e:

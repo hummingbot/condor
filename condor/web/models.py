@@ -415,10 +415,10 @@ class UpdateServerRequest(BaseModel):
 
 
 class GatewayStartRequest(BaseModel):
+    # The Hummingbot API always runs the Gateway secured (TLS + mTLS) and manages the
+    # certificates/passphrase itself (hummingbot-api SEC-048), so only image/port are sent.
     image: str = "hummingbot/gateway:latest"
-    passphrase: str
     port: int = 15888
-    dev_mode: bool = True
 
 
 class CredentialInfo(BaseModel):
