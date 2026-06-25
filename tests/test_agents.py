@@ -338,6 +338,80 @@ def test_no_allowlist_means_no_filter():
     assert PydanticAIClient(model="ollama:x").allowed_tools is None
 
 
+# ── prompt_stream PromptDone sentinel (CORR-041) ──
+
+
+class _FakeRun:
+    """Minimal stand-in for pydantic-ai's agent run iterator."""
+
+    def __init__(self, nodes):
+        self._nodes = nodes
+        self.result = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def __aiter__(self):
+        for node in self._nodes:
+            yield node
+
+
+def _collect_prompt_stream(client):
+    async def _run():
+        return [event async for event in client.prompt_stream("hi")]
+
+    return asyncio.run(_run())
+
+
+def _prompt_done_reasons(events):
+    from condor.acp.client import PromptDone
+
+    return [e.stop_reason for e in events if isinstance(e, PromptDone)]
+
+
+def test_prompt_stream_success_emits_single_end_turn():
+    client = PydanticAIClient(model="ollama:x")
+    client._agent = SimpleNamespace(iter=lambda *a, **k: _FakeRun([]))
+    client._request_semaphore = asyncio.Semaphore(1)
+
+    events = _collect_prompt_stream(client)
+    assert _prompt_done_reasons(events) == ["end_turn"]
+
+
+def test_prompt_stream_error_emits_text_then_single_error():
+    from condor.acp.client import PromptDone, TextChunk
+
+    client = PydanticAIClient(model="ollama:x")
+
+    def _boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    client._agent = SimpleNamespace(iter=_boom)
+    client._request_semaphore = asyncio.Semaphore(1)
+
+    events = _collect_prompt_stream(client)
+    assert _prompt_done_reasons(events) == ["error"]
+    # The error path emits a TextChunk before the PromptDone(error) sentinel.
+    assert isinstance(events[0], TextChunk)
+    assert isinstance(events[-1], PromptDone)
+
+
+def test_prompt_stream_timeout_emits_single_timeout():
+    client = PydanticAIClient(model="ollama:x")
+
+    def _timeout(*a, **k):
+        raise asyncio.TimeoutError()
+
+    client._agent = SimpleNamespace(iter=_timeout)
+    client._request_semaphore = asyncio.Semaphore(1)
+
+    events = _collect_prompt_stream(client)
+    assert _prompt_done_reasons(events) == ["timeout"]
+
+
 def test_assistant_routines_dir_layout():
     from routines.base import assistant_routines_dir
 

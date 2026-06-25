@@ -710,7 +710,7 @@ class PydanticAIClient:
             except Exception as e:
                 log.exception("PydanticAI prompt error: %s", e)
                 yield TextChunk(text=self._format_error(e))
-            yield PromptDone(stop_reason="error")
+                yield PromptDone(stop_reason="error")
 
     def _format_error(self, e: Exception) -> str:
         """Translate provider HTTP errors into actionable user-facing text.
