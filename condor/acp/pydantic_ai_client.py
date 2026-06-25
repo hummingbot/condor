@@ -307,7 +307,8 @@ class PydanticAIClient:
         self._shutdown_event: asyncio.Event | None = None
         self._startup_error: BaseException | None = None
         # Accumulated turn history — grows with each prompt_stream() call so
-        # the model sees prior turns. Reset via clear_history().
+        # the model sees prior turns. A fresh client is created per session/tick,
+        # so history is reset by recreating the client rather than in-place.
         self._message_history: list = []
 
     def _build_model(self) -> Any:
@@ -571,10 +572,6 @@ class PydanticAIClient:
             if not self._ready_event.is_set():
                 self._startup_error = exc
                 self._ready_event.set()
-
-    def clear_history(self) -> None:
-        """Discard accumulated message history, starting a fresh conversation."""
-        self._message_history.clear()
 
     async def stop(self) -> None:
         """Signal the MCP lifecycle task to shut down and wait for it."""
