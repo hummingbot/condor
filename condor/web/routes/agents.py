@@ -799,12 +799,27 @@ async def consult_agent(
 ):
     """Run an Agent consult (its brain to completion) and return the answer."""
     from condor.agents.consult import run_consult
+    from config_manager import get_config_manager
 
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
+
+    # The consult binds the agent's MCP toolset to ``server_name``'s live
+    # credentials, so gate it on server access exactly like the portfolio/bots
+    # routes do — otherwise any session could consult against a server it was
+    # never granted (IDOR). Only enforce when a server is actually requested;
+    # serverless consults need no server scope.
+    if req.server_name and not get_config_manager().has_server_access(
+        user.id, req.server_name
+    ):
+        raise HTTPException(status_code=403, detail="No access")
+
+    # Web callers always act as themselves; the ``user_id`` override is reserved
+    # for trusted internal/MCP callers and must not let a session impersonate
+    # another user's memory/skill scope.
     answer = await run_consult(
         slug=slug,
-        user_id=req.user_id or user.id,
+        user_id=user.id,
         chat_id=req.chat_id,
         server_name=req.server_name,
         task=req.task,

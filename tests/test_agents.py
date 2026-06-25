@@ -427,3 +427,75 @@ def test_claude_acp_takes_acp_path_not_pydantic_ai():
     assert is_pydantic_ai_model("claude-acp:opus") is False  # ACP subprocess path
     assert is_pydantic_ai_model("anthropic:claude-opus-4-8") is True  # API path
     assert is_pydantic_ai_model("ollama:qwen3:32b") is True
+
+
+# ── consult endpoint authorization (SEC-035) ──
+
+
+def _consult_request(**kw):
+    from condor.web.routes.agents import ConsultRequest
+
+    kw.setdefault("task", "what's my balance?")
+    return ConsultRequest(**kw)
+
+
+def _web_user(uid):
+    return SimpleNamespace(id=uid, username="", first_name="", role="user")
+
+
+def test_consult_denies_server_without_access(monkeypatch):
+    """A user without access to server 'X' gets 403 and run_consult is not called."""
+    import config_manager
+    from condor.agents import consult as consult_module
+    from condor.web.routes import agents as agents_module
+
+    called = {"run": False}
+
+    async def _fail_run_consult(**kw):  # pragma: no cover - must not be reached
+        called["run"] = True
+        return "should not run"
+
+    monkeypatch.setattr(consult_module, "run_consult", _fail_run_consult)
+    monkeypatch.setattr(
+        config_manager,
+        "get_config_manager",
+        lambda: SimpleNamespace(has_server_access=lambda uid, name: False),
+    )
+
+    from fastapi import HTTPException
+
+    req = _consult_request(server_name="X", user_id=999)
+    try:
+        asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
+        assert False, "expected 403"
+    except HTTPException as exc:
+        assert exc.status_code == 403
+    assert called["run"] is False  # no MCP client built for X
+
+
+def test_consult_forces_caller_user_id(monkeypatch):
+    """An accessible-server consult runs, but user_id is forced to the caller's."""
+    import config_manager
+    from condor.agents import consult as consult_module
+    from condor.web.routes import agents as agents_module
+
+    seen = {}
+
+    async def _capture_run_consult(**kw):
+        seen.update(kw)
+        return "ok"
+
+    monkeypatch.setattr(consult_module, "run_consult", _capture_run_consult)
+    monkeypatch.setattr(
+        config_manager,
+        "get_config_manager",
+        lambda: SimpleNamespace(has_server_access=lambda uid, name: True),
+    )
+
+    # Caller is 42 but tries to impersonate user 999.
+    req = _consult_request(server_name="X", user_id=999)
+    result = asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
+
+    assert result["answer"] == "ok"
+    assert seen["user_id"] == 42  # caller's id, not the 999 override
+    assert seen["server_name"] == "X"
