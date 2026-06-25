@@ -412,6 +412,36 @@ def test_prompt_stream_timeout_emits_single_timeout():
     assert _prompt_done_reasons(events) == ["timeout"]
 
 
+def test_prompt_stream_runs_without_semaphore_for_cloud_providers():
+    # Cloud providers leave _request_semaphore None (PERF-038): prompt_stream
+    # must still work, with the serialization guard acting as a no-op.
+    client = PydanticAIClient(model="anthropic:claude-sonnet-4-6")
+    client._agent = SimpleNamespace(iter=lambda *a, **k: _FakeRun([]))
+    client._request_semaphore = None
+
+    events = _collect_prompt_stream(client)
+    assert _prompt_done_reasons(events) == ["end_turn"]
+
+
+def test_resolve_base_url_distinguishes_cloud_from_local_backends():
+    # PERF-038: only backends with a resolved base URL get serialized. Cloud
+    # providers pydantic-ai resolves natively return None (no semaphore).
+    from condor.acp.pydantic_ai_client import resolve_base_url
+
+    # Cloud providers -> no base URL -> run concurrently (no semaphore).
+    assert resolve_base_url("anthropic:claude-sonnet-4-6") is None
+    assert resolve_base_url("groq:llama-3.3-70b-versatile") is None
+    assert resolve_base_url("openai:gpt-4o") is None
+
+    # Local / custom backends -> base URL -> stay serialized.
+    assert resolve_base_url("ollama:llama3.1") == "http://localhost:11434/v1"
+    assert resolve_base_url("lmstudio:qwen-14b") == "http://localhost:1234/v1"
+    assert (
+        resolve_base_url("openai:my-model", "http://localhost:8000/v1")
+        == "http://localhost:8000/v1"
+    )
+
+
 def test_assistant_routines_dir_layout():
     from routines.base import assistant_routines_dir
 

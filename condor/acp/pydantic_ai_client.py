@@ -10,6 +10,7 @@ Yields the same ACPEvent types so TickEngine can consume it identically.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -294,7 +295,9 @@ class PydanticAIClient:
         self._mcp_servers: list[Any] = []
         self._agent: Any = None
         # Resolved in start() to the global semaphore for this server's base URL,
-        # so all sessions sharing the same LM Studio instance are serialized.
+        # so all sessions sharing the same local inference server (e.g. LM Studio)
+        # are serialized. Stays None for natively-resolved cloud providers
+        # (anthropic/groq/default openai/google), which handle concurrency fine.
         self._request_semaphore: asyncio.Semaphore | None = None
         # Background task that owns the MCP server cancel scopes.
         # anyio requires cancel scopes to be entered/exited in the same task,
@@ -502,12 +505,16 @@ class PydanticAIClient:
         self._agent = Agent(model, toolsets=toolsets, prepare_tools=prepare)
 
         # Resolve the global semaphore for this server's base URL so all client
-        # instances targeting the same inference server share one request slot.
-        prefix = self.model_name.split(":", 1)[0]
-        resolved_base_url = self.base_url or DEFAULT_BASE_URLS.get(
-            prefix, self.model_name
+        # instances targeting the same local inference server share one request
+        # slot. Cloud providers pydantic-ai resolves natively (anthropic, groq,
+        # default openai/google) have no base URL here; they handle concurrency
+        # fine, so we leave the semaphore None and skip serialization for them.
+        resolved_base_url = resolve_base_url(self.model_name, self.base_url)
+        self._request_semaphore = (
+            _get_server_semaphore(resolved_base_url)
+            if resolved_base_url is not None
+            else None
         )
-        self._request_semaphore = _get_server_semaphore(resolved_base_url)
 
         # Spin up a dedicated background task to own the MCP server cancel scopes.
         # anyio cancel scopes must be entered and exited in the same asyncio task;
@@ -606,8 +613,10 @@ class PydanticAIClient:
 
         # Serialize requests: local inference servers (LM Studio, Ollama) process
         # one request at a time. Without this, concurrent ticks race to connect
-        # and the losing ticks ConnectTimeout against a busy server.
-        async with self._request_semaphore:
+        # and the losing ticks ConnectTimeout against a busy server. Cloud
+        # providers leave the semaphore None (see start()) so concurrent prompts
+        # run in parallel; nullcontext() makes the guard a no-op for them.
+        async with self._request_semaphore or contextlib.nullcontext():
             start_time = time.monotonic()
 
             try:
