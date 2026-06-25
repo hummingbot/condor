@@ -135,18 +135,36 @@ async def get_bots_client(
 
 
 def clear_bots_state(context) -> None:
-    """Clear all bots-related state from user context.
+    """Clear only bots-related state from user context.
 
-    Thin wrapper that delegates to the master cleaner
-    ``clear_all_input_states`` (the single source of truth, see CLAUDE.md),
-    which already clears the superset of bots/archived/config-menu keys.
+    This is a NARROW cleaner: it pops just the bots/archived/config-menu feature
+    keys and does NOT tear down unrelated state (active /trade SDS subscriptions,
+    portfolio cache, etc.). It is invoked mid/end of bots flows and on menu
+    re-entry (e.g. controller save, show_bots_menu), so it must not disturb a
+    user's live trade view. For full state resets on top-level command
+    entrypoints, use ``clear_all_input_states`` instead.
 
     Args:
         context: Telegram context object
     """
-    from handlers import clear_all_input_states
-
-    clear_all_input_states(context)
+    context.user_data.pop("bots_state", None)
+    context.user_data.pop("controller_config_params", None)
+    context.user_data.pop("controller_configs_list", None)
+    context.user_data.pop("selected_controllers", None)
+    context.user_data.pop("editing_controller_field", None)
+    context.user_data.pop("deploy_params", None)
+    context.user_data.pop("editing_deploy_field", None)
+    # Archived bots state
+    context.user_data.pop("archived_databases", None)
+    context.user_data.pop("archived_current_db", None)
+    context.user_data.pop("archived_page", None)
+    context.user_data.pop("archived_summaries", None)
+    context.user_data.pop("archived_total_count", None)
+    # Config menu state
+    context.user_data.pop("configs_controller_type", None)
+    context.user_data.pop("configs_page", None)
+    context.user_data.pop("selected_configs", None)
+    context.user_data.pop("configs_type_filtered", None)
 
 
 def get_controller_config(context) -> Dict[str, Any]:

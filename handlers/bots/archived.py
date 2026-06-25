@@ -16,7 +16,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from handlers import clear_all_input_states
 from utils.telegram_formatters import (
     escape_markdown_v2,
     format_error_message,
@@ -37,6 +36,20 @@ BOTS_PER_PAGE = 5
 # ============================================
 # STATE MANAGEMENT
 # ============================================
+
+
+def clear_archived_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clear only archived-related state from context.
+
+    Narrow cleaner used on archived menu refresh/re-entry. It must NOT tear down
+    unrelated state (active /trade SDS subscriptions, portfolio cache, etc.) —
+    use ``clear_all_input_states`` for full resets on command entrypoints.
+    """
+    context.user_data.pop("archived_databases", None)
+    context.user_data.pop("archived_current_db", None)
+    context.user_data.pop("archived_page", None)
+    context.user_data.pop("archived_summaries", None)
+    context.user_data.pop("archived_total_count", None)
 
 
 def _get_db_path_by_index(
@@ -907,7 +920,7 @@ async def handle_archived_refresh(
     """Refresh archived bots data."""
     # Clear cache
     context.user_data.pop("_bots_cache", None)
-    clear_all_input_states(context)
+    clear_archived_state(context)
 
     # Re-show menu
     await show_archived_menu(update, context, page=0)
