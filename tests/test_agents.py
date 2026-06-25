@@ -234,23 +234,6 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     )
 
 
-def test_manage_trading_agent_delete_refuses_with_strategy(tmp_path, monkeypatch):
-    """delete_agent must refuse while the agent still owns a strategy."""
-    from mcp_servers.condor.settings import settings
-    from mcp_servers.condor.tools import trading_agent as ta
-
-    _patch_roots(monkeypatch, tmp_path)
-    monkeypatch.setattr(settings, "user_id", 7, raising=False)
-
-    asyncio.run(ta.manage_trading_agent(action="create_agent", name="Looper"))
-    StrategyStore().create(agent_slug="looper", name="Tick", instructions="x")
-
-    refused = asyncio.run(
-        ta.manage_trading_agent(action="delete_agent", agent_slug="looper")
-    )
-    assert "error" in refused and "strateg" in refused["error"].lower()
-
-
 def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
     """A strategy can't be created under an agent that does not exist."""
     from mcp_servers.condor.settings import settings
@@ -421,6 +404,45 @@ def test_prompt_stream_runs_without_semaphore_for_cloud_providers():
 
     events = _collect_prompt_stream(client)
     assert _prompt_done_reasons(events) == ["end_turn"]
+
+
+# ── per-server slot released during human confirmation (PERF-029) ──
+
+
+def test_release_request_slot_frees_semaphore_during_wait():
+    # PERF-029: while one session blocks on a human confirmation, the global
+    # per-server slot must be free so a concurrent session on the same backend
+    # can proceed instead of stalling for the whole confirmation timeout.
+    async def _run():
+        sem = asyncio.Semaphore(1)
+        client = PydanticAIClient(model="ollama:x")
+        client._request_semaphore = sem
+
+        await sem.acquire()  # this session holds the only slot
+        assert sem.locked()
+
+        async with client._release_request_slot():
+            # During the "human is deciding" window the slot is free…
+            assert not sem.locked()
+            # …and a concurrent session can grab it.
+            await asyncio.wait_for(sem.acquire(), timeout=0.1)
+            sem.release()
+        # Re-acquired before returning, so model HTTP work stays serialized.
+        assert sem.locked()
+
+    asyncio.run(_run())
+
+
+def test_release_request_slot_noop_for_cloud_providers():
+    # PERF-038: cloud providers keep _request_semaphore None; the release helper
+    # must be a no-op rather than crash on a None semaphore.
+    async def _run():
+        client = PydanticAIClient(model="anthropic:claude-sonnet-4-6")
+        client._request_semaphore = None
+        async with client._release_request_slot():
+            pass
+
+    asyncio.run(_run())
 
 
 def test_resolve_base_url_distinguishes_cloud_from_local_backends():

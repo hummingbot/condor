@@ -590,6 +590,31 @@ class PydanticAIClient:
     def alive(self) -> bool:
         return self._agent is not None
 
+    @contextlib.asynccontextmanager
+    async def _release_request_slot(self) -> AsyncIterator[None]:
+        """Temporarily release the per-server request slot for a blocking wait.
+
+        The per-server semaphore exists only to serialize concurrent HTTP
+        requests to single-threaded local backends (LM Studio/Ollama). It must
+        NOT stay held while we block on a human-in-the-loop confirmation: the
+        semaphore is GLOBAL and keyed by base URL, so one user sitting on a
+        permission dialog would otherwise stall every other session/tick that
+        targets the same backend for the whole confirmation timeout.
+
+        Releases the slot on entry and re-acquires it before returning, so model
+        HTTP work stays serialized. No-op for cloud providers, whose semaphore is
+        None (PERF-038).
+        """
+        sem = self._request_semaphore
+        if sem is None:
+            yield
+            return
+        sem.release()
+        try:
+            yield
+        finally:
+            await sem.acquire()
+
     async def prompt(self, text: str) -> str:
         """One-shot prompt: send text, return response."""
         chunks: list[str] = []
@@ -674,9 +699,14 @@ class PydanticAIClient:
                                             {"optionId": "allow", "kind": "allow_once"},
                                             {"optionId": "deny", "kind": "deny"},
                                         ]
-                                        result = await self.permission_callback(
-                                            tool_call_info, options
-                                        )
+                                        # Don't hold the per-server slot while a
+                                        # human decides — release it for the wait
+                                        # so other sessions/ticks on this backend
+                                        # aren't blocked (PERF-029).
+                                        async with self._release_request_slot():
+                                            result = await self.permission_callback(
+                                                tool_call_info, options
+                                            )
                                         outcome = result.get("outcome", {})
                                         if (
                                             isinstance(outcome, dict)
