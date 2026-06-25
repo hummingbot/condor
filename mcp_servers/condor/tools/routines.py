@@ -202,15 +202,17 @@ async def run_routine(
 
     context = MCPContext()
 
-    # Attribute the report to its producer: an explicit strategy (by composite
-    # key), else the run context (Agent consult -> its slug; chat condor -> "condor").
+    # Attribute the report to its producer: an explicit strategy's owning agent
+    # (the bare agent slug, the canonical attribution unit shared with the
+    # web/Telegram runner's _agent_of and the agent index), else the run context
+    # (Agent consult -> its slug; chat condor -> "condor").
     agent = settings.agent_slug or "condor"
     if strategy_id:
         from condor.agents.strategy import StrategyStore
 
         s = StrategyStore().get_by_key(strategy_id)
         if s:
-            agent = s.key
+            agent = s.agent_slug
         else:
             from condor.agents.agent import AgentStore
 
