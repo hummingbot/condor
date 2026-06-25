@@ -132,7 +132,7 @@ def _list_agent_definitions() -> dict:
 
     An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
     *strategy* (a looping playbook it owns) and from a running *instance*. This
-    surfaces consultable experts and loopable agents that ``list_strategies`` /
+    surfaces consult-only agents and loopable agents that ``list_strategies`` /
     ``list_agents`` (instances) never show.
     """
     from condor.agents.agent import AgentStore
@@ -159,6 +159,112 @@ def _list_agent_definitions() -> dict:
             }
         )
     return {"agents": agents}
+
+
+# ---------------------------------------------------------------------------
+# Agent CRUD (the AGENT.md identity itself — the primary artifact)
+#
+# An Agent is the brain/identity. It is created FIRST; routines and strategies
+# are sub-resources that hang off an existing agent_slug. Capability is derived:
+# ``when_to_consult`` => consultable (on any model); ≥1 strategy => loopeable.
+# A bare agent (no trigger, no strategy) is a stub.
+# ---------------------------------------------------------------------------
+
+
+def _manage_agent(
+    action: str,
+    agent_slug: str | None,
+    name: str | None,
+    description: str | None,
+    instructions: str | None,
+    agent_key: str | None,
+    tools: list[str] | None,
+    when_to_consult: str | None,
+    server_required: bool | None,
+) -> dict:
+    from condor.agents.agent import AgentStore
+
+    store = AgentStore()
+
+    if action == "create_agent":
+        if not name:
+            return {"error": "name is required to create an agent"}
+        agent = store.create(
+            name=name,
+            description=description or "",
+            instructions=instructions or "",
+            agent_key=agent_key or "",
+            tools=tools,
+            when_to_consult=when_to_consult or "",
+            server_required=True if server_required is None else server_required,
+            created_by=settings.user_id,
+        )
+        return {
+            "created": True,
+            "agent_slug": agent.slug,
+            "name": agent.name,
+            "consultable": agent.consultable,
+        }
+
+    if action == "get_agent":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        a = store.get(agent_slug)
+        if not a:
+            return {"error": f"Agent '{agent_slug}' not found"}
+        return {
+            "slug": a.slug,
+            "name": a.name,
+            "description": a.description,
+            "instructions": a.instructions,
+            "agent_key": a.agent_key,
+            "tools": a.tools,
+            "when_to_consult": a.when_to_consult,
+            "server_required": a.server_required,
+            "consultable": a.consultable,
+            "created_by": a.created_by,
+            "created_at": a.created_at,
+        }
+
+    if action == "update_agent":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        a = store.get(agent_slug)
+        if not a:
+            return {"error": f"Agent '{agent_slug}' not found"}
+        if name:
+            a.name = name
+        if description is not None:
+            a.description = description
+        if instructions is not None:
+            a.instructions = instructions
+        if agent_key is not None:
+            a.agent_key = agent_key
+        if tools is not None:
+            a.tools = tools
+        if when_to_consult is not None:
+            a.when_to_consult = when_to_consult
+        if server_required is not None:
+            a.server_required = server_required
+        store.update(a)
+        return {"updated": True, "agent_slug": a.slug, "consultable": a.consultable}
+
+    if action == "delete_agent":
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        from condor.agents.strategy import StrategyStore
+
+        owned = StrategyStore().list(agent_slug)
+        if owned:
+            return {
+                "error": (
+                    f"Agent '{agent_slug}' still owns {len(owned)} strategy(ies). "
+                    "Delete its strategies first."
+                )
+            }
+        return {"deleted": store.delete(agent_slug)}
+
+    return {"error": f"Unknown agent action: {action}"}
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +541,10 @@ async def manage_trading_agent(
     agent_key: str | None = None,
     skills: list[str] | None = None,
     config: dict | None = None,
+    # Agent-definition params (for create_agent/update_agent actions)
+    tools: list[str] | None = None,
+    when_to_consult: str | None = None,
+    server_required: bool | None = None,
     # Journal params (for journal_read/journal_write actions)
     section: str = "recent",
     max_entries: int = 30,
@@ -448,6 +558,26 @@ async def manage_trading_agent(
     # Agent definitions (identities) — distinct from strategies and instances
     if action == "list_agent_definitions":
         return _list_agent_definitions()
+
+    # Agent CRUD — the AGENT.md identity itself (created before routines/strategies)
+    agent_def_actions = {
+        "create_agent",
+        "get_agent",
+        "update_agent",
+        "delete_agent",
+    }
+    if action in agent_def_actions:
+        return _manage_agent(
+            action,
+            agent_slug,
+            name,
+            description,
+            instructions,
+            agent_key,
+            tools,
+            when_to_consult,
+            server_required,
+        )
 
     # Strategy operations
     local_strategy_actions = {

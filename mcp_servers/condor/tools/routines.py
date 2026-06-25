@@ -11,8 +11,10 @@ def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
 
     Routines live at the **Agent** level (``agents/<slug>/routines``),
     shared across all of that agent's strategies. A strategy_id (composite key
-    "agent_slug.strategy_slug") resolves to its owning agent's routines dir;
-    otherwise the current assistant's own dir — ``assistants/condor/routines``
+    "agent_slug.strategy_slug") resolves to its owning agent's routines dir; a
+    bare agent slug ("agent_slug", no dot) resolves to that agent directly —
+    used in the expert-first flow where routines are created before any strategy
+    exists. Otherwise the current assistant's own dir — ``assistants/condor/routines``
     for the chat, or the launched Agent's (``settings.agent_slug``).
     """
     from routines.base import assistant_routines_dir
@@ -21,9 +23,15 @@ def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
         from condor.agents.strategy import StrategyStore
 
         s = StrategyStore().get_by_key(strategy_id)
-        if not s:
-            return None
-        return assistant_routines_dir(s.agent_slug)
+        if s:
+            return assistant_routines_dir(s.agent_slug)
+        # Fall back: treat strategy_id as a bare agent slug so routines can be
+        # created/run for a consult-only expert that owns no strategy yet.
+        from condor.agents.agent import AgentStore
+
+        if AgentStore().get(strategy_id):
+            return assistant_routines_dir(strategy_id)
+        return None
 
     return assistant_routines_dir(settings.agent_slug or None)
 
@@ -203,6 +211,12 @@ async def run_routine(
         s = StrategyStore().get_by_key(strategy_id)
         if s:
             agent = s.key
+        else:
+            from condor.agents.agent import AgentStore
+
+            if AgentStore().get(strategy_id):
+                # bare agent slug (expert-first flow): attribute to the agent
+                agent = strategy_id
 
     try:
         from condor.reports import attribute_to
@@ -290,7 +304,11 @@ def create_routine(name: str, code: str, strategy_id: str | None) -> dict:
 
     routines_dir = _get_agent_routines_dir(strategy_id)
     if not routines_dir:
-        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
+        return {
+            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
+            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
+            "resolve to an existing agent."
+        }
 
     file_path = routines_dir / f"{name}.py"
     if file_path.exists():
@@ -343,7 +361,11 @@ def edit_routine(name: str, code: str, strategy_id: str | None) -> dict:
     """Update the source code of an agent-local routine."""
     routines_dir = _get_agent_routines_dir(strategy_id)
     if not routines_dir:
-        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
+        return {
+            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
+            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
+            "resolve to an existing agent."
+        }
 
     file_path = routines_dir / f"{name}.py"
     if not file_path.exists():
@@ -378,7 +400,11 @@ def delete_routine(name: str, strategy_id: str | None) -> dict:
     """Delete an agent-local routine."""
     routines_dir = _get_agent_routines_dir(strategy_id)
     if not routines_dir:
-        return {"error": "strategy_id is required (or CONDOR_AGENT_SLUG must be set)"}
+        return {
+            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
+            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
+            "resolve to an existing agent."
+        }
 
     file_path = routines_dir / f"{name}.py"
     if not file_path.exists():
