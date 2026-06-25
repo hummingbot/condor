@@ -6,7 +6,7 @@ import pytest
 
 from condor.memory import paths as paths_module
 from condor.memory.paths import store_root
-from condor.memory.store import MemoryStore
+from condor.memory.store import MemoryStore, _atomic_write
 
 
 @pytest.fixture
@@ -202,8 +202,8 @@ def test_atomic_write_uses_unique_tmp_per_writer(memory_root, monkeypatch):
         return orig(self, text, *args, **kwargs)
 
     monkeypatch.setattr(Path, "write_text", spy)
-    s._atomic_write(target, "a")
-    s._atomic_write(target, "b")
+    _atomic_write(target, "a")
+    _atomic_write(target, "b")
 
     assert len(seen) == 2
     assert seen[0] != seen[1]  # unique per writer
@@ -229,7 +229,7 @@ def test_concurrent_writers_never_leave_a_torn_file(memory_root):
     def writer(text):
         barrier.wait()
         for _ in range(10):
-            s._atomic_write(target, text)
+            _atomic_write(target, text)
 
     threads = [threading.Thread(target=writer, args=(p,)) for p in payloads]
     for t in threads:

@@ -104,14 +104,37 @@ def append_audit(
     _trim_audit(audit_file)
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write atomically (tmp file + os.replace) within the same dir.
+
+    Free function (not a method) so every per-assistant store — memories and
+    skills alike — shares one implementation instead of a verbatim copy. The
+    temp file is named uniquely per writer (pid + uuid) so two processes
+    writing the same slug concurrently never share — and thus never tear — the
+    temp file; ``os.replace`` then publishes each writer's complete file
+    atomically (FEAT-003 runs the same store from the main process and the MCP
+    subprocess).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _trim_audit(audit_file: Path, cap: int | None = None) -> None:
     """Bound ``audit.log`` to its newest ``cap`` entries.
 
     Only rewrites once the file exceeds ``2 * cap`` lines, so the trim cost is
     amortized away across appends instead of paid on every write. The rewrite
     is atomic (tmp file + ``os.replace``) so a concurrent reader/writer never
-    sees a torn file — the same discipline :meth:`MemoryStore._atomic_write`
-    uses for memory files (FEAT-003 runs the same store from two processes).
+    sees a torn file — the same discipline :func:`_atomic_write` uses for
+    memory files (FEAT-003 runs the same store from two processes).
     """
     if cap is None:
         cap = _AUDIT_CAP
@@ -191,7 +214,7 @@ class MemoryStore:
             "created": created,
             "source": source,
         }
-        self._atomic_write(path, _render(meta, content.strip()))
+        _atomic_write(path, _render(meta, content.strip()))
         self._reindex()
         action = "update" if existed else "create"
         self._append_audit(action, f"memory:{slug}", meta["description"], source)
@@ -318,30 +341,9 @@ class MemoryStore:
                 self.index_file.unlink()
             return
         self.root.mkdir(parents=True, exist_ok=True)
-        self._atomic_write(self.index_file, "\n".join(lines) + "\n")
+        _atomic_write(self.index_file, "\n".join(lines) + "\n")
 
     def _append_audit(
         self, action: str, target: str, summary: str, source: str
     ) -> None:
         append_audit(self.audit_file, action, target, summary, source)
-
-    @staticmethod
-    def _atomic_write(path: Path, text: str) -> None:
-        """Write atomically (tmp file + os.replace) within the same dir.
-
-        The temp file is named uniquely per writer (pid + uuid) so two
-        processes writing the same slug concurrently never share — and thus
-        never tear — the temp file; ``os.replace`` then publishes each
-        writer's complete file atomically (FEAT-003 runs the same store from
-        the main process and the MCP subprocess).
-        """
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        try:
-            tmp.write_text(text)
-            os.replace(tmp, path)
-        finally:
-            try:
-                tmp.unlink()
-            except FileNotFoundError:
-                pass
