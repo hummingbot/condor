@@ -43,7 +43,7 @@ def store_root(user_id: int, agent_slug: str | None = None) -> Path:
 
 
 def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
-    """Read-only, repo-shipped skills for an agent (FEAT-004).
+    """Repo-shipped skills library for an agent (FEAT-004).
 
     These are authored playbooks that ship with Condor and are available without
     being copied into the mutable per-user store. They live *beside* the agent's
@@ -55,7 +55,9 @@ def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
       ``agents/<slug>/skills/`` (e.g. an executor_manager's playbooks)
 
     Merged into the agent's [SKILLS]/[DOMAIN SKILLS] index alongside its learned
-    skills; read-only (create/edit/delete refuse these slugs).
+    skills. The library is editable at runtime: ``SkillStore`` create/edit/delete
+    act on this same dir, so repo-shipped playbooks can be refined like any other
+    (edits are version-controlled). See :mod:`condor.memory.skills`.
     """
     if agent_slug:
         return _PROJECT_ROOT / "agents" / agent_slug / "skills"
