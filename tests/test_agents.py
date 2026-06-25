@@ -603,3 +603,18 @@ def test_consult_forces_caller_user_id(monkeypatch):
     assert result["answer"] == "ok"
     assert seen["user_id"] == 42  # caller's id, not the 999 override
     assert seen["server_name"] == "X"
+
+
+def test_normalize_mode_coerces_legacy_and_unknown():
+    """Legacy/removed (FEAT-004) or unknown persisted agent_mode -> DEFAULT_MODE."""
+    from handlers.agents._shared import AGENT_MODES, DEFAULT_MODE, normalize_mode
+
+    # Removed legacy modes and any unknown/None value fall back to default.
+    assert normalize_mode("trading") == DEFAULT_MODE
+    assert normalize_mode("agent_builder") == DEFAULT_MODE
+    assert normalize_mode("does-not-exist") == DEFAULT_MODE
+    assert normalize_mode(None) == DEFAULT_MODE
+
+    # The default mode itself is always valid and preserved.
+    assert DEFAULT_MODE in AGENT_MODES
+    assert normalize_mode(DEFAULT_MODE) == DEFAULT_MODE

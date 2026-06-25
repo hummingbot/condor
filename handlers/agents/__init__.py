@@ -6,6 +6,8 @@ import shutil
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from condor.acp import ACP_COMMANDS, PromptDone
+from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from handlers import clear_all_input_states
 from utils.auth import restricted
 
@@ -17,13 +19,12 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     DEFAULT_MODE,
-    load_assistant,
     get_project_dir,
+    load_assistant,
+    normalize_mode,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
-from condor.acp import ACP_COMMANDS, PromptDone
-from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
 
@@ -71,8 +72,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     clear_all_input_states(context)
 
-    # Ensure defaults are set
-    context.user_data.setdefault("agent_mode", DEFAULT_MODE)
+    # Ensure defaults are set (coercing any legacy/removed persisted mode)
+    context.user_data["agent_mode"] = normalize_mode(
+        context.user_data.get("agent_mode")
+    )
     context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
 
     # Warn if no agent CLI is available
@@ -180,6 +183,9 @@ async def _handle_mode_start(
     message = query.message if query else update.message
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+
+    # Never start a session in a removed/unknown mode (stale state, old button).
+    mode = normalize_mode(mode)
 
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
@@ -788,7 +794,7 @@ async def agent_message_handler(
         await _resolve_openrouter_typed_slug(update, context, text)
         return
 
-    mode = context.user_data.get("agent_mode", DEFAULT_MODE)
+    mode = normalize_mode(context.user_data.get("agent_mode"))
 
     session = get_session(chat_id)
 

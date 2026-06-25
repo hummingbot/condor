@@ -141,6 +141,18 @@ AGENT_MODES = discover_assistants()
 DEFAULT_MODE = "condor"
 
 
+def normalize_mode(mode: str | None) -> str:
+    """Coerce a persisted ``agent_mode`` to a currently-valid one.
+
+    FEAT-004 collapsed the old multi-mode setup ('trading'/'agent_builder') into
+    the single 'condor' mode. Stale pickled ``user_data`` may still hold a mode
+    that is no longer in ``AGENT_MODES``; left as-is it would surface a raw broken
+    label or start a non-existent mode. Anything unknown falls back to
+    ``DEFAULT_MODE``.
+    """
+    return mode if mode in AGENT_MODES else DEFAULT_MODE
+
+
 def reload_assistants() -> None:
     """Re-scan assistants/ folder. Call after adding/removing .md files."""
     _assistant_cache.clear()

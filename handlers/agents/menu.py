@@ -5,7 +5,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from ._shared import AGENT_MODES, AGENT_OPTIONS, DEFAULT_AGENT, DEFAULT_MODE
+from ._shared import AGENT_MODES, AGENT_OPTIONS, DEFAULT_AGENT, normalize_mode
 from .session import get_session
 
 log = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ async def show_agent_menu(
     else:
         # No session — show options to start or change settings
         agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
-        mode = context.user_data.get("agent_mode", DEFAULT_MODE)
+        mode = normalize_mode(context.user_data.get("agent_mode"))
         mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
         llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
         text = (
