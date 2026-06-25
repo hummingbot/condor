@@ -669,15 +669,27 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
 
     agents = _agent_store().list_all()
     store = _strategy_store()
-    results: list[AgentSummary] = []
 
+    # Flatten every (agent, strategy) summary into a single gather so all
+    # per-strategy performance fetches run concurrently across all agents,
+    # not just within each agent (cold-cache latency O(1) round-trips).
+    coros = []
+    owners: list[str] = []
     for agent in agents:
-        strategies = store.list(agent.slug)
-        summaries = await _asyncio.gather(
-            *[_build_strategy_summary(s) for s in strategies],
-            return_exceptions=True,
-        )
-        strat_summaries = [s for s in summaries if isinstance(s, StrategySummary)]
+        for strategy in store.list(agent.slug):
+            coros.append(_build_strategy_summary(strategy))
+            owners.append(agent.slug)
+
+    summaries = await _asyncio.gather(*coros, return_exceptions=True)
+
+    by_agent: dict[str, list[StrategySummary]] = {agent.slug: [] for agent in agents}
+    for owner_slug, summary in zip(owners, summaries):
+        if isinstance(summary, StrategySummary):
+            by_agent[owner_slug].append(summary)
+
+    results: list[AgentSummary] = []
+    for agent in agents:
+        strat_summaries = by_agent[agent.slug]
         results.append(
             AgentSummary(
                 slug=agent.slug,
