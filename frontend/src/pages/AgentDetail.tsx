@@ -286,7 +286,7 @@ export function AgentDetail() {
   const [showBrainModal, setShowBrainModal] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleteStrategySlug, setDeleteStrategySlug] = useState<string | null>(null);
+  const [deleteStrategy, setDeleteStrategy] = useState<StrategySummary | null>(null);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
 
   // Routine instances for ReportBrowser (routines live at the agent level,
@@ -307,10 +307,10 @@ export function AgentDetail() {
   });
 
   const deleteStrategyMutation = useMutation({
-    mutationFn: () => api.deleteStrategy(slug!, deleteStrategySlug!),
+    mutationFn: () => api.deleteStrategy(slug!, deleteStrategy!.slug),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agent", slug] });
-      setDeleteStrategySlug(null);
+      setDeleteStrategy(null);
     },
   });
 
@@ -460,7 +460,7 @@ export function AgentDetail() {
                 key={strategy.slug}
                 agentSlug={agent.slug}
                 strategy={strategy}
-                onDelete={() => setDeleteStrategySlug(strategy.slug)}
+                onDelete={() => setDeleteStrategy(strategy)}
               />
             ))}
           </div>
@@ -546,19 +546,19 @@ export function AgentDetail() {
       )}
 
       {/* Delete Strategy Confirmation */}
-      {deleteStrategySlug && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setDeleteStrategySlug(null)}>
+      {deleteStrategy && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setDeleteStrategy(null)}>
           <div
             className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-2 text-lg font-semibold text-[var(--color-text)]">Delete Strategy</h2>
             <p className="mb-6 text-sm text-[var(--color-text-muted)]">
-              Delete <strong className="text-[var(--color-text)]">{deleteStrategySlug}</strong>? This cannot be undone.
+              Delete <strong className="text-[var(--color-text)]">{deleteStrategy.name}</strong>? This cannot be undone.
             </p>
             <div className="flex justify-end gap-3">
               <button
-                onClick={() => setDeleteStrategySlug(null)}
+                onClick={() => setDeleteStrategy(null)}
                 className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               >
                 Cancel
