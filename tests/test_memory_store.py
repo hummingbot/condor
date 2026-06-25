@@ -166,6 +166,65 @@ def test_atomic_write_leaves_no_tmp(memory_root):
     assert tmp_files == []
 
 
+def test_atomic_write_uses_unique_tmp_per_writer(memory_root, monkeypatch):
+    # Two writes to the same slug must target distinct temp files so concurrent
+    # writers (CORR-032) never share — and thus never tear — the temp file.
+    seen: list[str] = []
+    s = MemoryStore(user_id=42)
+    target = s.memories_dir / "one.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    orig = Path.write_text
+
+    def spy(self, text, *args, **kwargs):
+        if self.name.endswith(".tmp"):
+            seen.append(self.name)
+        return orig(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    s._atomic_write(target, "a")
+    s._atomic_write(target, "b")
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]  # unique per writer
+    assert all(name.endswith(".tmp") for name in seen)
+
+
+def test_concurrent_writers_never_leave_a_torn_file(memory_root):
+    # Many threads writing the same slug concurrently: the published file must
+    # always parse cleanly (frontmatter + body), never a torn/interleaved one.
+    import threading
+
+    from condor.memory.store import _parse_frontmatter
+
+    s = MemoryStore(user_id=42)
+    target = s.memories_dir / "shared.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    payloads = [
+        f"---\nname: shared\ncreated: {i}\n---\n\n{'x' * 5000}\n" for i in range(40)
+    ]
+    barrier = threading.Barrier(len(payloads))
+
+    def writer(text):
+        barrier.wait()
+        for _ in range(10):
+            s._atomic_write(target, text)
+
+    threads = [threading.Thread(target=writer, args=(p,)) for p in payloads]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    meta, body = _parse_frontmatter(target.read_text())
+    # The surviving file is exactly one writer's payload, not a blend.
+    assert meta.get("name") == "shared"
+    assert body == "x" * 5000
+    # No temp files survive the storm.
+    assert list(target.parent.glob("*.tmp")) == []
+
+
 # -- per-assistant resolver + isolation (FEAT-003) ----------------------------
 
 

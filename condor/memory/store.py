@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -288,8 +289,21 @@ class MemoryStore:
 
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
-        """Write atomically (tmp file + os.replace) within the same dir."""
+        """Write atomically (tmp file + os.replace) within the same dir.
+
+        The temp file is named uniquely per writer (pid + uuid) so two
+        processes writing the same slug concurrently never share — and thus
+        never tear — the temp file; ``os.replace`` then publishes each
+        writer's complete file atomically (FEAT-003 runs the same store from
+        the main process and the MCP subprocess).
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(text)
-        os.replace(tmp, path)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(text)
+            os.replace(tmp, path)
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass

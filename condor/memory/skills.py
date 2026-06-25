@@ -28,6 +28,9 @@ None) or ``agents/<slug>`` for a trading agent / domain expert.
 
 from __future__ import annotations
 
+import os
+import uuid
+
 from .paths import builtin_skills_root
 from .store import _parse_frontmatter, _render, _slugify, _utcnow
 
@@ -250,10 +253,21 @@ class SkillStore:
 
     @staticmethod
     def _atomic_write(path, text: str) -> None:
-        """Write atomically (tmp file + os.replace) within the same dir."""
-        import os
+        """Write atomically (tmp file + os.replace) within the same dir.
 
+        The temp file is named uniquely per writer (pid + uuid) so two
+        processes writing the same slug concurrently never share — and thus
+        never tear — the temp file; ``os.replace`` then publishes each
+        writer's complete file atomically (FEAT-003 runs the same store from
+        the main process and the MCP subprocess).
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(text)
-        os.replace(tmp, path)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        try:
+            tmp.write_text(text)
+            os.replace(tmp, path)
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
