@@ -44,7 +44,7 @@ def test_agent_discovery_and_consultable_derived(tmp_path, monkeypatch):
         agent_key="ollama:qwen3:32b",
         body="Body for executor_manager.",
     )
-    # Loop-only Agent: no trigger, ACP model => NOT consultable.
+    # Loop-only Agent: no consult trigger => NOT consultable.
     _write_agent(
         tmp_path,
         "brigado",
@@ -63,24 +63,30 @@ def test_agent_discovery_and_consultable_derived(tmp_path, monkeypatch):
 
     brig = store.get("brigado")
     assert brig is not None
-    assert brig.consultable is False  # ACP model + empty when_to_consult
+    assert brig.consultable is False  # empty when_to_consult => not consultable
 
     index = store.list_consultable_index()
     assert "[executor_manager] When deploying or tuning executors" in index
     assert "brigado" not in index  # only consultable agents appear
 
 
-def test_consultable_requires_pydantic_ai(tmp_path, monkeypatch):
-    """A trigger alone isn't enough — the model must be pydantic-ai."""
+def test_consultable_on_any_model(tmp_path, monkeypatch):
+    """A consult trigger alone makes an agent consultable, regardless of model.
+
+    An ACP key (claude-code) can't enforce the tools allowlist, but the consult
+    still runs (unrestricted, mutations confirmation-gated) — so it IS consultable.
+    """
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(
         tmp_path,
         "acp_consult",
         name="ACP",
         when_to_consult="whenever",
-        agent_key="claude-code",  # ACP => allowlist can't be enforced
+        agent_key="claude-code",  # ACP model
     )
-    assert AgentStore().get("acp_consult").consultable is False
+    store = AgentStore()
+    assert store.get("acp_consult").consultable is True
+    assert "acp_consult" in store.list_consultable_index()
 
 
 def test_missing_agent_returns_none(tmp_path, monkeypatch):
@@ -166,6 +172,120 @@ def test_strategy_agent_key_override_optional(tmp_path, monkeypatch):
     assert store.get_by_key(s2.key).agent_key == "ollama:z"
 
 
+# ── MCP tool: manage_trading_agent agent CRUD (the AGENT.md identity) ──
+
+
+def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
+    """create_agent/get_agent/update_agent/delete_agent through the MCP tool."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+
+    created = asyncio.run(
+        ta.manage_trading_agent(
+            action="create_agent",
+            name="Risk Sentry",
+            description="watches drawdown",
+            instructions="identity + domain knowledge",
+            agent_key="ollama:qwen3:32b",
+            when_to_consult="when sizing a position",
+            tools=["get_market_data"],
+        )
+    )
+    assert created["created"] is True
+    assert created["agent_slug"] == "risk_sentry"
+    assert created["consultable"] is True  # has a consult trigger
+
+    got = asyncio.run(
+        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
+    )
+    assert got["instructions"].strip() == "identity + domain knowledge"
+    assert got["tools"] == ["get_market_data"]
+
+    updated = asyncio.run(
+        ta.manage_trading_agent(
+            action="update_agent",
+            agent_slug="risk_sentry",
+            instructions="new body",
+            when_to_consult="",  # demote from consultable
+        )
+    )
+    assert updated["updated"] is True
+    assert updated["consultable"] is False
+    assert (
+        asyncio.run(
+            ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
+        )["instructions"].strip()
+        == "new body"
+    )
+
+    listed = asyncio.run(ta.manage_trading_agent(action="list_agent_definitions"))[
+        "agents"
+    ]
+    assert any(a["slug"] == "risk_sentry" for a in listed)
+
+    assert asyncio.run(
+        ta.manage_trading_agent(action="delete_agent", agent_slug="risk_sentry")
+    ) == {"deleted": True}
+    assert "error" in asyncio.run(
+        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
+    )
+
+
+def test_manage_trading_agent_delete_refuses_with_strategy(tmp_path, monkeypatch):
+    """delete_agent must refuse while the agent still owns a strategy."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+
+    asyncio.run(ta.manage_trading_agent(action="create_agent", name="Looper"))
+    StrategyStore().create(agent_slug="looper", name="Tick", instructions="x")
+
+    refused = asyncio.run(
+        ta.manage_trading_agent(action="delete_agent", agent_slug="looper")
+    )
+    assert "error" in refused and "strateg" in refused["error"].lower()
+
+
+def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
+    """A strategy can't be created under an agent that does not exist."""
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    _patch_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "user_id", 7, raising=False)
+
+    result = asyncio.run(
+        ta.manage_trading_agent(
+            action="create_strategy",
+            agent_slug="ghost",
+            name="S",
+            instructions="x",
+        )
+    )
+    assert "error" in result and "not found" in result["error"].lower()
+
+
+def test_routines_dir_resolves_bare_agent_slug(tmp_path, monkeypatch):
+    """A bare agent slug (no strategy yet) resolves to its routines dir."""
+    from mcp_servers.condor.tools import routines as routines_tool
+
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "soloist", name="Soloist", agent_key="ollama:x")
+    monkeypatch.setattr(
+        "routines.base.assistant_routines_dir", lambda slug: tmp_path / str(slug)
+    )
+
+    # Bare slug of an existing agent => that agent's dir.
+    assert routines_tool._get_agent_routines_dir("soloist") == tmp_path / "soloist"
+    # Unknown slug (not an agent, not a strategy) => None.
+    assert routines_tool._get_agent_routines_dir("nope") is None
+
+
 # ── Shared per-Agent skill library (FEAT-003 brain) ──
 
 
@@ -175,9 +295,7 @@ def test_agent_skill_library_read_and_edit(tmp_path, monkeypatch):
     from condor.memory.skills import SkillStore
 
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    skill_dir = (
-        tmp_path / "agents" / "executor_manager" / "skills" / "size_grid"
-    )
+    skill_dir = tmp_path / "agents" / "executor_manager" / "skills" / "size_grid"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
         "---\nname: size_grid\ndescription: d\nwhen_to_use: before a grid\n"
@@ -268,9 +386,7 @@ def _run_create_session(monkeypatch, **kwargs):
         session_module, "build_mcp_servers_for_session", lambda *a, **k: []
     )
     _FakeACPClient.last_extra_env = None
-    asyncio.run(
-        session_module.get_or_create_session(agent_key="claude-code", **kwargs)
-    )
+    asyncio.run(session_module.get_or_create_session(agent_key="claude-code", **kwargs))
     return _FakeACPClient.last_extra_env
 
 

@@ -581,17 +581,17 @@ def build_initial_context(
     try:
         from condor.agents.agent import AgentStore
 
-        experts_index = AgentStore().list_consultable_index()
-        if experts_index:
+        agents_index = AgentStore().list_consultable_index()
+        if agents_index:
             sections.append(
-                "[EXPERTS — domain agents you can consult]\n"
+                "[AGENTS — domain agents you can consult]\n"
                 "You are a coordinator. When a task is squarely in an agent's "
                 "domain, delegate it with "
-                'consult(expert="<slug>", task="...", context="..."). The agent runs '
+                'consult(agent="<slug>", task="...", context="..."). The agent runs '
                 "with its own focused tools and domain memory and returns an answer; "
                 "summarize that answer for the user rather than holding the domain "
                 "context yourself.\n\n"
-                f"{experts_index}"
+                f"{agents_index}"
             )
     except Exception:
         pass  # Consultable agents are advisory — never block session start on them.

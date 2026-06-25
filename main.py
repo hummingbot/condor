@@ -606,6 +606,17 @@ async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
 
 def main() -> None:
     """Run the bot."""
+    # Reap any ACP/MCP subprocess trees orphaned by a prior hard kill (kill -9,
+    # OOM, power loss) before we spawn our own — those bypass post_shutdown.
+    try:
+        from condor.acp.client import reap_stale_acp_trees
+
+        reaped = reap_stale_acp_trees(TELEGRAM_TOKEN)
+        if reaped:
+            logger.info("Reaped %d stale ACP/MCP process(es) from a prior run", reaped)
+    except Exception:
+        logger.exception("Startup ACP reaper failed (continuing)")
+
     # Setup persistence to save user data, chat data, and bot data
     # This will save trading context, last used parameters, etc.
     persistence = get_persistence()
@@ -721,18 +732,34 @@ async def _run_dual(application: Application) -> None:
 
     # Run uvicorn as a task
     web_task = asyncio.create_task(server.serve())
+    stop_task = asyncio.create_task(shutdown_event.wait())
 
-    # Wait until shutdown signal
-    await shutdown_event.wait()
-
-    logger.info("Shutting down...")
-    server.should_exit = True
-    await web_task
-
-    # Graceful Telegram shutdown
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
+    try:
+        # Exit on a shutdown signal OR if the web server stops/crashes on its own.
+        await asyncio.wait(
+            {web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        # Always run teardown — even if the run raised — so post_shutdown
+        # (destroy_all_sessions + engine.stop) reaps every ACP subprocess tree.
+        logger.info("Shutting down...")
+        stop_task.cancel()
+        server.should_exit = True
+        try:
+            await web_task
+        except Exception:
+            logger.exception("Web server crashed during shutdown")
+        # Run each step independently so one failure can't skip the rest —
+        # application.shutdown() is what triggers post_shutdown.
+        for name, step in (
+            ("updater.stop", application.updater.stop),
+            ("application.stop", application.stop),
+            ("application.shutdown", application.shutdown),
+        ):
+            try:
+                await step()
+            except Exception:
+                logger.exception("Shutdown step %s failed", name)
 
 
 if __name__ == "__main__":
