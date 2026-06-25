@@ -23,17 +23,10 @@ _TOKEN_EXPIRE_SECONDS = 86400  # 24 hours
 _AUTH_WINDOW_SECONDS = 86400  # accept auth_date within 24 hours
 _LOGIN_TOKEN_TTL = 300  # one-time login tokens valid for 5 minutes
 
-# Rate limiting for one-time login token redemption (per user_id, in-memory).
-_LOGIN_REDEEM_MAX_FAILURES = 5  # max failed attempts within the window
-_LOGIN_REDEEM_WINDOW = 300  # rolling window in seconds
-
 _bearer_scheme = HTTPBearer()
 
 # In-memory store: token_str -> {user_id, username, first_name, created_at}
 _pending_login_tokens: dict[str, dict] = {}
-
-# In-memory rate-limit store: user_id -> list[timestamp] of recent failed redeem attempts
-_login_redeem_failures: dict[int, list[float]] = {}
 
 
 def _jwt_secret() -> str:
@@ -197,28 +190,13 @@ def _gc_expired_login_tokens(now: float) -> None:
         _pending_login_tokens.pop(k, None)
 
 
-def _is_rate_limited(user_id: int, now: float) -> bool:
-    """Return True if user_id has too many recent failed redeem attempts."""
-    attempts = _login_redeem_failures.get(user_id)
-    if not attempts:
-        return False
-    recent = [t for t in attempts if now - t < _LOGIN_REDEEM_WINDOW]
-    if recent:
-        _login_redeem_failures[user_id] = recent
-    else:
-        _login_redeem_failures.pop(user_id, None)
-    return len(recent) >= _LOGIN_REDEEM_MAX_FAILURES
-
-
-def _record_redeem_failure(user_id: int, now: float) -> None:
-    """Record a failed redeem attempt for a user_id (for rate limiting)."""
-    _login_redeem_failures.setdefault(user_id, []).append(now)
-
-
 def redeem_login_token(token: str) -> Optional[dict]:
     """Redeem a one-time login token. Returns user info or None if invalid/expired.
 
-    Applies a best-effort in-memory rate limit per user_id and garbage-collects
+    The security control is the token itself: 32 bytes of cryptographically
+    random, single-use (popped on first lookup) data with a short TTL. A token
+    cannot be brute-forced, and the user_id is only known *after* a valid token
+    is presented, so there is no per-user threat to rate-limit. Garbage-collects
     expired tokens on every call (so unredeemed tokens do not leak memory).
     """
     now = time.time()
@@ -230,18 +208,8 @@ def redeem_login_token(token: str) -> Optional[dict]:
     if info is None:
         return None
 
-    user_id = info["user_id"]
-
     # Reject expired tokens (already popped above).
     if now - info["created_at"] > _LOGIN_TOKEN_TTL:
-        _record_redeem_failure(user_id, now)
         return None
 
-    # Rate-limit redemptions per user_id after repeated failures.
-    if _is_rate_limited(user_id, now):
-        _record_redeem_failure(user_id, now)
-        return None
-
-    # Successful redemption: clear any prior failure history for this user.
-    _login_redeem_failures.pop(user_id, None)
     return info
