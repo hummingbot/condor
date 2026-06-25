@@ -9,9 +9,8 @@ split between ``experts.py`` (consult-only) and the identity half of
 - is **consultable** (CONSULT mode: run its own brain to completion → answer), and
 - **owns strategies** (RUN mode: each strategy is a *playbook* looped by ``TickEngine``).
 
-Capabilities are **derived**, not flagged: an Agent with ``when_to_consult`` + a
-pydantic-ai ``agent_key`` is consultable; an Agent with ≥1 strategy is loopeable;
-it can be both.
+Capabilities are **derived**, not flagged: an Agent with ``when_to_consult`` is
+consultable (on any model); an Agent with ≥1 strategy is loopeable; it can be both.
 
 Disk layout::
 
@@ -32,7 +31,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from condor.memory.store import _parse_frontmatter
 
 from .strategy import _render_frontmatter, _slugify
@@ -48,7 +46,7 @@ class Agent:
     name: str
     description: str = ""
     instructions: str = ""  # AGENT.md body: identity + domain knowledge
-    agent_key: str = ""  # default model (pydantic-ai to be consultable)
+    agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code")
     # Tool-name allowlist (pydantic-ai only), enforced on BOTH consult and loop.
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
     # Empty => UNRESTRICTED (all discovered tools, subject to tool_filter_mode).
@@ -73,12 +71,14 @@ class Agent:
 
     @property
     def consultable(self) -> bool:
-        """DERIVED capability: a non-empty trigger AND a pydantic-ai model.
+        """DERIVED capability: any Agent with a non-empty consult trigger.
 
-        The pydantic-ai requirement preserves the old expert rule — the tool
-        allowlist can only be enforced on a pydantic-ai client (see consult.py).
+        Consult works on any model — there is no separate "expert" kind of agent.
+        A pydantic-ai key runs the consult with the tool allowlist enforced; an
+        ACP key (claude-code/gemini/copilot) runs it unrestricted but with every
+        mutation still gated by the user's confirmation (see consult.py).
         """
-        return bool(self.when_to_consult) and is_pydantic_ai_model(self.agent_key)
+        return bool(self.when_to_consult)
 
 
 def _load_agent_from_dir(agent_dir: Path) -> Agent | None:

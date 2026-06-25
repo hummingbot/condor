@@ -2,10 +2,11 @@
 
 ``condor`` (the coordinator) calls the ``consult`` MCP tool, which calls back into
 the main process (where ``ConfigManager`` and the agent runtime live) and lands
-here. We load the Agent, build its restricted toolset, run its own brain to
-completion on its configured pydantic-ai model — or, if that model's local backend
-is down, on a claude-code/ACP fallback — and return its answer text. No strategy is
-involved — CONSULT runs the Agent's identity + shared memory/skills.
+here. We load the Agent, build its toolset, run its own brain to completion on its
+configured model — a pydantic-ai key (allowlist enforced) or an ACP key like
+claude-code (unrestricted, mutations still confirmation-gated); a pydantic-ai key
+whose local backend is down falls back to claude-code — and return its answer text.
+No strategy is involved — CONSULT runs the Agent's identity + shared memory/skills.
 
 The Agent may call mutating tools; those are gated by the SAME interactive
 confirmation flow condor uses (:func:`handlers.agents.confirmation.permission_callback`),
@@ -45,40 +46,36 @@ async def run_consult(
         index = store.list_consultable_index()
         available = f"\n\nAvailable experts:\n{index}" if index else ""
         return f"No agent named '{slug}' is available.{available}"
-    if not is_pydantic_ai_model(agent.agent_key):
-        return (
-            f"Agent '{slug}' is configured with agent_key='{agent.agent_key}', but "
-            "consults require a pydantic-ai model (ollama/lmstudio/openai/groq/"
-            "openrouter) so the tool allowlist can be enforced."
-        )
-
-    # Preflight the model backend so a stopped Ollama/LM Studio fails fast with a
-    # clear reason instead of a deep httpx error mid-run. If a local backend is
-    # down we fall back to claude-code (ACP), which needs no local backend.
+    # Any Agent with a consult trigger is consultable — there is no separate
+    # "expert" kind. Only a pydantic-ai key has a local backend to preflight, so
+    # a stopped Ollama/LM Studio fails fast with a clear reason (and falls back to
+    # claude-code) instead of a deep httpx error mid-run. ACP keys (claude-code/
+    # gemini/copilot) need no backend and route straight to the ACP client below.
     # Override the fallback with CONSULT_FALLBACK_MODEL, or set it to "" to disable.
     model_key = agent.agent_key
     fallback_note = ""
-    backend_err = await healthcheck_local_backend(model_key)
-    if backend_err:
-        fallback = os.environ.get("CONSULT_FALLBACK_MODEL", "claude-code").strip()
-        if fallback and fallback != model_key:
-            log.warning(
-                "Consult backend for '%s' unavailable (%s); falling back to %s",
-                slug,
-                backend_err,
-                fallback,
-            )
-            model_key = fallback
-            fallback_note = (
-                f"_(note: {agent.name}'s configured model was unavailable — "
-                f"{backend_err} Answered with fallback `{fallback}`.)_\n\n"
-            )
-        else:
-            return (
-                f"The '{slug}' expert is unavailable: {backend_err}\n\n"
-                "Start the model backend, or set CONSULT_FALLBACK_MODEL to a "
-                "reachable model to auto-fall-back."
-            )
+    if is_pydantic_ai_model(model_key):
+        backend_err = await healthcheck_local_backend(model_key)
+        if backend_err:
+            fallback = os.environ.get("CONSULT_FALLBACK_MODEL", "claude-code").strip()
+            if fallback and fallback != model_key:
+                log.warning(
+                    "Consult backend for '%s' unavailable (%s); falling back to %s",
+                    slug,
+                    backend_err,
+                    fallback,
+                )
+                model_key = fallback
+                fallback_note = (
+                    f"_(note: {agent.name}'s configured model was unavailable — "
+                    f"{backend_err} Answered with fallback `{fallback}`.)_\n\n"
+                )
+            else:
+                return (
+                    f"The '{slug}' agent is unavailable: {backend_err}\n\n"
+                    "Start the model backend, or set CONSULT_FALLBACK_MODEL to a "
+                    "reachable model to auto-fall-back."
+                )
 
     # Build the Agent's MCP toolset in the main process (ConfigManager is here).
     # agent_slug scopes the condor MCP tools' memory/skills to this Agent (its brain).

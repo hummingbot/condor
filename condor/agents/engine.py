@@ -89,6 +89,11 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
+    # The live per-tick ACP client, held so stop() can reap it if the tick's own
+    # finally is skipped (e.g. cancelled mid-await). None between ticks.
+    _active_client: "ACPClient | PydanticAIClient | None" = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self):
         # The journal/sessions/learnings hang off the *strategy* dir (one level
@@ -158,6 +163,16 @@ class TickEngine:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        # Backstop: if the tick was cancelled mid-await, its own finally may not
+        # have reaped the ACP subprocess. stop() is idempotent, so a double call
+        # after a clean tick is a harmless no-op.
+        client = self._active_client
+        if client is not None:
+            try:
+                await client.stop()
+            except Exception:
+                log.exception("TickEngine %s: error reaping active client", self.agent_id)
+            self._active_client = None
         if self.journal:
             self.journal.close()
         _engines.pop(self.agent_id, None)
@@ -350,6 +365,7 @@ class TickEngine:
 
         # 6. Create a fresh agent client per tick (clean context window)
         acp_client = await self._create_client()
+        self._active_client = acp_client
 
         response_chunks: list[str] = []
         tool_calls: list[dict[str, Any]] = []
@@ -394,6 +410,7 @@ class TickEngine:
             response_chunks.append("(timed out)")
         finally:
             await acp_client.stop()
+            self._active_client = None
 
         response_text = "".join(response_chunks)
         tick_duration = time.time() - self._last_tick_at

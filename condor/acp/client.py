@@ -11,12 +11,159 @@ import json
 import logging
 import os
 import signal
+import subprocess
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Awaitable
 
 from .jsonrpc import JSONRPCPeer
 
 log = logging.getLogger(__name__)
+
+
+def _descendant_pids(root: int) -> set[int]:
+    """Every transitive child PID of ``root``, from a single ``ps`` snapshot.
+
+    Used at teardown to find MCP server subprocesses that ``claude`` spawns in
+    their OWN process groups (so ``killpg`` of our group misses them). Must be
+    called BEFORE the parent dies — once it exits the children reparent to init
+    and the ppid links that identify them are gone.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,ppid="], capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception:
+        return set()
+    children: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    stack = [root]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in found:
+                found.add(child)
+                stack.append(child)
+    return found
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _signal_all(pids: set[int], pgid: int | None, sig: int) -> None:
+    """Send ``sig`` to the process group (if known) and every PID directly."""
+    if pgid is not None:
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _ps_rows() -> list[tuple[int, int, str]]:
+    """``(pid, ppid, args)`` for every process, from one ``ps`` snapshot."""
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except Exception:
+        return []
+    rows: list[tuple[int, int, str]] = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+        except ValueError:
+            continue
+    return rows
+
+
+def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
+    """Kill leaked ACP/MCP subprocess trees from a prior crashed run.
+
+    A hard kill (``kill -9``, OOM, power loss) bypasses the graceful shutdown
+    path, orphaning the ``claude-agent-acp → claude → MCP`` tree. Call this at
+    startup, BEFORE spawning any of our own subprocesses: at that point anything
+    whose cmdline carries this bot's ``token`` is necessarily a stale leak. We
+    seed on those, climb to the owning ``claude-agent-acp`` root, and kill the
+    whole tree. Interactive Claude Code sessions are never touched (their MCP
+    servers carry no token, and we explicitly exclude their signatures).
+
+    Returns the number of processes signalled.
+    """
+    if not token:
+        return 0
+    rows = _ps_rows()
+    if not rows:
+        return 0
+    args_of = {pid: args for pid, _, args in rows}
+    parent_of = {pid: ppid for pid, ppid, _ in rows}
+
+    def _protected(a: str) -> bool:
+        return "dangerously-skip-permissions" in a or "claude-code-acp" in a
+
+    # Seeds: our own MCP servers are launched with --bot-token <token>.
+    seeds = [pid for pid, _, args in rows if token in args and not _protected(args)]
+    if not seeds:
+        return 0
+
+    def _acp_ish(a: str) -> bool:
+        return (
+            "claude-agent-acp" in a
+            or a.strip() == "claude"
+            or "mcp_servers" in a
+            or "uv run" in a
+        )
+
+    roots: set[int] = set()
+    for seed in seeds:
+        cur, root = seed, seed
+        while True:
+            p = parent_of.get(cur)
+            if not p or p == 1 or not _acp_ish(args_of.get(p, "")):
+                break
+            if _protected(args_of.get(p, "")):
+                break
+            root = cur = p
+        roots.add(root)
+
+    targets: set[int] = set()
+    for root in roots:
+        targets |= _descendant_pids(root)
+        targets.add(root)
+    targets = {p for p in targets if not _protected(args_of.get(p, ""))}
+    if not targets:
+        return 0
+
+    _signal_all(targets, None, signal.SIGTERM)
+    time.sleep(wait_s)
+    survivors = {p for p in targets if _alive(p)}
+    if survivors:
+        _signal_all(survivors, None, signal.SIGKILL)
+    return len(targets)
+
 
 ACP_COMMANDS: dict[str, str] = {
     "claude-code": "claude-agent-acp",
@@ -171,7 +318,14 @@ class ACPClient:
         log.info("ACP session started: %s (cmd=%s)", self._session_id, self.command)
 
     async def stop(self) -> None:
-        """Terminate the subprocess and all its children (MCP servers)."""
+        """Terminate the subprocess and ALL descendants (claude + MCP servers).
+
+        ``claude`` spawns each MCP stdio server in its own process group, so a
+        lone ``killpg`` of our group leaks them — and ``claude`` itself ignores
+        SIGTERM. We snapshot the full descendant tree *before* killing (after the
+        parent dies the children reparent to init and the tree is lost), then
+        signal the process group AND every descendant PID directly.
+        """
         self._peer.cancel_all()
         for task in (self._read_task, self._stderr_task):
             if task:
@@ -182,24 +336,32 @@ class ACPClient:
                     pass
         if self._process and self._process.returncode is None:
             pid = self._process.pid
+            # Snapshot descendants now — reparenting after death destroys the links.
+            pids = await asyncio.to_thread(_descendant_pids, pid)
+            pids.add(pid)
             try:
-                # Kill the entire process group (subprocess + MCP server children)
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
+                pgid = os.getpgid(pid)
             except (ProcessLookupError, PermissionError):
-                pass
+                pgid = None
+
+            _signal_all(pids, pgid, signal.SIGTERM)
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    self._process.kill()
-                # Always reap after SIGKILL to prevent zombies
+                log.warning("ACP process %d ignored SIGTERM; escalating", pid)
+
+            # Re-scan in case the tree shifted, then SIGKILL anything still alive.
+            survivors = {
+                p for p in (pids | await asyncio.to_thread(_descendant_pids, pid))
+                if _alive(p)
+            }
+            if survivors:
+                _signal_all(survivors, pgid, signal.SIGKILL)
                 try:
                     await asyncio.wait_for(self._process.wait(), timeout=3)
                 except asyncio.TimeoutError:
                     log.warning("ACP process %d could not be reaped", pid)
-            log.debug("ACP process group %d stopped", pid)
+            log.debug("ACP process tree for %d stopped (%d pids)", pid, len(pids))
         # Clear reference so alive returns False even if reap failed
         self._process = None
 
