@@ -235,6 +235,7 @@ function ConsultPanel({ slug, whenToConsult }: { slug: string; whenToConsult: st
   const [task, setTask] = useState("");
   const consultMutation = useMutation({
     mutationFn: () => api.consultAgent(slug, { task }),
+    onSuccess: () => setTask(""),
   });
 
   return (
@@ -263,7 +264,7 @@ function ConsultPanel({ slug, whenToConsult }: { slug: string; whenToConsult: st
           {consultMutation.isPending ? "…" : "Ask"}
         </button>
       </div>
-      {consultMutation.data && (
+      {consultMutation.data && !consultMutation.isPending && (
         <div className="mt-3 whitespace-pre-wrap rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-sm text-[var(--color-text)]">
           {consultMutation.data.answer}
         </div>
