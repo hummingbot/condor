@@ -1377,7 +1377,7 @@ async def _show_wizard_connector_step(
         if not cex_connectors:
             from handlers.config.api_keys import keys_web_button
 
-            keys_btn = keys_web_button() or InlineKeyboardButton(
+            keys_btn = keys_web_button(query.from_user) or InlineKeyboardButton(
                 "🔑 View Keys", callback_data="config_api_keys"
             )
             keyboard = [
@@ -6260,7 +6260,7 @@ async def _show_pmm_wizard_connector_step(
         if not cex_connectors:
             from handlers.config.api_keys import keys_web_button
 
-            keys_btn = keys_web_button() or InlineKeyboardButton(
+            keys_btn = keys_web_button(query.from_user) or InlineKeyboardButton(
                 "🔑 View Keys", callback_data="config_api_keys"
             )
             keyboard = [
@@ -8062,7 +8062,7 @@ async def _show_pv1_wizard_connector_step(
         if not cex_connectors:
             from handlers.config.api_keys import keys_web_button
 
-            keys_btn = keys_web_button() or InlineKeyboardButton(
+            keys_btn = keys_web_button(query.from_user) or InlineKeyboardButton(
                 "🔑 View Keys", callback_data="config_api_keys"
             )
             keyboard = [

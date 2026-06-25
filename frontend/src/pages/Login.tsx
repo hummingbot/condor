@@ -11,11 +11,18 @@ export function Login() {
   const [loggingIn, setLoggingIn] = useState(false);
   const attempted = useRef(false);
 
+  // Where to land after login. Only allow internal paths to avoid open redirects.
+  const rawRedirect = searchParams.get("redirect");
+  const redirectTo =
+    rawRedirect && rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")
+      ? rawRedirect
+      : "/";
+
   useEffect(() => {
     if (isAuthenticated) {
-      navigate("/", { replace: true });
+      navigate(redirectTo, { replace: true });
     }
-  }, [isAuthenticated, navigate]);
+  }, [isAuthenticated, navigate, redirectTo]);
 
   // Auto-login when ?token= is present in URL
   useEffect(() => {
@@ -30,12 +37,12 @@ export function Login() {
     window.history.replaceState(null, "", window.location.pathname);
 
     loginWithToken(token)
-      .then(() => navigate("/", { replace: true }))
+      .then(() => navigate(redirectTo, { replace: true }))
       .catch((err) => {
         setError(err instanceof Error ? err.message : "Login failed");
         setLoggingIn(false);
       });
-  }, [searchParams, loginWithToken, navigate]);
+  }, [searchParams, loginWithToken, navigate, redirectTo]);
 
   return (
     <div className="flex h-screen items-center justify-center">

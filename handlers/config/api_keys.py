@@ -7,7 +7,7 @@ exchanges are currently connected and points the user to the web UI.
 """
 
 import logging
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -24,20 +24,46 @@ logger = logging.getLogger(__name__)
 # Default account name used for all API key operations
 DEFAULT_ACCOUNT = "master_account"
 
-# Where users connect/remove exchange keys (web dashboard only)
-KEYS_WEB_URL = f"{WEB_URL}/settings?tab=keys"
+# Path (within the web dashboard) where users connect/remove exchange keys
+KEYS_WEB_PATH = "/settings?tab=keys"
 
 
-def keys_web_button() -> InlineKeyboardButton | None:
+def _web_url_is_local() -> bool:
+    """Whether WEB_URL points at a local host Telegram can't link to as a button.
+
+    Mirrors the /web command's detection (localhost/loopback or a bare hostname
+    without a dot).
+    """
+    host = urlparse(WEB_URL).hostname or ""
+    return "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in host
+
+
+def build_keys_login_url(user) -> str:
+    """Build a one-time login link that lands on the web keys page.
+
+    Like the /web command, this mints a short-lived (≈5 min) login token so the
+    user arrives authenticated, and carries a redirect to Settings → Keys.
+    """
+    from condor.web.auth import create_login_token
+
+    token = create_login_token(
+        user.id,
+        getattr(user, "username", "") or "",
+        getattr(user, "first_name", "") or "",
+    )
+    redirect = quote(KEYS_WEB_PATH, safe="")
+    return f"{WEB_URL}/login?token={token}&redirect={redirect}"
+
+
+def keys_web_button(user) -> InlineKeyboardButton | None:
     """Return a tappable URL button to the web keys page, or None.
 
     Telegram rejects URL buttons pointing at localhost/loopback hosts, so for
     a local WEB_URL we return None and callers fall back to a callback button.
     """
-    host = (urlparse(KEYS_WEB_URL).hostname or "").lower()
-    if not host or host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
+    if _web_url_is_local():
         return None
-    return InlineKeyboardButton("🌐 Open Web Dashboard", url=KEYS_WEB_URL)
+    return InlineKeyboardButton("🌐 Open Web Dashboard", url=build_keys_login_url(user))
 
 
 @restricted
@@ -75,12 +101,6 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Clear bots state to prevent bots handler from intercepting input
     # This is needed when navigating here from a bot wizard.
     context.user_data.pop("bots_state", None)
-
-    web_hint = (
-        "_To connect or remove exchange keys, open the web dashboard:_\n"
-        f"`{KEYS_WEB_URL}`\n"
-        "_\\(Settings → Keys\\)_"
-    )
 
     try:
         from config_manager import get_config_manager
@@ -131,11 +151,29 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 else:
                     creds_display = "_No exchanges connected yet\\._\n\n"
 
-                message_text = header + creds_display + web_hint
+                # One-time login link (lands authenticated on Settings → Keys).
+                web_url = build_keys_login_url(query.from_user)
                 keyboard = []
-                web_button = keys_web_button()
-                if web_button:
-                    keyboard.append([web_button])
+                if _web_url_is_local():
+                    # Telegram can't make a URL button for localhost — show the
+                    # link as copyable text instead.
+                    web_hint = (
+                        "_To connect or remove exchange keys, open the web "
+                        "dashboard:_\n\n"
+                        f"`{web_url}`\n\n"
+                        "_\\(Settings → Keys\\) — link valid for 5 minutes\\._"
+                    )
+                else:
+                    web_hint = (
+                        "_To connect or remove exchange keys, open the web "
+                        "dashboard \\(Settings → Keys\\)\\._\n"
+                        "_Link valid for 5 minutes\\._"
+                    )
+                    keyboard.append(
+                        [InlineKeyboardButton("🌐 Open Web Dashboard", url=web_url)]
+                    )
+
+                message_text = header + creds_display + web_hint
                 keyboard.append(
                     [InlineKeyboardButton("« Close", callback_data="config_close")]
                 )
