@@ -44,7 +44,7 @@ async def run_consult(
     agent = store.get(slug)
     if agent is None:
         index = store.list_consultable_index()
-        available = f"\n\nAvailable experts:\n{index}" if index else ""
+        available = f"\n\nAvailable agents:\n{index}" if index else ""
         return f"No agent named '{slug}' is available.{available}"
     # Any Agent with a consult trigger is consultable — there is no separate
     # "expert" kind. Only a pydantic-ai key has a local backend to preflight, so
@@ -92,14 +92,11 @@ async def run_consult(
             user_id,
             chat_id,
             agent_slug=slug,
-            execution_mode="loop",
         )
     else:
-        mcp_servers = build_mcp_servers_for_session(
-            user_id, chat_id, execution_mode="loop"
-        )
+        mcp_servers = build_mcp_servers_for_session(user_id, chat_id)
 
-    # Route the expert's dangerous-tool confirmations to the user's Telegram chat,
+    # Route the agent's dangerous-tool confirmations to the user's Telegram chat,
     # reusing the live bot registered at startup (main.py: routine_store.set_bot).
     permission_cb = None
     try:
