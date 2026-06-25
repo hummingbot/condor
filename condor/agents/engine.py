@@ -31,7 +31,7 @@ from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
-from .risk import RiskEngine, RiskLimits, auto_approve_with_risk_check
+from .risk import RiskEngine, RiskLimits, RiskState, auto_approve_with_risk_check
 from .strategy import Strategy
 
 log = logging.getLogger(__name__)
@@ -171,7 +171,9 @@ class TickEngine:
             try:
                 await client.stop()
             except Exception:
-                log.exception("TickEngine %s: error reaping active client", self.agent_id)
+                log.exception(
+                    "TickEngine %s: error reaping active client", self.agent_id
+                )
             self._active_client = None
         if self.journal:
             self.journal.close()
@@ -364,7 +366,7 @@ class TickEngine:
             self._pending_directives.clear()
 
         # 6. Create a fresh agent client per tick (clean context window)
-        acp_client = await self._create_client()
+        acp_client = await self._create_client(risk_state)
         self._active_client = acp_client
 
         response_chunks: list[str] = []
@@ -504,8 +506,15 @@ class TickEngine:
     # Client factory
     # ------------------------------------------------------------------
 
-    async def _create_client(self) -> "ACPClient | PydanticAIClient":
-        """Build an ACP or PydanticAI client (does NOT start it)."""
+    async def _create_client(
+        self, risk_state: RiskState
+    ) -> "ACPClient | PydanticAIClient":
+        """Build an ACP or PydanticAI client (does NOT start it).
+
+        ``risk_state`` is computed once in ``_tick`` and threaded through here
+        (it only feeds the auto-approve callback and cannot change between the
+        two points), avoiding a redundant per-tick journal re-parse.
+        """
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
             build_mcp_servers_for_session,
@@ -513,7 +522,6 @@ class TickEngine:
         )
 
         mode = self.config.get("execution_mode", "loop")
-        risk_state = self.risk.get_state(self.journal or _NullTracker())
 
         server_name = self.config.get("server_name")
         if server_name:
