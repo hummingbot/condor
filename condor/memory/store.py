@@ -34,6 +34,11 @@ from .paths import store_root
 
 _VALID_TYPES = ("preference", "fact", "feedback", "reference")
 
+# Cap audit.log to the newest N entries (mirrors config.yml's audit_log cap of
+# 500, per CLAUDE.md). FEAT-003 creates one store per (assistant, user), so an
+# uncapped append-only log would grow without bound on every write/delete.
+_AUDIT_CAP = 500
+
 
 def _slugify(name: str) -> str:
     """Convert a memory name to a filesystem-safe slug."""
@@ -96,6 +101,39 @@ def append_audit(
     }
     with audit_file.open("a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _trim_audit(audit_file)
+
+
+def _trim_audit(audit_file: Path, cap: int | None = None) -> None:
+    """Bound ``audit.log`` to its newest ``cap`` entries.
+
+    Only rewrites once the file exceeds ``2 * cap`` lines, so the trim cost is
+    amortized away across appends instead of paid on every write. The rewrite
+    is atomic (tmp file + ``os.replace``) so a concurrent reader/writer never
+    sees a torn file — the same discipline :meth:`MemoryStore._atomic_write`
+    uses for memory files (FEAT-003 runs the same store from two processes).
+    """
+    if cap is None:
+        cap = _AUDIT_CAP
+    try:
+        with audit_file.open("r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return
+    if len(lines) <= cap * 2:
+        return
+    tail = lines[-cap:]
+    tmp = audit_file.with_name(
+        f".{audit_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        tmp.write_text("".join(tail))
+        os.replace(tmp, audit_file)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class MemoryStore:

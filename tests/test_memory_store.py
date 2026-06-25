@@ -120,6 +120,26 @@ def test_delete_removes_and_audits(memory_root):
     assert delete_entry["target"] == "memory:temp"
 
 
+def test_audit_log_is_bounded_and_keeps_newest(memory_root, monkeypatch):
+    # PERF-043: writing far more than the cap must leave audit.log bounded and
+    # preserve the newest entries (the only ones audit() ever returns).
+    from condor.memory import store as store_module
+
+    monkeypatch.setattr(store_module, "_AUDIT_CAP", 10)
+    s = MemoryStore(user_id=42)
+    total = 55  # >> 2 * cap, forces several trims
+    for i in range(total):
+        s.write("Pair", f"body {i}", f"desc {i}", type="fact")
+
+    lines = s.audit_file.read_text().splitlines()
+    # Never grows past the rewrite threshold (2 * cap).
+    assert len(lines) <= 2 * store_module._AUDIT_CAP
+    # The most recent entry survived the trimming.
+    newest = s.audit(limit=1)[-1]
+    assert newest["summary"] == f"desc {total - 1}"
+    assert newest["action"] == "update"
+
+
 def test_audit_records_source(memory_root):
     s = MemoryStore(user_id=42)
     s.write("From agent", "body", "desc", source="agent:grid_scalper")
