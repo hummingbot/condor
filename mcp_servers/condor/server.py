@@ -19,7 +19,57 @@ from mcp_servers.condor.tools import (
     trading_agent,
 )
 
-mcp = FastMCP("condor")
+
+def _build_instructions() -> str:
+    """Server-level instructions surfaced to the MCP host on connect.
+
+    An external MCP client (Claude Code, Cursor, …) only receives a flat list of
+    tool names — it never sees Condor's skills/agents indexes, which are injected
+    only into the in-bot `/agent` brain prompt. Without this, the host reaches for
+    whatever obvious tool is in scope (e.g. a raw `manage_bots`) instead of the
+    matching Condor playbook. We embed the live indexes here so any host can route
+    a request to the right skill/agent. Built once at import; cheap and read-only.
+    """
+    base = (
+        "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
+        "routine) and consultable **domain agents** on top of these tools.\n\n"
+        "ROUTING RULE — before handling a request with raw tools (including tools "
+        "from other connected MCP servers such as mcp-hummingbot), check whether a "
+        "Condor skill or agent matches it:\n"
+        '- If a SKILL matches, call `manage_skill(action="read", name="<name>")` '
+        'and follow its steps. When it links a routine (shown as "→ routine: X"), '
+        'run that routine via `manage_routines(action="run", name="X", config={})` '
+        "instead of reimplementing it by hand.\n"
+        "- If a domain AGENT matches, delegate with "
+        '`consult(agent="<slug>", task="...", context="...")` and summarize its answer.\n'
+        "- Only fall back to raw tools when nothing matches.\n"
+        'Discover more anytime with `manage_skill(action="list")`.'
+    )
+
+    sections = [base]
+    try:
+        from condor.memory import SkillStore
+
+        skills_index = SkillStore().list_index()
+        if skills_index:
+            sections.append(
+                "[SKILLS — read the playbook before a matching flow]\n" + skills_index
+            )
+    except Exception:
+        pass  # Advisory — never block server startup on index assembly.
+    try:
+        from condor.agents.agent import AgentStore
+
+        agents_index = AgentStore().list_consultable_index()
+        if agents_index:
+            sections.append("[AGENTS — consult for domain work]\n" + agents_index)
+    except Exception:
+        pass
+
+    return "\n\n".join(sections)
+
+
+mcp = FastMCP("condor", instructions=_build_instructions())
 
 
 @mcp.tool()
