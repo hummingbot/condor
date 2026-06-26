@@ -14,7 +14,7 @@ You are working on a routine for Condor — a Python script auto-discovered from
 ```python
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
-from config_manager import get_client
+from config_manager import get_config_manager
 
 CATEGORY = "Market Data"  # Market Data | Analysis | Arbitrage | Monitoring | Bot Analysis
 
@@ -24,12 +24,46 @@ class Config(BaseModel):
     connector_name: str = Field(default="binance_perpetual", description="Exchange connector")
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
-    client = await get_client(context._chat_id, context=context)
-    if not client:
-        return "No server available"
+    client = await get_config_manager().get_client()  # default server (localhost)
     # ... do work ...
     return "result string"
 ```
+
+## Choosing the API server
+
+By default a routine should talk to the **local** Hummingbot API on localhost. The
+simplest, most predictable way is `get_config_manager().get_client()` with no args — it
+returns a client for `default_server` in `config.yml` (normally `local` → localhost).
+This is deterministic: it does NOT depend on which server the user has "active" in chat.
+
+**If you need data from a specific server**, pass its name (the key under `servers:` in
+`config.yml`, the same name shown in `/servers`):
+
+```python
+from config_manager import get_config_manager
+
+cm = get_config_manager()
+client = await cm.get_client("brigado_2")     # pin to one named server
+names = list(cm._data["servers"].keys())      # discover available server names
+```
+
+Best practice: make the server a **config field** so it's frozen per instance and
+editable from the UI (`server_name=brigado_2`):
+
+```python
+class Config(BaseModel):
+    """Analysis pinned to a specific server."""
+    server_name: str = Field(default="local", description="Hummingbot server to query")
+
+async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+    client = await get_config_manager().get_client(config.server_name)
+    ...
+```
+
+`get_client(name)` raises `ValueError` if the name is unknown, and skips the per-user
+access-control filtering that the chat-based path applies — fine for routines you author
+and run yourself. Avoid `get_client(context._chat_id, context=context)` unless you
+specifically want the routine to follow the user's currently-active server.
 
 ## Key Rules
 
@@ -38,7 +72,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 - `Config.__doc__` = routine description in UI
 - `CATEGORY` at module level groups it in the catalog
 - Return a string, or `RoutineResult` for rich output
-- `get_client()` is optional — routines can use external APIs directly (aiohttp, etc.)
+- The API client is optional — routines can use external APIs directly (aiohttp, etc.)
 - Use `asyncio.gather` for parallel fetches
 - Handle missing data gracefully — return error strings, don't raise
 
@@ -77,12 +111,14 @@ try:
     builder.table([{"Col": "val"}])                           # columns auto-detected from first row
     builder.plotly(fig)                                        # Plotly figure object
     builder.manual_order()                                     # preserve insertion order (default: kpi→plotly→table→markdown)
-    builder.save()
+    report_id = await builder.save()                           # save() is ASYNC — always await it
 except Exception as e:
     logger.warning(f"Report generation failed: {e}")
 ```
 
-**Only these methods exist:** `source`, `tags`, `kpi`, `markdown`, `table`, `plotly`, `manual_order`, `save`. No `heading()`, `text()`, `section()`, or `html()`.
+**`save()` is async — you MUST `await` it.** `await builder.save()` returns the new `report_id` (a str). Calling `builder.save()` without `await` does nothing (just creates a coroutine that never runs, so no report is written). To update an existing report in place, pass its id: `await builder.save(report_id=existing_id)`.
+
+**Only these methods exist:** `source`, `tags`, `kpi`, `markdown`, `table`, `plotly`, `manual_order`, `save`. No `heading()`, `text()`, `section()`, or `html()`. Every chainable method (`source`, `tags`, `kpi`, `markdown`, `table`, `plotly`, `manual_order`) is sync and returns the builder; only `save()` is async.
 
 ### Live Reports for Continuous Routines
 
@@ -140,7 +176,7 @@ Set `CONTINUOUS = True` for routines with internal loops. These run as asyncio t
 import asyncio
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
-from config_manager import get_client
+from config_manager import get_config_manager
 
 CONTINUOUS = True
 
@@ -153,9 +189,7 @@ class Config(BaseModel):
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     chat_id = context._chat_id
-    client = await get_client(chat_id, context=context)
-    if not client:
-        return "No server available"
+    client = await get_config_manager().get_client()  # default server (localhost)
 
     # Send start notification (works in all contexts)
     await context.bot.send_message(
@@ -210,7 +244,8 @@ return RoutineResult(text=summary, chart_image=buf.getvalue())
 ## Hummingbot Client API
 
 ```python
-client = await get_client(context._chat_id, context=context)
+client = await get_config_manager().get_client()        # default server (localhost)
+# client = await get_config_manager().get_client("brigado_2")  # or a specific server
 
 # Market data
 await client.market_data.get_candles(connector, pair, interval="1m", max_records=100)
@@ -263,5 +298,6 @@ results = await asyncio.gather(*[fetch(p) for p in pairs], return_exceptions=Tru
 - `get_performance_report(controller_id=...)` NOT ~~`get_performance_report(executor_id=...)`~~
 - `create_executor(config_dict)` — plain dict, NOT Pydantic model
 - `builder.kpi(label, value)` — individual args, NOT a list of dicts
+- `await builder.save()` — `save()` is async; without `await` the report is silently never written
 - All client methods are async — always `await`
 - `get_total_value()` returns `float`, all others return `dict`

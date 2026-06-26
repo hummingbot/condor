@@ -87,13 +87,17 @@ try:
     builder.plotly(fig)                      # if a chart
     builder.markdown(summary_text)           # text summary
     builder.manual_order()
-    builder.save()
+    report_id = await builder.save()  # save() is ASYNC — always await it
 except Exception as e:
     logger.warning(f"Report generation failed: {e}")
 ```
 **Only these ReportBuilder methods exist:** `source`, `tags`, `kpi`, `markdown`,
 `table`, `plotly`, `manual_order`, `save`. Always wrap in try/except and pass the
 real routine filename to `builder.source("routine", ...)`.
+**`save()` is async — you MUST `await` it.** It returns the new `report_id` (str).
+Without `await`, the coroutine never runs and no report is written. To update an
+existing report in place: `await builder.save(report_id=existing_id)`. Every other
+method is sync and chainable; only `save()` is async.
 
 ## Live Reports for Continuous Routines
 ```python
@@ -132,6 +136,7 @@ fig.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="
 - `get_performance_report(controller_id=...)` NOT `executor_id`
 - `create_executor(config_dict)` — plain dict, NOT a Pydantic model
 - `builder.kpi(label, value)` — individual args, NOT a list of dicts
+- `await builder.save()` — `save()` is async; without `await` the report is silently never written
 - All client methods are async — always `await`. Handle missing data gracefully
   (return error strings, don't raise). Use `asyncio.gather` + `Semaphore(10)` for bulk.
 
