@@ -14,8 +14,9 @@ def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
     "agent_slug.strategy_slug") resolves to its owning agent's routines dir; a
     bare agent slug ("agent_slug", no dot) resolves to that agent directly —
     used in the expert-first flow where routines are created before any strategy
-    exists. Otherwise the current assistant's own dir — ``assistants/condor/routines``
-    for the chat, or the launched Agent's (``settings.agent_slug``).
+    exists. Otherwise the current assistant's own dir — the general library
+    (root ``routines/``) for the chat, or the launched Agent's
+    (``agents/<slug>/routines``, ``settings.agent_slug``).
     """
     from routines.base import assistant_routines_dir
 
@@ -37,20 +38,24 @@ def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
 
 
 def _resolve_routine(name: str):
-    """Look up a routine: this assistant's own first, then the shared base."""
+    """Look up a routine in the current assistant's scope.
+
+    A domain expert/trading agent (``settings.agent_slug`` set) resolves ONLY its
+    own routines — it never sees the chat's general library. The chat ``condor``
+    resolves the general library (root ``routines/``).
+    """
     from routines.base import (
         assistant_routines_dir,
         discover_routines,
         discover_routines_from_path,
     )
 
-    own_dir = assistant_routines_dir(settings.agent_slug or None)
-    if own_dir.exists():
-        own = discover_routines_from_path(
-            own_dir, agent_slug=settings.agent_slug or None
-        )
-        if name in own:
-            return own[name]
+    if settings.agent_slug:
+        own_dir = assistant_routines_dir(settings.agent_slug)
+        if own_dir.exists():
+            own = discover_routines_from_path(own_dir, agent_slug=settings.agent_slug)
+            return own.get(name)
+        return None
 
     return discover_routines(force_reload=True).get(name)
 
@@ -58,9 +63,26 @@ def _resolve_routine(name: str):
 def list_routines(strategy_id: str | None = None) -> dict:
     from routines.base import discover_routines, discover_routines_from_path
 
-    routines = discover_routines(force_reload=True)
     result = []
-    for name, routine in sorted(routines.items()):
+
+    # Agent/expert MCP: ONLY its own routines, isolated from the general library.
+    if settings.agent_slug:
+        own_dir = _get_agent_routines_dir(None)
+        if own_dir and own_dir.exists():
+            for name, routine in sorted(discover_routines_from_path(own_dir).items()):
+                result.append(
+                    {
+                        "name": name,
+                        "description": routine.description,
+                        "type": "continuous" if routine.is_continuous else "one-shot",
+                        "scope": "agent",
+                        "agent": settings.agent_slug,
+                    }
+                )
+        return {"routines": result}
+
+    # Chat condor: the general library (root routines/).
+    for name, routine in sorted(discover_routines(force_reload=True).items()):
         result.append(
             {
                 "name": name,
@@ -73,8 +95,9 @@ def list_routines(strategy_id: str | None = None) -> dict:
     if strategy_id:
         agent_routines_dir = _get_agent_routines_dir(strategy_id)
         if agent_routines_dir and agent_routines_dir.exists():
-            agent_routines = discover_routines_from_path(agent_routines_dir)
-            for name, routine in sorted(agent_routines.items()):
+            for name, routine in sorted(
+                discover_routines_from_path(agent_routines_dir).items()
+            ):
                 result.append(
                     {
                         "name": name,
@@ -84,47 +107,16 @@ def list_routines(strategy_id: str | None = None) -> dict:
                         "agent": strategy_id,
                     }
                 )
-    elif settings.agent_slug:
-        # Launched for an agent/expert: its own routines.
-        agent_routines_dir = _get_agent_routines_dir(None)
-        if agent_routines_dir and agent_routines_dir.exists():
-            agent_routines = discover_routines_from_path(agent_routines_dir)
-            for name, routine in sorted(agent_routines.items()):
-                result.append(
-                    {
-                        "name": name,
-                        "description": routine.description,
-                        "type": "continuous" if routine.is_continuous else "one-shot",
-                        "scope": "agent",
-                        "agent": settings.agent_slug,
-                    }
-                )
     else:
-        # Chat condor: its own routines, then an overview of every agent's.
-        from routines.base import assistant_routines_dir
-
-        condor_dir = assistant_routines_dir(None)
-        if condor_dir.exists():
-            for name, routine in sorted(
-                discover_routines_from_path(condor_dir).items()
-            ):
-                result.append(
-                    {
-                        "name": name,
-                        "description": routine.description,
-                        "type": "continuous" if routine.is_continuous else "one-shot",
-                        "scope": "condor",
-                    }
-                )
-
+        # Overview of every agent's routines.
         from condor.agents.agent import AgentStore
 
         for a in AgentStore().list_all():
-            agent_routines_dir = a.routines_dir
-            if not agent_routines_dir.exists():
+            if not a.routines_dir.exists():
                 continue
-            agent_routines = discover_routines_from_path(agent_routines_dir)
-            for name, routine in sorted(agent_routines.items()):
+            for name, routine in sorted(
+                discover_routines_from_path(a.routines_dir).items()
+            ):
                 result.append(
                     {
                         "name": name,

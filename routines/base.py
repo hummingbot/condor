@@ -21,17 +21,18 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def assistant_routines_dir(agent_slug: str | None) -> Path:
-    """Per-assistant routines dir, layered on top of the shared ``routines/`` base.
+    """Routines dir for an assistant.
 
-    Each assistant/expert owns its routines, co-located with its skills/memory
-    (FEAT-003), while the shared ``routines/`` library stays available to all:
+    There is a single home for the general library — the repo-root ``routines/``,
+    owned by the chat ``condor``. Domain experts/trading agents are isolated: each
+    owns its routines and does **not** see the general library.
 
-    - chat ``condor`` (``agent_slug`` None) → ``assistants/condor/routines``
-    - trading agent / domain expert (slug) → ``agents/<slug>/routines``
+    - chat ``condor`` (``agent_slug`` None) → ``routines`` (the general library)
+    - trading agent / domain expert (slug) → ``agents/<slug>/routines`` (isolated)
     """
     if agent_slug:
         return _PROJECT_ROOT / "agents" / agent_slug / "routines"
-    return _PROJECT_ROOT / "assistants" / "condor" / "routines"
+    return _PROJECT_ROOT / "routines"
 
 
 @dataclass
@@ -60,6 +61,14 @@ def normalize_result(result) -> RoutineResult:
 _routines_cache: dict[str, "RoutineInfo"] | None = None
 
 
+def _safe_mtime(file_path: Path) -> float | None:
+    """Return the file's modification time (epoch seconds), or None on failure."""
+    try:
+        return file_path.stat().st_mtime
+    except OSError:
+        return None
+
+
 class RoutineInfo:
     """Metadata container for a discovered routine."""
 
@@ -75,6 +84,7 @@ class RoutineInfo:
         cleanup_fn: Callable | None = None,
         category: str = "Uncategorized",
         source: str = "global",
+        last_modified: float | None = None,
     ):
         self.name = name
         self.config_class = config_class
@@ -86,6 +96,8 @@ class RoutineInfo:
         self.cleanup_fn = cleanup_fn
         self.category = category
         self.source = source
+        # File modification time (epoch seconds) of the routine's source file.
+        self.last_modified = last_modified
 
         # Extract description from Config docstring
         doc = config_class.__doc__ or name
@@ -184,6 +196,7 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source="global",
+                last_modified=_safe_mtime(file_path),
             )
             logger.debug(
                 f"Discovered routine: {file_path.stem} (continuous={is_continuous})"
@@ -263,6 +276,7 @@ def discover_routines_from_path(
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source=source,
+                last_modified=_safe_mtime(file_path),
             )
             logger.debug(f"Discovered agent routine: {file_path.stem}")
 

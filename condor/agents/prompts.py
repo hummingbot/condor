@@ -108,8 +108,12 @@ TOOL_PRELOAD_DRY_RUN = (
 
 
 def _build_routines_section(strategy: Strategy) -> str:
-    """Build an [AVAILABLE ROUTINES] section listing strategy-local + global routines."""
-    from routines.base import discover_routines, discover_routines_from_path
+    """Build an [AVAILABLE ROUTINES] section listing this agent's own routines.
+
+    Domain experts/trading agents are isolated: they see only their own routines
+    (``agents/<slug>/routines``), never the chat's general library.
+    """
+    from routines.base import assistant_routines_dir, discover_routines_from_path
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
@@ -117,25 +121,17 @@ def _build_routines_section(strategy: Strategy) -> str:
     )
     lines.append("")
 
-    # Agent-level routines first (shared across this agent's strategies)
-    from routines.base import assistant_routines_dir
-
+    # Agent-level routines (shared across this agent's strategies, isolated from
+    # the chat's general library).
     routines_dir = assistant_routines_dir(strategy.agent_slug)
-    if routines_dir.exists():
-        from routines.base import discover_routines_from_path
-
-        local = discover_routines_from_path(routines_dir)
-        if local:
-            lines.append("Agent-local:")
-            for name, r in sorted(local.items()):
-                lines.append(f"  - {name}: {r.description}")
-
-    # Global routines
-    global_routines = discover_routines(force_reload=False)
-    if global_routines:
-        lines.append("Global:")
-        for name, r in sorted(global_routines.items()):
+    local = (
+        discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
+    )
+    if local:
+        for name, r in sorted(local.items()):
             lines.append(f"  - {name}: {r.description}")
+    else:
+        lines.append("  (none yet — create one with action=\"create_routine\")")
 
     return "\n".join(lines)
 

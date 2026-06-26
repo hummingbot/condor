@@ -467,11 +467,8 @@ def test_resolve_base_url_distinguishes_cloud_from_local_backends():
 def test_assistant_routines_dir_layout():
     from routines.base import assistant_routines_dir
 
-    assert assistant_routines_dir(None).parts[-3:] == (
-        "assistants",
-        "condor",
-        "routines",
-    )
+    # The chat condor's home is the repo-root general library.
+    assert assistant_routines_dir(None).parts[-1] == "routines"
     assert assistant_routines_dir("executor_manager").parts[-3:] == (
         "agents",
         "executor_manager",

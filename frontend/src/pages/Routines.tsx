@@ -3,10 +3,12 @@ import {
   Brain,
   Clock,
   FileText,
+  LayoutGrid,
   Loader2,
   RefreshCw,
   Search,
   Square,
+  Table2,
   X,
   Zap,
 } from "lucide-react";
@@ -14,12 +16,16 @@ import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
+import { RoutineTable, type RoutineRow } from "@/components/routines/RoutineTable";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
-import { formatRelativeTime } from "@/lib/formatters";
+import { formatRelativeTime, toMs } from "@/lib/formatters";
 import { formatInterval } from "@/lib/routineUtils";
 
 type SourceTypeFilter = "all" | "routine" | "agent" | string;
+type ViewMode = "grid" | "table";
+
+const VIEW_STORAGE_KEY = "routines_view_mode";
 
 export function Routines() {
   const { server } = useServer();
@@ -29,6 +35,18 @@ export function Routines() {
   const [browserSource, setBrowserSource] = useState<string | null>(null);
   const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>(agentParam || "all");
   const [search, setSearch] = useState("");
+  const [view, setView] = useState<ViewMode>(
+    () => (localStorage.getItem(VIEW_STORAGE_KEY) as ViewMode) || "grid",
+  );
+
+  const setViewMode = useCallback((mode: ViewMode) => {
+    setView(mode);
+    try {
+      localStorage.setItem(VIEW_STORAGE_KEY, mode);
+    } catch {
+      // storage unavailable
+    }
+  }, []);
 
   const { data: routines = [], isLoading: loadingRoutines } = useQuery({
     queryKey: ["routines"],
@@ -105,6 +123,47 @@ export function Routines() {
     () => instances.filter((i) => i.status === "running" || i.status === "scheduled"),
     [instances],
   );
+
+  // Latest execution time (epoch ms) per routine, from instance runs.
+  const lastRunByRoutine = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const i of instances) {
+      const ts = i.last_run_at ?? i.created_at;
+      if (!ts) continue;
+      const ms = toMs(ts);
+      const prev = map.get(i.routine_name) ?? 0;
+      if (ms > prev) map.set(i.routine_name, ms);
+    }
+    return map;
+  }, [instances]);
+
+  // Enriched rows for the table view.
+  const tableRows = useMemo<RoutineRow[]>(() => {
+    return filteredRoutines.map((r) => {
+      const isAgent = r.source.startsWith("agent:");
+      const info = reportInfo.get(r.name);
+      const reportMs = info ? toMs(info.created_at) : 0;
+      const runMs = lastRunByRoutine.get(r.name) ?? 0;
+      const lastExecuted = Math.max(reportMs, runMs) || null;
+      return {
+        name: r.name,
+        displayName: r.name.replace(/_/g, " "),
+        description: info?.title ?? r.description,
+        isAgent,
+        agentName: isAgent ? r.source.replace("agent:", "") : null,
+        isContinuous: r.is_continuous,
+        category: r.category,
+        reportCount: info?.count ?? r.report_count,
+        lastModified: r.last_modified,
+        lastExecuted,
+        hasActive: instances.some(
+          (i) =>
+            i.routine_name === r.name &&
+            (i.status === "running" || i.status === "scheduled"),
+        ),
+      };
+    });
+  }, [filteredRoutines, reportInfo, lastRunByRoutine, instances]);
 
   const stopMutation = useMutation({
     mutationFn: (id: string) => api.stopRoutineInstance(id),
@@ -204,6 +263,31 @@ export function Routines() {
             )}
           </div>
 
+          <div className="flex items-center rounded-md border border-[var(--color-border)] p-0.5">
+            <button
+              onClick={() => setViewMode("grid")}
+              className={`rounded p-1.5 transition-colors ${
+                view === "grid"
+                  ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              }`}
+              title="Grid view"
+            >
+              <LayoutGrid className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setViewMode("table")}
+              className={`rounded p-1.5 transition-colors ${
+                view === "table"
+                  ? "bg-[var(--color-surface-hover)] text-[var(--color-text)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+              }`}
+              title="Table view"
+            >
+              <Table2 className="h-4 w-4" />
+            </button>
+          </div>
+
           <button
             onClick={refreshAll}
             className="rounded p-2 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
@@ -278,6 +362,8 @@ export function Routines() {
               {routines.length === 0 ? "No routines available" : "No matches"}
             </p>
           </div>
+        ) : view === "table" ? (
+          <RoutineTable rows={tableRows} onOpen={setBrowserSource} />
         ) : (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {filteredRoutines.map((r) => {

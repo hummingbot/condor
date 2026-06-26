@@ -143,17 +143,12 @@ class RoutineStore:
     # ── Discovery ──
 
     def _discover_all(self) -> dict[str, "RoutineInfo"]:
-        """Discover routines: shared base + condor's own + each agent's, merged."""
-        from routines.base import assistant_routines_dir
+        """Discover routines: the general library (root ``routines/``) + each agent's.
 
+        The chat ``condor`` sees the general library plus every agent's routines
+        (prefixed). Each agent's own routines stay isolated under its slug.
+        """
         all_routines = dict(discover_routines(force_reload=True))
-
-        # condor's own routines (assistants/condor/routines) — merged unprefixed,
-        # alongside the shared base; the chat's working set.
-        condor_dir = assistant_routines_dir(None)
-        if condor_dir.is_dir():
-            for rname, rinfo in discover_routines_from_path(condor_dir).items():
-                all_routines[rname] = rinfo
 
         # Scan agents/*/routines/
         agents_dir = Path(__file__).resolve().parent.parent / "agents"
@@ -201,6 +196,7 @@ class RoutineStore:
                     "category": info.category,
                     "source": info.source,
                     "fields": info.get_fields(),
+                    "last_modified": info.last_modified,
                     "report_count": report_counts.get(name, 0)
                     or report_counts.get(name.split("/")[-1], 0),
                 }
@@ -286,10 +282,7 @@ class RoutineStore:
         if "/" in routine_name:
             slug, rname = routine_name.split("/", 1)
             agents_dir = (
-                Path(__file__).resolve().parent.parent
-                / "agents"
-                / slug
-                / "routines"
+                Path(__file__).resolve().parent.parent / "agents" / slug / "routines"
             )
             agent_routines = discover_routines_from_path(agents_dir, agent_slug=slug)
             return agent_routines.get(rname)

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   Check,
+  ExternalLink,
   Key,
   Loader2,
   Plus,
@@ -300,8 +301,16 @@ export function ApiKeysSettings() {
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Back
         </button>
-        <h3 className="text-sm font-semibold text-[var(--color-text)]">
+        <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text)]">
           Configure {flow.connectorName}
+          <a
+            href={`https://hummingbot.org/exchanges/${flow.connectorName.replace(/_(perpetual|spot)$/, "")}/#how-to-connect`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-xs font-normal text-[var(--color-primary)] hover:underline"
+          >
+            How to connect <ExternalLink className="h-3 w-3" />
+          </a>
         </h3>
         {loadingConfigMap ? (
           <div className="flex items-center gap-2 py-4 text-xs text-[var(--color-text-muted)]">

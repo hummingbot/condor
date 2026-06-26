@@ -485,6 +485,8 @@ export interface RoutineInfo {
   category: string;
   source: string;
   fields: Record<string, RoutineFieldInfo>;
+  /** Source-file modification time (epoch seconds), or null if unavailable. */
+  last_modified: number | null;
   report_count: number;
 }
 
