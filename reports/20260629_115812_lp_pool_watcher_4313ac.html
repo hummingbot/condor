@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>LP Pool Watcher</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --text-muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+  }
+  :root.light {
+    --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de;
+    --text: #1f2328; --text-muted: #656d76;
+    --green: #1a7f37; --red: #cf222e; --blue: #0969da;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.6; padding: 24px; max-width: 1400px; margin: 0 auto;
+  }
+  .report-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px;
+  }
+  .report-header h1 { font-size: 20px; }
+  .report-header .meta { color: var(--text-muted); font-size: 12px; }
+  .report-header .meta span { margin-left: 16px; }
+  .kpi-bar { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+  .kpi-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 150px; flex: 1;
+  }
+  .kpi-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+  .kpi-card .value { font-size: 24px; font-weight: 700; margin: 4px 0; }
+  .kpi-card .delta { font-size: 12px; }
+  .kpi-card .delta.up { color: var(--green); }
+  .kpi-card .delta.down { color: var(--red); }
+  .section { margin-bottom: 32px; }
+  .section-md { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; }
+  .section-md h1, .section-md h2, .section-md h3 { color: var(--text); margin: 12px 0 6px; }
+  .section-md h1 { font-size: 18px; } .section-md h2 { font-size: 16px; } .section-md h3 { font-size: 14px; }
+  .section-md p { margin: 6px 0; }
+  .section-md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 13px; }
+  .section-md code { background: var(--bg); padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  .section-md pre code { background: none; padding: 0; }
+  .section-md ul, .section-md ol { padding-left: 20px; }
+  .section-md a { color: var(--blue); }
+  .section-table { overflow-x: auto; }
+  .section-table table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .section-table th {
+    background: var(--bg); text-align: left; padding: 8px 12px;
+    font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); border-bottom: 1px solid var(--border);
+  }
+  .section-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .section-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .section-table tr:last-child td { border-bottom: none; }
+  .plotly-chart { min-height: 400px; margin-bottom: 24px; width: 100%; overflow: hidden; }
+  .plotly-chart .js-plotly-plot, .plotly-chart .plot-container, .plotly-chart .plotly { width: 100% !important; }
+</style>
+</head>
+<body>
+<div class="report-header">
+  <h1>LP Pool Watcher</h1>
+  <div class="meta">
+    <span>2026-06-29 11:58 UTC</span>
+    <span>routine: optimal_pool_scorer</span><span>#lp</span><span>#pools</span><span>#orca</span><span>#meteora</span>
+  </div>
+</div>
+<div class="section section-table"><table><thead><tr><th>Pool</th><th>Protocol</th><th>Score</th><th>24h Fees</th><th>Fee APR</th><th>Liquidity</th><th>24h Trend</th><th>Warnings</th><th>Flags</th></tr></thead><tbody><tr><td>SOL / USDC</td><td>orca</td><td>100.0</td><td>$71.6K</td><td>108.7%</td><td>$24.04M</td><td>+0.53%</td><td>none</td><td>none</td></tr>
+<tr><td>cbBTC / USDC</td><td>orca</td><td>100.0</td><td>$7.3K</td><td>49.8%</td><td>$5.34M</td><td>-0.63%</td><td>none</td><td>none</td></tr>
+<tr><td>WETH / SOL</td><td>orca</td><td>100.0</td><td>$3.5K</td><td>30.2%</td><td>$4.22M</td><td>-0.79%</td><td>none</td><td>none</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>100.0</td><td>$13.0K</td><td>156.5%</td><td>$3.04M</td><td>+0.40%</td><td>none</td><td>none</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>100.0</td><td>$3.9K</td><td>47.8%</td><td>$2.96M</td><td>+0.40%</td><td>none</td><td>none</td></tr></tbody></table></div>
+<div class="section section-table"><table><thead><tr><th>Pool</th><th>Protocol</th><th>Score</th><th>24h Fees</th><th>Fee APR</th><th>Liquidity</th><th>24h Trend</th><th>Warnings</th><th>Flags</th></tr></thead><tbody><tr><td>PUMP / SOL</td><td>orca</td><td>73.63</td><td>$672.40</td><td>50.0%</td><td>$490.7K</td><td>-6.22%</td><td>none</td><td>strong_downtrend</td></tr>
+<tr><td>Jotchua / SOL</td><td>meteora</td><td>73.55</td><td>$1.1K</td><td>86.6%</td><td>$483.2K</td><td>-14.52%</td><td>none</td><td>strong_downtrend</td></tr>
+<tr><td>PUMP / SOL</td><td>meteora</td><td>69.7</td><td>$873.79</td><td>134.1%</td><td>$237.7K</td><td>-5.08%</td><td>none</td><td>strong_downtrend</td></tr></tbody></table></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>Scored 23 pools. Scores combine 24h fees, liquidity, trend quality, and API warning status.</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Best Pools</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Watchlist / Flagged</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Scoring Thresholds
+- Minimum liquidity: $100.0K
+- Preferred liquidity: $1.00M
+- Target fee APR proxy: 30.0%
+- Strong downtrend: below -3.0% over 24h
+- Stale data: older than 60 minutes</pre></div>
+<script>
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'set-theme') {
+    document.documentElement.classList.toggle('light', e.data.theme === 'light');
+  }
+});
+window.addEventListener('load', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.relayout(el, { autosize: true, width: undefined });
+  });
+});
+window.addEventListener('resize', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.Plots.resize(el);
+  });
+});
+</script>
+</body>
+</html>

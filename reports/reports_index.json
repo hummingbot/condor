@@ -754,5 +754,155 @@
       "scanner",
       "agent"
     ]
+  },
+  {
+    "id": "1c2665",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_115519_lp_pool_watcher_1c2665.html",
+    "created_at": "2026-06-29T11:55:19.887033+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "4313ac",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_115812_lp_pool_watcher_4313ac.html",
+    "created_at": "2026-06-29T11:58:12.064351+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "a620d9",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_120118_lp_pool_discovery_a620d9.html",
+    "created_at": "2026-06-29T12:01:18.671032+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "6ace76",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_120606_lp_pool_discovery_6ace76.html",
+    "created_at": "2026-06-29T12:06:06.831056+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "1ffed9",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_120613_lp_pool_watcher_1ffed9.html",
+    "created_at": "2026-06-29T12:06:13.904508+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "8eac4a",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_123553_lp_pool_discovery_8eac4a.html",
+    "created_at": "2026-06-29T12:35:53.771125+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "861866",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_123553_lp_pool_watcher_861866.html",
+    "created_at": "2026-06-29T12:35:53.812898+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "b23f30",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_125809_lp_pool_discovery_b23f30.html",
+    "created_at": "2026-06-29T12:58:09.474327+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "8bae9f",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_125809_lp_pool_watcher_8bae9f.html",
+    "created_at": "2026-06-29T12:58:09.513089+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "61bdf4",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_130131_lp_pool_discovery_61bdf4.html",
+    "created_at": "2026-06-29T13:01:31.691769+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
   }
 ]
