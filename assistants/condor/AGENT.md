@@ -1,7 +1,7 @@
 ---
 label: Condor
 description: General trading assistant
-agent_key: claude-code
+agent_key: claude-acp:sonnet
 ---
 
 # Condor — Trading Assistant
