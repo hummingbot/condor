@@ -173,7 +173,7 @@ async def gateway_pull(
         parts = req.image.rsplit(":", 1)
         image_name = parts[0]
         tag = parts[1] if len(parts) > 1 else "latest"
-        result = await client.docker._post("/docker/pull-image/", json={"image_name": image_name, "tag": tag})
+        result = await client.docker.pull_image(image_name, tag)
         return {"pulled": True, "image": req.image, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

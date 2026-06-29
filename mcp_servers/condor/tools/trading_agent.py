@@ -418,9 +418,54 @@ def _resolve_journal_manager(agent_id: str):
     return JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir), None
 
 
+def _resolve_experiment_file(agent_id: str):
+    """For an experiment agent_id ("..._eN"), locate its saved snapshot.
+
+    Experiments (dry_run / run_once) keep no journal — the tick is saved as a
+    flat ``dry_runs/experiment_N.md`` (legacy: ``experiments/``). Returns
+    (path | None, num | None); num is set even when the file isn't on disk yet
+    so callers can distinguish "experiment in progress" from "not an experiment".
+    """
+    from condor.agents.journal import resolve_agent_dirs
+
+    last_sep = agent_id.rfind("_")
+    if last_sep == -1:
+        return None, None
+    num_part = agent_id[last_sep + 1 :]
+    if not num_part.startswith("e"):
+        return None, None
+    try:
+        num = int(num_part[1:])
+    except ValueError:
+        return None, None
+
+    _, base_dir = resolve_agent_dirs(agent_id)
+    if base_dir is None:
+        return None, num
+    for dirname in ("dry_runs", "experiments"):
+        path = base_dir / dirname / f"experiment_{num}.md"
+        if path.exists():
+            return path, num
+    return None, num
+
+
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
+
+    # Experiments (dry_run / run_once) have no journal — surface the saved
+    # dry-run snapshot instead of the misleading "no journal available" error.
+    exp_path, exp_num = _resolve_experiment_file(agent_id)
+    if exp_num is not None:
+        if exp_path is None:
+            return {
+                "content": f"(experiment #{exp_num} — no saved snapshot yet; "
+                "the run may still be in progress)"
+            }
+        content = exp_path.read_text()
+        if section == "runs":
+            return {"runs": [{"experiment": exp_num, "file": exp_path.name}]}
+        return {"content": content}
 
     jm, err = _resolve_journal_manager(agent_id)
     if err:
