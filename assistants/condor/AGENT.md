@@ -1,7 +1,7 @@
 ---
 label: Condor
 description: General trading assistant
-agent_key: ollama:gemma4:26b
+agent_key: claude-code
 ---
 
 # Condor — Trading Assistant
