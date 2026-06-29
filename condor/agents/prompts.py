@@ -45,16 +45,6 @@ GENERAL:
 - Keep tool chains short (1-5 calls per tick).
 - Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
 
-JOURNAL:
-- Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
-- Learnings must specify a category: "market" or "execution".
-  trading_agent_journal_write(entry_type="learning", category="market|execution", text="...")
-  - market: band behavior, volatility regimes, S/R patterns, routine observations.
-  - execution: executor errors, schema issues, fill problems, timing.
-- Keep learnings factual and short (1 line). No speculation.
-- Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
-- Do NOT call trading_agent_journal_read — context is already in this prompt.
-
 SKILLS & ROUTINES:
 - [AVAILABLE SKILLS & ROUTINES] below lists SKILLS (playbooks — know-how: when to
   act + steps) and ROUTINES (executable scripts).
@@ -73,38 +63,64 @@ MEMORY (about the user, NOT operational learnings):
 - If you learn something new and stable about the USER (a standing preference,
   a profile fact, a correction), save it with manage_memory(action="write",
   name="short-name", description="one line", content="...", type="preference|fact").
-  Operational/market learnings still go to trading_agent_journal_write, NOT here.
+  Operational/market learnings go to the journal (see JOURNAL above), NOT here.
 
 NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
 """
 
-TOOL_PRELOAD_LIVE = (
-    "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
-    'ToolSearch(query="select:mcp__mcp-hummingbot__get_market_data,'
-    "mcp__mcp-hummingbot__manage_executors,"
-    "mcp__mcp-hummingbot__search_history,"
-    "mcp__mcp-hummingbot__explore_geckoterminal,"
-    "mcp__condor__trading_agent_journal_write,"
-    "mcp__condor__send_notification,"
-    "mcp__condor__manage_memory,"
-    "mcp__condor__manage_skill,"
-    'mcp__condor__manage_routines")\n'
-    "Do this silently."
-)
+# Journal guidance. In experiment modes (dry_run / run_once) the engine keeps NO
+# journal — the whole tick is captured in a dry-run snapshot instead — so the agent
+# must not call trading_agent_journal_write (it would fail with "no journal
+# available"). Loop mode gets the full journal protocol.
+JOURNAL_SECTION_LIVE = """\
+JOURNAL:
+- Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
+- Learnings must specify a category: "market" or "execution".
+  trading_agent_journal_write(entry_type="learning", category="market|execution", text="...")
+  - market: band behavior, volatility regimes, S/R patterns, routine observations.
+  - execution: executor errors, schema issues, fill problems, timing.
+- Keep learnings factual and short (1 line). No speculation.
+- Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
+- Do NOT call trading_agent_journal_read — context is already in this prompt.
+"""
 
-TOOL_PRELOAD_DRY_RUN = (
-    "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
-    'ToolSearch(query="select:mcp__mcp-hummingbot__get_market_data,'
-    "mcp__mcp-hummingbot__search_history,"
-    "mcp__mcp-hummingbot__explore_geckoterminal,"
-    "mcp__condor__trading_agent_journal_write,"
-    "mcp__condor__send_notification,"
-    "mcp__condor__manage_memory,"
-    "mcp__condor__manage_skill,"
-    'mcp__condor__manage_routines")\n'
-    "Do this silently."
-)
+JOURNAL_SECTION_EXPERIMENT = """\
+JOURNAL:
+- This is an experiment (dry-run / run-once): there is NO journal this tick.
+- Do NOT call trading_agent_journal_write or trading_agent_journal_read — they are
+  unavailable here and will error.
+- Put all observations, reasoning, and what you WOULD record straight into your
+  response. The full tick is saved automatically as a dry-run snapshot.
+"""
+
+
+def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
+    """ToolSearch preload line for ACP sessions.
+
+    Dry-run omits manage_executors (read-only). Experiment modes (dry_run /
+    run_once) omit trading_agent_journal_write since they have no journal.
+    """
+    tools = ["mcp__mcp-hummingbot__get_market_data"]
+    if not is_dry_run:
+        tools.append("mcp__mcp-hummingbot__manage_executors")
+    tools += [
+        "mcp__mcp-hummingbot__search_history",
+        "mcp__mcp-hummingbot__explore_geckoterminal",
+    ]
+    if not is_experiment:
+        tools.append("mcp__condor__trading_agent_journal_write")
+    tools += [
+        "mcp__condor__send_notification",
+        "mcp__condor__manage_memory",
+        "mcp__condor__manage_skill",
+        "mcp__condor__manage_routines",
+    ]
+    return (
+        "IMPORTANT: At the very start, load ALL MCP tools in a single ToolSearch call:\n"
+        f'ToolSearch(query="select:{",".join(tools)}")\n'
+        "Do this silently."
+    )
 
 
 def _build_routines_section(strategy: Strategy) -> str:
@@ -124,14 +140,12 @@ def _build_routines_section(strategy: Strategy) -> str:
     # Agent-level routines (shared across this agent's strategies, isolated from
     # the chat's general library).
     routines_dir = assistant_routines_dir(strategy.agent_slug)
-    local = (
-        discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
-    )
+    local = discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
     if local:
         for name, r in sorted(local.items()):
             lines.append(f"  - {name}: {r.description}")
     else:
-        lines.append("  (none yet — create one with action=\"create_routine\")")
+        lines.append('  (none yet — create one with action="create_routine")')
 
     return "\n".join(lines)
 
@@ -161,17 +175,24 @@ def build_tick_prompt(
 
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
+    # Experiments (dry_run + run_once) keep no journal — the tick is captured as a
+    # dry-run snapshot instead. Mirrors TickEngine.is_experiment in engine.py.
+    is_experiment = execution_mode in ("dry_run", "run_once")
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
-    # Select base prompt and tool preload based on mode
+    # Select base prompt and journal protocol based on mode
     base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
-    sections: list[str] = [base_prompt, BASE_PROMPT_COMMON]
+    journal_section = (
+        JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
+    )
+    sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
-        tool_preload = TOOL_PRELOAD_DRY_RUN if is_dry_run else TOOL_PRELOAD_LIVE
-        sections.append(tool_preload)
+        sections.append(
+            _build_tool_preload(is_dry_run=is_dry_run, is_experiment=is_experiment)
+        )
     else:
         sections.append(
             "TOOLS:\n"
