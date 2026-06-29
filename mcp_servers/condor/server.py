@@ -8,8 +8,9 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import consult as consult_tool
+from mcp_servers.condor.tools import context
+from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
-    context,
     memory,
     notes,
     notification,
@@ -41,7 +42,10 @@ def _build_instructions() -> str:
         'run that routine via `manage_routines(action="run", name="X", config={})` '
         "instead of reimplementing it by hand.\n"
         "- If a domain AGENT matches, delegate with "
-        '`consult(agent="<slug>", task="...", context="...")` and summarize its answer.\n'
+        '`consult(agent="<slug>", task="...", context="...")` and summarize its answer. '
+        "For a long, one-off task you want run in the background until done (it pings "
+        'the user when finished), use `delegate(action="start", agent="<slug>", '
+        'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
         "- Only fall back to raw tools when nothing matches.\n"
         'Discover more anytime with `manage_skill(action="list")`.'
     )
@@ -91,6 +95,43 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
         {"agent": "...", "answer": "..."} or {"error": "..."}.
     """
     return await consult_tool.consult(agent, task, context)
+
+
+@mcp.tool()
+@handle_errors("delegate task")
+async def delegate(
+    action: str,
+    agent: str = "",
+    task: str = "",
+    task_id: str = "",
+) -> dict:
+    """Delegate a one-off task to a background agent instance.
+
+    DELEGATE is the async, unattended sibling of CONSULT. Where ``consult`` blocks
+    and returns an answer now (mutations human-gated), ``delegate`` hands a
+    goal-oriented task to a DETACHED agent that works autonomously until done, then
+    notifies the user with the result — while you stay free to do other things. Use
+    it for "go build/scan/produce X and ping me when finished" (e.g. "create a
+    routine that scans SOL pools"). The agent runs unrestricted with full
+    auto-approve, so delegate only to trusted agents/tasks.
+
+    Actions:
+    - "start": Begin a delegation (requires agent, task). Returns immediately with
+      {"task_id", "status": "running"} — does NOT wait for completion.
+    - "list": List in-flight/finished delegations (task_id, agent, status).
+    - "get": Get a delegation's status + result/error (requires task_id).
+    - "stop": Cancel a running delegation (requires task_id).
+
+    Args:
+        action: start | list | get | stop.
+        agent: Agent slug to delegate to (for start).
+        task: The one-off task, in plain language (for start).
+        task_id: Delegation id returned by start (for get/stop).
+
+    Returns:
+        Action-specific result dict.
+    """
+    return await delegate_tool.delegate(action, agent, task, task_id)
 
 
 @mcp.tool()
