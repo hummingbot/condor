@@ -216,15 +216,16 @@ class GatewayContainerRequest(BaseModel):
 
     config: dict[str, Any] | None = Field(
         default=None,
-        description="Gateway configuration (required for 'start', optional for 'restart'). "
-        "Required fields: passphrase (Gateway passphrase), image (Docker image). "
-        "Optional fields: port (exposed port, default: 15888), environment (env vars)",
+        description="Gateway configuration (used for 'start', optional for 'restart'). "
+        "The Hummingbot API runs Gateway secured (TLS + mTLS) and manages the "
+        "certificates/passphrase itself using its own CONFIG_PASSWORD (hummingbot-api "
+        "SEC-048), so no passphrase is needed here. "
+        "Fields: image (Docker image, default: hummingbot/gateway:latest), "
+        "port (exposed port, default: 15888).",
         examples=[
             {
-                "passphrase": "your_secure_passphrase",
                 "image": "hummingbot/gateway:latest",
                 "port": 15888,
-                "environment": {"GATEWAY_PASSPHRASE": "your_secure_passphrase"},
             }
         ],
     )

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, FileText, ScrollText, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, FileText, FlaskConical, ScrollText, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
@@ -152,6 +152,23 @@ export function StrategyDetail() {
               <FileText className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Playbook</span>
             </button>
+            {strategy.experiments.length > 0 && (
+              <button
+                onClick={() =>
+                  handleSessionClick(
+                    Math.max(...strategy.experiments.map((e) => e.number)),
+                    "experiment",
+                  )
+                }
+                className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+                title="Dry-run & run-once snapshots"
+              >
+                <FlaskConical className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">
+                  Dry runs ({strategy.experiments.length})
+                </span>
+              </button>
+            )}
             <button
               onClick={() => setShowRoutinesBrowser(true)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"

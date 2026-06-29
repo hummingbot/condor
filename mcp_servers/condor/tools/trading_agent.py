@@ -470,8 +470,11 @@ def journal_write(
     engine = get_engine(agent_id)
     if engine:
         if engine.is_experiment:
+            # Experiments (dry_run / run_once) keep no journal — the whole tick is
+            # captured in the dry-run snapshot. Treat a stray write as a benign
+            # skip so it never derails the (possibly live) run_once tick.
             return {
-                "error": "experiments don't have a journal — use dry_runs/ for results"
+                "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
             }
         session_dir = engine.session_dir
         agent_dir = engine.strategy.dir
@@ -479,6 +482,13 @@ def journal_write(
         from condor.agents.journal import resolve_agent_dirs
 
         session_dir, agent_dir = resolve_agent_dirs(agent_id)
+        # resolve_agent_dirs returns (None, base_dir) for an experiment id ("..._eN")
+        # but (None, None) for a genuinely unknown agent. Skip benignly for the
+        # former, error for the latter.
+        if session_dir is None and agent_dir is not None:
+            return {
+                "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
+            }
     if not session_dir:
         return {"error": "no journal available for this agent"}
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
