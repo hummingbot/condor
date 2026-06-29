@@ -168,13 +168,14 @@ async def _run_agent_to_completion(
     else:
         from condor.acp.client import ACPClient, resolve_acp
 
-        agent_cmd, model_env = resolve_acp(model_key)
+        agent_cmd, model_env, model_pref = resolve_acp(model_key)
         client = ACPClient(
             command=agent_cmd,
             working_dir=get_project_dir(),
             mcp_servers=mcp_servers,
             permission_callback=permission_cb,
             extra_env=model_env or None,
+            model=model_pref or None,
         )
 
     prompt = build_agent_context(agent, user_id, task, context)

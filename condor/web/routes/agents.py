@@ -888,19 +888,16 @@ async def delegate_agent(
 
 @router.get("/delegations")
 async def list_delegations(user: WebUser = Depends(get_current_user)):
-    """List in-flight and finished delegations (this process)."""
+    """List in-flight and finished delegations (this process).
+
+    Returns the full record per task (status + result/error) so the dashboard can
+    render an at-a-glance list without a follow-up fetch per row. The registry is
+    in-memory and small (ephemeral, per-process), so the payload stays cheap.
+    """
     from condor.agents.delegate import get_all_delegations
 
     return {
-        "delegations": [
-            {
-                "task_id": dt.task_id,
-                "agent": dt.agent_slug,
-                "status": dt.status,
-                "task": dt.task,
-            }
-            for dt in get_all_delegations().values()
-        ]
+        "delegations": [dt.to_dict() for dt in get_all_delegations().values()]
     }
 
 

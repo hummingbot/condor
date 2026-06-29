@@ -555,15 +555,6 @@ async def manage_trading_agent(
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
     server_required: bool | None = None,
-    # Journal params (for journal_read/journal_write actions)
-    section: str = "recent",
-    max_entries: int = 30,
-    entry_type: str = "action",
-    text: str = "",
-    reasoning: str = "",
-    risk_note: str = "",
-    tick: int = 0,
-    category: str = "",
 ) -> dict:
     # Agent definitions (identities) — distinct from strategies and instances
     if action == "list_agent_definitions":
@@ -636,14 +627,9 @@ async def manage_trading_agent(
     if action in lifecycle_actions:
         return await _agent_lifecycle(action, strategy_id, agent_id, config)
 
-    # Journal actions (absorbed from standalone tools)
-    if action == "journal_read":
-        return journal_read(agent_id or "", section, max_entries)
-
-    if action == "journal_write":
-        return journal_write(
-            agent_id or "", entry_type, text, reasoning, risk_note, tick, category
-        )
+    # Journal reads/writes are the standalone trading_agent_journal_read /
+    # trading_agent_journal_write tools — the canonical interface used by live
+    # tick prompts. They are intentionally NOT duplicated as actions here.
 
     # Journal/monitoring that's file-based
     if action in ("agent_tracker", "agent_journal"):

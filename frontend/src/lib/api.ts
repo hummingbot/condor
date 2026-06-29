@@ -444,6 +444,20 @@ export interface AgentDetail {
   strategies: StrategySummary[];
 }
 
+// Delegation = a fire-and-forget background task handed to a detached Agent
+// instance (DELEGATE mode). Ephemeral + in-process; status drives the UI.
+export interface Delegation {
+  task_id: string;
+  agent: string;
+  user_id: number;
+  chat_id: number;
+  server_name: string | null;
+  task: string;
+  status: "running" | "done" | "error" | "stopped";
+  result: string;
+  error: string;
+}
+
 // Strategy = a playbook that loops under an Agent. Holds the operational
 // history: sessions, experiments, live instances, config and learnings.
 export interface StrategyDetail {
@@ -978,6 +992,17 @@ export const api = {
     apiFetch<{ agent: string; answer: string }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/consult`,
       { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  // ── Delegations (fire-and-forget background agent tasks) ──
+
+  getDelegations: () =>
+    apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
+
+  stopDelegation: (taskId: string) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/api/v1/agents/delegations/${encodeURIComponent(taskId)}/stop`,
+      { method: "POST" },
     ),
 
   // ── Strategies (playbooks that loop under an Agent) ──

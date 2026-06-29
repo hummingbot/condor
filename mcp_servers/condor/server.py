@@ -291,9 +291,8 @@ async def manage_trading_agent(
     - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
     - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
 
-    Actions -- Journal:
-    - "journal_read": Read journal entries (requires agent_id, optional section/max_entries)
-    - "journal_write": Write a journal entry (requires agent_id, entry_type, text)
+    Journal reads/writes are the dedicated trading_agent_journal_read /
+    trading_agent_journal_write tools, not actions of this tool.
 
     Actions -- Monitoring:
     - "agent_tracker": Get the full tracker markdown (tick history, executor ledger, snapshots) (requires agent_id)
@@ -477,7 +476,10 @@ async def manage_notes(
 
 
 # ---------------------------------------------------------------------------
-# Backward-compatibility aliases for journal tools
+# Trading-agent journal tools — the canonical interface live tick prompts call
+# directly (see condor/agents/prompts.py). Kept as dedicated top-level tools
+# rather than manage_trading_agent actions so the agent's ergonomic, oft-used
+# write path is a single named tool.
 # ---------------------------------------------------------------------------
 
 

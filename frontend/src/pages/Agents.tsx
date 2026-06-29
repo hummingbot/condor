@@ -5,13 +5,20 @@ import {
   CircleDot,
   Pause,
   Plus,
+  Radio,
+  Square,
   Trash2,
   Zap,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { type AgentSummary, type RunningInstance, api } from "@/lib/api";
+import {
+  type AgentSummary,
+  type Delegation,
+  type RunningInstance,
+  api,
+} from "@/lib/api";
 
 const STATUS_STYLES: Record<string, { dot: string; bg: string; label: string }> = {
   running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", bg: "border-emerald-500/30 bg-emerald-500/5", label: "LIVE" },
@@ -289,6 +296,107 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
   );
 }
 
+const DELEGATION_STATUS: Record<
+  Delegation["status"],
+  { dot: string; text: string; label: string }
+> = {
+  running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", text: "text-emerald-400", label: "RUNNING" },
+  done: { dot: "bg-sky-400", text: "text-sky-400", label: "DONE" },
+  error: { dot: "bg-red-400", text: "text-red-400", label: "ERROR" },
+  stopped: { dot: "bg-[var(--color-text-muted)]/50", text: "text-[var(--color-text-muted)]", label: "STOPPED" },
+};
+
+function BackgroundTasks() {
+  const queryClient = useQueryClient();
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const { data } = useQuery({
+    queryKey: ["delegations"],
+    queryFn: api.getDelegations,
+    refetchInterval: 5000,
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: (taskId: string) => api.stopDelegation(taskId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["delegations"] }),
+  });
+
+  const delegations = data?.delegations ?? [];
+  if (delegations.length === 0) return null;
+
+  // Running first, then the rest in insertion order.
+  const ordered = [...delegations].sort(
+    (a, b) => (a.status === "running" ? 0 : 1) - (b.status === "running" ? 0 : 1),
+  );
+  const runningCount = delegations.filter((d) => d.status === "running").length;
+
+  return (
+    <div className="mb-6 rounded-lg border border-sky-500/20 bg-[var(--color-surface)] p-4">
+      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-sky-400">
+        <Radio className="h-3.5 w-3.5" /> Background Tasks ({delegations.length})
+        {runningCount > 0 && (
+          <span className="text-emerald-400">· {runningCount} running</span>
+        )}
+      </h3>
+      <div className="space-y-2">
+        {ordered.map((d) => {
+          const s = DELEGATION_STATUS[d.status];
+          const isOpen = expanded === d.task_id;
+          const body = (d.status === "error" ? d.error : d.result)?.trim();
+          return (
+            <div
+              key={d.task_id}
+              className="rounded-md border border-[var(--color-border)]/60 bg-[var(--color-bg)]/40"
+            >
+              <div className="flex items-center gap-3 px-3 py-2">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                <Link
+                  to={`/agents/${encodeURIComponent(d.agent)}`}
+                  className="shrink-0 font-mono text-xs font-medium text-[var(--color-primary)] hover:underline"
+                >
+                  {d.agent}
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setExpanded(isOpen ? null : d.task_id)}
+                  className="min-w-0 flex-1 truncate text-left text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  title={d.task}
+                >
+                  {d.task.split("\n")[0] || "—"}
+                </button>
+                <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${s.text}`}>
+                  {s.label}
+                </span>
+                {d.status === "running" && (
+                  <button
+                    type="button"
+                    onClick={() => stopMutation.mutate(d.task_id)}
+                    disabled={stopMutation.isPending}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-40"
+                    title="Stop task"
+                  >
+                    <Square className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+              {isOpen && (
+                <div className="border-t border-[var(--color-border)]/40 px-3 py-2">
+                  <p className="mb-1 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                    {d.status === "error" ? "Error" : "Result"}
+                  </p>
+                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-[var(--color-text)]">
+                    {body || (d.status === "running" ? "Running…" : "(no output)")}
+                  </pre>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DeleteAgentDialog({
   agent,
   onClose,
@@ -426,6 +534,9 @@ export function Agents() {
       {!isLoading && activeSessions.length > 0 && (
         <ActiveSessionsTable sessions={activeSessions} />
       )}
+
+      {/* Background Tasks (delegations) */}
+      <BackgroundTasks />
 
       {isLoading ? (
         <div className="flex h-64 items-center justify-center text-[var(--color-text-muted)]">
