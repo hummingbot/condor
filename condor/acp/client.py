@@ -174,26 +174,65 @@ ACP_COMMANDS: dict[str, str] = {
 }
 
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").
-# The suffix is passed through verbatim as ANTHROPIC_MODEL — claude-agent-acp /
-# Claude Code resolve aliases ("opus", "sonnet", "haiku") and full ids alike, so
-# there are no hardcoded model ids to age here.
+# The suffix is selected at runtime via session/set_model against the agent's
+# advertised models (see ACPClient._select_model), which resolves aliases
+# ("opus", "sonnet", "haiku") and full ids alike — so no hardcoded ids age here.
+# NOTE: claude-agent-acp ignores ANTHROPIC_MODEL; the protocol is the real lever.
 _CLAUDE_ACP_BASES = {"claude-code", "claude-acp"}
 
 
-def resolve_acp(agent_key: str) -> tuple[str, dict[str, str]]:
-    """Resolve an ACP ``agent_key`` to its (command, env-overrides).
+def resolve_acp(agent_key: str) -> tuple[str, dict[str, str], str]:
+    """Resolve an ACP ``agent_key`` to ``(command, env-overrides, model-pref)``.
 
     Supports an optional model suffix for Claude, e.g. ``"claude-acp:opus"`` or
-    ``"claude-acp:claude-opus-4-8"`` → ``ANTHROPIC_MODEL`` is set so the ACP CLI
-    uses that model. A bare key ("claude-code"/"claude-acp") sets no model, so the
-    CLI keeps its own default. Non-Claude bases ignore any suffix.
+    ``"claude-acp:claude-opus-4-8"``. A bare key ("claude-code"/"claude-acp") sets
+    no preference, so the agent keeps its own default. Non-Claude bases ignore any
+    suffix.
+
+    The suffix is returned as ``model-pref`` so the caller can select it over the
+    ACP protocol (``session/set_model``) — the ``claude-agent-acp`` bridge does NOT
+    read ``ANTHROPIC_MODEL`` (it picks from Claude Code ``settings.model`` or the
+    first advertised model), so env is not a reliable channel. We still set
+    ``ANTHROPIC_MODEL`` for any non-bridge consumer, but ACPClient drives the model
+    via the protocol.
     """
     base, _, model = agent_key.partition(":")
     command = ACP_COMMANDS.get(base, ACP_COMMANDS["claude-code"])
     env: dict[str, str] = {}
+    model_pref = ""
     if model and base in _CLAUDE_ACP_BASES:
         env["ANTHROPIC_MODEL"] = model
-    return command, env
+        model_pref = model
+    return command, env, model_pref
+
+
+def resolve_model_id(preference: str, available_models: list[dict]) -> str | None:
+    """Map a model ``preference`` (e.g. "sonnet", "claude-sonnet-4-6") to an exact
+    advertised ``modelId`` from the ACP agent's ``availableModels``.
+
+    The ``session/set_model`` request needs an EXACT id — the bridge does not
+    fuzzy-match there (unlike its own settings.model handling). We mirror its
+    matching: exact id/name, then substring, so a short alias like "sonnet" still
+    resolves. Returns ``None`` if nothing matches (caller keeps the default).
+    """
+    if not preference or not available_models:
+        return None
+    pref = preference.strip().lower()
+
+    def fields(m: dict) -> tuple[str, str]:
+        return (str(m.get("modelId", "")).lower(), str(m.get("name", "")).lower())
+
+    # Exact match on id or display name.
+    for m in available_models:
+        mid, name = fields(m)
+        if pref in (mid, name):
+            return m.get("modelId")
+    # Substring match either direction (handles "sonnet" ⊂ "claude-sonnet-4-6").
+    for m in available_models:
+        mid, name = fields(m)
+        if (mid and (pref in mid or mid in pref)) or (name and pref in name):
+            return m.get("modelId")
+    return None
 
 
 # --- Event types yielded by prompt_stream ---
@@ -255,12 +294,17 @@ class ACPClient:
         mcp_servers: list[dict[str, Any]] | None = None,
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
+        model: str | None = None,
     ):
         self.command = command
         self.working_dir = working_dir or os.getcwd()
         self.mcp_servers: list[dict[str, Any]] = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
+        # Requested model preference (e.g. "sonnet"); selected over the ACP
+        # protocol after session/new since the bridge ignores ANTHROPIC_MODEL.
+        self.model = model
+        self.active_model_id: str | None = None  # resolved id actually in effect
         self._process: asyncio.subprocess.Process | None = None
         self._peer = JSONRPCPeer()
         self._session_id: str | None = None
@@ -317,6 +361,60 @@ class ACPClient:
         self._session_id = result["sessionId"]
         log.info("ACP session started: %s (cmd=%s)", self._session_id, self.command)
 
+        # Select the requested model over the ACP protocol. The claude-agent-acp
+        # bridge does NOT honor ANTHROPIC_MODEL — it defaults to Claude Code's
+        # settings.model or the first advertised model — so the only reliable way
+        # to pin (e.g.) Sonnet is session/set_model with an exact advertised id.
+        await self._select_model(result.get("models") or {})
+
+    async def _select_model(self, model_state: dict) -> None:
+        """Resolve ``self.model`` against advertised models and set it via ACP.
+
+        ``model_state`` is the ``session/new`` response's ``models`` block
+        (``{availableModels: [...], currentModelId: ...}``). No-op when no model
+        was requested or it can't be matched — we log either way so the effective
+        model is verifiable from the bot logs rather than the model's self-report.
+        """
+        available = model_state.get("availableModels") or []
+        current = model_state.get("currentModelId")
+        self.active_model_id = current
+        if not self.model:
+            log.info("ACP session %s using default model %s", self._session_id, current)
+            return
+        target = resolve_model_id(self.model, available)
+        if not target:
+            log.warning(
+                "ACP model %r not found in advertised models %s; keeping default %s",
+                self.model,
+                [m.get("modelId") for m in available],
+                current,
+            )
+            return
+        if target == current:
+            log.info(
+                "ACP session %s already on requested model %s", self._session_id, target
+            )
+            return
+        try:
+            await self._peer.send_request(
+                "session/set_model",
+                {"sessionId": self._session_id, "modelId": target},
+                self._process.stdin,
+            )
+            self.active_model_id = target
+            log.info(
+                "ACP session %s model set to %s (requested %r)",
+                self._session_id,
+                target,
+                self.model,
+            )
+        except Exception:
+            log.exception(
+                "ACP session/set_model failed for %r; staying on %s",
+                self.model,
+                current,
+            )
+
     async def stop(self) -> None:
         """Terminate the subprocess and ALL descendants (claude + MCP servers).
 
@@ -352,7 +450,8 @@ class ACPClient:
 
             # Re-scan in case the tree shifted, then SIGKILL anything still alive.
             survivors = {
-                p for p in (pids | await asyncio.to_thread(_descendant_pids, pid))
+                p
+                for p in (pids | await asyncio.to_thread(_descendant_pids, pid))
                 if _alive(p)
             }
             if survivors:

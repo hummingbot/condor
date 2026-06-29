@@ -31,6 +31,24 @@ from condor.agents.agent import AgentStore
 log = logging.getLogger(__name__)
 
 
+def _build_consult_permission_cb(chat_id: int):
+    """Build the human-confirm callback that routes dangerous-tool confirmations
+    to the user's Telegram chat, reusing the live bot registered at startup
+    (main.py: routine_store.set_bot). Returns ``None`` if no bot is available."""
+    try:
+        from condor.routine_store import get_routine_store
+        from handlers.agents import confirmation
+
+        bot = get_routine_store().get_bot()
+        if bot is not None:
+            return functools.partial(confirmation.permission_callback, bot, chat_id)
+    except Exception:
+        log.exception(
+            "Could not build consult permission callback; mutations will error"
+        )
+    return None
+
+
 async def run_consult(
     slug: str,
     user_id: int,
@@ -39,7 +57,42 @@ async def run_consult(
     task: str,
     context: str = "",
 ) -> str:
-    """Consult the Agent ``slug`` with ``task`` and return its answer."""
+    """Consult the Agent ``slug`` with ``task`` and return its answer.
+
+    CONSULT is synchronous and human-gated: mutating tools are confirmed via the
+    user's Telegram chat. Its async, unattended sibling is DELEGATE
+    (:mod:`condor.agents.delegate`), which reuses :func:`_run_agent_to_completion`
+    with ``permission_callback=None`` (auto-approve).
+    """
+    permission_cb = _build_consult_permission_cb(chat_id)
+    return await _run_agent_to_completion(
+        slug=slug,
+        user_id=user_id,
+        chat_id=chat_id,
+        server_name=server_name,
+        task=task,
+        context=context,
+        permission_callback=permission_cb,
+    )
+
+
+async def _run_agent_to_completion(
+    slug: str,
+    user_id: int,
+    chat_id: int,
+    server_name: str | None,
+    task: str,
+    context: str = "",
+    permission_callback=None,
+) -> str:
+    """Load the Agent ``slug``, run its brain to completion on ``task``, return text.
+
+    Shared engine of a single agent run. CONSULT passes a human-confirm
+    ``permission_callback``; DELEGATE passes ``None`` so an ACP agent auto-approves
+    its own tool calls (unattended). No strategy is involved — the Agent's identity
+    + shared memory/skills drive the run, and ``client.prompt()`` returning IS the
+    "task done" signal.
+    """
     store = AgentStore()
     agent = store.get(slug)
     if agent is None:
@@ -96,22 +149,10 @@ async def run_consult(
     else:
         mcp_servers = build_mcp_servers_for_session(user_id, chat_id)
 
-    # Route the agent's dangerous-tool confirmations to the user's Telegram chat,
-    # reusing the live bot registered at startup (main.py: routine_store.set_bot).
-    permission_cb = None
-    try:
-        from condor.routine_store import get_routine_store
-        from handlers.agents import confirmation
-
-        bot = get_routine_store().get_bot()
-        if bot is not None:
-            permission_cb = functools.partial(
-                confirmation.permission_callback, bot, chat_id
-            )
-    except Exception:
-        log.exception(
-            "Could not build consult permission callback; mutations will error"
-        )
+    # ``permission_callback`` is passed in: CONSULT routes dangerous-tool
+    # confirmations to the user's Telegram chat; DELEGATE passes None so an ACP
+    # agent auto-approves (unattended).
+    permission_cb = permission_callback
 
     # Build the client for the (possibly fallback) model. A pydantic-ai model gets
     # the agent's tool allowlist enforced; an ACP fallback (claude-code) cannot
@@ -127,13 +168,14 @@ async def run_consult(
     else:
         from condor.acp.client import ACPClient, resolve_acp
 
-        agent_cmd, model_env = resolve_acp(model_key)
+        agent_cmd, model_env, model_pref = resolve_acp(model_key)
         client = ACPClient(
             command=agent_cmd,
             working_dir=get_project_dir(),
             mcp_servers=mcp_servers,
             permission_callback=permission_cb,
             extra_env=model_env or None,
+            model=model_pref or None,
         )
 
     prompt = build_agent_context(agent, user_id, task, context)

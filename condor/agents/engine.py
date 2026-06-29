@@ -564,14 +564,16 @@ class TickEngine:
                 allowed_tools=self.agent.tools or None,
             )
         else:
-            # Supports a Claude model suffix, e.g. "claude-acp:opus".
-            agent_cmd, model_env = resolve_acp(agent_key)
+            # Supports a Claude model suffix, e.g. "claude-acp:opus" — selected via
+            # session/set_model after handshake (the bridge ignores ANTHROPIC_MODEL).
+            agent_cmd, model_env, model_pref = resolve_acp(agent_key)
             return ACPClient(
                 command=agent_cmd,
                 working_dir=get_project_dir(),
                 mcp_servers=mcp_servers,
                 permission_callback=permission_cb,
                 extra_env=model_env or None,
+                model=model_pref or None,
             )
 
     # ------------------------------------------------------------------

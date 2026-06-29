@@ -60,6 +60,29 @@ def _is_agent_available(agent_key: str) -> bool:
     return available
 
 
+def _reclaim_default_agent(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Resolve the effective agent_key, reclaiming DEFAULT_AGENT after an auto-switch.
+
+    A previous auto-switch (no installed CLI for the configured default) parks the
+    user on whatever backend was available and flags it ``agent_llm_auto``. That was
+    never the user's choice, so once DEFAULT_AGENT's CLI is back, restore it. An
+    explicit pick via Change LLM clears the flag, so deliberate choices are never
+    reverted. Used by both the /agent command and the always-on message handler so
+    healing happens no matter how the user re-enters.
+    """
+    context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
+    agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
+    if (
+        context.user_data.get("agent_llm_auto")
+        and agent_key != DEFAULT_AGENT
+        and _is_agent_available(DEFAULT_AGENT)
+    ):
+        context.user_data["agent_llm"] = DEFAULT_AGENT
+        context.user_data.pop("agent_llm_auto", None)
+        agent_key = DEFAULT_AGENT
+    return agent_key
+
+
 @restricted
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /agent command — manage agent settings, mode, and session."""
@@ -76,10 +99,9 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     context.user_data["agent_mode"] = normalize_mode(
         context.user_data.get("agent_mode")
     )
-    context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
+    agent_key = _reclaim_default_agent(context)
 
     # Warn if no agent CLI is available
-    agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     if not _is_agent_available(agent_key):
         available = [k for k in AGENT_OPTIONS if _is_agent_available(k)]
         if not available:
@@ -92,8 +114,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "Then restart the bot."
             )
             return
-        # Auto-switch to an available one
+        # Auto-switch to an available one. Flag it as non-user so the reclaim
+        # logic above can restore DEFAULT_AGENT once its CLI is installed.
         context.user_data["agent_llm"] = available[0]
+        context.user_data["agent_llm_auto"] = True
 
     await show_agent_menu(update, context)
 
@@ -259,6 +283,7 @@ async def _handle_set_llm(
         return
 
     context.user_data["agent_llm"] = llm_key
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
     chat_id = update.effective_chat.id
@@ -343,6 +368,7 @@ async def _handle_openrouter_pick(
     model = models[idx]
     agent_key = f"openrouter:{model.slug}"
     context.user_data["agent_llm"] = agent_key
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
     await destroy_session(update.effective_chat.id)
@@ -441,6 +467,7 @@ async def _handle_openrouter_type_confirm(
         return
 
     context.user_data["agent_llm"] = f"openrouter:{slug}"
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
     await destroy_session(update.effective_chat.id)
@@ -800,10 +827,9 @@ async def agent_message_handler(
 
     # Auto-create session if none exists (always-on agent)
     if not session or not session.client.alive:
-        agent_key = context.user_data.get(
-            "agent_llm", context.user_data.get("agent_selected", DEFAULT_AGENT)
-        )
-        context.user_data.setdefault("agent_llm", agent_key)
+        # Reclaim the configured default after an auto-switch — same healing the
+        # /agent command does, so users who only ever type messages benefit too.
+        agent_key = _reclaim_default_agent(context)
 
         # Condor is the single interactive agent; its builder capabilities ship
         # as built-in skills, so there is only ever one mode.

@@ -245,6 +245,14 @@ class StartStrategyRequest(BaseModel):
     user_id: int | None = None  # Override user_id (for internal/MCP calls)
 
 
+class DelegateRequest(BaseModel):
+    task: str
+    chat_id: int = 0  # Telegram chat for the completion notification
+    user_id: int | None = None  # Override user_id (for internal/MCP calls)
+    server_name: str | None = None
+    timeout_s: int = 900
+
+
 # ── Stores / lookups ──
 
 
@@ -838,6 +846,85 @@ async def consult_agent(
         context=req.context,
     )
     return {"agent": slug, "answer": answer}
+
+
+# ── Delegate (fire-and-forget background tasks) ──
+
+
+@router.post("/{slug}/delegate")
+async def delegate_agent(
+    slug: str, req: DelegateRequest, user: WebUser = Depends(get_current_user)
+):
+    """Delegate a one-off task to a detached background Agent instance.
+
+    Returns immediately with a ``task_id``; the agent runs unattended (ACP
+    auto-approve) until done, then notifies the user. The async sibling of
+    ``/consult``.
+    """
+    from condor.agents.delegate import start_delegation
+    from config_manager import get_config_manager
+
+    _get_agent(slug)
+    if not req.task:
+        raise HTTPException(status_code=400, detail="task is required")
+
+    # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
+    # to ``server_name``'s live credentials, so refuse a server the caller can't access.
+    if req.server_name and not get_config_manager().has_server_access(
+        user.id, req.server_name
+    ):
+        raise HTTPException(status_code=403, detail="No access")
+
+    dt = await start_delegation(
+        agent_slug=slug,
+        user_id=req.user_id or user.id,
+        chat_id=req.chat_id,
+        server_name=req.server_name,
+        task=req.task,
+        timeout_s=req.timeout_s,
+    )
+    return {"task_id": dt.task_id, "status": dt.status}
+
+
+@router.get("/delegations")
+async def list_delegations(user: WebUser = Depends(get_current_user)):
+    """List in-flight and finished delegations (this process).
+
+    Returns the full record per task (status + result/error) so the dashboard can
+    render an at-a-glance list without a follow-up fetch per row. The registry is
+    in-memory and small (ephemeral, per-process), so the payload stays cheap.
+    """
+    from condor.agents.delegate import get_all_delegations
+
+    return {
+        "delegations": [dt.to_dict() for dt in get_all_delegations().values()]
+    }
+
+
+@router.get("/delegations/{task_id}")
+async def get_delegation_status(
+    task_id: str, user: WebUser = Depends(get_current_user)
+):
+    """Get a delegation's status + result/error."""
+    from condor.agents.delegate import get_delegation
+
+    dt = get_delegation(task_id)
+    if dt is None:
+        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    return dt.to_dict()
+
+
+@router.post("/delegations/{task_id}/stop")
+async def stop_delegation_route(
+    task_id: str, user: WebUser = Depends(get_current_user)
+):
+    """Cancel a running delegation (status -> stopped)."""
+    from condor.agents.delegate import get_delegation, stop_delegation
+
+    if get_delegation(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    stopped = await stop_delegation(task_id)
+    return {"stopped": stopped}
 
 
 # ── Strategy CRUD ──

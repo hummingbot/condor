@@ -284,6 +284,10 @@ def register_handlers(application: Application) -> None:
         new_bot_command,
     )
     from handlers.cex import cex_callback_handler
+    from handlers.delegations import (
+        delegations_callback_handler,
+        delegations_command,
+    )
     from handlers.config import get_config_callback_handler, get_modify_value_handler
     from handlers.config.api_keys import keys_command
     from handlers.config.gateway import gateway_command
@@ -314,6 +318,9 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    application.add_handler(
+        CommandHandler("delegations", delegations_command)
+    )
     application.add_handler(CommandHandler("memory", memory_command))
 
     # Add configuration commands (direct access)
@@ -350,6 +357,11 @@ def register_handlers(application: Application) -> None:
     # Add agent callback handler
     application.add_handler(
         CallbackQueryHandler(agent_callback_handler, pattern="^agent:")
+    )
+
+    # Add delegations callback handler (/delegations list + view + stop)
+    application.add_handler(
+        CallbackQueryHandler(delegations_callback_handler, pattern="^deleg:")
     )
 
     # Add memory callback handler (/memory review + delete)
@@ -445,6 +457,7 @@ async def post_init(application: Application) -> None:
         BotCommand("start", "Welcome message and setup"),
         BotCommand("portfolio", "View balances across exchanges"),
         BotCommand("agent", "AI trading assistant"),
+        BotCommand("delegations", "Monitor background agent tasks"),
         BotCommand("memory", "Review what the assistant remembers about you"),
         BotCommand("executors", "Deploy and manage trading executors"),
         BotCommand("bots", "Deploy and manage trading bots"),

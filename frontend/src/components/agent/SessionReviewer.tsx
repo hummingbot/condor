@@ -7,6 +7,7 @@ import {
   FlaskConical,
   LayoutList,
   X,
+  Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -17,6 +18,7 @@ import {
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
 import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
+import { formatDateTime } from "@/lib/formatters";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 const SUB_TABS = [
@@ -34,6 +36,22 @@ interface SidebarItem {
   created_at: string;
   execution_mode?: string;
   agent_key?: string;
+}
+
+// Per-execution-mode icon, label and color for experiment items.
+function expDisplay(mode?: string): { Icon: typeof FlaskConical; label: string; color: string } {
+  if (mode === "run_once") return { Icon: Zap, label: "Run", color: "text-amber-400" };
+  if (mode === "dry_run") return { Icon: FlaskConical, label: "Dry", color: "text-blue-400" };
+  return { Icon: FlaskConical, label: "Exp", color: "text-amber-400" };
+}
+
+// Render a `created_at` value that may be an epoch-seconds string (sessions) or
+// an already-formatted date string (experiments).
+function formatCreatedAt(value: string): string {
+  if (!value) return "";
+  const num = Number(value);
+  if (!Number.isNaN(num) && num > 0) return formatDateTime(num * 1000);
+  return value;
 }
 
 interface SessionReviewerProps {
@@ -193,6 +211,7 @@ export function SessionReviewer({
           {sidebarItems.map((item) => {
             const isActive = item.number === selectedNum && item.kind === selectedKind;
             const isExp = item.kind === "experiment";
+            const exp = isExp ? expDisplay(item.execution_mode) : null;
 
             if (sidebarCollapsed) {
               return (
@@ -206,10 +225,10 @@ export function SessionReviewer({
                         : "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
                       : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
                   }`}
-                  title={`${isExp ? "Experiment" : "Session"} ${item.number}`}
+                  title={`${exp ? exp.label : "Session"} ${item.number}`}
                 >
-                  {isExp ? (
-                    <FlaskConical className="h-3.5 w-3.5 text-amber-400" />
+                  {exp ? (
+                    <exp.Icon className={`h-3.5 w-3.5 ${exp.color}`} />
                   ) : (
                     <span className="text-xs font-bold">{item.number}</span>
                   )}
@@ -231,10 +250,10 @@ export function SessionReviewer({
               >
                 <div className="flex items-center justify-between">
                   <span className={`text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
-                    {isExp ? (
+                    {exp ? (
                       <span className="flex items-center gap-1">
-                        <FlaskConical className="h-3 w-3 text-amber-400" />
-                        Exp {item.number}
+                        <exp.Icon className={`h-3 w-3 ${exp.color}`} />
+                        {exp.label} {item.number}
                       </span>
                     ) : (
                       `Session ${item.number}`
@@ -251,7 +270,7 @@ export function SessionReviewer({
                     </span>
                   )}
                   <span className="text-[10px] text-[var(--color-text-muted)]/60">
-                    {item.created_at}
+                    {formatCreatedAt(item.created_at)}
                   </span>
                 </div>
               </button>
