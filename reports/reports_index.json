@@ -904,5 +904,140 @@
       "meteora"
     ],
     "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "3073c1",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_133538_lp_pool_discovery_3073c1.html",
+    "created_at": "2026-06-29T13:35:38.220694+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "ee81c0",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_133655_lp_pool_watcher_ee81c0.html",
+    "created_at": "2026-06-29T13:36:55.706152+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "26f601",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_133805_lp_pool_discovery_26f601.html",
+    "created_at": "2026-06-29T13:38:05.440550+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "804bc3",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_133945_lp_pool_watcher_804bc3.html",
+    "created_at": "2026-06-29T13:39:45.299197+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "aceed7",
+    "title": "Current Orca/Meteora LP Pool Discovery",
+    "filename": "20260629_141521_current_orcameteora_lp_pool_discovery_aceed7.html",
+    "created_at": "2026-06-29T14:15:21.730815+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "30b46f",
+    "title": "Orca/Meteora LP Pool Discovery 2026-06-29",
+    "filename": "20260629_141547_orcameteora_lp_pool_discovery_2026_06_29_30b46f.html",
+    "created_at": "2026-06-29T14:15:47.281215+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "7318b3",
+    "title": "Orca/Meteora LP Pool Scorer 2026-06-29",
+    "filename": "20260629_141633_orcameteora_lp_pool_scorer_2026_06_29_7318b3.html",
+    "created_at": "2026-06-29T14:16:33.810232+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "74a3c2",
+    "title": "LP Pool Discovery",
+    "filename": "20260629_142024_lp_pool_discovery_74a3c2.html",
+    "created_at": "2026-06-29T14:20:24.919735+00:00",
+    "source_type": "routine",
+    "source_name": "discover_lp_pools",
+    "tags": [
+      "lp",
+      "discovery",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
+  },
+  {
+    "id": "64435f",
+    "title": "LP Pool Watcher",
+    "filename": "20260629_142122_lp_pool_watcher_64435f.html",
+    "created_at": "2026-06-29T14:21:22.586832+00:00",
+    "source_type": "routine",
+    "source_name": "optimal_pool_scorer",
+    "tags": [
+      "lp",
+      "pools",
+      "orca",
+      "meteora"
+    ],
+    "agent": "lp_pools_watcher"
   }
 ]

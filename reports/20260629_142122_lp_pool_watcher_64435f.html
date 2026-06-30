@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>LP Pool Watcher</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --text-muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+  }
+  :root.light {
+    --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de;
+    --text: #1f2328; --text-muted: #656d76;
+    --green: #1a7f37; --red: #cf222e; --blue: #0969da;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.6; padding: 24px; max-width: 1400px; margin: 0 auto;
+  }
+  .report-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px;
+  }
+  .report-header h1 { font-size: 20px; }
+  .report-header .meta { color: var(--text-muted); font-size: 12px; }
+  .report-header .meta span { margin-left: 16px; }
+  .kpi-bar { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+  .kpi-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 150px; flex: 1;
+  }
+  .kpi-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+  .kpi-card .value { font-size: 24px; font-weight: 700; margin: 4px 0; }
+  .kpi-card .delta { font-size: 12px; }
+  .kpi-card .delta.up { color: var(--green); }
+  .kpi-card .delta.down { color: var(--red); }
+  .section { margin-bottom: 32px; }
+  .section-md { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; }
+  .section-md h1, .section-md h2, .section-md h3 { color: var(--text); margin: 12px 0 6px; }
+  .section-md h1 { font-size: 18px; } .section-md h2 { font-size: 16px; } .section-md h3 { font-size: 14px; }
+  .section-md p { margin: 6px 0; }
+  .section-md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 13px; }
+  .section-md code { background: var(--bg); padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  .section-md pre code { background: none; padding: 0; }
+  .section-md ul, .section-md ol { padding-left: 20px; }
+  .section-md a { color: var(--blue); }
+  .section-table { overflow-x: auto; }
+  .section-table table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .section-table th {
+    background: var(--bg); text-align: left; padding: 8px 12px;
+    font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); border-bottom: 1px solid var(--border);
+  }
+  .section-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .section-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .section-table tr:last-child td { border-bottom: none; }
+  .plotly-chart { min-height: 400px; margin-bottom: 24px; width: 100%; overflow: hidden; }
+  .plotly-chart .js-plotly-plot, .plotly-chart .plot-container, .plotly-chart .plotly { width: 100% !important; }
+</style>
+</head>
+<body>
+<div class="report-header">
+  <h1>LP Pool Watcher</h1>
+  <div class="meta">
+    <span>2026-06-29 14:21 UTC</span>
+    <span>routine: optimal_pool_scorer</span><span>#lp</span><span>#pools</span><span>#orca</span><span>#meteora</span>
+  </div>
+</div>
+<div class="section section-table"><table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody><tr><td>pools_count</td><td>31</td></tr>
+<tr><td>pools_by_protocol</td><td>meteora: 14, orca: 17</td></tr>
+<tr><td>min_liquidity_usd</td><td>1000000.0</td></tr>
+<tr><td>preferred_liquidity_usd</td><td>1000000</td></tr>
+<tr><td>target_fee_apr</td><td>0.3</td></tr>
+<tr><td>max_downtrend_pct_24h</td><td>-3.0</td></tr>
+<tr><td>max_healthy_volatility_pct_24h</td><td>8.0</td></tr>
+<tr><td>stale_after_minutes</td><td>60.0</td></tr>
+<tr><td>max_best</td><td>5</td></tr>
+<tr><td>max_watchlist</td><td>5</td></tr>
+<tr><td>fee_weight</td><td>0.35</td></tr>
+<tr><td>liquidity_weight</td><td>0.25</td></tr>
+<tr><td>trend_weight</td><td>0.25</td></tr>
+<tr><td>warning_weight</td><td>0.15</td></tr>
+<tr><td>report_title</td><td>LP Pool Watcher</td></tr></tbody></table></div>
+<div class="section section-table"><table><thead><tr><th>Pool</th><th>Protocol</th><th>Pair</th><th>24h Fees</th><th>Liquidity</th><th>24h Trend</th><th>Warnings</th></tr></thead><tbody><tr><td>SOL / USDC</td><td>orca</td><td>SOL/USDC</td><td>$89.4K</td><td>$24.03M</td><td>+0.86%</td><td>0</td></tr>
+<tr><td>USDT / TRX</td><td>orca</td><td>USDT/TRX</td><td>$53.0K</td><td>$1264.96M</td><td>-2.63%</td><td>0</td></tr>
+<tr><td>cbBTC / USDC</td><td>orca</td><td>cbBTC/USDC</td><td>$9.7K</td><td>$5.29M</td><td>-1.60%</td><td>0</td></tr>
+<tr><td>WETH / SOL</td><td>orca</td><td>WETH/SOL</td><td>$4.2K</td><td>$4.20M</td><td>-0.93%</td><td>0</td></tr>
+<tr><td>cbBTC / SOL</td><td>orca</td><td>cbBTC/SOL</td><td>$3.2K</td><td>$5.19M</td><td>-1.63%</td><td>0</td></tr>
+<tr><td>JupUSD / USDC</td><td>orca</td><td>JupUSD/USDC</td><td>$1.3K</td><td>$3.83M</td><td>+0.45%</td><td>0</td></tr>
+<tr><td>ORCA / SOL</td><td>orca</td><td>ORCA/SOL</td><td>$1.1K</td><td>$768.7K</td><td>+1.76%</td><td>0</td></tr>
+<tr><td>USDG / SOL</td><td>orca</td><td>USDG/SOL</td><td>$1.0K</td><td>$3.42M</td><td>+0.05%</td><td>0</td></tr>
+<tr><td>ZEC / USDC</td><td>orca</td><td>ZEC/USDC</td><td>$939.03</td><td>$2.71M</td><td>-2.06%</td><td>0</td></tr>
+<tr><td>PYUSD / PRIME</td><td>orca</td><td>PYUSD/PRIME</td><td>$897.54</td><td>$10.98M</td><td>-0.98%</td><td>0</td></tr>
+<tr><td>USDC / USDT</td><td>orca</td><td>USDC/USDT</td><td>$729.71</td><td>$1.22M</td><td>+0.10%</td><td>0</td></tr>
+<tr><td>JLP / SOL</td><td>orca</td><td>JLP/SOL</td><td>$692.55</td><td>$1.01M</td><td>+0.09%</td><td>0</td></tr>
+<tr><td>PUMP / SOL</td><td>orca</td><td>PUMP/SOL</td><td>$653.72</td><td>$499.9K</td><td>-4.93%</td><td>0</td></tr>
+<tr><td>Fartcoin / SOL</td><td>orca</td><td>Fartcoin/SOL</td><td>$522.92</td><td>$806.6K</td><td>+8.49%</td><td>0</td></tr>
+<tr><td>ONYC / USDC</td><td>orca</td><td>ONYC/USDC</td><td>$483.86</td><td>$7.72M</td><td>+0.69%</td><td>0</td></tr>
+<tr><td>JTO / JitoSOL</td><td>orca</td><td>JTO/JitoSOL</td><td>$469.17</td><td>$1.59M</td><td>-7.18%</td><td>0</td></tr>
+<tr><td>JLP / USDC</td><td>orca</td><td>JLP/USDC</td><td>$459.84</td><td>$1.54M</td><td>+0.07%</td><td>0</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>SOL/USDC</td><td>$16.1K</td><td>$3.15M</td><td>+0.83%</td><td>0</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>SOL/USDC</td><td>$4.8K</td><td>$2.85M</td><td>+0.77%</td><td>0</td></tr>
+<tr><td>cbBTC / USDC</td><td>meteora</td><td>cbBTC/USDC</td><td>$2.8K</td><td>$1.42M</td><td>-1.58%</td><td>0</td></tr>
+<tr><td>HYPE / USDC</td><td>meteora</td><td>HYPE/USDC</td><td>$2.7K</td><td>$5.63M</td><td>+0.57%</td><td>0</td></tr>
+<tr><td>ANTFUN / USDT</td><td>meteora</td><td>ANTFUN/USDT</td><td>$2.4K</td><td>$14.83M</td><td>-6.28%</td><td>0</td></tr>
+<tr><td>JUP / USDC</td><td>meteora</td><td>JUP/USDC</td><td>$1.7K</td><td>$894.1K</td><td>-1.71%</td><td>0</td></tr>
+<tr><td>SPCX / USDC</td><td>meteora</td><td>SPCX/USDC</td><td>$1.5K</td><td>$2.73M</td><td>-0.96%</td><td>0</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>SOL/USDC</td><td>$1.2K</td><td>$2.02M</td><td>+0.63%</td><td>0</td></tr>
+<tr><td>MET / SOL</td><td>meteora</td><td>MET/SOL</td><td>$1.0K</td><td>$859.4K</td><td>+3.76%</td><td>0</td></tr>
+<tr><td>TRUMP / USDC</td><td>meteora</td><td>TRUMP/USDC</td><td>$962.07</td><td>$3.58M</td><td>+0.51%</td><td>0</td></tr>
+<tr><td>HYPE / USDC</td><td>meteora</td><td>HYPE/USDC</td><td>$820.63</td><td>$377.4K</td><td>+0.28%</td><td>0</td></tr>
+<tr><td>PUMP / SOL</td><td>meteora</td><td>PUMP/SOL</td><td>$770.00</td><td>$236.5K</td><td>-4.00%</td><td>0</td></tr>
+<tr><td>USDC / SOL</td><td>meteora</td><td>USDC/SOL</td><td>$701.01</td><td>$121.4K</td><td>-0.03%</td><td>0</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>SOL/USDC</td><td>$631.28</td><td>$660.6K</td><td>+1.19%</td><td>0</td></tr></tbody></table></div>
+<div class="section section-table"><table><thead><tr><th>Pool</th><th>Protocol</th><th>Score</th><th>24h Fees</th><th>Fee APR</th><th>Liquidity</th><th>24h Trend</th><th>Warnings</th><th>Flags</th></tr></thead><tbody><tr><td>SOL / USDC</td><td>orca</td><td>100.0</td><td>$89.4K</td><td>135.8%</td><td>$24.03M</td><td>+0.86%</td><td>none</td><td>none</td></tr>
+<tr><td>WETH / SOL</td><td>orca</td><td>100.0</td><td>$4.2K</td><td>36.8%</td><td>$4.20M</td><td>-0.93%</td><td>none</td><td>none</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>100.0</td><td>$16.1K</td><td>186.0%</td><td>$3.15M</td><td>+0.83%</td><td>none</td><td>none</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>100.0</td><td>$4.8K</td><td>61.7%</td><td>$2.85M</td><td>+0.77%</td><td>none</td><td>none</td></tr>
+<tr><td>JLP / SOL</td><td>orca</td><td>94.06</td><td>$692.55</td><td>24.9%</td><td>$1.01M</td><td>+0.09%</td><td>none</td><td>none</td></tr></tbody></table></div>
+<div class="section section-table"><table><thead><tr><th>Pool</th><th>Protocol</th><th>Score</th><th>24h Fees</th><th>Fee APR</th><th>Liquidity</th><th>24h Trend</th><th>Warnings</th><th>Flags</th></tr></thead><tbody><tr><td>ORCA / SOL</td><td>orca</td><td>84.61</td><td>$1.1K</td><td>50.2%</td><td>$768.7K</td><td>+1.76%</td><td>none</td><td>low_liquidity</td></tr>
+<tr><td>SOL / USDC</td><td>meteora</td><td>83.26</td><td>$631.28</td><td>34.9%</td><td>$660.6K</td><td>+1.19%</td><td>none</td><td>low_liquidity</td></tr>
+<tr><td>MET / SOL</td><td>meteora</td><td>80.74</td><td>$1.0K</td><td>42.6%</td><td>$859.4K</td><td>+3.76%</td><td>none</td><td>low_liquidity</td></tr>
+<tr><td>HYPE / USDC</td><td>meteora</td><td>79.72</td><td>$820.63</td><td>79.4%</td><td>$377.4K</td><td>+0.28%</td><td>none</td><td>low_liquidity</td></tr>
+<tr><td>USDC / SOL</td><td>meteora</td><td>76.52</td><td>$701.01</td><td>210.8%</td><td>$121.4K</td><td>-0.03%</td><td>none</td><td>low_liquidity</td></tr></tbody></table></div>
+<div class="section section-table"><table><thead><tr><th>Pool</th><th>Protocol</th><th>Score</th><th>24h Fees</th><th>Fee APR</th><th>Liquidity</th><th>24h Trend</th><th>Warnings</th><th>Flags</th></tr></thead><tbody><tr><td>JUP / USDC</td><td>meteora</td><td>74.93</td><td>$1.7K</td><td>71.0%</td><td>$894.1K</td><td>-1.71%</td><td>none</td><td>low_liquidity</td></tr>
+<tr><td>Fartcoin / SOL</td><td>orca</td><td>63.94</td><td>$522.92</td><td>23.7%</td><td>$806.6K</td><td>+8.49%</td><td>none</td><td>low_liquidity</td></tr>
+<tr><td>PUMP / SOL</td><td>orca</td><td>58.75</td><td>$653.72</td><td>47.7%</td><td>$499.9K</td><td>-4.93%</td><td>none</td><td>low_liquidity, strong_downtrend</td></tr>
+<tr><td>PUMP / SOL</td><td>meteora</td><td>55.46</td><td>$770.00</td><td>118.8%</td><td>$236.5K</td><td>-4.00%</td><td>none</td><td>low_liquidity, strong_downtrend</td></tr>
+<tr><td>JTO / JitoSOL</td><td>orca</td><td>55.05</td><td>$469.17</td><td>10.8%</td><td>$1.59M</td><td>-7.18%</td><td>none</td><td>strong_downtrend</td></tr></tbody></table></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>Scored 31 pools. Scores combine 24h fees, liquidity, trend quality, and API warning status.</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Input Parameters</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Input Pools</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Best Pools</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Watchlist / Flagged</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Excluded</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Data Gaps
+- SOL / USDC: missing data_age_minutes
+- USDT / TRX: missing data_age_minutes
+- cbBTC / USDC: missing data_age_minutes
+- WETH / SOL: missing data_age_minutes
+- cbBTC / SOL: missing data_age_minutes
+- JupUSD / USDC: missing data_age_minutes
+- ORCA / SOL: missing data_age_minutes
+- USDG / SOL: missing data_age_minutes
+- ZEC / USDC: missing data_age_minutes
+- PYUSD / PRIME: missing data_age_minutes
+- USDC / USDT: missing data_age_minutes
+- JLP / SOL: missing data_age_minutes
+- PUMP / SOL: missing data_age_minutes
+- Fartcoin / SOL: missing data_age_minutes
+- ONYC / USDC: missing data_age_minutes
+- JTO / JitoSOL: missing data_age_minutes
+- JLP / USDC: missing data_age_minutes
+- SOL / USDC: missing data_age_minutes
+- SOL / USDC: missing data_age_minutes
+- cbBTC / USDC: missing data_age_minutes</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Scoring Thresholds
+- Minimum liquidity: $1.00M
+- Preferred liquidity: $1.00M
+- Target fee APR proxy: 30.0%
+- Strong downtrend: below -3.0% over 24h
+- Stale data: older than 60 minutes</pre></div>
+<script>
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'set-theme') {
+    document.documentElement.classList.toggle('light', e.data.theme === 'light');
+  }
+});
+window.addEventListener('load', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.relayout(el, { autosize: true, width: undefined });
+  });
+});
+window.addEventListener('resize', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.Plots.resize(el);
+  });
+});
+</script>
+</body>
+</html>
