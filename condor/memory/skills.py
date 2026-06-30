@@ -32,14 +32,28 @@ from .paths import builtin_skills_root
 from .store import _atomic_write, _parse_frontmatter, _render, _slugify, _utcnow
 
 
-def _routine_exists(name: str) -> bool:
-    """True if ``name`` is a discoverable global routine.
+def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
+    """True if ``name`` is a routine this assistant can actually run.
 
-    Validated against the global routine registry only — agent-local routines
-    live under a strategy dir the store has no handle to, so a reference to one
-    simply reports ``routine_ok=false`` here (advisory; never fatal).
+    Validated against the *same* scope the runtime resolves routines in: a
+    trading agent / domain expert (``agent_slug`` set) runs ONLY its own routines
+    (``agents/<slug>/routines``) and never the chat's general library, so an agent
+    skill's reference is checked against the agent's dir alone; the chat ``condor``
+    (``agent_slug`` None) is checked against the global registry. A miss simply
+    reports ``routine_ok=false`` (advisory; never fatal).
     """
     try:
+        if agent_slug:
+            from routines.base import (
+                assistant_routines_dir,
+                discover_routines_from_path,
+            )
+
+            own_dir = assistant_routines_dir(agent_slug)
+            if not own_dir.exists():
+                return False
+            return name in discover_routines_from_path(own_dir, agent_slug=agent_slug)
+
         from routines.base import discover_routines
 
         return name in discover_routines(force_reload=False)
@@ -106,7 +120,7 @@ class SkillStore:
         }
         if ref:
             result["references_routine"] = ref
-            result["routine_ok"] = _routine_exists(ref)
+            result["routine_ok"] = _routine_exists(ref, self.agent_slug)
         return result
 
     def edit(self, name: str, **fields) -> dict:
@@ -177,7 +191,7 @@ class SkillStore:
         }
         if ref:
             result["references_routine"] = ref
-            result["routine_ok"] = _routine_exists(ref)
+            result["routine_ok"] = _routine_exists(ref, self.agent_slug)
         return result
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
@@ -203,7 +217,7 @@ class SkillStore:
                 }
                 if ref:
                     hit["references_routine"] = ref
-                    hit["routine_ok"] = _routine_exists(ref)
+                    hit["routine_ok"] = _routine_exists(ref, self.agent_slug)
                 results.append(hit)
             if len(results) >= limit:
                 break

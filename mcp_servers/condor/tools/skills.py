@@ -10,13 +10,34 @@ from condor.memory import SkillStore
 from mcp_servers.condor.settings import settings
 
 
-def _store() -> SkillStore:
-    # agent_slug selects this assistant's skill library (FEAT-003); empty -> chat.
-    return SkillStore(settings.agent_slug or None)
+def _resolve_agent_slug(strategy_id: str | None) -> tuple[str | None, bool]:
+    """Resolve which assistant's skill library an action targets.
 
+    Mirrors routines' ``_get_agent_routines_dir``. ``strategy_id`` lets the chat
+    condor author/inspect a *specific* agent's local skills (the chat MCP has no
+    ``agent_slug`` of its own): a composite key ``"agent_slug.strategy_slug"``
+    resolves to its owning agent, a bare agent slug resolves to that agent
+    directly (expert-first flow, before any strategy exists). Without
+    ``strategy_id`` the target is the current assistant — the launched agent
+    (``settings.agent_slug``) or the chat condor (``None``).
 
-def _source() -> str:
-    return f"agent:{settings.agent_slug}" if settings.agent_slug else "chat"
+    Returns ``(agent_slug, ok)``; ``ok`` is False only when a ``strategy_id`` was
+    given but matched no strategy or agent, so the caller errors instead of
+    silently writing to the chat library.
+    """
+    if strategy_id:
+        from condor.agents.strategy import StrategyStore
+
+        s = StrategyStore().get_by_key(strategy_id)
+        if s:
+            return s.agent_slug, True
+        from condor.agents.agent import AgentStore
+
+        if AgentStore().get(strategy_id):
+            return strategy_id, True
+        return None, False
+
+    return (settings.agent_slug or None), True
 
 
 async def manage_skill(
@@ -28,8 +49,13 @@ async def manage_skill(
     references_routine: str | None = None,
     query: str | None = None,
     max_entries: int = 30,
+    strategy_id: str | None = None,
 ) -> dict:
-    store = _store()
+    agent_slug, ok = _resolve_agent_slug(strategy_id)
+    if strategy_id and not ok:
+        return {"error": f"No strategy or agent found for strategy_id '{strategy_id}'"}
+    store = SkillStore(agent_slug)
+    source = f"agent:{agent_slug}" if agent_slug else "chat"
 
     if action == "create":
         if not name or not description or not when_to_use or not body:
@@ -42,7 +68,7 @@ async def manage_skill(
             when_to_use,
             body,
             references_routine=references_routine,
-            source=_source(),
+            source=source,
         )
 
     elif action == "read":

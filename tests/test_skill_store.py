@@ -28,7 +28,7 @@ def fake_routines(monkeypatch):
     monkeypatch.setattr(
         skills_module,
         "_routine_exists",
-        lambda name: name == "band_scanner",
+        lambda name, agent_slug=None: name == "band_scanner",
     )
 
 

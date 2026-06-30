@@ -53,8 +53,11 @@ def _build_instructions() -> str:
     sections = [base]
     try:
         from condor.memory import SkillStore
+        from mcp_servers.condor.settings import settings
 
-        skills_index = SkillStore().list_index()
+        # Scope to the launched assistant: an agent subprocess (--agent-slug) must
+        # advertise ITS OWN skills here, not the chat condor's global library.
+        skills_index = SkillStore(settings.agent_slug or None).list_index()
         if skills_index:
             sections.append(
                 "[SKILLS — read the playbook before a matching flow]\n" + skills_index
@@ -397,6 +400,7 @@ async def manage_skill(
     references_routine: str | None = None,
     query: str | None = None,
     max_entries: int = 30,
+    strategy_id: str | None = None,
 ) -> dict:
     """Manage your SKILLS — playbooks (know-how) you can follow and refine.
 
@@ -412,6 +416,12 @@ async def manage_skill(
     referenced routine no longer exists; do NOT invoke it. A playbook is advisory
     text; executing what it describes (a routine, an executor) still goes through
     the normal risk/confirmation controls. The skill is NOT a bypass.
+
+    Skills are scoped per-assistant: a launched agent reads/writes ONLY its own
+    library. From the chat you can target a specific agent's local skill library
+    with strategy_id (an "agent_slug.strategy_slug" key, or a bare agent slug) —
+    use this to author or inspect an agent's skills while building it. Without
+    strategy_id the current assistant's library is used.
 
     Actions:
     - "read": Get a full playbook + routine validation (requires name).
@@ -430,6 +440,8 @@ async def manage_skill(
         references_routine: Optional routine name to link; "" clears it (create/edit).
         query: Search string (for search).
         max_entries: Cap for search results (default 30).
+        strategy_id: Target a specific agent's local skill library (chat-side
+            authoring). Composite "agent_slug.strategy_slug" key or bare agent slug.
 
     Returns:
         Action-specific result dict.
@@ -443,6 +455,7 @@ async def manage_skill(
         references_routine=references_routine,
         query=query,
         max_entries=max_entries,
+        strategy_id=strategy_id,
     )
 
 
