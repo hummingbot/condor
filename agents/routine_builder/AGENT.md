@@ -63,7 +63,7 @@ The `Config` docstring is the UI description. `CATEGORY` groups it in the catalo
 
 1. **Understand** — clarify what to analyze, monitor, or compute. Ask: global or agent-local?
 2. **Check existing** — `manage_routines(action="list")` to avoid duplicates.
-3. **Read relevant skills** — see "When to Read Which Skill" below.
+3. **Read the cookbook** — see "Reference: the routine cookbook" below.
 4. **Create** — `manage_routines(action="create_routine", name="snake_case", code="...")`
 5. **Test** — `manage_routines(action="run", name="routine_name", config={})`
 6. **Iterate** — read errors, fix, re-test until clean output.
@@ -87,14 +87,23 @@ manage_routines(action="create_routine", name="x", code="...", strategy_id="slug
 manage_routines(action="run", name="x", strategy_id="slug.strategy", config={})
 ```
 
-## When to Read Which Skill
+## Reference: the routine cookbook
 
-Before implementing, read the relevant skill(s) with `manage_skill(action="read", name="...")`:
+All routine patterns live in ONE skill, `routine_cookbook`. Read its overview
+first, then pull the companion file for what your routine actually does:
 
-- **Fetching market data, candles, prices, order book, portfolio, executors** → `routine-hummingbot-client`
-- **Multiple parallel API calls, bulk fetches, rate limiting** → `routine-async-patterns`
-- **Reports, KPIs, tables, Plotly charts, ReportBuilder, LiveReport** → `routine-report-builder`
-- **Continuous / monitoring routines with internal loops** → `routine-continuous`
+```python
+manage_skill(action="read", name="routine_cookbook")                          # overview + file map
+manage_skill(action="read_file", name="routine_cookbook", file="report_builder.md")
+```
+
+Companion files (pull only what you need):
+
+- **Fetching market data, candles, prices, order book, portfolio, executors** → `hummingbot_client.md`
+- **Multiple parallel API calls, bulk fetches, rate limiting** → `async_patterns.md`
+- **Reports, KPIs, tables, Plotly charts, ReportBuilder, LiveReport** → `report_builder.md`
+- **Continuous / monitoring routines with internal loops** → `continuous.md`
+- **Candlestick charts, indicator overlays, volume footprint** → `candles_chart.md`
 
 ## Rules
 
