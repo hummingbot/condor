@@ -198,6 +198,67 @@ def test_create_edit_delete_roundtrip(project_root, fake_routines):
     assert s.list_index() == ""
 
 
+def test_read_lists_companion_files(project_root):
+    """read() surfaces bundled companion files but not SKILL.md or temp files."""
+    _write_skill(project_root, None, "pmm_playbook", when_to_use="pick a config")
+    skill_dir = SkillStore().skills_dir / "pmm_playbook"
+    (skill_dir / "config_aggressive.md").write_text("aggressive body")
+    (skill_dir / "config_conservative.md").write_text("conservative body")
+    (skill_dir / ".hidden.tmp").write_text("ignore me")
+
+    read = SkillStore().read("pmm_playbook")
+    assert read["files"] == ["config_aggressive.md", "config_conservative.md"]
+
+
+def test_read_omits_files_when_no_companions(project_root):
+    _write_skill(project_root, None, "plain", when_to_use="x")
+    assert "files" not in SkillStore().read("plain")
+
+
+def test_read_file_returns_companion_content(project_root):
+    _write_skill(project_root, None, "pmm_playbook", when_to_use="pick a config")
+    skill_dir = SkillStore().skills_dir / "pmm_playbook"
+    (skill_dir / "config_aggressive.md").write_text("tight spreads")
+
+    res = SkillStore().read_file("PMM Playbook", "config_aggressive.md")
+    assert res["skill"] == "pmm_playbook"
+    assert res["file"] == "config_aggressive.md"
+    assert res["content"] == "tight spreads"
+
+
+def test_read_file_missing_file_lists_available(project_root):
+    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
+    skill_dir = SkillStore().skills_dir / "pmm_playbook"
+    (skill_dir / "config_balanced.md").write_text("body")
+
+    res = SkillStore().read_file("pmm_playbook", "ghost.md")
+    assert "error" in res
+    assert res["files"] == ["config_balanced.md"]
+
+
+def test_read_file_missing_skill_errors(project_root):
+    assert "error" in SkillStore().read_file("nope", "x.md")
+
+
+def test_read_file_rejects_path_traversal(project_root):
+    """A companion read must never escape the skill folder."""
+    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
+    # Plant a secret beside the skills dir to prove it stays unreachable.
+    (SkillStore().skills_dir / "secret.md").write_text("top secret")
+
+    s = SkillStore()
+    for bad in (
+        "../secret.md",
+        "..%2fsecret.md",
+        "/etc/passwd",
+        "sub/x.md",
+        "SKILL.md",
+    ):
+        res = s.read_file("pmm_playbook", bad)
+        assert "error" in res, bad
+        assert "content" not in res, bad
+
+
 def test_create_requires_all_fields(project_root):
     err = SkillStore().create("only_name", "", "", "")
     assert "error" in err
