@@ -411,29 +411,23 @@ async def sync_server_permissions() -> None:
     logger.info("Synced server permissions")
 
 
-async def post_init(application: Application) -> None:
-    """Register bot commands after initialization."""
-    from telegram import BotCommandScopeChat
+async def register_bot_commands(application: Application) -> None:
+    """Register the Telegram command menus (public for everyone, admin overlay).
 
-    from utils.config import ADMIN_USER_ID
-
-    # Sync server permissions (ensures all servers have ownership entries)
-    await sync_server_permissions()
-
-    # Preload Whisper model in background so first voice message is fast
-    import asyncio
-
-    from utils.transcribe import DEFAULT_MODEL, _get_model
-
-    asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
-
-    # Clear any previously set commands for all scopes to avoid stale overrides
+    Extracted from ``post_init`` so it can also run on hot-reload — otherwise a
+    newly added command (e.g. /delegations) gets its dispatch handler reloaded
+    but never shows up in the menu until a full process restart.
+    """
     from telegram import (
         BotCommandScopeAllGroupChats,
         BotCommandScopeAllPrivateChats,
+        BotCommandScopeChat,
         BotCommandScopeDefault,
     )
 
+    from utils.config import ADMIN_USER_ID
+
+    # Clear any previously set commands for all scopes to avoid stale overrides
     for scope in [
         BotCommandScopeDefault(),
         BotCommandScopeAllPrivateChats(),
@@ -452,7 +446,10 @@ async def post_init(application: Application) -> None:
         except Exception:
             pass
 
-    # Public commands (all users)
+    # 1) Public commands — registered by default for ALL users (default scope is
+    #    the universal fallback every user resolves to unless a more specific
+    #    scope overrides it). Wrapped independently so a transient failure here
+    #    never blocks the admin step (or the rest of post_init) from running.
     commands = [
         BotCommand("start", "Welcome message and setup"),
         BotCommand("portfolio", "View balances across exchanges"),
@@ -470,9 +467,13 @@ async def post_init(application: Application) -> None:
         BotCommand("gateway", "Gateway for DEX trading"),
         BotCommand("web", "Open the web dashboard"),
     ]
-    await application.bot.set_my_commands(commands)
+    try:
+        await application.bot.set_my_commands(commands)
+    except Exception as e:
+        logger.warning(f"Failed to set public commands: {e}", exc_info=True)
 
-    # Admin-only commands (visible only to admin user in their command menu)
+    # 2) Admin-only commands — layered on top of the public ones, visible only in
+    #    the admin user's own command menu (chat scope overrides the default).
     if ADMIN_USER_ID:
         admin_commands = commands + [
             BotCommand("admin", "Admin panel - manage users and access"),
@@ -484,6 +485,22 @@ async def post_init(application: Application) -> None:
             )
         except Exception as e:
             logger.warning(f"Failed to set admin-specific commands: {e}", exc_info=True)
+
+
+async def post_init(application: Application) -> None:
+    """Register bot commands after initialization."""
+    # Sync server permissions (ensures all servers have ownership entries)
+    await sync_server_permissions()
+
+    # Preload Whisper model in background so first voice message is fast
+    import asyncio
+
+    from utils.transcribe import DEFAULT_MODEL, _get_model
+
+    asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
+
+    # Register command menus (public + admin overlay)
+    await register_bot_commands(application)
 
     # Restore scheduled routine jobs from persistence
     from handlers.routines import restore_scheduled_jobs
@@ -565,6 +582,9 @@ async def watch_and_reload(application: Application) -> None:
                 logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
+            # Refresh the Telegram command menus too, so a newly added/removed
+            # command shows up without requiring a full process restart.
+            await register_bot_commands(application)
             logger.info("✅ Auto-reloaded handlers successfully")
         except Exception as e:
             logger.error(f"❌ Auto-reload failed: {e}", exc_info=True)
