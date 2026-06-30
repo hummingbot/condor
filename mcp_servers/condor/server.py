@@ -46,6 +46,14 @@ def _build_instructions() -> str:
         "For a long, one-off task you want run in the background until done (it pings "
         'the user when finished), use `delegate(action="start", agent="<slug>", '
         'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
+        "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
+        "design a routine MUST go through the `routine_builder` agent "
+        '(`consult(agent="routine_builder", ...)` for inline work, '
+        '`delegate(action="start", agent="routine_builder", ...)` for background). '
+        "It is the single entry point for routine authoring — do NOT write routine "
+        "code yourself and do NOT hand-roll it with raw `manage_routines` "
+        "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
+        '— for that just call `manage_routines(action="run", name="...")`.)\n'
         "- Only fall back to raw tools when nothing matches.\n"
         'Discover more anytime with `manage_skill(action="list")`.'
     )
