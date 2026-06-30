@@ -22,7 +22,7 @@ async def delegate(
     if action == "start":
         if not agent or not task:
             return {"error": "agent and task are required to start a delegation"}
-        return await call_main_api(
+        result = await call_main_api(
             "POST",
             f"/agents/{agent}/delegate",
             {
@@ -32,6 +32,18 @@ async def delegate(
                 "server_name": settings.active_server or None,
             },
         )
+        # Spell out how the user tracks this so the model never INVENTS a status
+        # command. There is no "/task" command — the user-facing one is
+        # "/delegations"; the user is also pinged automatically on completion.
+        if isinstance(result, dict) and not result.get("error"):
+            result["next_steps"] = (
+                "Running in the background — the user is notified automatically "
+                "when it finishes. Tell them they can check progress anytime with "
+                "the /delegations command in Telegram. You can poll it yourself "
+                'with delegate(action="get", task_id="<id>"). Do NOT invent any '
+                "other status command (e.g. there is no /task command)."
+            )
+        return result
 
     if action == "list":
         return await call_main_api("GET", "/agents/delegations")

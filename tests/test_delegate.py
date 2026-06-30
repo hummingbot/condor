@@ -163,3 +163,65 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
 
 def test_stop_unknown_returns_false():
     assert asyncio.run(stop_delegation("nope-delegate-x")) is False
+
+
+def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
+    """The runner feeds streamed events to an event_sink and the transcript
+    captures reasoning, tool calls (input/output), and the final result."""
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    _write_agent(tmp_path, "scout")
+
+    from condor.acp.client import TextChunk, ThoughtChunk, ToolCallEvent, ToolCallUpdate
+
+    async def fake_run(*, event_sink, **kw):
+        # Simulate the agent streaming reasoning, a tool call, and a final answer.
+        event_sink(ThoughtChunk(text="I should scan the pools first."))
+        event_sink(
+            ToolCallEvent(
+                tool_call_id="t1",
+                title="get_market_data",
+                status="in_progress",
+                kind="other",
+                input={"connector": "binance", "pair": "SOL-USDC"},
+            )
+        )
+        event_sink(
+            ToolCallUpdate(
+                tool_call_id="t1", status="completed", output="3 pools found"
+            )
+        )
+        event_sink(TextChunk(text="Done: 3 pools."))
+        return "Done: 3 pools."
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="scan SOL pools",
+            bot=_FakeBot(),
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+
+    assert dt.status == "done"
+    # Events captured in order on the task.
+    assert [e["type"] for e in dt.events] == ["thought", "tool", "text"]
+    tool_ev = dt.events[1]
+    assert tool_ev["name"] == "get_market_data"
+    assert tool_ev["status"] == "completed"  # patched by the ToolCallUpdate
+    assert tool_ev["output"] == "3 pools found"
+
+    # Transcript renders the full session, not just the result.
+    text = (tmp_path / "scout" / "delegations" / f"{dt.task_id}.md").read_text()
+    assert "## Session" in text
+    assert "I should scan the pools first." in text
+    assert "get_market_data" in text
+    assert "3 pools found" in text
+    assert "**Tool calls:** 1" in text
+    assert "Done: 3 pools." in text

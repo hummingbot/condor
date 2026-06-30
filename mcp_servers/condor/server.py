@@ -126,9 +126,14 @@ async def delegate(
     routine that scans SOL pools"). The agent runs unrestricted with full
     auto-approve, so delegate only to trusted agents/tasks.
 
+    The user tracks a delegation in Telegram with the /delegations command (NOT
+    "/task" — that does not exist) and is pinged automatically when it finishes.
+    Never invent a status command; "start" returns a next_steps hint with the
+    correct wording.
+
     Actions:
     - "start": Begin a delegation (requires agent, task). Returns immediately with
-      {"task_id", "status": "running"} — does NOT wait for completion.
+      {"task_id", "status": "running", "next_steps"} — does NOT wait for completion.
     - "list": List in-flight/finished delegations (task_id, agent, status).
     - "get": Get a delegation's status + result/error (requires task_id).
     - "stop": Cancel a running delegation (requires task_id).

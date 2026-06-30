@@ -84,6 +84,7 @@ async def _run_agent_to_completion(
     task: str,
     context: str = "",
     permission_callback=None,
+    event_sink=None,
 ) -> str:
     """Load the Agent ``slug``, run its brain to completion on ``task``, return text.
 
@@ -92,6 +93,11 @@ async def _run_agent_to_completion(
     its own tool calls (unattended). No strategy is involved — the Agent's identity
     + shared memory/skills drive the run, and ``client.prompt()`` returning IS the
     "task done" signal.
+
+    If ``event_sink`` is provided, it is called with every streamed
+    :data:`condor.acp.client.ACPEvent` (thoughts, tool calls, text) as they arrive,
+    so a caller can persist the full session transcript. When ``None`` (CONSULT's
+    path) the cheaper one-shot ``client.prompt()`` is used and behavior is unchanged.
     """
     store = AgentStore()
     agent = store.get(slug)
@@ -182,7 +188,17 @@ async def _run_agent_to_completion(
 
     await client.start()
     try:
-        answer = await client.prompt(prompt)
+        if event_sink is None:
+            answer = await client.prompt(prompt)
+        else:
+            from condor.acp.client import TextChunk
+
+            chunks: list[str] = []
+            async for event in client.prompt_stream(prompt):
+                event_sink(event)
+                if isinstance(event, TextChunk):
+                    chunks.append(event.text)
+            answer = "".join(chunks)
     finally:
         await client.stop()
 
