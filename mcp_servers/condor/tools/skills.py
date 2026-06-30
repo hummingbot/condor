@@ -50,6 +50,7 @@ async def manage_skill(
     query: str | None = None,
     max_entries: int = 30,
     strategy_id: str | None = None,
+    file: str | None = None,
 ) -> dict:
     agent_slug, ok = _resolve_agent_slug(strategy_id)
     if strategy_id and not ok:
@@ -78,6 +79,11 @@ async def manage_skill(
         if skill is None:
             return {"error": f"Skill '{name}' not found"}
         return skill
+
+    elif action == "read_file":
+        if not name or not file:
+            return {"error": "name and file are required for read_file"}
+        return store.read_file(name, file)
 
     elif action == "search":
         if not query:

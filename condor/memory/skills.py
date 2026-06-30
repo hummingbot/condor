@@ -21,12 +21,20 @@ Layout on disk — keyed by the assistant only (``agent_slug``), via
     {assistant_home}/skills/
         <slug>/
             SKILL.md         # frontmatter + steps
+            <companion>.md   # optional attached reference files (templates, etc.)
 
 where ``{assistant_home}`` is ``assistants/condor`` for the chat (``agent_slug``
 None) or ``agents/<slug>`` for a trading agent / domain expert.
+
+A skill folder may bundle **companion files** beside its ``SKILL.md`` — e.g.
+config templates the playbook links. These implement *progressive disclosure*:
+the injected index shows only the ``SKILL.md`` trigger, the companions stay out
+of context, and the agent pulls one on demand via :meth:`SkillStore.read_file`.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from .paths import builtin_skills_root
 from .store import _atomic_write, _parse_frontmatter, _render, _slugify, _utcnow
@@ -174,11 +182,14 @@ class SkillStore:
 
         Validates ``references_routine`` against the routine registry and
         surfaces ``routine_ok`` so the agent won't invoke a broken reference.
+        When the skill bundles companion files (see :meth:`read_file`), their
+        names are listed under ``files`` so the agent knows what it can pull.
         """
         slug = _slugify(name)
         if not self.skills_dir:
             return None
-        path = self.skills_dir / slug / "SKILL.md"
+        skill_dir = self.skills_dir / slug
+        path = skill_dir / "SKILL.md"
         if not path.exists():
             return None
         meta, body = _parse_frontmatter(path.read_text())
@@ -189,10 +200,66 @@ class SkillStore:
             "when_to_use": meta.get("when_to_use", ""),
             "body": body,
         }
+        files = self._companion_files(skill_dir)
+        if files:
+            result["files"] = files
         if ref:
             result["references_routine"] = ref
             result["routine_ok"] = _routine_exists(ref, self.agent_slug)
         return result
+
+    def read_file(self, name: str, filename: str) -> dict:
+        """Return the contents of a companion file bundled in a skill's folder.
+
+        Companion files implement progressive disclosure: a skill's ``SKILL.md``
+        links them (e.g. config templates) and the agent pulls one only when
+        needed, so the bulk stays out of the prompt until requested. ``filename``
+        must be a bare name living directly inside the skill folder — any path
+        separator or traversal is rejected so a skill can never read outside its
+        own directory.
+        """
+        if not self.skills_dir:
+            return {"error": "this assistant has no skills library"}
+        slug = _slugify(name)
+        skill_dir = self.skills_dir / slug
+        if not (skill_dir / "SKILL.md").exists():
+            return {"error": f"Skill '{name}' not found"}
+
+        fname = (filename or "").strip()
+        if not fname or fname == "SKILL.md":
+            return {"error": "filename is required (a companion file, not SKILL.md)"}
+        # Companion files are flat inside the skill dir: reject any path component.
+        if "/" in fname or "\\" in fname or Path(fname).name != fname:
+            return {"error": f"Invalid file name '{filename}'"}
+
+        target = skill_dir / fname
+        # Defense in depth: the resolved path must stay within the skill folder.
+        try:
+            if not target.resolve().is_relative_to(skill_dir.resolve()):
+                return {"error": f"Invalid file name '{filename}'"}
+        except (OSError, ValueError):
+            return {"error": f"Invalid file name '{filename}'"}
+        if not target.is_file():
+            return {
+                "error": f"File '{filename}' not found in skill '{slug}'",
+                "files": self._companion_files(skill_dir),
+            }
+        return {"skill": slug, "file": fname, "content": target.read_text()}
+
+    @staticmethod
+    def _companion_files(skill_dir: Path) -> list[str]:
+        """Names of attached reference files in a skill folder (all but SKILL.md).
+
+        Hidden/temp files (``.``-prefixed, incl. the atomic-write tmp files) are
+        skipped so only authored companions surface.
+        """
+        if not skill_dir.is_dir():
+            return []
+        return sorted(
+            f.name
+            for f in skill_dir.iterdir()
+            if f.is_file() and f.name != "SKILL.md" and not f.name.startswith(".")
+        )
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
         """Keyword/substring search over name + when_to_use + description + body.
