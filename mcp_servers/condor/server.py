@@ -35,8 +35,9 @@ def _build_instructions() -> str:
         "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
         "routine) and consultable **domain agents** on top of these tools.\n\n"
         "ROUTING RULE — before handling a request with raw tools (including tools "
-        "from other connected MCP servers such as mcp-hummingbot), check whether a "
-        "Condor skill or agent matches it:\n"
+        "from other connected MCP servers such as mcp-hummingbot), apply this "
+        "priority: (1) a matching SKILL, (2) a matching AGENT, (3) raw tools only "
+        "if neither matches:\n"
         '- If a SKILL matches, call `manage_skill(action="read", name="<name>")` '
         'and follow its steps. When it links a routine (shown as "→ routine: X"), '
         'run that routine via `manage_routines(action="run", name="X", config={})` '
@@ -55,6 +56,9 @@ def _build_instructions() -> str:
         "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
         '— for that just call `manage_routines(action="run", name="...")`.)\n'
         "- Only fall back to raw tools when nothing matches.\n"
+        "Anti-pattern: answering a domain request (deploy/tune an executor, analyze "
+        "logs, author a routine) with a chain of raw `mcp-hummingbot`/`manage_*` "
+        "calls when a skill or agent covers it.\n"
         'Discover more anytime with `manage_skill(action="list")`.'
     )
 
