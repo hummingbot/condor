@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "mcp-hummingbot": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
+      "env": {}
+    },
+    "condor": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "python", "-m", "mcp_servers.condor"],
+      "env": {}
+    }
+  }
+}
