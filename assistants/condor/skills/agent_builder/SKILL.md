@@ -195,6 +195,15 @@ changes *how* the consult runs: a pydantic-ai key (`ollama:…`/`openai:…`/`gr
 `copilot`) runs unrestricted, with mutations still confirmation-gated. A `claude-code`
 loop agent is consultable too — set `when_to_consult` and it shows up for Condor.
 
+**Writing the `when_to_consult` trigger:** Condor routes by matching the request
+against this string, so vague ones cause misses. Rules:
+- **Lead with the user's action, not the domain** — "When the user wants to deploy,
+  tune, or stop an executor" matches an intent; "Executor expertise" matches nothing.
+- **Name the concrete verbs + nouns** the user would actually say (deploy/tune/stop,
+  executor, grid, spread, inventory) so keyword overlap is high.
+- **State the boundary** when two agents are close ("…executor deployment — NOT
+  controller backtesting"). Same shape applies to a skill's `when_to_use`.
+
 **Model selection:** Set per session, not baked in. The agent/strategy `agent_key` is the
 default; override at launch via `config={"agent_key": "…"}`.
 - ACP (subprocess CLI): `claude-code`, `gemini`, `copilot`
