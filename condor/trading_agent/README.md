@@ -110,6 +110,17 @@ trading_agents/
 
 `auto_approve_with_risk_check(...)` is wired in as the ACP permission callback. Every tool call the LLM tries to make is intercepted: trading-side tools are checked against `RiskLimits` (max exposure, max drawdown, max open executors); read-only tools are auto-approved. The agent literally cannot exceed its limits — the framework refuses on its behalf.
 
+#### Claude Managed Agents (`claude-managed`)
+
+`agent_key: claude-managed` (optionally `claude-managed:<model>`, or pin via `default_config.model`) runs the brain on Anthropic's hosted Managed Agents harness instead of a local subprocess:
+
+- **Persistent session** — every tick is a `user.message` in the same hosted conversation, so the agent natively remembers earlier ticks. The harness handles context compaction and prompt caching; Condor only sends the *dynamic* state per tick (`build_managed_tick_prompt`), while rules/strategy/routines live in the agent's system prompt (`build_managed_system_prompt`).
+- **Cross-session memory** — a workspace memory store is mounted at `/mnt/memory` inside the agent's sandbox and survives across sessions and restarts. The agent curates its own `playbooks.md` / `mistakes.md` / `regimes.md`; this is the self-learning loop.
+- **Local execution, hosted reasoning** — trading tools are exposed as *custom tools*. The hosted agent emits structured tool requests; `McpToolBridge` (`condor/acp/managed_tools.py`) executes them on the local machine through the same MCP servers, gated by the same `auto_approve_with_risk_check` callback. Exchange credentials never leave the machine, and dry-run / risk blocking behaves identically to the other providers.
+- **State** — agent/session/store IDs persist in `trading_agents/{slug}/state/managed_agent.json`. The agent is recreated automatically when the model, system prompt, or tool set changes (fingerprint check). `dry_run` / `run_once` experiments use ephemeral sessions (so they never pollute the live conversation) but still share the memory store.
+
+Requires `ANTHROPIC_API_KEY` and `anthropic>=0.109`.
+
 ---
 
 ## 3. The executor / position-hold pattern in detail

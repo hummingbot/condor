@@ -23,6 +23,7 @@ dependencies = [
     "scipy>=1.17.1",
     "pydantic-ai[mcp]",
     "beautifulsoup4>=4.14.3",
+    "anthropic>=0.109.1",
 ]
 
 [project.optional-dependencies]

@@ -13,6 +13,30 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+BLOCK_RESULT_PREFIX = "BLOCKED by the Condor risk engine"
+
+
+def format_block_result(block_reason: str | None) -> str:
+    """Human-readable tool result when the risk gate cancels a mutating call."""
+    detail = block_reason or "risk limits or dry-run mode"
+    return (
+        f"{BLOCK_RESULT_PREFIX} ({detail}). "
+        "Do not retry this action this tick; journal why instead."
+    )
+
+
+def format_drawdown_display(risk_state: dict[str, Any]) -> str:
+    """Human-readable drawdown line for prompts and journal snapshots."""
+    max_dd = risk_state.get("max_drawdown_pct", -1)
+    if max_dd < 0:
+        return "disabled"
+    dd_pct = float(risk_state.get("drawdown_pct", 0) or 0)
+    base = f"{dd_pct:.1f}% / {max_dd:.1f}% limit"
+    ref = float(risk_state.get("drawdown_reference_quote", 0) or 0)
+    if ref > 0:
+        return f"{base} (vs ${ref:.2f} margin)"
+    return base
+
 
 @dataclass
 class RiskLimits:
