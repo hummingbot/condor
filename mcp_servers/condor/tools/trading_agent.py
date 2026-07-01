@@ -372,13 +372,16 @@ async def _agent_lifecycle(
                 },
             )
 
-        if action in ("stop_agent", "pause_agent", "resume_agent"):
+        if action in ("stop_agent", "pause_agent", "resume_agent", "shutdown_agent"):
             if not agent_id:
                 return {"error": "agent_id is required"}
+            # shutdown_agent escalates beyond the position-preserving stop: it winds
+            # down this session's positions/executors per its shutdown.md policy.
             verb = {
                 "stop_agent": "stop",
                 "pause_agent": "pause",
                 "resume_agent": "resume",
+                "shutdown_agent": "shutdown",
             }[action]
             aslug, sslug = agent_strategy_from_agent_id(agent_id)
             return await call_main_api(
@@ -667,6 +670,7 @@ async def manage_trading_agent(
         "stop_agent",
         "pause_agent",
         "resume_agent",
+        "shutdown_agent",
         "list_agents",
     }
     if action in lifecycle_actions:

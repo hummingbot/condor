@@ -1227,6 +1227,36 @@ async def stop_strategy(
     return {"stopped": True}
 
 
+@router.post("/{slug}/strategies/{sslug}/shutdown")
+async def shutdown_strategy(
+    slug: str,
+    sslug: str,
+    agent_id: str | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """Emergency shutdown: wind down positions/executors per shutdown.md, then stop.
+
+    Escalation above the plain (position-preserving) ``/stop``. If ``agent_id`` is
+    given, only that instance is wound down; otherwise every running instance of
+    this strategy is.
+    """
+    reason = "manual emergency stop"
+    if agent_id:
+        from condor.agents.engine import get_engine
+
+        engine = get_engine(agent_id)
+        if not engine:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        await engine._run_shutdown(reason=reason)
+    else:
+        engines = _get_engines_for(slug, sslug)
+        if not engines:
+            raise HTTPException(status_code=404, detail="No running strategy found")
+        for engine in engines:
+            await engine._run_shutdown(reason=reason)
+    return {"shutdown": True}
+
+
 @router.post("/{slug}/strategies/{sslug}/pause")
 async def pause_strategy(
     slug: str,

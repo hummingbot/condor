@@ -299,7 +299,9 @@ async def manage_trading_agent(
     Actions -- Lifecycle:
     - "list_agents": List all running agent instances with status
     - "start_agent": Start a new agent session (requires strategy_id, optional config overrides)
-    - "stop_agent": Stop a running agent (requires agent_id)
+    - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
+    - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
+      per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
     - "pause_agent": Pause a running agent (requires agent_id)
     - "resume_agent": Resume a paused agent (requires agent_id)
 
