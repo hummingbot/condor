@@ -66,7 +66,7 @@ default_config:
 default_trading_context: |
   # SESSION INPUT GUIDE
   SESSION_MODE options: dry_run, run_once, loop.
-  SCAN_PROFILE options: safe_conservative, default_cautious, balanced_fee_capture, risk_on_volatile, meme_scout, meme_tiny_live.
+  SCAN_PROFILE options: safe_conservative, default_cautious, balanced_fee_capture, risk_on_volatile, category_scout, meme_scout, meme_tiny_live.
   OPTIONAL_CATEGORIES options: blank, memecoin, utility, governance, liquid_staking_token, security, stablecoin.
   MAX_POSITION_AGE_MINUTES is the time limit; 1440 = 1 day.
   TAKE_PROFIT_PCT_AFTER_COSTS and STOP_LOSS_PCT_AFTER_COSTS are percentages, e.g. 5 = 5%.
@@ -113,7 +113,7 @@ The selection path uses Orca public pool data only:
 
 The live path must additionally verify the selected pool through Gateway and portfolio/balance checks before opening.
 
-Scan profiles can narrow discovery by Orca category and adjust TVL, volume, volatility, and scoring gates. The chosen scan profile is the TVL hard floor; do not apply a second live TVL floor from default config or model judgment after a scan succeeds. `safe_conservative` avoids memecoin focus, `balanced_fee_capture` targets non-meme fee pools, `risk_on_volatile` allows memecoin exposure, and `meme_scout` / `meme_tiny_live` default to memecoin category scans. Manual `include_pool_addresses` should be used only for debug or forced inspection of known pools.
+Scan profiles can narrow discovery by Orca category and adjust TVL, volume, volatility, and scoring gates. The chosen scan profile is the TVL hard floor; do not apply a second live TVL floor from default config or model judgment after a scan succeeds. `safe_conservative` avoids memecoin focus, `balanced_fee_capture` targets non-meme fee pools, `risk_on_volatile` allows memecoin exposure, `category_scout` is a looser consult/dry-run discovery profile for utility, governance, liquid-staking-token, and security categories, and `meme_scout` / `meme_tiny_live` default to memecoin category scans. Manual `include_pool_addresses` should be used only for debug or forced inspection of known pools.
 
 ## Hard Gates
 
@@ -137,6 +137,52 @@ Surviving pools are scored from 0 to 5 across six criteria:
 The default weights sum to 1.0: 25% liquidity depth, 20% recent activity, 20% fee productivity, 15% range stability, 10% execution simplicity, and 10% sponsor fit.
 
 The scoring model is intentionally simple and reviewable. It is designed to produce an auditable choice, not to claim proprietary prediction power.
+
+## Consult-Mode Pool Discovery
+
+When consulted for Orca pool discovery, run `orca_pool_scan` in analysis-only posture. Do not consult another pool-watcher agent for Orca discovery.
+
+Use routine config that matches the user's intent:
+
+- `execution_mode: dry_run`;
+- `risk_profile: meme_scout` for meme-pool screening;
+- `risk_profile: safe_conservative` or `default_cautious` for conservative broad screening;
+- explicit category, quote, or exclude filters only when the user asks for them; category filters must use exact valid category values.
+
+Valid Orca category values are exact strings only:
+
+- `memecoin`;
+- `utility`;
+- `governance`;
+- `liquid_staking_token`;
+- `security`;
+- `stablecoin`.
+
+Do not invent aliases. Use `memecoin`, not `meme`; use `liquid_staking_token`, not `lst`.
+
+Preferred consult-mode profile mapping:
+
+- meme pools, meme coins, or highest meme fees -> `risk_profile: meme_scout`; do not also pass `categories` unless the user explicitly asks for a category override;
+- tiny-live meme dry analysis -> `risk_profile: meme_tiny_live`;
+- stablecoin or liquid-staking conservative pools -> `risk_profile: safe_conservative`;
+- broad conservative Orca screening -> `risk_profile: default_cautious`;
+- fee-focused non-meme pools -> `risk_profile: balanced_fee_capture`;
+- early category discovery for utility, governance, liquid-staking-token, or security pools -> `risk_profile: category_scout`;
+- higher-volatility fee capture across utility, governance, and memecoin pools -> `risk_profile: risk_on_volatile`.
+
+Consult-mode discovery stops at routine-backed analysis. It must not create executors, perform swaps, open LP positions, or imply that a candidate is live-actionable without Gateway, balance, executor, and risk-limit preflight.
+
+Report only fields present in routine output, such as:
+
+- pool/pair;
+- pool address;
+- TVL/liquidity;
+- 24h volume;
+- 24h fees or fee proxy if returned;
+- fee APR/APY proxy if returned;
+- warnings, hard gates, and rejection reasons;
+- preset suggestion;
+- reason for inclusion or exclusion.
 
 ## Named Presets
 

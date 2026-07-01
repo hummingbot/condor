@@ -17,9 +17,31 @@ DEFAULT_SCAN_SORT_FIELDS = ["tvl", "volume24h", "fees24h", "yieldovertvl24h"]
 DEFAULT_ALLOWED_QUOTE_SYMBOLS = ["USDC", "SOL", "mSOL", "JitoSOL"]
 DEFAULT_PREFERRED_QUOTE_SYMBOLS = ["USDC", "SOL"]
 VALID_CATEGORIES = {"memecoin", "utility", "governance", "liquid_staking_token", "security", "stablecoin"}
-VALID_RISK_PROFILES = {"default_cautious", "balanced_fee_capture", "risk_on_volatile", "meme_scout", "meme_tiny_live", "safe_conservative"}
+VALID_RISK_PROFILES = {
+    "default_cautious",
+    "balanced_fee_capture",
+    "risk_on_volatile",
+    "meme_scout",
+    "meme_tiny_live",
+    "safe_conservative",
+    "category_scout",
+}
 RISK_PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
     "default_cautious": {},
+    "category_scout": {
+        "categories": ["utility", "governance", "liquid_staking_token", "security"],
+        "min_tvl_query_usd": 50_000,
+        "min_tvl_usd": 100_000,
+        "min_volume_24h_usd": 50_000,
+        "min_volume_7d_usd": 250_000,
+        "max_abs_price_delta_24h": 0.25,
+        "weight_liquidity_depth": 0.15,
+        "weight_recent_activity": 0.30,
+        "weight_fee_productivity": 0.30,
+        "weight_range_stability": 0.10,
+        "weight_execution_simplicity": 0.10,
+        "weight_sponsor_fit": 0.05,
+    },
     "safe_conservative": {
         "categories": ["stablecoin", "liquid_staking_token"],
         "min_tvl_query_usd": 1_000_000,
@@ -282,6 +304,19 @@ def _is_baseline_value(field: str, value: Any) -> bool:
     return value == baseline
 
 
+def _stats_window_items(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _stats_windows_with_required_gates(config: Config) -> str:
+    windows = _stats_window_items(config.stats_windows)
+    if config.min_volume_24h_usd > 0 and "24h" not in windows:
+        windows.append("24h")
+    if config.min_volume_7d_usd > 0 and "7d" not in windows:
+        windows.append("7d")
+    return ",".join(windows) if windows else config.stats_windows
+
+
 def _apply_risk_profile(config: Config) -> Config:
     profile = _normalized_name(config.risk_profile, "default_cautious")
     overrides = RISK_PROFILE_DEFAULTS.get(profile, {})
@@ -291,7 +326,8 @@ def _apply_risk_profile(config: Config) -> Config:
             continue
         if _is_baseline_value(field, getattr(config, field)):
             updates[field] = list(value) if isinstance(value, list) else value
-    return config.model_copy(update=updates)
+    config = config.model_copy(update=updates)
+    return config.model_copy(update={"stats_windows": _stats_windows_with_required_gates(config)})
 
 
 def _config_errors(config: Config) -> list[str]:
@@ -888,6 +924,49 @@ def _candidate_row(candidate: dict[str, Any], include_range: bool = False) -> di
     return row
 
 
+def _round_optional(value: Any, digits: int = 2) -> float | None:
+    parsed = _to_float(value)
+    return None if parsed is None else round(parsed, digits)
+
+
+def _near_miss_row(
+    candidate: dict[str, Any],
+    reason: str,
+    score: float | None = None,
+    criteria: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    token_a = candidate.get("token_a") or {}
+    token_b = candidate.get("token_b") or {}
+    return {
+        "reason": reason,
+        "pool_address": candidate.get("address"),
+        "pair": candidate.get("trading_pair") or f"{token_a.get('symbol', 'n/a')}-{token_b.get('symbol', 'n/a')}",
+        "quote_symbol": candidate.get("quote_symbol"),
+        "score": score,
+        "tvl_usd": _round_optional(candidate.get("tvl_usd")),
+        "volume_24h_usd": _round_optional(candidate.get("volume_24h_usd")),
+        "volume_7d_usd": _round_optional(candidate.get("volume_7d_usd")),
+        "fees_24h_usd": _round_optional(candidate.get("fees_24h_usd")),
+        "price_delta_24h": candidate.get("price_delta_24h"),
+        "source_categories": candidate.get("source_categories", []),
+        "source_lenses": candidate.get("source_lenses", []),
+        "criteria_scores": criteria,
+    }
+
+
+def _append_near_miss(
+    near_misses: dict[str, list[dict[str, Any]]],
+    reason: str,
+    candidate: dict[str, Any],
+    score: float | None = None,
+    criteria: dict[str, float] | None = None,
+    limit_per_reason: int = 5,
+) -> None:
+    rows = near_misses.setdefault(reason, [])
+    if len(rows) < limit_per_reason:
+        rows.append(_near_miss_row(candidate, reason, score, criteria))
+
+
 def _format_money(value: Any) -> str:
     parsed = _to_float(value)
     return "n/a" if parsed is None else f"${parsed:,.2f}"
@@ -930,6 +1009,9 @@ def _format_scan_text(payload: dict[str, Any]) -> str:
         lines.append("Selected: none")
     if rejections:
         lines.append(f"Rejected pools: {sum(rejections.values())}")
+    near_misses = payload.get("near_miss_candidates") or {}
+    if near_misses:
+        lines.append(f"Near-miss samples: {sum(len(rows) for rows in near_misses.values())}")
     if warnings:
         lines.append(f"Warnings: {len(warnings)}")
     summary = payload.get("agent_prompt_summary")
@@ -982,6 +1064,7 @@ def _config_summary(config: Config, diagnostics: dict[str, Any]) -> dict[str, An
     return {
         "risk_profile": config.risk_profile,
         "categories": config.categories,
+        "stats_windows": config.stats_windows,
         "min_tvl_query_usd": config.min_tvl_query_usd,
         "min_tvl_usd": config.min_tvl_usd,
         "min_volume_24h_usd": config.min_volume_24h_usd,
@@ -1048,6 +1131,28 @@ async def _save_scan_report(payload: dict[str, Any]) -> None:
         if rejections:
             builder.markdown("## Rejection Summary")
             builder.table([{"Reason": reason, "Count": count} for reason, count in sorted(rejections.items())])
+        near_misses = payload.get("near_miss_candidates") or {}
+        if near_misses:
+            rows = []
+            for reason, candidates in sorted(near_misses.items()):
+                for candidate in candidates:
+                    rows.append(
+                        {
+                            "Reason": reason,
+                            "Pair": candidate.get("pair"),
+                            "Pool": candidate.get("pool_address"),
+                            "Score": _format_number(candidate.get("score"), 4),
+                            "TVL": _format_money(candidate.get("tvl_usd")),
+                            "24h Volume": _format_money(candidate.get("volume_24h_usd")),
+                            "7d Volume": _format_money(candidate.get("volume_7d_usd")),
+                            "24h Fees": _format_money(candidate.get("fees_24h_usd")),
+                            "24h Move": _format_pct(candidate.get("price_delta_24h")),
+                            "Categories": ",".join(candidate.get("source_categories") or []),
+                        }
+                    )
+            if rows:
+                builder.markdown("## Near-Miss Rejections")
+                builder.table(rows)
         if warnings:
             builder.markdown("## Warnings\n" + "\n".join(f"- {warning}" for warning in warnings))
         builder.markdown(
@@ -1088,12 +1193,15 @@ async def run(config: Config, context: Any) -> str:
         rejection_counts: Counter[str] = Counter()
         warnings: list[str] = []
         candidates: list[dict[str, Any]] = []
+        near_misses: dict[str, list[dict[str, Any]]] = {}
         for record in records:
             candidate = _normalize(record)
             accepted, reason, gate_warnings = _gate(candidate, config)
             warnings.extend(gate_warnings)
             if not accepted:
-                rejection_counts[reason or "rejected"] += 1
+                rejection_reason = reason or "rejected"
+                rejection_counts[rejection_reason] += 1
+                _append_near_miss(near_misses, rejection_reason, candidate)
                 continue
             criteria, weighted_score, score_warnings = _score(candidate, config)
             warnings.extend(score_warnings)
@@ -1103,6 +1211,7 @@ async def run(config: Config, context: Any) -> str:
             candidate["range_suggestion"] = _range(candidate, config, candidate["preset_suggestion"])
             if candidate["preset_suggestion"] == "no-trade":
                 rejection_counts["score_below_trade_threshold"] += 1
+                _append_near_miss(near_misses, "score_below_trade_threshold", candidate, weighted_score, criteria)
                 continue
             candidates.append(candidate)
 
@@ -1128,6 +1237,7 @@ async def run(config: Config, context: Any) -> str:
                 "selected_candidate": None,
                 "top_candidates": [],
                 "rejection_summary": dict(rejection_counts),
+                "near_miss_candidates": near_misses,
                 "warnings": sorted(set(warnings)),
                 "agent_prompt_summary": "No trade: no Orca pool survived hard gates and scoring thresholds.",
             }
@@ -1158,6 +1268,14 @@ async def run(config: Config, context: Any) -> str:
 
 
 def _self_check() -> None:
+    assert _apply_risk_profile(Config(risk_profile="meme_scout", stats_windows="24h")).stats_windows == "24h,7d"
+    assert _apply_risk_profile(Config(risk_profile="category_scout")).categories == [
+        "utility",
+        "governance",
+        "liquid_staking_token",
+        "security",
+    ]
+
     warned_candidate = {
         "address": "pool",
         "token_a": {"symbol": "SOL", "mint": "sol", "decimals": 9},
