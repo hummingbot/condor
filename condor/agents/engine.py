@@ -84,6 +84,7 @@ class TickEngine:
     _task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _running: bool = field(default=False, init=False)
     _paused: bool = field(default=False, init=False)
+    _shutting_down: bool = field(default=False, init=False)
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
@@ -179,6 +180,61 @@ class TickEngine:
             self.journal.close()
         _engines.pop(self.agent_id, None)
         log.info("TickEngine %s stopped", self.agent_id)
+
+    async def _run_shutdown(self, reason: str) -> None:
+        """Emergency winddown of this session's positions/executors, then self-stop.
+
+        This is the escalation above the plain graceful :meth:`stop` (which keeps
+        positions): it runs the deterministic + LLM winddown in
+        :func:`condor.agents.shutdown.run_shutdown` and always ends stopped.
+
+        Idempotent and re-entrancy-safe via ``_shutting_down`` (a concurrent auto
+        trigger + manual call runs the winddown at most once). Safe from inside the
+        tick task (hard auto-trigger) or outside it (manual stop): it cancels the
+        in-flight tick only when called from a *different* task — cancelling our own
+        task would abort the winddown.
+        """
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        # Halt the loop so no next/concurrent tick fights the winddown.
+        self._running = False
+        self._paused = True
+
+        current = asyncio.current_task()
+        if self._task is not None and self._task is not current and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        # Reap any live per-tick client (mirrors stop()'s backstop).
+        client = self._active_client
+        if client is not None:
+            try:
+                await client.stop()
+            except Exception:
+                log.exception(
+                    "TickEngine %s: error reaping active client during shutdown",
+                    self.agent_id,
+                )
+            self._active_client = None
+
+        from .shutdown import run_shutdown
+
+        try:
+            await run_shutdown(self, reason)
+        except Exception:
+            log.exception("TickEngine %s: shutdown sequence error", self.agent_id)
+            await self._notify(
+                f"🚨 Agent {self.agent_id}: shutdown sequence errored — "
+                f"verify positions manually! ({reason})"
+            )
+        finally:
+            if self.journal:
+                self.journal.close()
+            _engines.pop(self.agent_id, None)
+            log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
 
     def pause(self) -> None:
         self._paused = True
