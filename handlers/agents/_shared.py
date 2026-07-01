@@ -576,10 +576,11 @@ def build_initial_context(
         skills_index = SkillStore().list_index()
         if skills_index:
             sections.append(
-                "[SKILLS — playbooks you can follow]\n"
-                "These are read-only playbooks shipped with the assistant. Before a "
-                "known flow, read the full playbook with "
-                'manage_skill(action="read", name="...") and follow its steps.\n\n'
+                "[SKILLS — check here BEFORE handling a known flow with raw tools]\n"
+                "Read-only playbooks shipped with the assistant. Before using raw "
+                "tools for a flow below, read its playbook with "
+                'manage_skill(action="read", name="...") and follow the steps — '
+                "don't re-derive or hand-roll what a playbook already covers.\n\n"
                 f"{skills_index}"
             )
     except Exception:
@@ -595,13 +596,12 @@ def build_initial_context(
         agents_index = AgentStore().list_consultable_index()
         if agents_index:
             sections.append(
-                "[AGENTS — domain agents you can consult]\n"
-                "You are a coordinator. When a task is squarely in an agent's "
-                "domain, delegate it with "
-                'consult(agent="<slug>", task="...", context="..."). The agent runs '
-                "with its own focused tools and domain memory and returns an answer; "
-                "summarize that answer for the user rather than holding the domain "
-                "context yourself.\n\n"
+                "[AGENTS — consult these BEFORE doing domain work with raw tools]\n"
+                "You are a coordinator. If a request falls in an agent's domain "
+                "below, delegate it with "
+                'consult(agent="<slug>", task="...", context="...") instead of '
+                "driving the domain's raw tools yourself — the agent has the focused "
+                "tools and domain memory. Relay a concise summary of its answer.\n\n"
                 f"{agents_index}"
             )
     except Exception:
