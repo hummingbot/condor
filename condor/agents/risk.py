@@ -50,10 +50,20 @@ class RiskState:
             "should_shutdown": self.should_shutdown,
             "shutdown_reason": self.shutdown_reason,
             # Include limits for prompt display
-            "max_position_size": self._limits.max_position_size_quote if hasattr(self, "_limits") else 500,
-            "max_open_executors": self._limits.max_open_executors if hasattr(self, "_limits") else 5,
-            "max_drawdown_pct": self._limits.max_drawdown_pct if hasattr(self, "_limits") else -1,
-            "shutdown_drawdown_pct": self._limits.shutdown_drawdown_pct if hasattr(self, "_limits") else -1,
+            "max_position_size": (
+                self._limits.max_position_size_quote
+                if hasattr(self, "_limits")
+                else 500
+            ),
+            "max_open_executors": (
+                self._limits.max_open_executors if hasattr(self, "_limits") else 5
+            ),
+            "max_drawdown_pct": (
+                self._limits.max_drawdown_pct if hasattr(self, "_limits") else -1
+            ),
+            "shutdown_drawdown_pct": (
+                self._limits.shutdown_drawdown_pct if hasattr(self, "_limits") else -1
+            ),
         }
 
 
@@ -79,7 +89,10 @@ class RiskEngine:
         # Check blocking conditions
         reasons = []
 
-        if self.limits.max_drawdown_pct >= 0 and state.drawdown_pct > self.limits.max_drawdown_pct:
+        if (
+            self.limits.max_drawdown_pct >= 0
+            and state.drawdown_pct > self.limits.max_drawdown_pct
+        ):
             reasons.append(
                 f"Drawdown {state.drawdown_pct:.1f}% exceeds limit {self.limits.max_drawdown_pct:.1f}%"
             )
@@ -103,7 +116,9 @@ class RiskEngine:
 
         return state
 
-    def check_executor_action(self, tool_call: dict, current_state: RiskState) -> tuple[bool, str]:
+    def check_executor_action(
+        self, tool_call: dict, current_state: RiskState
+    ) -> tuple[bool, str]:
         """Check if an executor creation is within risk limits.
 
         Returns (allowed, reason).
@@ -117,11 +132,16 @@ class RiskEngine:
 
         # Check executor count
         if current_state.executor_count >= self.limits.max_open_executors:
-            return False, f"Max open executors ({self.limits.max_open_executors}) reached"
+            return (
+                False,
+                f"Max open executors ({self.limits.max_open_executors}) reached",
+            )
 
         # Check position size
         config = input_data.get("executor_config", {})
-        amount = float(config.get("total_amount_quote", 0) or config.get("amount", 0) or 0)
+        amount = float(
+            config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
+        )
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (
@@ -153,7 +173,11 @@ def auto_approve_with_risk_check(
                     if action in ("create", "stop"):
                         log.info("Dry-run mode: blocked manage_executors(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name in ("place_order", "manage_gateway_swaps", "manage_gateway_clmm"):
+                elif tool_name in (
+                    "place_order",
+                    "manage_gateway_swaps",
+                    "manage_gateway_clmm",
+                ):
                     log.info("Dry-run mode: blocked %s", tool_name)
                     return {"outcome": {"outcome": "cancelled"}}
 
@@ -169,7 +193,9 @@ def auto_approve_with_risk_check(
                         log.warning("Blocked executor create: missing controller_id")
                         return {"outcome": {"outcome": "cancelled"}}
 
-                allowed, reason = risk_engine.check_executor_action(tool_call, risk_state)
+                allowed, reason = risk_engine.check_executor_action(
+                    tool_call, risk_state
+                )
                 if not allowed:
                     log.warning("Risk engine blocked tool call: %s", reason)
                     return {"outcome": {"outcome": "cancelled"}}
@@ -184,7 +210,9 @@ def auto_approve_with_risk_check(
             if opt.get("kind") in ("allow_once", "allow_always"):
                 return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
         if options:
-            return {"outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}}
+            return {
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+            }
         return {"outcome": {"outcome": "cancelled"}}
 
     return callback

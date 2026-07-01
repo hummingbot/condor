@@ -908,9 +908,7 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
     """
     from condor.agents.delegate import get_all_delegations
 
-    return {
-        "delegations": [dt.to_dict() for dt in get_all_delegations().values()]
-    }
+    return {"delegations": [dt.to_dict() for dt in get_all_delegations().values()]}
 
 
 @router.get("/delegations/{task_id}")

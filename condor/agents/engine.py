@@ -202,7 +202,11 @@ class TickEngine:
         self._paused = True
 
         current = asyncio.current_task()
-        if self._task is not None and self._task is not current and not self._task.done():
+        if (
+            self._task is not None
+            and self._task is not current
+            and not self._task.done()
+        ):
             self._task.cancel()
             try:
                 await self._task

@@ -19,7 +19,8 @@ class RiskLimitsConfig(BaseModel):
     )
     max_open_executors: int = Field(default=5, description="Max simultaneous executors")
     max_drawdown_pct: float = Field(
-        default=-1.0, description="Max drawdown %% that pauses (soft-blocks) ticks; -1 = disabled"
+        default=-1.0,
+        description="Max drawdown %% that pauses (soft-blocks) ticks; -1 = disabled",
     )
     shutdown_drawdown_pct: float = Field(
         default=-1.0,

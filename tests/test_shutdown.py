@@ -9,8 +9,8 @@ import asyncio
 from types import SimpleNamespace
 
 from condor.agents import shutdown as shutdown_module
-from condor.agents.engine import TickEngine
 from condor.agents import strategy as strategy_module
+from condor.agents.engine import TickEngine
 from condor.agents.shutdown import (
     DEFAULT_POLICY,
     POLICY_FLATTEN_ALL,
@@ -33,7 +33,9 @@ def _make_strategy(tmp_path, monkeypatch) -> Strategy:
     return s
 
 
-def _write_shutdown_md(path, policy: str, cancel: bool = True, body: str = "Body.") -> None:
+def _write_shutdown_md(
+    path, policy: str, cancel: bool = True, body: str = "Body."
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"---\non_kill_switch: {policy}\ncancel_open_orders: {str(cancel).lower()}\n---\n\n{body}\n"
@@ -70,7 +72,9 @@ def test_resolution_prefers_strategy_over_agent_over_default(tmp_path, monkeypat
     agent_dir = s.dir.parent.parent  # {root}/acme
     defaults_dir = tmp_path / "_defaults"
 
-    _write_shutdown_md(defaults_dir / "shutdown.md", DEFAULT_POLICY, body="default body")
+    _write_shutdown_md(
+        defaults_dir / "shutdown.md", DEFAULT_POLICY, body="default body"
+    )
     _write_shutdown_md(agent_dir / "shutdown.md", POLICY_KEEP_ALL, body="agent body")
     _write_shutdown_md(s.dir / "shutdown.md", POLICY_FLATTEN_ALL, body="strategy body")
 
@@ -161,7 +165,9 @@ class _FakeExecutorsAPI:
     async def get_positions_summary(self, controller_id=None):
         if len(self._positions_sequence) > 1:
             return {"positions": self._positions_sequence.pop(0)}
-        return {"positions": self._positions_sequence[0] if self._positions_sequence else []}
+        return {
+            "positions": self._positions_sequence[0] if self._positions_sequence else []
+        }
 
 
 class _FakeClient:
@@ -192,9 +198,7 @@ def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
 
     class _Registry:
         async def run_core_providers(self, client, config, agent_id=""):
-            return {
-                "executors": SimpleNamespace(data={"executors": running_executors})
-            }
+            return {"executors": SimpleNamespace(data={"executors": running_executors})}
 
     client = _FakeClient(positions_sequence)
     notifications = []
