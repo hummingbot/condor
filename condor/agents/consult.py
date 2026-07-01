@@ -145,9 +145,12 @@ async def _run_agent_to_completion(
         get_project_dir,
     )
 
-    if agent.server_required and server_name:
+    # A server pinned on the Agent itself wins over the ambient chat server; when
+    # the agent isn't pinned, fall back to the caller's (chat's) resolved server.
+    effective_server = agent.server_name or server_name
+    if agent.server_required and effective_server:
         mcp_servers = build_mcp_servers_for_agent(
-            server_name,
+            effective_server,
             user_id,
             chat_id,
             agent_slug=slug,

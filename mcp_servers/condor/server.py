@@ -266,6 +266,7 @@ async def manage_trading_agent(
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
     server_required: bool | None = None,
+    server_name: str | None = None,
 ) -> dict:
     """Manage trading agents and strategies.
 
@@ -337,6 +338,7 @@ async def manage_trading_agent(
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: Trigger describing when to consult the agent (create/update_agent). Set it to make the agent consultable — recommended for every agent, on any model.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
+        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
 
     Returns:
         Action-specific result dict.
@@ -355,6 +357,7 @@ async def manage_trading_agent(
         tools=tools,
         when_to_consult=when_to_consult,
         server_required=server_required,
+        server_name=server_name,
     )
 
 

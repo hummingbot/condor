@@ -171,6 +171,7 @@ class AgentDetail(BaseModel):
     when_to_consult: str = ""
     consultable: bool = False
     server_required: bool = True
+    server_name: str = ""
     strategies: list[StrategySummary] = []
 
 
@@ -204,6 +205,7 @@ class CreateAgentRequest(BaseModel):
     tools: list[str] = []
     when_to_consult: str = ""
     server_required: bool = True
+    server_name: str = ""
 
 
 class UpdateAgentMdRequest(BaseModel):
@@ -770,6 +772,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         when_to_consult=agent.when_to_consult,
         consultable=agent.consultable,
         server_required=agent.server_required,
+        server_name=agent.server_name,
         strategies=strat_summaries,
     )
 
@@ -787,6 +790,7 @@ async def create_agent(
         tools=req.tools,
         when_to_consult=req.when_to_consult,
         server_required=req.server_required,
+        server_name=req.server_name,
         created_by=user.id,
     )
     return AgentSummary(

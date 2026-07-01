@@ -181,6 +181,7 @@ def _manage_agent(
     tools: list[str] | None,
     when_to_consult: str | None,
     server_required: bool | None,
+    server_name: str | None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -197,6 +198,7 @@ def _manage_agent(
             tools=tools,
             when_to_consult=when_to_consult or "",
             server_required=True if server_required is None else server_required,
+            server_name=server_name or "",
             created_by=settings.user_id,
         )
         return {
@@ -221,6 +223,7 @@ def _manage_agent(
             "tools": a.tools,
             "when_to_consult": a.when_to_consult,
             "server_required": a.server_required,
+            "server_name": a.server_name,
             "consultable": a.consultable,
             "created_by": a.created_by,
             "created_at": a.created_at,
@@ -246,6 +249,8 @@ def _manage_agent(
             a.when_to_consult = when_to_consult
         if server_required is not None:
             a.server_required = server_required
+        if server_name is not None:
+            a.server_name = server_name
         store.update(a)
         return {"updated": True, "agent_slug": a.slug, "consultable": a.consultable}
 
@@ -349,8 +354,15 @@ async def _agent_lifecycle(
                     config["execution_mode"] = "dry_run"
                 config_dict.update(config)
             if not config or "server_name" not in config:
-                effective = settings.active_server or get_effective_server(
-                    settings.chat_id
+                # A server pinned on the owning Agent wins over the ambient chat
+                # server, mirroring consult/delegate resolution.
+                from condor.agents.agent import AgentStore
+
+                owner = AgentStore().get(strategy.agent_slug)
+                effective = (
+                    (owner.server_name if owner else "")
+                    or settings.active_server
+                    or get_effective_server(settings.chat_id)
                 )
                 if not effective:
                     cm = get_config_manager()
@@ -603,6 +615,7 @@ async def manage_trading_agent(
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
     server_required: bool | None = None,
+    server_name: str | None = None,
 ) -> dict:
     # Agent definitions (identities) — distinct from strategies and instances
     if action == "list_agent_definitions":
@@ -626,6 +639,7 @@ async def manage_trading_agent(
             tools,
             when_to_consult,
             server_required,
+            server_name,
         )
 
     # Strategy operations

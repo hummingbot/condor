@@ -53,6 +53,10 @@ class Agent:
     tools: list[str] = field(default_factory=list)
     when_to_consult: str = ""  # empty => not offered as consultable
     server_required: bool = True
+    # Pin this agent to a specific hummingbot-api server. When set, the agent's
+    # mcp-hummingbot subprocess is initialized against THIS server regardless of
+    # the chat's active server. Empty => fall back to the ambient chat server.
+    server_name: str = ""
     created_by: int = 0
     created_at: str = ""
 
@@ -97,6 +101,7 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
             tools=meta.get("tools", []) or [],
             when_to_consult=meta.get("when_to_consult", ""),
             server_required=meta.get("server_required", True),
+            server_name=meta.get("server_name", "") or "",
             created_by=meta.get("created_by", 0),
             created_at=meta.get("created_at", ""),
         )
@@ -147,6 +152,7 @@ class AgentStore:
         tools: list[str] | None = None,
         when_to_consult: str = "",
         server_required: bool = True,
+        server_name: str = "",
         created_by: int = 0,
     ) -> Agent:
         agent = Agent(
@@ -158,6 +164,7 @@ class AgentStore:
             tools=tools or [],
             when_to_consult=when_to_consult,
             server_required=server_required,
+            server_name=server_name,
             created_by=created_by,
         )
         self._save(agent)
@@ -191,6 +198,7 @@ class AgentStore:
             "tools": agent.tools,
             "when_to_consult": agent.when_to_consult,
             "server_required": agent.server_required,
+            "server_name": agent.server_name,
             "created_by": agent.created_by,
             "created_at": agent.created_at,
         }
