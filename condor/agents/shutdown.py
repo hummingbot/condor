@@ -16,6 +16,7 @@ the body is free-form instructions handed to the bounded LLM cleanup pass.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -256,6 +257,82 @@ async def _verify_and_retry(
     return [p for p in positions if not _should_remain_open(p, policy)]
 
 
+def _build_llm_context(
+    policy: ShutdownPolicy,
+    running: list[dict],
+    positions: list[dict],
+    failures: list[str],
+) -> str:
+    """Post-baseline state handed to the LLM cleanup pass."""
+    lines = [
+        "An emergency shutdown was triggered. The deterministic winddown has ALREADY run.",
+        f"Policy: on_kill_switch={policy.on_kill_switch}, "
+        f"cancel_open_orders={policy.cancel_open_orders}.",
+        "",
+        f"Executors still running after the baseline stop ({len(running)}):",
+    ]
+    lines += [
+        f"  - {ex.get('id') or ex.get('executor_id') or '?'} "
+        f"{ex.get('connector', '?')} {ex.get('pair', '')}".rstrip()
+        for ex in running
+    ] or ["  (none)"]
+    lines += ["", f"Open positions after the baseline stop ({len(positions)}):"]
+    lines += [
+        f"  - {_describe_position(p)} pnl="
+        f"{p.get('unrealized_pnl_quote', p.get('unrealized_pnl', '?'))}"
+        for p in positions
+    ] or ["  (none)"]
+    if failures:
+        lines += ["", f"Deterministic winddown errors ({len(failures)}):"]
+        lines += [f"  - {f}" for f in failures]
+    return "\n".join(lines)
+
+
+async def _run_llm_cleanup(
+    engine: Any,
+    client: Any,
+    policy: ShutdownPolicy,
+    body: str,
+    failures: list[str],
+) -> None:
+    """Best-effort LLM nuance pass on top of the guaranteed deterministic floor.
+
+    Bounded by a hard 300s timeout (the same ceiling the tick ACP session runs
+    under) and fully fail-open: the safety-critical winddown already happened, so
+    any hang or error here is logged and swallowed — it can never strand a position
+    the way an LLM-only shutdown could.
+    """
+    agent = getattr(engine, "agent", None)
+    if not body or agent is None:
+        return
+    try:
+        from .consult import _run_agent_to_completion
+
+        running = await _get_running_executors(engine, client)
+        positions = await _fetch_positions(client, engine.agent_id)
+        context = _build_llm_context(policy, running, positions, failures)
+        async with asyncio.timeout(300):
+            await _run_agent_to_completion(
+                slug=agent.slug,
+                user_id=engine.user_id,
+                chat_id=engine.chat_id,
+                server_name=engine.config.get("server_name"),
+                task=body,
+                context=context,
+                permission_callback=None,  # unattended auto-approve, like DELEGATE
+            )
+    except asyncio.TimeoutError:
+        log.warning(
+            "TickEngine %s: shutdown LLM cleanup timed out (floor already secured)",
+            engine.agent_id,
+        )
+    except Exception:
+        log.exception(
+            "TickEngine %s: shutdown LLM cleanup failed (floor already secured)",
+            engine.agent_id,
+        )
+
+
 async def run_shutdown(engine: Any, reason: str) -> None:
     """Wind down this session's executors/positions per its ``shutdown.md`` policy.
 
@@ -272,7 +349,7 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     the self-stop; this function performs the winddown itself and never raises for
     an individual API failure -- failures are collected and surfaced.
     """
-    policy, _body = load_shutdown_policy(engine.strategy)
+    policy, body = load_shutdown_policy(engine.strategy)
     agent_id = engine.agent_id
     log.warning(
         "TickEngine %s: SHUTDOWN starting -- %s (policy=%s)",
@@ -303,6 +380,9 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         return
 
     stopped, failures = await _deterministic_baseline(engine, client, policy)
+
+    # LLM nuance pass on top of the guaranteed floor (best-effort, bounded).
+    await _run_llm_cleanup(engine, client, policy, body, failures)
 
     stranded = await _verify_and_retry(engine, client, policy)
 

@@ -358,3 +358,57 @@ def test_shutdown_threshold_disabled_by_default():
     state = _risk(soft=-1.0, hard=-1.0).get_state(_FakeTracker(99.0))
     assert state.should_shutdown is False
     assert state.is_blocked is False
+
+
+# ── bounded LLM cleanup pass ──
+
+
+def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
+    engine, client, notes = _fake_engine(running, positions_seq, monkeypatch, tmp_path)
+    engine.agent = SimpleNamespace(slug="acme")
+    engine.user_id = 7
+    engine.chat_id = 99
+    engine.strategy.dir.mkdir(parents=True, exist_ok=True)
+    (engine.strategy.dir / "shutdown.md").write_text(
+        f"---\non_kill_switch: flatten_all\n---\n{body}\n"
+    )
+    return engine, client, notes
+
+
+def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
+    from condor.agents import consult as consult_module
+
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Do cleanup."
+    )
+    seen = {}
+
+    async def fake_complete(**kwargs):
+        seen.update(kwargs)
+        return "done"
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_complete)
+    asyncio.run(run_shutdown(engine, "breach"))
+    assert seen["task"] == "Do cleanup."
+    assert seen["slug"] == "acme"
+    assert seen["permission_callback"] is None
+
+
+def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
+    from condor.agents import consult as consult_module
+
+    running = [{"id": "e1", "connector": "binance_perpetual"}]
+    engine, client, notes = _engine_with_llm(
+        running, [[]], tmp_path, monkeypatch, body="Cleanup."
+    )
+
+    async def boom(**kwargs):
+        raise RuntimeError("model exploded")
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", boom)
+    asyncio.run(run_shutdown(engine, "breach"))
+    # The deterministic floor still ran and the winddown completed cleanly.
+    assert dict(client.executors.stop_calls) == {"e1": False}
+    assert any("complete" in n for n in notes)
+    assert not any("🚨" in n for n in notes)
