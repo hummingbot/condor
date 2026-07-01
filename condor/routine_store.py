@@ -84,9 +84,7 @@ class _HttpBot:
             # Honor the buffer's name (e.g. "Daily_PnL.html") and the explicit
             # `filename` kwarg so the file arrives with a real name + extension
             # instead of a generic, extension-less "file".
-            filename = (
-                kw.get("filename") or getattr(document, "name", None) or "file"
-            )
+            filename = kw.get("filename") or getattr(document, "name", None) or "file"
             mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
             files = {"document": (filename, document, mime)}
         return await self._post("sendDocument", data, files=files)
@@ -97,6 +95,17 @@ class _HttpBot:
 
 
 _http_bot = _HttpBot()
+
+
+def _agent_of(routine) -> str:
+    """Which assistant produced this routine's reports.
+
+    A routine's ``source`` is ``"agent:<slug>"`` for an agent/expert-local routine
+    or ``"global"`` for the shared/condor library — so reports are attributed to
+    the owning expert, else to the chat ``condor``.
+    """
+    src = getattr(routine, "source", "global") or "global"
+    return src.split(":", 1)[1] if src.startswith("agent:") else "condor"
 
 
 class WebRoutineContext:
@@ -127,14 +136,22 @@ class RoutineStore:
         """Inject the Telegram bot so web-triggered routines can send messages."""
         self._bot = bot
 
+    def get_bot(self):
+        """Return the registered Telegram bot, or None if not set yet."""
+        return self._bot
+
     # ── Discovery ──
 
     def _discover_all(self) -> dict[str, "RoutineInfo"]:
-        """Discover global routines + agent routines, merged into one dict."""
+        """Discover routines: the general library (root ``routines/``) + each agent's.
+
+        The chat ``condor`` sees the general library plus every agent's routines
+        (prefixed). Each agent's own routines stay isolated under its slug.
+        """
         all_routines = dict(discover_routines(force_reload=True))
 
-        # Scan trading_agents/*/routines/
-        agents_dir = Path(__file__).resolve().parent.parent / "trading_agents"
+        # Scan agents/*/routines/
+        agents_dir = Path(__file__).resolve().parent.parent / "agents"
         if agents_dir.exists():
             for agent_dir in sorted(agents_dir.iterdir()):
                 routines_path = agent_dir / "routines"
@@ -179,6 +196,7 @@ class RoutineStore:
                     "category": info.category,
                     "source": info.source,
                     "fields": info.get_fields(),
+                    "last_modified": info.last_modified,
                     "report_count": report_counts.get(name, 0)
                     or report_counts.get(name.split("/")[-1], 0),
                 }
@@ -264,10 +282,7 @@ class RoutineStore:
         if "/" in routine_name:
             slug, rname = routine_name.split("/", 1)
             agents_dir = (
-                Path(__file__).resolve().parent.parent
-                / "trading_agents"
-                / slug
-                / "routines"
+                Path(__file__).resolve().parent.parent / "agents" / slug / "routines"
             )
             agent_routines = discover_routines_from_path(agents_dir, agent_slug=slug)
             return agent_routines.get(rname)
@@ -319,7 +334,8 @@ class RoutineStore:
         reports._last_report_id = None
         try:
             cfg = routine.config_class(**config)
-            raw = await routine.run_fn(cfg, ctx)
+            with reports.attribute_to(_agent_of(routine)):
+                raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except Exception as e:
             tb = traceback.format_exc()
@@ -400,7 +416,8 @@ class RoutineStore:
         start = time.time()
         try:
             cfg = routine.config_class(**config)
-            raw = await routine.run_fn(cfg, ctx)
+            with reports.attribute_to(_agent_of(routine)):
+                raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")
@@ -478,7 +495,8 @@ class RoutineStore:
                 reports._last_report_id = None
                 try:
                     cfg = routine.config_class(**config)
-                    raw = await routine.run_fn(cfg, ctx)
+                    with reports.attribute_to(_agent_of(routine)):
+                        raw = await routine.run_fn(cfg, ctx)
                     result = normalize_result(raw)
                 except Exception as e:
                     tb = traceback.format_exc()

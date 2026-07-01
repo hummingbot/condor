@@ -1,14 +1,11 @@
-const TOKEN_KEY = "condor_token";
+import { authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = localStorage.getItem(TOKEN_KEY);
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    ...authHeaders(),
     ...(init?.headers as Record<string, string>),
   };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -337,12 +334,34 @@ export interface RunningInstance {
   risk_limits: Record<string, unknown>;
 }
 
-export interface AgentSummary {
+export interface StrategySummary {
   slug: string;
   name: string;
   description: string;
   status: string;
   agent_id: string;
+  session_count: number;
+  experiment_count: number;
+  tick_count: number;
+  daily_pnl: number;
+  total_pnl: number;
+  total_volume: number;
+  open_positions: number;
+  instances: RunningInstance[];
+}
+
+export interface AgentSummary {
+  slug: string;
+  name: string;
+  description: string;
+  consultable: boolean;
+  when_to_consult: string;
+  agent_key: string;
+  strategy_count: number;
+  strategies: StrategySummary[];
+  // Rolled-up aggregates across the agent's strategies (FEAT-004) for summary cards.
+  status: string;
+  agent_id?: string;
   session_count: number;
   experiment_count: number;
   tick_count: number;
@@ -409,13 +428,46 @@ export interface ExperimentInfo {
   agent_key: string;
   snapshot_count: number;
   created_at: string;
+  error?: boolean;
 }
 
+// Agent = identity + brain (AGENT.md, tools, consult capability) that owns strategies.
 export interface AgentDetail {
   slug: string;
   name: string;
   description: string;
   agent_md: string;
+  agent_key: string;
+  tools: string[];
+  when_to_consult: string;
+  consultable: boolean;
+  server_required: boolean;
+  server_name: string;
+  strategies: StrategySummary[];
+}
+
+// Delegation = a fire-and-forget background task handed to a detached Agent
+// instance (DELEGATE mode). Ephemeral + in-process; status drives the UI.
+export interface Delegation {
+  task_id: string;
+  agent: string;
+  user_id: number;
+  chat_id: number;
+  server_name: string | null;
+  task: string;
+  status: "running" | "done" | "error" | "stopped";
+  result: string;
+  error: string;
+}
+
+// Strategy = a playbook that loops under an Agent. Holds the operational
+// history: sessions, experiments, live instances, config and learnings.
+export interface StrategyDetail {
+  slug: string;
+  agent_slug: string;
+  name: string;
+  description: string;
+  strategy_md: string;
   config: Record<string, unknown>;
   default_trading_context: string;
   learnings: string;
@@ -449,6 +501,8 @@ export interface RoutineInfo {
   category: string;
   source: string;
   fields: Record<string, RoutineFieldInfo>;
+  /** Source-file modification time (epoch seconds), or null if unavailable. */
+  last_modified: number | null;
   report_count: number;
 }
 
@@ -629,107 +683,107 @@ export const api = {
 
   getServerStatus: (name: string) =>
     apiFetch<{ online: boolean; error?: string }>(
-      `/api/v1/servers/${name}/status`,
+      `/api/v1/servers/${encodeURIComponent(name)}/status`,
     ),
 
   getPortfolio: (server: string, refresh = false) =>
     apiFetch<PortfolioResponse>(
-      `/api/v1/servers/${server}/portfolio${refresh ? "?refresh=true" : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/portfolio${refresh ? "?refresh=true" : ""}`,
     ),
 
   getPortfolioHistory: (server: string, range = "1D", breakdown = false) =>
     apiFetch<PortfolioHistoryResponse>(
-      `/api/v1/servers/${server}/portfolio/history?range=${range}${breakdown ? "&breakdown=true" : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/portfolio/history?range=${encodeURIComponent(range)}${breakdown ? "&breakdown=true" : ""}`,
     ),
 
   getBots: (server: string) =>
-    apiFetch<BotsPageResponse>(`/api/v1/servers/${server}/bots`),
+    apiFetch<BotsPageResponse>(`/api/v1/servers/${encodeURIComponent(server)}/bots`),
 
   getBot: (server: string, botId: string) =>
-    apiFetch<BotDetail>(`/api/v1/servers/${server}/bots/${botId}`),
+    apiFetch<BotDetail>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botId)}`),
 
   getAvailableConfigs: (server: string) =>
     apiFetch<AvailableControllersResponse>(
-      `/api/v1/servers/${server}/controllers/configs`,
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`,
     ),
 
   getConfigDetail: (server: string, configId: string) =>
     apiFetch<ControllerConfigDetail>(
-      `/api/v1/servers/${server}/controllers/configs/${configId}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
     ),
 
   updateConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
+    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
 
   updateBotControllerConfig: (server: string, botName: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
+    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
 
   updateConfigYaml: (server: string, configId: string, yamlContent: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
+    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
       method: "PUT",
       body: JSON.stringify({ yaml_content: yamlContent }),
     }),
 
   getControllerConfigTemplate: (server: string, controllerType: string, controllerName: string) =>
     apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/template`,
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/template`,
     ),
 
   createControllerConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ created: boolean; config_id: string }>(`/api/v1/servers/${server}/controllers/configs`, {
+    apiFetch<{ created: boolean; config_id: string }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`, {
       method: "POST",
       body: JSON.stringify({ ...data, id: configId }),
     }),
 
   deleteControllerConfig: (server: string, configId: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/controllers/configs/${configId}`, {
+    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
       method: "DELETE",
     }),
 
   deleteController: (server: string, controllerType: string, controllerName: string) =>
     apiFetch<{ deleted: boolean }>(
-      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}`,
       { method: "DELETE" },
     ),
 
   getControllerSource: (server: string, controllerType: string, controllerName: string) =>
     apiFetch<ControllerSourceResponse>(
-      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/source`,
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
     ),
 
   updateControllerSource: (server: string, controllerType: string, controllerName: string, source: string) =>
     apiFetch<{ updated: boolean }>(
-      `/api/v1/servers/${server}/controllers/${controllerType}/${controllerName}/source`,
+      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
       { method: "PUT", body: JSON.stringify({ source }) },
     ),
 
   deployBot: (server: string, data: DeployBotRequest) =>
-    apiFetch<Record<string, unknown>>(`/api/v1/servers/${server}/bots/deploy`, {
+    apiFetch<Record<string, unknown>>(`/api/v1/servers/${encodeURIComponent(server)}/bots/deploy`, {
       method: "POST",
       body: JSON.stringify(data),
     }),
 
   stopBot: (server: string, botName: string) =>
     apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/stop`,
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/stop`,
       { method: "POST" },
     ),
 
   stopControllers: (server: string, botName: string, controllerNames: string[]) =>
     apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/stop`,
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/stop`,
       { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
     ),
 
   startControllers: (server: string, botName: string, controllerNames: string[]) =>
     apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${server}/bots/${encodeURIComponent(botName)}/controllers/start`,
+      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/start`,
       { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
     ),
 
@@ -755,7 +809,7 @@ export const api = {
     if (params.cursor) qs.set("cursor", params.cursor);
     const q = qs.toString();
     return apiFetch<ControllerPerformanceHistoryResponse>(
-      `/api/v1/servers/${server}/controller-performance/history${q ? `?${q}` : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
     );
   },
 
@@ -777,12 +831,12 @@ export const api = {
     if (params.offset) qs.set("offset", String(params.offset));
     const q = qs.toString();
     return apiFetch<BotRunsResponse>(
-      `/api/v1/servers/${server}/bot-runs${q ? `?${q}` : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs${q ? `?${q}` : ""}`,
     );
   },
 
   deleteBotRun: (server: string, botRunId: number) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${server}/bot-runs/${botRunId}`, {
+    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bot-runs/${botRunId}`, {
       method: "DELETE",
     }),
 
@@ -798,7 +852,7 @@ export const api = {
     if (params?.limit) qs.set("limit", String(params.limit));
     const q = qs.toString();
     return apiFetch<ExecutorInfo[]>(
-      `/api/v1/servers/${server}/executors${q ? `?${q}` : ""}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors${q ? `?${q}` : ""}`,
     );
   },
 
@@ -821,7 +875,7 @@ export const api = {
     if (params.status) qs.set("status", params.status);
     if (params.controller_id) qs.set("controller_id", params.controller_id);
     return apiFetch<{ executors: ExecutorInfo[]; next_cursor: string | null }>(
-      `/api/v1/servers/${server}/executors/page?${qs.toString()}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/page?${qs.toString()}`,
     );
   },
 
@@ -830,50 +884,50 @@ export const api = {
     data: { executor_type: string; config: Record<string, unknown>; account_name?: string; controller_id?: string },
   ) =>
     apiFetch<{ status: string; executor_id: string }>(
-      `/api/v1/servers/${server}/executors`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors`,
       { method: "POST", body: JSON.stringify(data) },
     ),
 
   stopExecutor: (server: string, executorId: string, keepPosition = false) =>
     apiFetch<{ status: string; result: unknown }>(
-      `/api/v1/servers/${server}/executors/${executorId}/stop?keep_position=${keepPosition}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}/stop?keep_position=${keepPosition}`,
       { method: "POST" },
     ),
 
   getPositionsHeld: (server: string) =>
-    apiFetch<PositionsResponse>(`/api/v1/servers/${server}/executors/positions`),
+    apiFetch<PositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/executors/positions`),
 
   clearPositionHeld: (server: string, connector: string, pair: string, controllerId?: string) => {
     const params = controllerId ? `?controller_id=${encodeURIComponent(controllerId)}` : "";
     return apiFetch<{ status: string }>(
-      `/api/v1/servers/${server}/executors/positions/${connector}/${pair}${params}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/positions/${encodeURIComponent(connector)}/${encodeURIComponent(pair)}${params}`,
       { method: "DELETE" },
     );
   },
 
   getConsolidatedPositions: (server: string) =>
-    apiFetch<ConsolidatedPositionsResponse>(`/api/v1/servers/${server}/positions`),
+    apiFetch<ConsolidatedPositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/positions`),
 
   getConnectors: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${server}/market/connectors`),
+    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connectors`),
 
   getConnectedExchanges: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${server}/market/connected-exchanges`),
+    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
 
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
-      `/api/v1/servers/${server}/market/prices?connector=${connector}&trading_pair=${pair}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
     ),
 
   getRateOracleRates: (server: string, tradingPairs: string[]) =>
     apiFetch<{ rates: Record<string, number> }>(
-      `/api/v1/servers/${server}/rate-oracle/rates`,
+      `/api/v1/servers/${encodeURIComponent(server)}/rate-oracle/rates`,
       { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
     ),
 
   getTradingRules: (server: string, connector: string) =>
     apiFetch<TradingRulesResponse>(
-      `/api/v1/servers/${server}/market/trading-rules?connector=${connector}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/market/trading-rules?connector=${encodeURIComponent(connector)}`,
     ),
 
   getOrderBook: (
@@ -883,7 +937,7 @@ export const api = {
     depth = 20,
   ) =>
     apiFetch<OrderBookResponse>(
-      `/api/v1/servers/${server}/market/order-book?connector=${connector}&trading_pair=${pair}&depth=${depth}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/market/order-book?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&depth=${depth}`,
     ),
 
   getCandles: (
@@ -895,33 +949,28 @@ export const api = {
     startTime?: number,
     endTime?: number,
   ) => {
-    let url = `/api/v1/servers/${server}/market/candles?connector=${connector}&trading_pair=${pair}&interval=${interval}&limit=${limit}`;
+    let url = `/api/v1/servers/${encodeURIComponent(server)}/market/candles?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
     if (startTime) url += `&start_time=${startTime}`;
     if (endTime) url += `&end_time=${endTime}`;
     return apiFetch<CandleData[]>(url);
   },
 
-  // ── Agents ──
+  // ── Agents (identity + brain) ──
 
   getAgents: () => apiFetch<AgentSummary[]>("/api/v1/agents"),
 
-  getAgentPerformance: (slug: string) =>
-    apiFetch<AgentPerformanceResponse>(`/api/v1/agents/${slug}/performance`),
-
-  getAgentSessionExecutors: (slug: string, sessionNum: number) =>
-    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
-      `/api/v1/agents/${slug}/sessions/${sessionNum}/executors`,
-    ),
-
   getAgent: (slug: string) =>
-    apiFetch<AgentDetail>(`/api/v1/agents/${slug}`),
+    apiFetch<AgentDetail>(`/api/v1/agents/${encodeURIComponent(slug)}`),
 
   createAgent: (data: {
     name: string;
     description?: string;
     instructions?: string;
-    default_trading_context?: string;
-    config?: Record<string, unknown>;
+    agent_key?: string;
+    tools?: string[];
+    when_to_consult?: string;
+    server_required?: boolean;
+    server_name?: string;
   }) =>
     apiFetch<AgentSummary>("/api/v1/agents", {
       method: "POST",
@@ -929,68 +978,148 @@ export const api = {
     }),
 
   updateAgentMd: (slug: string, content: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/agents/${slug}`, {
+    apiFetch<{ updated: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
       method: "PUT",
       body: JSON.stringify({ content }),
-    }),
-
-  updateAgentConfig: (slug: string, config: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/agents/${slug}/config`, {
-      method: "PUT",
-      body: JSON.stringify({ config }),
     }),
 
   deleteAgent: (slug: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/agents/${slug}`, {
+    apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
       method: "DELETE",
     }),
 
-  startAgent: (slug: string, config: Record<string, unknown> = {}, trading_context = "") =>
+  consultAgent: (
+    slug: string,
+    data: { task: string; context?: string; chat_id?: number; server_name?: string },
+  ) =>
+    apiFetch<{ agent: string; answer: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/consult`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  // ── Delegations (fire-and-forget background agent tasks) ──
+
+  getDelegations: () =>
+    apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
+
+  stopDelegation: (taskId: string) =>
+    apiFetch<{ task_id: string; status: string }>(
+      `/api/v1/agents/delegations/${encodeURIComponent(taskId)}/stop`,
+      { method: "POST" },
+    ),
+
+  // ── Strategies (playbooks that loop under an Agent) ──
+
+  getStrategies: (slug: string) =>
+    apiFetch<StrategySummary[]>(`/api/v1/agents/${encodeURIComponent(slug)}/strategies`),
+
+  getStrategy: (slug: string, sslug: string) =>
+    apiFetch<StrategyDetail>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+    ),
+
+  createStrategy: (
+    slug: string,
+    data: {
+      name: string;
+      description?: string;
+      instructions?: string;
+      agent_key?: string;
+      default_trading_context?: string;
+      config?: Record<string, unknown>;
+    },
+  ) =>
+    apiFetch<StrategySummary>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  updateStrategyMd: (slug: string, sslug: string, content: string) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    ),
+
+  updateStrategyConfig: (slug: string, sslug: string, config: Record<string, unknown>) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config`,
+      { method: "PUT", body: JSON.stringify({ config }) },
+    ),
+
+  deleteStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+      { method: "DELETE" },
+    ),
+
+  getStrategyPerformance: (slug: string, sslug: string) =>
+    apiFetch<AgentPerformanceResponse>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/performance`,
+    ),
+
+  getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
+    ),
+
+  startStrategy: (
+    slug: string,
+    sslug: string,
+    config: Record<string, unknown> = {},
+    trading_context = "",
+  ) =>
     apiFetch<{ started: boolean; agent_id: string }>(
-      `/api/v1/agents/${slug}/start`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/start`,
       { method: "POST", body: JSON.stringify({ config, trading_context }) },
     ),
 
-  stopAgent: (slug: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/agents/${slug}/stop`, {
-      method: "POST",
-    }),
+  stopStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ stopped: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/stop`,
+      { method: "POST" },
+    ),
 
-  pauseAgent: (slug: string) =>
-    apiFetch<{ paused: boolean }>(`/api/v1/agents/${slug}/pause`, {
-      method: "POST",
-    }),
+  pauseStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ paused: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/pause`,
+      { method: "POST" },
+    ),
 
-  resumeAgent: (slug: string) =>
-    apiFetch<{ resumed: boolean }>(`/api/v1/agents/${slug}/resume`, {
-      method: "POST",
-    }),
+  resumeStrategy: (slug: string, sslug: string) =>
+    apiFetch<{ resumed: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/resume`,
+      { method: "POST" },
+    ),
 
-  getAgentLearnings: (slug: string) =>
-    apiFetch<{ content: string }>(`/api/v1/agents/${slug}/learnings`),
-
-  updateAgentLearnings: (slug: string, content: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/agents/${slug}/learnings`, {
-      method: "PUT",
-      body: JSON.stringify({ content }),
-    }),
-
-  getAgentSessions: (slug: string) =>
-    apiFetch<{ sessions: SessionInfo[] }>(`/api/v1/agents/${slug}/sessions`),
-
-  getSessionJournal: (slug: string, sessionNum: number) =>
+  getStrategyLearnings: (slug: string, sslug: string) =>
     apiFetch<{ content: string }>(
-      `/api/v1/agents/${slug}/sessions/${sessionNum}/journal`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
     ),
 
-  getSessionSnapshots: (slug: string, sessionNum: number) =>
+  updateStrategyLearnings: (slug: string, sslug: string, content: string) =>
+    apiFetch<{ updated: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    ),
+
+  getStrategySessions: (slug: string, sslug: string) =>
+    apiFetch<{ sessions: SessionInfo[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions`,
+    ),
+
+  getSessionJournal: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ content: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/journal`,
+    ),
+
+  getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
-      `/api/v1/agents/${slug}/sessions/${sessionNum}/snapshots`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
     ),
 
-  getSnapshot: (slug: string, sessionNum: number, tick: number) =>
+  getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>
     apiFetch<{ content: string; tick: number }>(
-      `/api/v1/agents/${slug}/sessions/${sessionNum}/snapshots/${tick}`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots/${tick}`,
     ),
 
   // ── Backtesting ──
@@ -1005,57 +1134,59 @@ export const api = {
       trade_cost?: number;
     },
   ) =>
-    apiFetch<BacktestTask>(`/api/v1/servers/${server}/backtesting/tasks`, {
+    apiFetch<BacktestTask>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`, {
       method: "POST",
       body: JSON.stringify(data),
     }),
 
   listBacktestTasks: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${server}/backtesting/tasks`),
+    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`),
 
   getBacktestTask: (server: string, taskId: string) =>
     apiFetch<BacktestTask>(
-      `/api/v1/servers/${server}/backtesting/tasks/${taskId}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
     ),
 
   deleteBacktestTask: (server: string, taskId: string) =>
     apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${server}/backtesting/tasks/${taskId}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
       { method: "DELETE" },
     ),
 
   getSavedBacktests: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${server}/backtesting/saved`),
+    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved`),
 
   deleteSavedBacktest: (server: string, taskId: string) =>
     apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${server}/backtesting/saved/${taskId}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved/${encodeURIComponent(taskId)}`,
       { method: "DELETE" },
     ),
 
   // ── Experiments ──
 
-  getAgentExperiments: (slug: string) =>
-    apiFetch<{ experiments: ExperimentInfo[] }>(`/api/v1/agents/${slug}/experiments`),
+  getAgentExperiments: (slug: string, sslug: string) =>
+    apiFetch<{ experiments: ExperimentInfo[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments`,
+    ),
 
-  getExperiment: (slug: string, expNum: number) =>
+  getExperiment: (slug: string, sslug: string, expNum: number) =>
     apiFetch<{ content: string; number: number }>(
-      `/api/v1/agents/${slug}/experiments/${expNum}`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments/${expNum}`,
     ),
 
   // ── Archived Bots ──
 
   getArchivedBots: (server: string) =>
-    apiFetch<{ bots: ArchivedBotSummary[] }>(`/api/v1/servers/${server}/archived`),
+    apiFetch<{ bots: ArchivedBotSummary[] }>(`/api/v1/servers/${encodeURIComponent(server)}/archived`),
 
   getArchivedBotPerformance: (server: string, dbPath: string, includeExecutors = false) =>
     apiFetch<ArchivedBotPerformance>(
-      `/api/v1/servers/${server}/archived/performance?db_path=${encodeURIComponent(dbPath)}&include_executors=${includeExecutors}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/archived/performance?db_path=${encodeURIComponent(dbPath)}&include_executors=${includeExecutors}`,
     ),
 
   getArchivedExecutors: (server: string, dbPath: string, offset = 0, limit = 50) =>
     apiFetch<PaginatedExecutors>(
-      `/api/v1/servers/${server}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
+      `/api/v1/servers/${encodeURIComponent(server)}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
     ),
 
   // ── Reports ──
@@ -1074,7 +1205,7 @@ export const api = {
   getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
 
   deleteReport: (id: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/reports/${id}`, { method: "DELETE" }),
+    apiFetch<{ deleted: boolean }>(`/api/v1/reports/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   // ── Routines ──
 
@@ -1084,7 +1215,7 @@ export const api = {
     apiFetch<RoutineInstance[]>("/api/v1/routines/instances"),
 
   getRoutineInstance: (id: string) =>
-    apiFetch<RoutineInstance>(`/api/v1/routines/instances/${id}`),
+    apiFetch<RoutineInstance>(`/api/v1/routines/instances/${encodeURIComponent(id)}`),
 
   runRoutine: (server: string, name: string, config: Record<string, unknown> = {}) =>
     apiFetch<{ instance_id: string }>(
@@ -1104,7 +1235,7 @@ export const api = {
     ),
 
   stopRoutineInstance: (id: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${id}/stop`, {
+    apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${encodeURIComponent(id)}/stop`, {
       method: "POST",
     }),
 
@@ -1169,7 +1300,7 @@ export const api = {
   getGatewayStatus: (server: string) =>
     apiFetch<GatewayStatus>(`/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`),
 
-  startGateway: (server: string, data: { image: string; passphrase: string; port?: number; dev_mode?: boolean }) =>
+  startGateway: (server: string, data: { image: string; port?: number }) =>
     apiFetch<{ started: boolean }>(`/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`, {
       method: "POST",
       body: JSON.stringify(data),

@@ -13,58 +13,19 @@ import {
 } from "recharts";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
-
-// ── Helpers ──
-
-function toMs(ts: string | number): number {
-  if (typeof ts === "number") return ts > 1e12 ? ts : ts * 1000;
-  const parsed = Date.parse(ts);
-  return isNaN(parsed) ? 0 : parsed;
-}
-
-function formatTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
-}
-
-function formatDateTime(ms: number): string {
-  const d = new Date(ms);
-  return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
-}
-
-/** Compute net position value in quote from positions_summary */
-function positionQuoteValue(positions: Record<string, unknown>[]): number {
-  let value = 0;
-  for (const pos of positions) {
-    const amt = Number(pos.amount || pos.net_amount_base || 0);
-    const price = Number(pos.breakeven_price || pos.entry_price || pos.current_price || 0);
-    const side = String(pos.side || pos.position_side || "");
-    const isSell = side.toLowerCase().includes("sell") || side.toLowerCase().includes("short");
-    const notional = amt * price;
-    value += isSell ? -notional : notional;
-  }
-  return value;
-}
+import { formatCurrencyVolume, formatCurrencyPnl, formatDateTime, formatTime, pnlColor, toMs } from "@/lib/formatters";
+import { positionQuoteValue, type PnlChartPoint } from "@/lib/pnl-chart";
 
 // ── Aggregation ──
 
 type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
-
-interface AggPoint {
-  time: number;
-  realized: number;
-  unrealized: number;
-  total: number;
-  volume: number;
-  position: number;
-}
 
 function aggregate(
   snapshots: ControllerPerformanceSnapshot[],
   enabledIds: Set<string>,
   controllers: ControllerInfo[],
   convertFn?: ConvertFn,
-): AggPoint[] {
+): PnlChartPoint[] {
   if (!snapshots || snapshots.length === 0) return [];
 
   // Build a lookup from controller id -> trading_pair using live controller data
@@ -101,7 +62,7 @@ function aggregate(
   const cursors: Record<string, number> = {};
   for (const c of cids) cursors[c] = 0;
 
-  const points: AggPoint[] = [];
+  const points: PnlChartPoint[] = [];
   for (const t of times) {
     let realized = 0, unrealized = 0, volume = 0, position = 0;
     for (const cid of cids) {

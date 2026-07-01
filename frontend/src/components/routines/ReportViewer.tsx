@@ -176,6 +176,7 @@ export function ReportViewer({
           src={`/reports/${report.filename}`}
           className="h-full w-full border-0"
           title={report.title}
+          sandbox="allow-scripts allow-popups"
         />
         {/* Fullscreen chevron overlays */}
         {fullscreen && hasPrev && (

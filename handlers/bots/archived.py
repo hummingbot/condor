@@ -39,7 +39,12 @@ BOTS_PER_PAGE = 5
 
 
 def clear_archived_state(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Clear archived-related state from context."""
+    """Clear only archived-related state from context.
+
+    Narrow cleaner used on archived menu refresh/re-entry. It must NOT tear down
+    unrelated state (active /trade SDS subscriptions, portfolio cache, etc.) —
+    use ``clear_all_input_states`` for full resets on command entrypoints.
+    """
     context.user_data.pop("archived_databases", None)
     context.user_data.pop("archived_current_db", None)
     context.user_data.pop("archived_page", None)

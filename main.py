@@ -20,8 +20,7 @@ from telegram.ext import (
 from condor.persistence import SafePicklePersistence
 from handlers import clear_all_input_states
 from utils.auth import restricted
-from utils.config import WEB_PORT, WEB_URL
-from utils.config import TELEGRAM_TOKEN
+from utils.config import TELEGRAM_TOKEN, WEB_PORT, WEB_URL
 
 # Enable logging
 logging.basicConfig(
@@ -63,7 +62,9 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     url = f"{WEB_URL}/login?token={token}"
     _hostname = urlparse(WEB_URL).hostname or ""
-    is_localhost = "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
+    is_localhost = (
+        "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
+    )
 
     if is_localhost:
         await update.message.reply_text(
@@ -241,6 +242,7 @@ def reload_handlers():
         "handlers.agents.stream",
         "handlers.agents.confirmation",
         "handlers.agents._shared",
+        "handlers.memory",
         "handlers.admin",
         "handlers.admin.update",
         "utils.auth",
@@ -270,7 +272,11 @@ def register_handlers(application: Application) -> None:
     # Import fresh versions after reload
     from handlers.admin import admin_command
     from handlers.admin.update import update_command
-    from handlers.agents import agent_callback_handler, agent_command, agent_voice_handler
+    from handlers.agents import (
+        agent_callback_handler,
+        agent_command,
+        agent_voice_handler,
+    )
     from handlers.bots import (
         bots_callback_handler,
         bots_command,
@@ -278,12 +284,17 @@ def register_handlers(application: Application) -> None:
         new_bot_command,
     )
     from handlers.cex import cex_callback_handler
+    from handlers.delegations import (
+        delegations_callback_handler,
+        delegations_command,
+    )
     from handlers.config import get_config_callback_handler, get_modify_value_handler
     from handlers.config.api_keys import keys_command
     from handlers.config.gateway import gateway_command
     from handlers.config.servers import servers_command
     from handlers.dex import dex_callback_handler, lp_command
     from handlers.executors import executors_callback_handler, executors_command
+    from handlers.memory import memory_callback_handler, memory_command
     from handlers.portfolio import get_portfolio_callback_handler, portfolio_command
     from handlers.routines import routines_callback_handler, routines_command
     from handlers.trading import trade_command as unified_trade_command
@@ -307,6 +318,10 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    application.add_handler(
+        CommandHandler("delegations", delegations_command)
+    )
+    application.add_handler(CommandHandler("memory", memory_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -342,6 +357,16 @@ def register_handlers(application: Application) -> None:
     # Add agent callback handler
     application.add_handler(
         CallbackQueryHandler(agent_callback_handler, pattern="^agent:")
+    )
+
+    # Add delegations callback handler (/delegations list + view + stop)
+    application.add_handler(
+        CallbackQueryHandler(delegations_callback_handler, pattern="^deleg:")
+    )
+
+    # Add memory callback handler (/memory review + delete)
+    application.add_handler(
+        CallbackQueryHandler(memory_callback_handler, pattern="^memory:")
     )
 
     # Add admin callback handler
@@ -386,25 +411,28 @@ async def sync_server_permissions() -> None:
     logger.info("Synced server permissions")
 
 
-async def post_init(application: Application) -> None:
-    """Register bot commands after initialization."""
-    from telegram import BotCommandScopeChat
+async def register_bot_commands(application: Application) -> None:
+    """Register the Telegram command menus (public for everyone, admin overlay).
+
+    Extracted from ``post_init`` so it can also run on hot-reload — otherwise a
+    newly added command (e.g. /delegations) gets its dispatch handler reloaded
+    but never shows up in the menu until a full process restart.
+    """
+    from telegram import (
+        BotCommandScopeAllGroupChats,
+        BotCommandScopeAllPrivateChats,
+        BotCommandScopeChat,
+        BotCommandScopeDefault,
+    )
 
     from utils.config import ADMIN_USER_ID
 
-    # Sync server permissions (ensures all servers have ownership entries)
-    await sync_server_permissions()
-
-    # Preload Whisper model in background so first voice message is fast
-    import asyncio
-    from utils.transcribe import _get_model, DEFAULT_MODEL
-
-    asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
-
     # Clear any previously set commands for all scopes to avoid stale overrides
-    from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeDefault
-
-    for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()]:
+    for scope in [
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+    ]:
         try:
             await application.bot.delete_my_commands(scope=scope)
         except Exception:
@@ -412,15 +440,22 @@ async def post_init(application: Application) -> None:
 
     if ADMIN_USER_ID:
         try:
-            await application.bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID)))
+            await application.bot.delete_my_commands(
+                scope=BotCommandScopeChat(chat_id=int(ADMIN_USER_ID))
+            )
         except Exception:
             pass
 
-    # Public commands (all users)
+    # 1) Public commands — registered by default for ALL users (default scope is
+    #    the universal fallback every user resolves to unless a more specific
+    #    scope overrides it). Wrapped independently so a transient failure here
+    #    never blocks the admin step (or the rest of post_init) from running.
     commands = [
         BotCommand("start", "Welcome message and setup"),
         BotCommand("portfolio", "View balances across exchanges"),
         BotCommand("agent", "AI trading assistant"),
+        BotCommand("delegations", "Monitor background agent tasks"),
+        BotCommand("memory", "Review what the assistant remembers about you"),
         BotCommand("executors", "Deploy and manage trading executors"),
         BotCommand("bots", "Deploy and manage trading bots"),
         BotCommand("new_bot", "Create bot configurations"),
@@ -432,9 +467,13 @@ async def post_init(application: Application) -> None:
         BotCommand("gateway", "Gateway for DEX trading"),
         BotCommand("web", "Open the web dashboard"),
     ]
-    await application.bot.set_my_commands(commands)
+    try:
+        await application.bot.set_my_commands(commands)
+    except Exception as e:
+        logger.warning(f"Failed to set public commands: {e}", exc_info=True)
 
-    # Admin-only commands (visible only to admin user in their command menu)
+    # 2) Admin-only commands — layered on top of the public ones, visible only in
+    #    the admin user's own command menu (chat scope overrides the default).
     if ADMIN_USER_ID:
         admin_commands = commands + [
             BotCommand("admin", "Admin panel - manage users and access"),
@@ -446,6 +485,22 @@ async def post_init(application: Application) -> None:
             )
         except Exception as e:
             logger.warning(f"Failed to set admin-specific commands: {e}", exc_info=True)
+
+
+async def post_init(application: Application) -> None:
+    """Register bot commands after initialization."""
+    # Sync server permissions (ensures all servers have ownership entries)
+    await sync_server_permissions()
+
+    # Preload Whisper model in background so first voice message is fast
+    import asyncio
+
+    from utils.transcribe import DEFAULT_MODEL, _get_model
+
+    asyncio.get_event_loop().run_in_executor(None, _get_model, DEFAULT_MODEL)
+
+    # Register command menus (public + admin overlay)
+    await register_bot_commands(application)
 
     # Restore scheduled routine jobs from persistence
     from handlers.routines import restore_scheduled_jobs
@@ -485,11 +540,10 @@ async def post_init(application: Application) -> None:
     asyncio.create_task(watch_and_reload(application))
 
 
-
 async def watch_and_reload(application: Application) -> None:
     """Watch for file changes and reload handlers automatically."""
     try:
-        from watchfiles import awatch
+        from watchfiles import DefaultFilter, awatch
     except ImportError:
         logger.warning(
             "watchfiles not installed. Auto-reload disabled. Install with: uv add watchfiles"
@@ -504,16 +558,33 @@ async def watch_and_reload(application: Application) -> None:
         watch_paths.append(assistants_path)
     logger.info(f"👀 Watching for changes in: {', '.join(str(p) for p in watch_paths)}")
 
-    async for changes in awatch(*watch_paths):
+    class _ReloadFilter(DefaultFilter):
+        """Ignore per-assistant runtime stores (FEAT-003).
+
+        ``assistants/{name}/store/`` is co-located with the watched assistant
+        definitions, so without this every chat memory/skill write would thrash
+        a full handler reload. AGENT.md / *.md changes still trigger reloads.
+        """
+
+        def __call__(self, change, path: str) -> bool:
+            if f"{os.sep}store{os.sep}" in path:
+                return False
+            return super().__call__(change, path)
+
+    async for changes in awatch(*watch_paths, watch_filter=_ReloadFilter()):
         logger.info(f"📝 Detected changes: {changes}")
         try:
             # Reload assistants if any .md file in assistants/ changed
             if any(str(assistants_path) in str(path) for _, path in changes):
                 from handlers.agents._shared import reload_assistants
+
                 reload_assistants()
                 logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
+            # Refresh the Telegram command menus too, so a newly added/removed
+            # command shows up without requiring a full process restart.
+            await register_bot_commands(application)
             logger.info("✅ Auto-reloaded handlers successfully")
         except Exception as e:
             logger.error(f"❌ Auto-reload failed: {e}", exc_info=True)
@@ -568,6 +639,17 @@ async def send_to_all(self, message: str, parse_mode: str = "Markdown"):
 
 def main() -> None:
     """Run the bot."""
+    # Reap any ACP/MCP subprocess trees orphaned by a prior hard kill (kill -9,
+    # OOM, power loss) before we spawn our own — those bypass post_shutdown.
+    try:
+        from condor.acp.client import reap_stale_acp_trees
+
+        reaped = reap_stale_acp_trees(TELEGRAM_TOKEN)
+        if reaped:
+            logger.info("Reaped %d stale ACP/MCP process(es) from a prior run", reaped)
+    except Exception:
+        logger.exception("Startup ACP reaper failed (continuing)")
+
     # Setup persistence to save user data, chat data, and bot data
     # This will save trading context, last used parameters, etc.
     persistence = get_persistence()
@@ -580,7 +662,8 @@ def main() -> None:
         await destroy_all_sessions()
 
         # Stop all trading agents
-        from condor.trading_agent.engine import get_all_engines
+        from condor.agents.engine import get_all_engines
+
         for engine in list(get_all_engines().values()):
             try:
                 await engine.stop()
@@ -589,18 +672,22 @@ def main() -> None:
 
         # Stop WebSocket manager
         from condor.web.ws_manager import get_ws_manager
+
         get_ws_manager().stop()
 
         # Stop ServerDataService
         from condor.server_data_service import get_server_data_service
+
         get_server_data_service().stop()
 
         # Close cached Hummingbot API clients (ConfigManager)
         from config_manager import get_config_manager
+
         await get_config_manager().close_all_clients()
 
         # Close MCP hummingbot client
         from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
+
         await hummingbot_client.close()
 
     # Create the Application with persistence enabled
@@ -654,6 +741,7 @@ async def _run_dual(application: Application) -> None:
 
     # Notify admin that Condor has started
     from utils.config import ADMIN_USER_ID
+
     if ADMIN_USER_ID:
         try:
             await application.bot.send_message(
@@ -677,18 +765,34 @@ async def _run_dual(application: Application) -> None:
 
     # Run uvicorn as a task
     web_task = asyncio.create_task(server.serve())
+    stop_task = asyncio.create_task(shutdown_event.wait())
 
-    # Wait until shutdown signal
-    await shutdown_event.wait()
-
-    logger.info("Shutting down...")
-    server.should_exit = True
-    await web_task
-
-    # Graceful Telegram shutdown
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
+    try:
+        # Exit on a shutdown signal OR if the web server stops/crashes on its own.
+        await asyncio.wait(
+            {web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        # Always run teardown — even if the run raised — so post_shutdown
+        # (destroy_all_sessions + engine.stop) reaps every ACP subprocess tree.
+        logger.info("Shutting down...")
+        stop_task.cancel()
+        server.should_exit = True
+        try:
+            await web_task
+        except Exception:
+            logger.exception("Web server crashed during shutdown")
+        # Run each step independently so one failure can't skip the rest —
+        # application.shutdown() is what triggers post_shutdown.
+        for name, step in (
+            ("updater.stop", application.updater.stop),
+            ("application.stop", application.stop),
+            ("application.shutdown", application.shutdown),
+        ):
+            try:
+                await step()
+            except Exception:
+                logger.exception("Shutdown step %s failed", name)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ import {
 } from "@/components/editor/EditorDialogs";
 import { useServer } from "@/hooks/useServer";
 import { api, type ControllerConfigSummary } from "@/lib/api";
+import { configToYaml } from "@/lib/configYaml";
 
 // ── Types ──
 
@@ -330,6 +331,11 @@ function EditorPane({
       if (tab.file.kind === "config") {
         queryClient.invalidateQueries({ queryKey: ["available-configs", server] });
         queryClient.invalidateQueries({ queryKey: ["config-detail", server, tab.file.configId] });
+      } else if (tab.file.kind === "controller") {
+        // Otherwise FileContentLoader serves the pre-edit source on reopen (staleTime).
+        queryClient.invalidateQueries({
+          queryKey: ["controller-source", server, tab.file.controllerType, tab.file.controllerName],
+        });
       }
     },
   });
@@ -480,7 +486,7 @@ export function EditorTab() {
     enabled: !!server,
   });
 
-  const controllerTypes = data?.controller_types ?? {};
+  const controllerTypes = useMemo(() => data?.controller_types ?? {}, [data]);
 
   // Build file entries for the active view
   const controllerFiles = useMemo<FileEntry[]>(() => {
@@ -601,9 +607,18 @@ export function EditorTab() {
     }
   }, []);
 
-  const activeTab = openTabs.find((t) => t.file.id === activeTabId);
-  const splitTab = splitMode ? openTabs.find((t) => t.file.id === splitTabId) : null;
-  const tabsToLoad = openTabs.filter((t) => !t.loaded && !t.error);
+  const activeTab = useMemo(
+    () => openTabs.find((t) => t.file.id === activeTabId),
+    [openTabs, activeTabId],
+  );
+  const splitTab = useMemo(
+    () => (splitMode ? openTabs.find((t) => t.file.id === splitTabId) : null),
+    [openTabs, splitMode, splitTabId],
+  );
+  const tabsToLoad = useMemo(
+    () => openTabs.filter((t) => !t.loaded && !t.error),
+    [openTabs],
+  );
 
   if (!server) {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
@@ -863,27 +878,43 @@ function FileContentLoader({
     enabled: tab.file.kind === "config" && !tab.loaded && !loadedRef.current,
   });
 
-  if (tab.file.kind === "controller" && controllerQuery.data && !loadedRef.current) {
-    loadedRef.current = true;
-    onLoaded(controllerQuery.data.source ?? "", false);
-  }
-  if (tab.file.kind === "controller" && controllerQuery.isError && !loadedRef.current) {
-    loadedRef.current = true;
-    onError(controllerQuery.error instanceof Error ? controllerQuery.error.message : "Failed to load");
-  }
-
-  if (tab.file.kind === "config" && configQuery.data && !loadedRef.current) {
-    loadedRef.current = true;
-    const filtered = Object.fromEntries(
-      Object.entries(configQuery.data.config).filter(([k]) => k !== "id"),
-    );
-    const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
-    onLoaded(dumped, false);
-  }
-  if (tab.file.kind === "config" && configQuery.isError && !loadedRef.current) {
-    loadedRef.current = true;
-    onError(configQuery.error instanceof Error ? configQuery.error.message : "Failed to load");
-  }
+  // Defer the parent setState to commit phase: calling onLoaded/onError directly
+  // in the render body updates EditorTab while this child renders (the classic
+  // "Cannot update a component while rendering a different component" anti-pattern).
+  // loadedRef still guards against re-entry / StrictMode double-invoke.
+  useEffect(() => {
+    if (loadedRef.current) return;
+    if (tab.file.kind === "controller") {
+      if (controllerQuery.data) {
+        loadedRef.current = true;
+        onLoaded(controllerQuery.data.source ?? "", false);
+      } else if (controllerQuery.isError) {
+        loadedRef.current = true;
+        onError(
+          controllerQuery.error instanceof Error ? controllerQuery.error.message : "Failed to load",
+        );
+      }
+    } else if (tab.file.kind === "config") {
+      if (configQuery.data) {
+        loadedRef.current = true;
+        const dumped = configToYaml(configQuery.data.config);
+        onLoaded(dumped, false);
+      } else if (configQuery.isError) {
+        loadedRef.current = true;
+        onError(configQuery.error instanceof Error ? configQuery.error.message : "Failed to load");
+      }
+    }
+  }, [
+    tab.file.kind,
+    controllerQuery.data,
+    controllerQuery.isError,
+    controllerQuery.error,
+    configQuery.data,
+    configQuery.isError,
+    configQuery.error,
+    onLoaded,
+    onError,
+  ]);
 
   return null;
 }

@@ -520,3 +520,21 @@ export function getOverlayTimeRange(overlays: ExecutorOverlay[]): { start: numbe
   }
   return { start, end };
 }
+
+/**
+ * Group executors by `connector:trading_pair` for per-market charts.
+ * Executors without a `trading_pair` are skipped. Insertion order is preserved.
+ */
+export function groupExecutorsByMarket(
+  executors: ExecutorInfo[],
+): [string, ExecutorInfo[]][] {
+  const groups = new Map<string, ExecutorInfo[]>();
+  for (const ex of executors) {
+    if (!ex.trading_pair) continue;
+    const key = `${ex.connector}:${ex.trading_pair}`;
+    const arr = groups.get(key);
+    if (arr) arr.push(ex);
+    else groups.set(key, [ex]);
+  }
+  return Array.from(groups.entries());
+}

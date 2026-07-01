@@ -142,14 +142,6 @@ export async function getHyperliquidBuilderApproval(userAddress: string): Promis
   return Number(await res.json());
 }
 
-/**
- * True if the user already approved at least the builder fee Condor needs. The approval persists
- * on-chain per (user, builder), so a returning user need not sign approveBuilderFee again.
- */
-export async function hasApprovedBuilderFee(userAddress: string): Promise<boolean> {
-  return (await getHyperliquidBuilderApproval(userAddress)) >= BUILDER_MAX_FEE_RATE_TENTHS_BPS;
-}
-
 /** Turn a raw Hyperliquid error string into actionable guidance for known cases. */
 export function friendlyHyperliquidError(detail: string, userAddress?: string): string {
   const d = (detail || "").trim();

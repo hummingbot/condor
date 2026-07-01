@@ -5,6 +5,7 @@ Manages servers, users, permissions, and settings in a single config.yml file.
 
 import asyncio
 import logging
+import secrets
 import time
 from enum import Enum
 from pathlib import Path
@@ -60,7 +61,9 @@ class ConfigManager:
         )  # server_name -> (client, connect_time)
         self._client_ttl = 300  # 5 minutes
         self._client_verify_interval = 60  # seconds between liveness checks
-        self._client_locks: Dict[str, asyncio.Lock] = {}  # per-server lock for get_client
+        self._client_locks: Dict[str, asyncio.Lock] = (
+            {}
+        )  # per-server lock for get_client
         self._load_config()
         self._load_audit_log()
 
@@ -156,6 +159,7 @@ class ConfigManager:
                 "users": self._data.get("users", {}),
                 "server_access": self._data.get("server_access", {}),
                 "chat_defaults": self._data.get("chat_defaults", {}),
+                "web_jwt_secret": self._data.get("web_jwt_secret"),
                 "version": self._data.get("version", self.VERSION),
             }
             with open(self.config_path, "w") as f:
@@ -324,6 +328,26 @@ class ConfigManager:
         logger.info(f"Set default server to '{name}'")
         return True
 
+    def get_or_create_web_jwt_secret(self) -> str:
+        """Return the web dashboard JWT signing secret, generating one on demand.
+
+        On first use a strong random secret is generated and persisted to
+        ``config.yml`` so web sessions survive restarts. The web layer prefers an
+        explicit ``WEB_JWT_SECRET`` env var over this value for multi-instance or
+        rotation scenarios; this is the zero-config default for everyone else.
+        """
+        secret = self._data.get("web_jwt_secret")
+        if secret:
+            return secret
+        secret = secrets.token_urlsafe(32)
+        self._data["web_jwt_secret"] = secret
+        self._save_config()
+        logger.info(
+            "Generated and persisted a new web dashboard JWT secret in %s",
+            self.config_path,
+        )
+        return secret
+
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""
         from hummingbot_api_client import HummingbotAPIClient
@@ -364,9 +388,7 @@ class ConfigManager:
             elif time.time() - last_verified < self._client_ttl:
                 # Needs liveness check
                 try:
-                    await asyncio.wait_for(
-                        client.accounts.list_accounts(), timeout=5
-                    )
+                    await asyncio.wait_for(client.accounts.list_accounts(), timeout=5)
                     self._clients[name] = (client, time.time())
                     return client
                 except Exception:
@@ -476,7 +498,7 @@ class ConfigManager:
         finally:
             try:
                 await client.close()
-            except:
+            except Exception:
                 pass
 
     async def close_all_clients(self):
@@ -625,9 +647,10 @@ class ConfigManager:
 
     def delete_user_preference(self, user_id: int, key: str) -> bool:
         """Delete a preference key. Returns True if it existed."""
-        prefs = self._data.get("user_preferences", {}).get(user_id, {})
-        if key in prefs:
-            del prefs[key]
+        prefs = self._data.setdefault("user_preferences", {})
+        user_prefs = prefs.get(user_id)
+        if user_prefs and key in user_prefs:
+            del user_prefs[key]
             self._save_config()
             return True
         return False

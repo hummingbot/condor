@@ -359,6 +359,11 @@ async def modify_controllers(
             if not config_controller_type or not config_controller_name:
                 raise ValueError("config_data must include 'controller_type' and 'controller_name'")
 
+            # Always set the config id to match the config name (file name), so the
+            # backend gets a complete config for validation and storage.
+            if config_data.get("id") != config_name:
+                config_data["id"] = config_name
+
             # Validate config against template schema before sending to backend
             template = await client.controllers.get_controller_config_template(
                 config_controller_type, config_controller_name
@@ -367,10 +372,6 @@ async def modify_controllers(
 
             # Validate config with backend
             await client.controllers.validate_controller_config(config_controller_type, config_controller_name, config_data)
-
-            # Modifying saved/global config (design-time only)
-            if "id" not in config_data or config_data["id"] != config_name:
-                config_data["id"] = config_name
 
             controller_configs = await client.controllers.list_controller_configs()
             exists = config_name in [c.get("id") for c in controller_configs]

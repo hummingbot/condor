@@ -230,7 +230,7 @@ export function ReportBrowser({
     const iframe = iframeRef.current;
     if (!iframe) return;
     const sendTheme = () => {
-      iframe.contentWindow?.postMessage({ type: "set-theme", theme: reportTheme }, "*");
+      iframe.contentWindow?.postMessage({ type: "set-theme", theme: reportTheme }, window.location.origin);
     };
     iframe.addEventListener("load", sendTheme);
     sendTheme();
@@ -893,6 +893,7 @@ export function ReportBrowser({
               src={`/reports/${selectedReport.filename}`}
               className="h-full w-full border-0"
               title={selectedReport.title}
+              sandbox="allow-scripts allow-popups"
             />
           )}
 

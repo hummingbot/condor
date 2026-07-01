@@ -8,6 +8,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { tsToSeconds } from "@/lib/formatters";
 import { getThemeColors } from "@/lib/theme-colors";
 
 interface Props {
@@ -29,10 +30,6 @@ function getChartColors() {
     up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
     down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
   };
-}
-
-function tsToSeconds(ts: number): number {
-  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
 }
 
 function pickCandleInterval(startSec: number, endSec: number): { interval: string; limit: number } {

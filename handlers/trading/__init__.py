@@ -21,37 +21,9 @@ from handlers.config.user_preferences import (
 )
 from handlers.dex.swap import handle_swap as dex_handle_swap
 from utils.auth import hummingbot_api_required, restricted
-from utils.telegram_formatters import escape_markdown_v2
+from utils.telegram_formatters import escape_markdown_v2, format_network_display
 
 logger = logging.getLogger(__name__)
-
-
-def _format_network_display(network_id: str) -> str:
-    """Format network ID for button display.
-
-    Examples:
-        solana-mainnet-beta -> Solana
-        ethereum-mainnet -> Ethereum
-        solana-devnet -> Solana Dev
-    """
-    if not network_id:
-        return "Network"
-
-    parts = network_id.split("-")
-    chain = parts[0].capitalize()
-
-    if len(parts) > 1:
-        net = parts[1]
-        if net in ("mainnet", "mainnet-beta"):
-            return chain
-        elif net == "devnet":
-            return f"{chain} Dev"
-        elif net == "testnet":
-            return f"{chain} Test"
-        else:
-            return f"{chain} {net[:4]}"
-
-    return chain
 
 
 async def _get_portfolio_connectors(client) -> tuple:
@@ -150,7 +122,7 @@ async def handle_unified_connector_select(
             )
             row = []
             for network in gateway_networks:
-                display = _format_network_display(network)
+                display = format_network_display(network)
                 row.append(
                     InlineKeyboardButton(
                         display, callback_data=f"trade:select_dex:{network}"

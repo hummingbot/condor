@@ -1,5 +1,22 @@
 // ── Centralized Formatters ──
 
+/** Humanize a tool-call name: strip the `mcp__<server>__` prefix and underscores.
+ *  e.g. "mcp__condor__manage_routines" → "manage routines", "ToolSearch" → "ToolSearch". */
+export function formatToolName(title: string): string {
+  const name = title.includes("__") ? title.split("__").pop()! : title;
+  return name.replace(/_/g, " ");
+}
+
+/** Escape a string for safe interpolation into innerHTML. */
+export function escapeHtml(val: string): string {
+  return val
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function formatCurrency(val: number, symbol = "$") {
   if (Math.abs(val) >= 1_000_000) return symbol + (val / 1_000_000).toFixed(2) + "M";
   if (Math.abs(val) >= 10_000) return symbol + (val / 1_000).toFixed(1) + "K";
@@ -13,6 +30,17 @@ export function formatCurrency(val: number, symbol = "$") {
   // Adaptive precision for small values (e.g. BTC)
   if (Math.abs(val) < 0.01 && val !== 0) return symbol + val.toPrecision(4);
   return symbol + val.toFixed(2);
+}
+
+/**
+ * Compact USD for chart tooltips / stat strips: `>=1M → "$N.NNM"`, `>=10K → "$N.NK"`,
+ * else plain `"$" + toFixed(2)` (no locale grouping). Kept distinct from `formatCurrency`,
+ * which uses `Intl` grouping/sign placement below 10K — switching would change rendered values.
+ */
+export function formatCompactUsd(val: number): string {
+  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
+  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
+  return "$" + val.toFixed(2);
 }
 
 export function formatCurrencyVolume(val: number, symbol = "$") {
@@ -43,6 +71,29 @@ export function formatPnl(val: number) {
   return formatCurrencyPnl(val);
 }
 
+/** Normalize a timestamp to seconds (ms timestamps > 1e12 are divided by 1000). */
+export function tsToSeconds(ts: number): number {
+  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
+}
+
+/** Normalize a timestamp (seconds or ms, number or ISO string) to epoch ms. */
+export function toMs(ts: string | number): number {
+  if (typeof ts === "number") return ts > 1e12 ? ts : ts * 1000;
+  const parsed = Date.parse(ts);
+  return isNaN(parsed) ? 0 : parsed;
+}
+
+/** Format an epoch-ms timestamp as a 24h `HH:MM` time label. */
+export function formatTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" });
+}
+
+/** Format an epoch-ms timestamp as a `Mon D HH:MM` (24h) date-time label. */
+export function formatDateTime(ms: number): string {
+  const d = new Date(ms);
+  return `${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit" })}`;
+}
+
 export function formatAge(timestamp: number): string {
   if (!timestamp) return "\u2014";
   try {
@@ -59,6 +110,32 @@ export function formatAge(timestamp: number): string {
   } catch {
     return "\u2014";
   }
+}
+
+/**
+ * Format a timestamp as a relative "Ns/m/h/d ago" label.
+ * Accepts epoch-seconds (number), or a Date/ISO string. Numeric ms timestamps
+ * (> 1e12) are normalized to seconds. When the value is null/undefined/empty,
+ * returns `fallback` (default "" — pass "never" to match instance-style labels).
+ */
+export function formatRelativeTime(
+  value: number | string | Date | null | undefined,
+  fallback = "",
+): string {
+  if (value == null || value === "") return fallback;
+  let seconds: number;
+  if (typeof value === "number") {
+    seconds = tsToSeconds(value);
+  } else {
+    const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+    if (Number.isNaN(ms)) return fallback;
+    seconds = ms / 1000;
+  }
+  const diff = Date.now() / 1000 - seconds;
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 export function formatPrice(val: number): string {

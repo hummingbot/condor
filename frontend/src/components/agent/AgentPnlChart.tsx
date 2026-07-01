@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { MetricEntry } from "@/lib/parse-agent";
 
@@ -28,7 +28,13 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
+  const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Baseline"> | null>(null);
+  // Tracks the point count of the last applied dataset, so we only auto-fit
+  // on the first non-empty load and when new points are appended (not on every update).
+  const lastLenRef = useRef(0);
+  const [chartReady, setChartReady] = useState(false);
 
+  // ── Initialize chart + series + crosshair tooltip ONCE ──
   useEffect(() => {
     let cancelled = false;
     import("lightweight-charts").then((mod) => {
@@ -66,18 +72,9 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
         priceLineVisible: false,
         lastValueVisible: true,
       });
-
-      // Set data
-      if (data.length > 0) {
-        const sorted = [...data].sort((a, b) => a.time - b.time);
-        series.setData(
-          sorted.map((d) => ({
-            time: d.time as import("lightweight-charts").UTCTimestamp,
-            value: d.value,
-          })),
-        );
-        chart.timeScale().fitContent();
-      }
+      seriesRef.current = series;
+      // Signals the data effect that the series is ready to receive data.
+      setChartReady(true);
 
       // Crosshair tooltip
       chart.subscribeCrosshairMove((param) => {
@@ -124,15 +121,42 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
 
     return () => {
       cancelled = true;
+      setChartReady(false);
       if (chartRef.current) {
         chartRef.current.remove();
         chartRef.current = null;
+        seriesRef.current = null;
       }
+      lastLenRef.current = 0;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Push live `data` to the series whenever it changes ──
+  // Runs once the series exists (chartReady) and on every `data` update, so the
+  // curve keeps up with the consumer's 10s refetch instead of freezing at mount.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!chartReady || !series) return;
 
-  if (data.length === 0) return null;
+    const sorted = [...data].sort((a, b) => a.time - b.time);
+    series.setData(
+      sorted.map((d) => ({
+        time: d.time as import("lightweight-charts").UTCTimestamp,
+        value: d.value,
+      })),
+    );
+
+    // Auto-fit on the first non-empty load and when new points are appended;
+    // skip re-fit on same-length updates so the user's pan/zoom is preserved.
+    if (sorted.length > 0 && sorted.length > lastLenRef.current) {
+      chartRef.current?.timeScale().fitContent();
+    }
+    lastLenRef.current = sorted.length;
+  }, [data, chartReady]);
+
+  // NOTE: do NOT early-return before the chart container mounts — the init effect
+  // needs `containerRef` to exist. When data is empty we render an empty container
+  // (kept mounted) so the empty→non-empty transition just flows through the data effect.
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">

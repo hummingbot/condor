@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 
 import { LeverageField, SelectField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
-import type { GridState, GridAction } from "@/pages/CreateGridExecutor";
+import type { GridState, GridAction } from "@/lib/gridExecutor";
 
 interface GridConfigPanelProps {
   state: GridState;

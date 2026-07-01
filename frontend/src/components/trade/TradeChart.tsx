@@ -7,6 +7,7 @@ import { candleStore } from "@/lib/candle-store";
 import type { ExtraLine } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
+import { escapeHtml, formatCompactUsd } from "@/lib/formatters";
 
 type PickField = "start" | "end" | "limit" | null;
 
@@ -227,7 +228,8 @@ export function TradeChart({
             const diff = curPrice - anchor.price;
             const pct = anchor.price !== 0 ? (diff / anchor.price) * 100 : 0;
             const up = diff >= 0;
-            const clr = up ? getThemeColors().green : getThemeColors().red;
+            const tc = getThemeColors();
+            const clr = up ? tc.green : tc.red;
 
             // Draw the box as a pixel overlay — no chart series, so no relayout/flicker
             const ax = chart.timeScale().timeToCoordinate(anchor.time as import("lightweight-charts").UTCTimestamp);
@@ -354,14 +356,8 @@ export function TradeChart({
           if (Math.abs(p) >= 1) return p.toFixed(4);
           return p.toPrecision(6);
         };
-        const fmtUsd = (v: number) => {
-          if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
-          if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
-          return "$" + v.toFixed(2);
-        };
-
         const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${value}</span></div>`;
+          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
         };
 
         // Grid-specific details
@@ -377,7 +373,7 @@ export function TradeChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : fmtUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", _cvtVal ? _cvtVal(Number(cfg.total_amount_quote)) : formatCompactUsd(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
@@ -388,13 +384,13 @@ export function TradeChart({
 
         tooltip.innerHTML = `
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace">${o.executorId.slice(0, 10)}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${o.side}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${o.status}</span>
+            <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(o.side)}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${o.type.toUpperCase()}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${o.closeType}</span>` : ""}
+            <span style="background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid rgba(255,255,255,0.08)">${escapeHtml(o.type.toUpperCase())}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:#6b7994">${escapeHtml(o.closeType)}</span>` : ""}
           </div>
           <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><div style="color:#6b7994;font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
@@ -467,9 +463,41 @@ export function TradeChart({
     return () => observer.disconnect();
   }, [chartReady]);
 
-  // ── Push candle data to chart ──
+  // Signature of the last full setData() render: channel key + earliest
+  // timestamp + count. Lets us tell a wholesale change (first load, pair/
+  // interval switch, history backfill/prepend) apart from a live tick, where
+  // the listener below already applied a cheap series.update().
+  const lastSetDataSigRef = useRef<string>("");
+
+  // ── Push candle data to chart (full setData only on structural changes) ──
   useEffect(() => {
     if (!chartReady || !seriesRef.current || !candles.length) return;
+
+    const key = `${server}:${connector}:${pair}:${interval}`;
+    const first = candles[0].timestamp;
+    const prevSig = lastSetDataSigRef.current;
+    const [prevKey, prevFirstStr, prevLenStr] = prevSig.split("|");
+    const prevFirst = Number(prevFirstStr);
+    const prevLen = Number(prevLenStr);
+
+    // lightweight-charts series.update() only handles the last bar or a single
+    // newer appended bar. So a full setData() is only required when:
+    //   • first load for this chart instance (no prior signature), or
+    //   • the channel key changed (pair/interval/connector/server switch), or
+    //   • the earliest candle moved back in time, i.e. older history was
+    //     prepended (REST backfill) — update() can't insert before the data.
+    // A plain live tick keeps the same key and earliest timestamp (last-bar
+    // update) or grows the count by appending a newer bar; both are already
+    // handled incrementally by the candleStore listener below, so we skip the
+    // expensive map + setData over the whole array on every tick.
+    const isFirstLoad = prevSig === "";
+    const keyChanged = prevKey !== key;
+    const historyPrepended = candles.length > prevLen && first < prevFirst;
+    const needsFullReset = isFirstLoad || keyChanged || historyPrepended;
+
+    lastSetDataSigRef.current = `${key}|${first}|${candles.length}`;
+
+    if (!needsFullReset) return;
 
     const mapped = candles.map((c) => ({
       time: c.timestamp as import("lightweight-charts").UTCTimestamp,
@@ -484,7 +512,7 @@ export function TradeChart({
       chartRef.current?.timeScale().fitContent();
       initializedRef.current = true;
     }
-  }, [candles, chartReady]);
+  }, [candles, chartReady, server, connector, pair, interval]);
 
   // ── Real-time last candle update via candle store listener ──
   useEffect(() => {

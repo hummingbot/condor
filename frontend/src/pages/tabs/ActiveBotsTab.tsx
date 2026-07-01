@@ -761,7 +761,7 @@ export function ActiveBotsTab() {
                       const cid = ctrl.controller_id || ctrl.controller_name;
                       return (
                         <ControllerRow
-                          key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                          key={`${ctrl.bot_name}-${cid}`}
                           ctrl={ctrl}
                           server={server!}
                           isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`}

@@ -17,6 +17,23 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def assistant_routines_dir(agent_slug: str | None) -> Path:
+    """Routines dir for an assistant.
+
+    There is a single home for the general library — the repo-root ``routines/``,
+    owned by the chat ``condor``. Domain experts/trading agents are isolated: each
+    owns its routines and does **not** see the general library.
+
+    - chat ``condor`` (``agent_slug`` None) → ``routines`` (the general library)
+    - trading agent / domain expert (slug) → ``agents/<slug>/routines`` (isolated)
+    """
+    if agent_slug:
+        return _PROJECT_ROOT / "agents" / agent_slug / "routines"
+    return _PROJECT_ROOT / "routines"
+
 
 @dataclass
 class RoutineResult:
@@ -40,7 +57,16 @@ def normalize_result(result) -> RoutineResult:
         return result
     return RoutineResult(text=str(result) if result else "Completed")
 
+
 _routines_cache: dict[str, "RoutineInfo"] | None = None
+
+
+def _safe_mtime(file_path: Path) -> float | None:
+    """Return the file's modification time (epoch seconds), or None on failure."""
+    try:
+        return file_path.stat().st_mtime
+    except OSError:
+        return None
 
 
 class RoutineInfo:
@@ -58,6 +84,7 @@ class RoutineInfo:
         cleanup_fn: Callable | None = None,
         category: str = "Uncategorized",
         source: str = "global",
+        last_modified: float | None = None,
     ):
         self.name = name
         self.config_class = config_class
@@ -69,6 +96,8 @@ class RoutineInfo:
         self.cleanup_fn = cleanup_fn
         self.category = category
         self.source = source
+        # File modification time (epoch seconds) of the routine's source file.
+        self.last_modified = last_modified
 
         # Extract description from Config docstring
         doc = config_class.__doc__ or name
@@ -167,6 +196,7 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source="global",
+                last_modified=_safe_mtime(file_path),
             )
             logger.debug(
                 f"Discovered routine: {file_path.stem} (continuous={is_continuous})"
@@ -202,14 +232,22 @@ def discover_routines_from_path(
         return routines
 
     source = f"agent:{agent_slug}" if agent_slug else "global"
-    default_category = agent_slug.replace("_", " ").replace("-", " ").title() if agent_slug else "Uncategorized"
+    default_category = (
+        agent_slug.replace("_", " ").replace("-", " ").title()
+        if agent_slug
+        else "Uncategorized"
+    )
 
     for file_path in routines_dir.glob("*.py"):
         if file_path.stem.startswith("_"):
             continue
 
         try:
-            module_name = f"agent_routine_{agent_slug}_{file_path.stem}" if agent_slug else f"agent_routine_{file_path.stem}"
+            module_name = (
+                f"agent_routine_{agent_slug}_{file_path.stem}"
+                if agent_slug
+                else f"agent_routine_{file_path.stem}"
+            )
             spec = importlib.util.spec_from_file_location(module_name, file_path)
             if not spec or not spec.loader:
                 continue
@@ -238,6 +276,7 @@ def discover_routines_from_path(
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source=source,
+                last_modified=_safe_mtime(file_path),
             )
             logger.debug(f"Discovered agent routine: {file_path.stem}")
 

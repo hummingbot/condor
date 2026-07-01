@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Brain,
@@ -16,6 +16,7 @@ import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { api, type ChatAgentOption, type ChatModeOption } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
+import { useResizeDrag } from "@/hooks/useResizeDrag";
 
 const MIN_WIDTH = 360;
 const MAX_WIDTH = 1200;
@@ -38,7 +39,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
 
   const [width, setWidth] = useState(DEFAULT_WIDTH);
-  const [isDragging, setIsDragging] = useState(false);
   const [showNewMenu, setShowNewMenu] = useState(false);
   const [pendingSession, setPendingSession] = useState(false);
 
@@ -94,27 +94,14 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   }, [chat.activeSlot?.messages]);
 
   // Resize drag handling
-  const startDrag = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      setIsDragging(true);
-      const startX = e.clientX;
-      const startWidth = width;
-
-      const onMove = (ev: MouseEvent) => {
-        const delta = startX - ev.clientX;
-        setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startWidth + delta)));
-      };
-      const onUp = () => {
-        setIsDragging(false);
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-      };
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    },
-    [width],
-  );
+  const { onMouseDown: startDrag, isDragging } = useResizeDrag({
+    axis: "x",
+    value: width,
+    onChange: setWidth,
+    min: MIN_WIDTH,
+    max: MAX_WIDTH,
+    direction: "inverted",
+  });
 
   // Clear pending state when active slot becomes available
   useEffect(() => {

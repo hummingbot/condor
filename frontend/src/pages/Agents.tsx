@@ -5,20 +5,48 @@ import {
   CircleDot,
   Pause,
   Plus,
+  Radio,
+  Square,
   Trash2,
   Zap,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Link, useNavigate } from "react-router-dom";
 
-import { type AgentSummary, type RunningInstance, api } from "@/lib/api";
+import {
+  type AgentSummary,
+  type Delegation,
+  type RunningInstance,
+  api,
+} from "@/lib/api";
 
 const STATUS_STYLES: Record<string, { dot: string; bg: string; label: string }> = {
   running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", bg: "border-emerald-500/30 bg-emerald-500/5", label: "LIVE" },
+  dry_run: { dot: "bg-blue-400", bg: "border-blue-500/30 bg-blue-500/5", label: "DRY RUN" },
   paused: { dot: "bg-amber-400", bg: "border-amber-500/30 bg-amber-500/5", label: "PAUSED" },
   stopped: { dot: "bg-red-400/60", bg: "border-red-500/20 bg-red-500/5", label: "STOPPED" },
   idle: { dot: "bg-[var(--color-text-muted)]/40", bg: "border-[var(--color-border)] bg-[var(--color-surface)]", label: "IDLE" },
 };
+
+// An agent counts as "live" only when it's running a real loop. If its only
+// running instance(s) are experiments (dry_run / run_once) — observation-only and
+// transient — surface it as "dry_run" so it doesn't read as a green LIVE loop or
+// inflate the Live Agents count. Mirrors the DRY RUN badge in the Active Sessions
+// table. The raw `agent.status` is "running" whenever any engine (incl. an
+// experiment) is alive.
+function deriveAgentStatus(agent: AgentSummary): string {
+  if (agent.status !== "running") return agent.status;
+  const runningInstances = (agent.instances || []).filter((i) => i.status === "running");
+  if (
+    runningInstances.length > 0 &&
+    runningInstances.every((i) => i.execution_mode === "dry_run" || i.execution_mode === "run_once")
+  ) {
+    return "dry_run";
+  }
+  return agent.status;
+}
 
 function StatusBadge({ status }: { status: string }) {
   const s = STATUS_STYLES[status] || STATUS_STYLES.idle;
@@ -35,7 +63,8 @@ function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick:
   const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
   const dayPnl = agent.daily_pnl ?? 0;
   const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const isLive = agent.status === "running";
+  const status = deriveAgentStatus(agent);
+  const isLive = status === "running";
 
   return (
     <button
@@ -59,8 +88,8 @@ function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick:
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <StatusBadge status={agent.status} />
-            {!isLive && (
+            <StatusBadge status={status} />
+            {agent.status !== "running" && (
               <div
                 className="opacity-0 transition-opacity group-hover:opacity-100"
                 onClick={(e) => { e.stopPropagation(); onDelete(); }}
@@ -125,17 +154,29 @@ function CreateAgentDialog({
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [defaultContext, setDefaultContext] = useState("");
+  const [instructions, setInstructions] = useState("");
+  const [serverName, setServerName] = useState("");
+
+  const { data: servers } = useQuery({
+    queryKey: ["servers"],
+    queryFn: api.getServers,
+  });
 
   const createMutation = useMutation({
     mutationFn: () =>
-      api.createAgent({ name, description, default_trading_context: defaultContext }),
+      api.createAgent({
+        name,
+        description,
+        instructions,
+        server_name: serverName || undefined,
+      }),
     onSuccess: (agent) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       onClose();
       setName("");
       setDescription("");
-      setDefaultContext("");
+      setInstructions("");
+      setServerName("");
       navigate(`/agents/${agent.slug}`);
     },
   });
@@ -178,17 +219,38 @@ function CreateAgentDialog({
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-              Default Trading Context
+              Instructions
             </label>
             <textarea
-              value={defaultContext}
-              onChange={(e) => setDefaultContext(e.target.value)}
-              placeholder="e.g. Trade meme coins aggressively, focus on momentum breakouts with tight stops..."
+              value={instructions}
+              onChange={(e) => setInstructions(e.target.value)}
+              placeholder="e.g. Domain knowledge and identity for this agent's brain — what it specializes in, how it reasons about markets..."
               rows={3}
               className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
             />
             <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              Natural language context that guides trading decisions. Can be overridden per session.
+              The agent's brain (AGENT.md). Add strategies afterward to make it loop.
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+              Server
+            </label>
+            <select
+              value={serverName}
+              onChange={(e) => setServerName(e.target.value)}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]"
+            >
+              <option value="">Follow active chat server</option>
+              {servers?.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+              Pin this agent to a specific Hummingbot API server. Leave as “Follow
+              active chat server” to use whichever server the chat is on.
             </p>
           </div>
         </div>
@@ -289,6 +351,119 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
   );
 }
 
+const DELEGATION_STATUS: Record<
+  Delegation["status"],
+  { dot: string; text: string; label: string }
+> = {
+  running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", text: "text-emerald-400", label: "RUNNING" },
+  done: { dot: "bg-sky-400", text: "text-sky-400", label: "DONE" },
+  error: { dot: "bg-red-400", text: "text-red-400", label: "ERROR" },
+  stopped: { dot: "bg-[var(--color-text-muted)]/50", text: "text-[var(--color-text-muted)]", label: "STOPPED" },
+};
+
+function BackgroundTasks() {
+  const queryClient = useQueryClient();
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const { data } = useQuery({
+    queryKey: ["delegations"],
+    queryFn: api.getDelegations,
+    refetchInterval: 5000,
+  });
+
+  const stopMutation = useMutation({
+    mutationFn: (taskId: string) => api.stopDelegation(taskId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["delegations"] }),
+  });
+
+  const delegations = data?.delegations ?? [];
+  if (delegations.length === 0) return null;
+
+  // Running first, then the rest in insertion order.
+  const ordered = [...delegations].sort(
+    (a, b) => (a.status === "running" ? 0 : 1) - (b.status === "running" ? 0 : 1),
+  );
+  const runningCount = delegations.filter((d) => d.status === "running").length;
+
+  return (
+    <div className="mb-6 rounded-lg border border-sky-500/20 bg-[var(--color-surface)] p-4">
+      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-sky-400">
+        <Radio className="h-3.5 w-3.5" /> Background Tasks ({delegations.length})
+        {runningCount > 0 && (
+          <span className="text-emerald-400">· {runningCount} running</span>
+        )}
+      </h3>
+      <div className="space-y-2">
+        {ordered.map((d) => {
+          const s = DELEGATION_STATUS[d.status];
+          const isOpen = expanded === d.task_id;
+          const body = (d.status === "error" ? d.error : d.result)?.trim();
+          return (
+            <div
+              key={d.task_id}
+              className="rounded-md border border-[var(--color-border)]/60 bg-[var(--color-bg)]/40"
+            >
+              <div className="flex items-center gap-3 px-3 py-2">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+                <Link
+                  to={`/agents/${encodeURIComponent(d.agent)}`}
+                  className="shrink-0 font-mono text-xs font-medium text-[var(--color-primary)] hover:underline"
+                >
+                  {d.agent}
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setExpanded(isOpen ? null : d.task_id)}
+                  className="min-w-0 flex-1 truncate text-left text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  title={d.task}
+                >
+                  {d.task.split("\n")[0] || "—"}
+                </button>
+                <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${s.text}`}>
+                  {s.label}
+                </span>
+                {d.status === "running" && (
+                  <button
+                    type="button"
+                    onClick={() => stopMutation.mutate(d.task_id)}
+                    disabled={stopMutation.isPending}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-40"
+                    title="Stop task"
+                  >
+                    <Square className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+              {isOpen && (
+                <div className="border-t border-[var(--color-border)]/40 px-3 py-2">
+                  <p className="mb-1 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                    {d.status === "error" ? "Error" : "Result"}
+                  </p>
+                  {d.status === "error" ? (
+                    // Errors are raw (stack traces / plain messages) — keep monospace.
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-red-300">
+                      {body || "(no output)"}
+                    </pre>
+                  ) : body ? (
+                    // A delegation result is the agent's narrative final answer — render markdown.
+                    <div className="chat-markdown max-h-64 overflow-auto text-xs text-[var(--color-text)]">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      {d.status === "running" ? "Running…" : "(no output)"}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DeleteAgentDialog({
   agent,
   onClose,
@@ -351,8 +526,8 @@ export function Agents() {
     refetchInterval: 10000,
   });
 
-  const running = agents.filter((a) => a.status === "running");
-  const others = agents.filter((a) => a.status !== "running");
+  const running = agents.filter((a) => deriveAgentStatus(a) === "running");
+  const others = agents.filter((a) => deriveAgentStatus(a) !== "running");
 
   const activeSessions = useMemo<ActiveSession[]>(
     () =>
@@ -426,6 +601,9 @@ export function Agents() {
       {!isLoading && activeSessions.length > 0 && (
         <ActiveSessionsTable sessions={activeSessions} />
       )}
+
+      {/* Background Tasks (delegations) */}
+      <BackgroundTasks />
 
       {isLoading ? (
         <div className="flex h-64 items-center justify-center text-[var(--color-text-muted)]">

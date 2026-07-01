@@ -5,6 +5,7 @@ import yaml from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { api, type ControllerConfigSummary } from "@/lib/api";
+import { configToYaml } from "@/lib/configYaml";
 
 // ── Delete Confirm Dialog ──
 
@@ -363,10 +364,7 @@ export function CloneConfigDialog({
 
   useMemo(() => {
     if (!data?.config) return;
-    const filtered = Object.fromEntries(
-      Object.entries(data.config).filter(([k]) => k !== "id"),
-    );
-    setYamlContent(yaml.dump(filtered, { sortKeys: false, lineWidth: -1 }));
+    setYamlContent(configToYaml(data.config));
   }, [data?.config]);
 
   const handleYamlChange = useCallback((val: string) => {

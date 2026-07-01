@@ -13,20 +13,17 @@ import {
   Save,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
 import { api, type ControllerInfo } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl } from "@/lib/formatters";
+import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
+import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 import { setViewContext } from "@/lib/viewContext";
 
 type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
-
-function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
 
 function parseSide(raw: string): string {
   const dot = raw.lastIndexOf(".");
@@ -59,17 +56,6 @@ interface ControllerBrowserProps {
   currencySymbol: string;
 }
 
-// Keys to strip from the YAML display (internal / read-only fields)
-const YAML_HIDDEN_KEYS = new Set(["id", "controller_name", "controller_type"]);
-
-function configToYaml(config: Record<string, unknown>): string {
-  const filtered: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(config)) {
-    if (!YAML_HIDDEN_KEYS.has(k) && !k.startsWith("_")) filtered[k] = v;
-  }
-  return yamlLib.dump(filtered, { lineWidth: -1, noRefs: true, sortKeys: true });
-}
-
 // ── YAML Config Editor ──
 
 function YamlConfigEditor({
@@ -85,16 +71,28 @@ function YamlConfigEditor({
   botName: string;
   onSaved: () => void;
 }) {
-  const originalYaml = configToYaml(config);
+  // Memoize the dump so typing / local-state renders don't re-run yaml.dump, and
+  // so WS-tick churn of the `config` object identity that yields the SAME content
+  // produces an identical string (compared by value) below.
+  const originalYaml = useMemo(
+    () =>
+      configToYaml(config, {
+        hiddenKeys: CONTROLLER_HIDDEN_KEYS,
+        stripUnderscore: true,
+        sortKeys: true,
+      }),
+    [config],
+  );
   const [yamlContent, setYamlContent] = useState(originalYaml);
   const [parseError, setParseError] = useState<string | null>(null);
 
-  // Sync when config changes externally (e.g. after save or controller switch)
+  // Sync when config content actually changes (save / controller switch). Keyed
+  // on the string value, not the `config` object: a tick that re-creates `config`
+  // with unchanged content leaves `originalYaml` equal, so unsaved edits survive.
   useEffect(() => {
-    const newYaml = configToYaml(config);
-    setYamlContent(newYaml);
+    setYamlContent(originalYaml);
     setParseError(null);
-  }, [config]);
+  }, [originalYaml]);
 
   const isDirty = yamlContent !== originalYaml;
 

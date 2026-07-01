@@ -8,35 +8,32 @@ import {
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
-import { ExecutorChart } from "@/components/charts/ExecutorChart";
-import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
-import { useAgentExecutors } from "@/hooks/useAgentExecutors";
-import { type AgentDetail, type ExecutorInfo, api } from "@/lib/api";
+import { api } from "@/lib/api";
 
 // ── Markdown Editor ──
 
 export function MarkdownEditor({
-  slug,
   label,
   sublabel,
   content,
-  mutationFn,
+  onSave,
+  invalidateKey,
 }: {
-  slug: string;
   label: string;
   sublabel: string;
   content: string;
-  mutationFn: (slug: string, value: string) => Promise<unknown>;
+  onSave: (value: string) => Promise<unknown>;
+  invalidateKey: unknown[];
 }) {
   const queryClient = useQueryClient();
   const [value, setValue] = useState(content);
   const [dirty, setDirty] = useState(false);
 
   const saveMut = useMutation({
-    mutationFn: () => mutationFn(slug, value),
+    mutationFn: () => onSave(value),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      queryClient.invalidateQueries({ queryKey: invalidateKey });
       setDirty(false);
     },
   });
@@ -129,12 +126,23 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
           <span className="text-[var(--color-text-muted)]">frequency</span>
           <span className="text-[var(--color-text)]">{instance.frequency_sec}s</span>
         </div>
-        {Object.entries(riskLimits).map(([k, v]) => (
-          <div key={k} className="flex justify-between">
-            <span className="text-[var(--color-text-muted)]">{k.replace("max_", "").replace(/_/g, " ")}</span>
-            <span className="text-[var(--color-text)]">{String(v)}</span>
-          </div>
-        ))}
+        {Object.entries(riskLimits).map(([k, v]) => {
+          // These are risk LIMITS (max_*), not current values — keep the "max"
+          // so e.g. "open executors: 10" isn't misread as 10 executors open now.
+          const label =
+            k === "max_position_size_quote"
+              ? "max position"
+              : k === "max_open_executors"
+                ? "max executors"
+                : k.replace(/_/g, " ");
+          const val = k === "max_position_size_quote" ? `$${v}` : String(v);
+          return (
+            <div key={k} className="flex justify-between">
+              <span className="text-[var(--color-text-muted)]">{label}</span>
+              <span className="text-[var(--color-text)]">{val}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -144,14 +152,16 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 export function PerformancePanel({
   slug,
+  sslug,
   onSessionClick,
 }: {
   slug: string;
+  sslug: string;
   onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
 }) {
   const { data } = useQuery({
-    queryKey: ["agent-performance", slug],
-    queryFn: () => api.getAgentPerformance(slug),
+    queryKey: ["strategy-performance", slug, sslug],
+    queryFn: () => api.getStrategyPerformance(slug, sslug),
     refetchInterval: 10000,
   });
   const totals = data?.totals || {};
@@ -309,117 +319,3 @@ export function PerformancePanel({
   );
 }
 
-// ── Overview Tab ──
-
-export function OverviewTab({ agent }: { agent: AgentDetail }) {
-  const config = agent.config as Record<string, unknown>;
-  const instances = agent.instances || [];
-  const hasRunning = instances.length > 0;
-  const serverName = (config.server_name as string) || "";
-
-  // Derive controller IDs from active instances for WS executor streaming
-  const controllerIds = useMemo(
-    () => instances.map((inst) => inst.agent_id).filter(Boolean),
-    [instances],
-  );
-
-  // Real-time executor data via WS
-  const { executors: liveExecutors } = useAgentExecutors(
-    hasRunning ? serverName : null,
-    controllerIds,
-  );
-
-  // Group live executors by connector:pair for charts
-  const chartGroups = useMemo(() => {
-    if (!serverName || liveExecutors.length === 0) return [];
-    const groups = new Map<string, ExecutorInfo[]>();
-    for (const ex of liveExecutors) {
-      if (!ex.trading_pair) continue;
-      const key = `${ex.connector}:${ex.trading_pair}`;
-      const arr = groups.get(key);
-      if (arr) arr.push(ex);
-      else groups.set(key, [ex]);
-    }
-    return Array.from(groups.entries());
-  }, [liveExecutors, serverName]);
-
-  return (
-    <div className="space-y-6">
-      {/* Agent Meta Strip */}
-      <div className="flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
-        <span className="rounded-full bg-[var(--color-surface)] px-2.5 py-1 border border-[var(--color-border)]">
-          {agent.sessions.length} session{agent.sessions.length !== 1 ? "s" : ""}
-        </span>
-        <span className="rounded-full bg-[var(--color-surface)] px-2.5 py-1 border border-[var(--color-border)] font-mono">
-          {agent.slug}
-        </span>
-        {agent.agent_id && (
-          <span className="rounded-full bg-[var(--color-surface)] px-2.5 py-1 border border-[var(--color-border)] font-mono">
-            {agent.agent_id}
-          </span>
-        )}
-      </div>
-
-      {/* Market Context Strip */}
-      {hasRunning && liveExecutors.length > 0 && (
-        <AgentMarketStrip serverName={serverName} executors={liveExecutors} />
-      )}
-
-      {/* Performance Panel + PnL Chart */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <PerformancePanel slug={agent.slug} />
-      </div>
-
-      {/* Live Executor Charts */}
-      {hasRunning && chartGroups.length > 0 && (
-        <div className="space-y-4">
-          <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-            <Zap className="h-3.5 w-3.5" /> Live Executors
-          </h3>
-          {chartGroups.map(([key, group]) => (
-            <ExecutorChart
-              key={key}
-              server={serverName}
-              executors={group}
-              connector={group[0].connector}
-              tradingPair={group[0].trading_pair}
-              height={300}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Running Instances */}
-      {hasRunning && (
-        <div className="rounded-lg border border-emerald-500/20 bg-[var(--color-surface)] p-4">
-          <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-emerald-400">
-            <Zap className="h-3.5 w-3.5" /> Active Sessions ({instances.length})
-          </h3>
-          <div className="space-y-3">
-            {instances.map((inst) => (
-              <InstanceCard key={inst.agent_id} instance={inst} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Strategy + Learnings Editors */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <MarkdownEditor
-          slug={agent.slug}
-          label="Strategy"
-          sublabel="agent.md"
-          content={agent.agent_md}
-          mutationFn={api.updateAgentMd}
-        />
-        <MarkdownEditor
-          slug={agent.slug}
-          label="Learnings"
-          sublabel="persists across sessions"
-          content={agent.learnings}
-          mutationFn={api.updateAgentLearnings}
-        />
-      </div>
-    </div>
-  );
-}

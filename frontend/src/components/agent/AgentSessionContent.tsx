@@ -10,9 +10,11 @@ import { ExecutorChart, type SnapshotBubble } from "@/components/charts/Executor
 import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
+import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
+import { formatCompactUsd } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
-import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/pages/Executors";
+import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/executor/ExecutorTable";
 
 // ── Helper ──
 
@@ -109,6 +111,7 @@ export function SessionActivity({ journal }: { journal: ParsedJournal }) {
 
 export function SessionExecutors({
   slug,
+  sslug,
   sessionNum,
   serverName,
   controllerIds,
@@ -116,6 +119,7 @@ export function SessionExecutors({
   sessionSummary,
 }: {
   slug: string;
+  sslug: string;
   sessionNum: number;
   serverName: string;
   controllerIds?: string[];
@@ -124,8 +128,8 @@ export function SessionExecutors({
 }) {
   // REST data (fallback + historical executors)
   const { data: sessionDetail } = useQuery({
-    queryKey: ["agent-session-executors", slug, sessionNum],
-    queryFn: () => api.getAgentSessionExecutors(slug, sessionNum),
+    queryKey: ["strategy-session-executors", slug, sslug, sessionNum],
+    queryFn: () => api.getStrategySessionExecutors(slug, sslug, sessionNum),
     refetchInterval: 10000,
   });
 
@@ -160,35 +164,37 @@ export function SessionExecutors({
 
   // Fetch snapshots for bubble markers
   const { data: snapshotsData } = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshots"],
-    queryFn: () => api.getSessionSnapshots(slug, sessionNum),
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshots"],
+    queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
   // Fetch each snapshot content for agent response previews
   const snapshotSummaries = snapshotsData?.snapshots ?? [];
   const snapshotQueries = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshot-contents", snapshotSummaries.map((s) => s.tick).join(",")],
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot-contents", snapshotSummaries.map((s) => s.tick).join(",")],
     queryFn: async () => {
-      const results: SnapshotBubble[] = [];
-      for (const snap of snapshotSummaries) {
-        try {
-          const data = await api.getSnapshot(slug, sessionNum, snap.tick);
-          if (data?.content) {
-            const parsed = parseSnapshot(data.content);
-            results.push({
-              tick: snap.tick,
-              timestamp: snap.timestamp,
-              agentResponse: parsed.agentResponse,
-              toolCallCount: parsed.toolCalls.length,
-            });
-          } else {
-            results.push({ tick: snap.tick, timestamp: snap.timestamp });
+      // Fetch all snapshots concurrently: Promise.all preserves input order, so
+      // the result stays sorted by tick while latency collapses to the slowest
+      // request instead of the sum of all of them.
+      return Promise.all(
+        snapshotSummaries.map(async (snap): Promise<SnapshotBubble> => {
+          try {
+            const data = await api.getSnapshot(slug, sslug, sessionNum, snap.tick);
+            if (data?.content) {
+              const parsed = parseSnapshot(data.content);
+              return {
+                tick: snap.tick,
+                timestamp: snap.timestamp,
+                agentResponse: parsed.agentResponse,
+                toolCallCount: parsed.toolCalls.length,
+              };
+            }
+            return { tick: snap.tick, timestamp: snap.timestamp };
+          } catch {
+            return { tick: snap.tick, timestamp: snap.timestamp };
           }
-        } catch {
-          results.push({ tick: snap.tick, timestamp: snap.timestamp });
-        }
-      }
-      return results;
+        }),
+      );
     },
     enabled: snapshotSummaries.length > 0,
     staleTime: 60000,
@@ -200,18 +206,10 @@ export function SessionExecutors({
   }));
 
   // Group executors by connector:pair for charts
-  const chartGroups = useMemo(() => {
-    if (!serverName || executorInfos.length === 0) return [];
-    const groups = new Map<string, ExecutorInfo[]>();
-    for (const ex of executorInfos) {
-      if (!ex.trading_pair) continue;
-      const key = `${ex.connector}:${ex.trading_pair}`;
-      const arr = groups.get(key);
-      if (arr) arr.push(ex);
-      else groups.set(key, [ex]);
-    }
-    return Array.from(groups.entries());
-  }, [executorInfos, serverName]);
+  const chartGroups = useMemo(
+    () => (serverName ? groupExecutorsByMarket(executorInfos) : []),
+    [executorInfos, serverName],
+  );
 
   // Aggregate stats
   const stats = useMemo(() => {
@@ -284,12 +282,6 @@ export function SessionExecutors({
     return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No executors for this session.</p>;
   }
 
-  const fmtUsd = (v: number) => {
-    if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
-    if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
-    return "$" + v.toFixed(2);
-  };
-
   return (
     <div className="space-y-3">
       {/* Stats strip */}
@@ -311,16 +303,16 @@ export function SessionExecutors({
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Net PnL</span>
           <span className={`font-mono text-sm font-semibold ${stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-            {stats.totalPnl >= 0 ? "+" : ""}{fmtUsd(stats.totalPnl)}
+            {stats.totalPnl >= 0 ? "+" : ""}{formatCompactUsd(stats.totalPnl)}
           </span>
         </div>
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
-          <span className="font-mono text-sm text-[var(--color-text)]">{fmtUsd(stats.totalVolume)}</span>
+          <span className="font-mono text-sm text-[var(--color-text)]">{formatCompactUsd(stats.totalVolume)}</span>
         </div>
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
-          <span className="font-mono text-sm text-[var(--color-text-muted)]">{fmtUsd(stats.totalFees)}</span>
+          <span className="font-mono text-sm text-[var(--color-text-muted)]">{formatCompactUsd(stats.totalFees)}</span>
         </div>
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Executors</span>
@@ -406,7 +398,7 @@ export function SessionExecutors({
                 <span className="text-xs font-medium text-[var(--color-text)]">{group[0].trading_pair}</span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
                 <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {pairPnl >= 0 ? "+" : ""}{fmtUsd(pairPnl)}
+                  {pairPnl >= 0 ? "+" : ""}{formatCompactUsd(pairPnl)}
                 </span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group.length} exec</span>
               </div>
@@ -459,12 +451,12 @@ export function SessionExecutors({
 
 // ── Session Snapshots ──
 
-export function SessionSnapshots({ slug, sessionNum, initialTick }: { slug: string; sessionNum: number; initialTick?: number | null }) {
+export function SessionSnapshots({ slug, sslug, sessionNum, initialTick }: { slug: string; sslug: string; sessionNum: number; initialTick?: number | null }) {
   const [selectedTick, setSelectedTick] = useState<number>(initialTick ?? 0);
 
   const { data: snapshotsData } = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshots"],
-    queryFn: () => api.getSessionSnapshots(slug, sessionNum),
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshots"],
+    queryFn: () => api.getSessionSnapshots(slug, sslug, sessionNum),
   });
 
   const snapshots = snapshotsData?.snapshots || [];
@@ -500,7 +492,7 @@ export function SessionSnapshots({ slug, sessionNum, initialTick }: { slug: stri
       {/* Snapshot detail */}
       <div className="min-w-0 flex-1">
         {selectedTick > 0 ? (
-          <SnapshotDetail slug={slug} sessionNum={sessionNum} tick={selectedTick} />
+          <SnapshotDetail slug={slug} sslug={sslug} sessionNum={sessionNum} tick={selectedTick} />
         ) : (
           <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">Select a snapshot to view details.</p>
         )}
@@ -511,10 +503,10 @@ export function SessionSnapshots({ slug, sessionNum, initialTick }: { slug: stri
 
 // ── Snapshot Detail ──
 
-function SnapshotDetail({ slug, sessionNum, tick }: { slug: string; sessionNum: number; tick: number }) {
+function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug: string; sessionNum: number; tick: number }) {
   const { data, isLoading } = useQuery({
-    queryKey: ["agent", slug, "session", sessionNum, "snapshot", tick],
-    queryFn: () => api.getSnapshot(slug, sessionNum, tick),
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "snapshot", tick],
+    queryFn: () => api.getSnapshot(slug, sslug, sessionNum, tick),
     enabled: tick > 0,
   });
 

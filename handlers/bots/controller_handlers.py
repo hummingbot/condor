@@ -249,9 +249,7 @@ async def show_controller_configs_menu(
 
         # Create button - dynamically routes to the current type's wizard
         type_row.append(
-            InlineKeyboardButton(
-                "➕ New", callback_data=f"bots:new_{current_type}"
-            )
+            InlineKeyboardButton("➕ New", callback_data=f"bots:new_{current_type}")
         )
 
         keyboard.append(type_row)
@@ -278,9 +276,7 @@ async def show_controller_configs_menu(
             nav = []
             if page > 0:
                 nav.append(
-                    InlineKeyboardButton(
-                        "◀️", callback_data=f"bots:cfg_page:{page - 1}"
-                    )
+                    InlineKeyboardButton("◀️", callback_data=f"bots:cfg_page:{page - 1}")
                 )
             nav.append(
                 InlineKeyboardButton(
@@ -289,9 +285,7 @@ async def show_controller_configs_menu(
             )
             if page < total_pages - 1:
                 nav.append(
-                    InlineKeyboardButton(
-                        "▶️", callback_data=f"bots:cfg_page:{page + 1}"
-                    )
+                    InlineKeyboardButton("▶️", callback_data=f"bots:cfg_page:{page + 1}")
                 )
             keyboard.append(nav)
 
@@ -363,12 +357,16 @@ async def show_controller_configs_menu(
         keyboard = []
         for ctrl_type in get_supported_controller_types():
             type_name, emoji = _get_controller_type_display(ctrl_type)
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"➕ {type_name}", callback_data=f"bots:new_{ctrl_type}"
-                )
-            ])
-        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"➕ {type_name}", callback_data=f"bots:new_{ctrl_type}"
+                    )
+                ]
+            )
+        keyboard.append(
+            [InlineKeyboardButton("⬅️ Back", callback_data="bots:main_menu")]
+        )
         error_msg = format_error_message(f"Failed to load configs: {str(e)}")
         try:
             if query and query.message:
@@ -1099,7 +1097,9 @@ async def handle_cfg_edit_save(
 
     try:
         client, _ = await get_bots_client(chat_id, context.user_data)
-        await client.controllers.create_or_update_controller_config(config_id, clean_config_for_save(config))
+        await client.controllers.create_or_update_controller_config(
+            config_id, clean_config_for_save(config)
+        )
         await query.answer()
 
         # Remove from modified since it's now saved
@@ -1375,12 +1375,13 @@ async def _show_wizard_connector_step(
         )
 
         if not cex_connectors:
+            from handlers.config.api_keys import keys_web_button
+
+            keys_btn = keys_web_button(query.from_user) or InlineKeyboardButton(
+                "🔑 View Keys", callback_data="config_api_keys"
+            )
             keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🔑 Configure API Keys", callback_data="config_api_keys"
-                    )
-                ],
+                [keys_btn],
                 [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
             ]
             await query.message.edit_text(
@@ -1388,7 +1389,7 @@ async def _show_wizard_connector_step(
                 r"⚠️ No CEX connectors available\." + "\n\n"
                 r"You need to connect API keys for an exchange to deploy strategies\."
                 + "\n"
-                r"Click below to configure your API keys\.",
+                r"Connect them from the web dashboard \(Settings → Keys\)\.",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -5181,9 +5182,7 @@ def _build_deploy_progressive_message(
             value_display = f"{default} (default)" if default else "Not set"
 
         if field_name == current_field:
-            lines.append(
-                f"➡️ *{escape_markdown_v2(label)}*{required}: _awaiting input_"
-            )
+            lines.append(f"➡️ *{escape_markdown_v2(label)}*{required}: _awaiting input_")
         elif DEPLOY_FIELD_ORDER.index(field_name) < DEPLOY_FIELD_ORDER.index(
             current_field
         ):
@@ -6259,12 +6258,13 @@ async def _show_pmm_wizard_connector_step(
         )
 
         if not cex_connectors:
+            from handlers.config.api_keys import keys_web_button
+
+            keys_btn = keys_web_button(query.from_user) or InlineKeyboardButton(
+                "🔑 View Keys", callback_data="config_api_keys"
+            )
             keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🔑 Configure API Keys", callback_data="config_api_keys"
-                    )
-                ],
+                [keys_btn],
                 [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
             ]
             await query.message.edit_text(
@@ -6272,7 +6272,7 @@ async def _show_pmm_wizard_connector_step(
                 r"⚠️ No CEX connectors available\." + "\n\n"
                 r"You need to connect API keys for an exchange to deploy strategies\."
                 + "\n"
-                r"Click below to configure your API keys\.",
+                r"Connect them from the web dashboard \(Settings → Keys\)\.",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -6885,10 +6885,18 @@ async def _show_pmm_wizard_review_step(
     sell_amounts = config.get("sell_amounts_pct", "1,1")
 
     if not buy_amounts:
-        num_buy_spreads = len(buy_spreads.split(",")) if isinstance(buy_spreads, str) and buy_spreads else 1
+        num_buy_spreads = (
+            len(buy_spreads.split(","))
+            if isinstance(buy_spreads, str) and buy_spreads
+            else 1
+        )
         buy_amounts = ",".join(["1"] * num_buy_spreads)
     if not sell_amounts:
-        num_sell_spreads = len(sell_spreads.split(",")) if isinstance(sell_spreads, str) and sell_spreads else 1
+        num_sell_spreads = (
+            len(sell_spreads.split(","))
+            if isinstance(sell_spreads, str) and sell_spreads
+            else 1
+        )
         sell_amounts = ",".join(["1"] * num_sell_spreads)
 
     # Build copyable config block
@@ -7259,8 +7267,10 @@ async def handle_pmm_edit_advanced(
         f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 10)}s`" + "\n"
         f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 10)}s` "
         f"sell=`{config.get('sell_cooldown_time', 10)}s`" + "\n"
-        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 10)}`" + "\n"
-        f"🛡️ *Profit Protection:* `{config.get('position_profit_protection', True)}`" + "\n"
+        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 10)}`"
+        + "\n"
+        f"🛡️ *Profit Protection:* `{config.get('position_profit_protection', True)}`"
+        + "\n"
         f"📊 *Global TP/SL:* `{config.get('global_take_profit', '0.03')}`/`{config.get('global_stop_loss', '0.05')}`",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -7890,10 +7900,18 @@ async def _pmm_show_review(context, chat_id, message_id, config):
     sell_amounts = config.get("sell_amounts_pct", "1,1")
 
     if not buy_amounts:
-        num_buy_spreads = len(buy_spreads.split(",")) if isinstance(buy_spreads, str) and buy_spreads else 1
+        num_buy_spreads = (
+            len(buy_spreads.split(","))
+            if isinstance(buy_spreads, str) and buy_spreads
+            else 1
+        )
         buy_amounts = ",".join(["1"] * num_buy_spreads)
     if not sell_amounts:
-        num_sell_spreads = len(sell_spreads.split(",")) if isinstance(sell_spreads, str) and sell_spreads else 1
+        num_sell_spreads = (
+            len(sell_spreads.split(","))
+            if isinstance(sell_spreads, str) and sell_spreads
+            else 1
+        )
         sell_amounts = ",".join(["1"] * num_sell_spreads)
 
     # Build copyable config block
@@ -7984,8 +8002,10 @@ async def _pmm_show_advanced(context, chat_id, message_id, config):
         f"⏱️ *Refresh:* `{config.get('executor_refresh_time', 10)}s`" + "\n"
         f"⏸️ *Cooldowns:* buy=`{config.get('buy_cooldown_time', 10)}s` "
         f"sell=`{config.get('sell_cooldown_time', 10)}s`" + "\n"
-        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 10)}`" + "\n"
-        f"🛡️ *Profit Protection:* `{config.get('position_profit_protection', True)}`" + "\n"
+        f"🔢 *Max Executors:* `{config.get('max_active_executors_by_level', 10)}`"
+        + "\n"
+        f"🛡️ *Profit Protection:* `{config.get('position_profit_protection', True)}`"
+        + "\n"
         f"📊 *Global TP/SL:* `{config.get('global_take_profit', '0.03')}`/`{config.get('global_stop_loss', '0.05')}`",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -8040,12 +8060,13 @@ async def _show_pv1_wizard_connector_step(
         )
 
         if not cex_connectors:
+            from handlers.config.api_keys import keys_web_button
+
+            keys_btn = keys_web_button(query.from_user) or InlineKeyboardButton(
+                "🔑 View Keys", callback_data="config_api_keys"
+            )
             keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🔑 Configure API Keys", callback_data="config_api_keys"
-                    )
-                ],
+                [keys_btn],
                 [InlineKeyboardButton("« Back", callback_data="bots:main_menu")],
             ]
             await query.message.edit_text(
@@ -8053,7 +8074,7 @@ async def _show_pv1_wizard_connector_step(
                 r"⚠️ No CEX connectors available\." + "\n\n"
                 r"You need to connect API keys for an exchange to deploy strategies\."
                 + "\n"
-                r"Click below to configure your API keys\.",
+                r"Connect them from the web dashboard \(Settings → Keys\)\.",
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -8077,8 +8098,7 @@ async def _show_pv1_wizard_connector_step(
         )
 
         await query.message.edit_text(
-            r"*📈 PMM V1 \- New Config*" + "\n\n"
-            r"*Step 1/5:* 🏦 Select Connector",
+            r"*📈 PMM V1 \- New Config*" + "\n\n" r"*Step 1/5:* 🏦 Select Connector",
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -8253,8 +8273,7 @@ async def _show_pv1_wizard_spreads_step(
         r"*📈 PMM V1 \- New Config*" + "\n\n"
         f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
         + "\n"
-        f"💰 Amount: `{escape_markdown_v2(str(amount))}`"
-        + "\n\n"
+        f"💰 Amount: `{escape_markdown_v2(str(amount))}`" + "\n\n"
         r"*Step 4/5:* 📊 Spread" + "\n\n"
         r"_Applied to both buy and sell\. Or type a custom value \(e\.g\. 0\.001\)_",
         parse_mode="MarkdownV2",
@@ -8652,8 +8671,7 @@ async def process_pv1_wizard_input(
                 text=r"*📈 PMM V1 \- New Config*" + "\n\n"
                 f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
                 + "\n"
-                f"💰 Amount: `{escape_markdown_v2(amount_str)}`"
-                + "\n\n"
+                f"💰 Amount: `{escape_markdown_v2(amount_str)}`" + "\n\n"
                 r"*Step 4/5:* 📊 Spread" + "\n\n"
                 r"_Applied to both buy and sell\. Or type a custom value \(e\.g\. 0\.001\)_",
                 parse_mode="MarkdownV2",
@@ -8677,9 +8695,7 @@ async def process_pv1_wizard_input(
                     InlineKeyboardButton("100", callback_data="bots:pv1_amount:100"),
                 ],
                 [
-                    InlineKeyboardButton(
-                        "⬅️ Back", callback_data="bots:pv1_back:pair"
-                    ),
+                    InlineKeyboardButton("⬅️ Back", callback_data="bots:pv1_back:pair"),
                     InlineKeyboardButton("❌ Cancel", callback_data="bots:main_menu"),
                 ],
             ]
@@ -8750,8 +8766,7 @@ async def process_pv1_wizard_input(
                 text=r"*📈 PMM V1 \- New Config*" + "\n\n"
                 f"🏦 `{escape_markdown_v2(connector)}` \\| 🔗 `{escape_markdown_v2(pair)}`"
                 + "\n"
-                f"💰 Amount: `{escape_markdown_v2(str(amount))}`"
-                + "\n\n"
+                f"💰 Amount: `{escape_markdown_v2(str(amount))}`" + "\n\n"
                 r"*Step 4/5:* 📊 Spread" + "\n\n"
                 r"⚠️ _Invalid value\. Enter a positive number \(e\.g\. 0\.001\)_",
                 parse_mode="MarkdownV2",
@@ -8773,6 +8788,7 @@ async def process_pv1_wizard_input(
                 elif value.startswith("["):
                     try:
                         import ast
+
                         config[field] = ast.literal_eval(value)
                     except Exception:
                         config[field] = value

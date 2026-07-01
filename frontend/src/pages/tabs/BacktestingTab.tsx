@@ -1,4 +1,3 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Calendar,
   CheckCircle2,
@@ -15,40 +14,17 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { IChartApi } from "lightweight-charts";
 
+import { useBacktest } from "@/hooks/useBacktest";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
-import { api } from "@/lib/api";
+import type { BacktestData, ExecutorData } from "@/lib/backtest";
+import { extractResults } from "@/lib/backtest";
+import { formatPct, formatPnl, formatUsd, pnlColor, tsToSeconds } from "@/lib/formatters";
 
 // -- Helpers --
-
-function tsToSeconds(ts: number): number {
-  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
-}
-
-function formatUsd(val: number) {
-  if (Math.abs(val) >= 1_000_000) return "$" + (val / 1_000_000).toFixed(2) + "M";
-  if (Math.abs(val) >= 10_000) return "$" + (val / 1_000).toFixed(1) + "K";
-  return val.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-}
-
-function formatPnl(val: number) {
-  return (val >= 0 ? "+" : "") + formatUsd(val);
-}
-
-function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
-
-function formatPct(val: number) {
-  return (val >= 0 ? "+" : "") + (val * 100).toFixed(2) + "%";
-}
 
 function tsToDateTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString("en-US", {
@@ -167,17 +143,21 @@ function BacktestChart({ data }: { data: BacktestData }) {
   useEffect(() => {
     if (!priceRef.current || data.candles.length === 0) return;
     const isDark = theme !== "light";
+    let cancelled = false;
     let ro: ResizeObserver | undefined;
     let isSyncing = false;
+    // This run owns its own charts so overlapping runs never share/teardown each
+    // other's instances. chartsRef tracks them for the ResizeObserver callback.
+    const charts: IChartApi[] = [];
 
     (async () => {
       const mod = await import("lightweight-charts");
-      if (!priceRef.current) return;
+      if (cancelled || !priceRef.current) return;
 
       for (const c of chartsRef.current) {
         try { c.remove(); } catch { /* ok */ }
       }
-      chartsRef.current = [];
+      chartsRef.current = charts;
 
       type TS = import("lightweight-charts").UTCTimestamp;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -191,7 +171,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
         width: containerWidth,
         height: hasPositionHeld ? 350 : hasPnl ? 380 : 450,
       });
-      chartsRef.current.push(priceChart);
+      charts.push(priceChart);
 
       const candleSeries = priceChart.addSeries(mod.CandlestickSeries, {
         upColor: "#26a69a",
@@ -255,7 +235,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
           width: containerWidth,
           height: hasPositionHeld ? 160 : 200,
         });
-        chartsRef.current.push(pnlChart);
+        charts.push(pnlChart);
 
         if (data.pnlTimeseries.length > 0) {
           const totalSeries = pnlChart.addSeries(mod.AreaSeries, {
@@ -316,7 +296,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
           width: containerWidth,
           height: 140,
         });
-        chartsRef.current.push(posChart);
+        charts.push(posChart);
 
         const pts = data.positionHeldTimeseries;
 
@@ -349,7 +329,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
       }
 
       // Sync time scales
-      const allCharts = chartsRef.current;
+      const allCharts = charts;
       for (let i = 0; i < allCharts.length; i++) {
         allCharts[i].timeScale().subscribeVisibleLogicalRangeChange((range) => {
           if (isSyncing || !range) return;
@@ -381,7 +361,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
       ro = new ResizeObserver((entries) => {
         const w = entries[0]?.contentRect?.width;
         if (w) {
-          for (const c of chartsRef.current) {
+          for (const c of charts) {
             c.applyOptions({ width: w });
           }
         }
@@ -390,11 +370,14 @@ function BacktestChart({ data }: { data: BacktestData }) {
     })();
 
     return () => {
+      cancelled = true;
       ro?.disconnect();
-      for (const c of chartsRef.current) {
+      for (const c of charts) {
         try { c.remove(); } catch { /* ok */ }
       }
-      chartsRef.current = [];
+      // Only clear the shared ref if it still points at this run's charts, so a
+      // newer run that already swapped in its own array isn't clobbered.
+      if (chartsRef.current === charts) chartsRef.current = [];
     };
   }, [data, theme, hasPnl, hasPositionHeld]);
 
@@ -474,7 +457,22 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
 export function BacktestingTab() {
   const { server } = useServer();
-  const queryClient = useQueryClient();
+
+  // Data layer: queries + mutations + selection/pinning state
+  const {
+    configsData,
+    tasks,
+    tasksLoading,
+    selectedTask,
+    selectedTaskLoading,
+    selectedTaskId,
+    setSelectedTaskId,
+    pinnedTask,
+    pinnedTaskId,
+    setPinnedTaskId,
+    submit: submitMutation,
+    remove: deleteMutation,
+  } = useBacktest(server);
 
   // Form state
   const [configId, setConfigId] = useState("");
@@ -486,57 +484,10 @@ export function BacktestingTab() {
   const [endDate, setEndDate] = useState(() =>
     toDateInputValue(Math.floor(Date.now() / 1000)),
   );
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [configDropdownOpen, setConfigDropdownOpen] = useState(false);
   const [configSearch, setConfigSearch] = useState("");
   const [activePreset, setActivePreset] = useState<string | null>("1W");
-  const [pinnedTaskId, setPinnedTaskId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-
-  // Available configs
-  const { data: configsData } = useQuery({
-    queryKey: ["available-configs", server],
-    queryFn: () => api.getAvailableConfigs(server!),
-    enabled: !!server,
-  });
-
-  // Task list
-  const {
-    data: tasks,
-    isLoading: tasksLoading,
-  } = useQuery({
-    queryKey: ["backtest-tasks", server],
-    queryFn: () => api.listBacktestTasks(server!),
-    enabled: !!server,
-    refetchInterval: 5000,
-  });
-
-  // Selected task detail
-  const { data: selectedTask, isLoading: selectedTaskLoading } = useQuery({
-    queryKey: ["backtest-task", server, selectedTaskId],
-    queryFn: () => api.getBacktestTask(server!, selectedTaskId!),
-    enabled: !!server && !!selectedTaskId,
-    refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      if (status === "pending" || status === "running") return 2000;
-      return false;
-    },
-  });
-
-  // Pinned task detail (for comparison)
-  const { data: pinnedTask } = useQuery({
-    queryKey: ["backtest-task", server, pinnedTaskId],
-    queryFn: () => api.getBacktestTask(server!, pinnedTaskId!),
-    enabled: !!server && !!pinnedTaskId && pinnedTaskId !== selectedTaskId,
-  });
-
-  // Auto-select first completed task
-  useEffect(() => {
-    if (!selectedTaskId && tasks && tasks.length > 0) {
-      const completed = tasks.find((t) => t.status === "completed");
-      setSelectedTaskId(completed?.task_id ?? tasks[0].task_id);
-    }
-  }, [tasks, selectedTaskId]);
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -546,32 +497,19 @@ export function BacktestingTab() {
     }
   }, [toast]);
 
-  // Submit mutation
-  const submitMutation = useMutation({
-    mutationFn: () =>
-      api.submitBacktest(server!, {
+  // Submit the current form as a backtest task
+  const submitBacktest = useCallback(() => {
+    submitMutation.mutate(
+      {
         config_id: configId,
         start_time: dateToTs(startDate),
         end_time: dateToTs(endDate),
         backtesting_resolution: resolution,
         trade_cost: parseFloat(tradeCost),
-      }),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["backtest-tasks", server] });
-      if (data.task_id) setSelectedTaskId(data.task_id);
-      setToast("Backtest submitted successfully");
-    },
-  });
-
-  // Delete mutation
-  const deleteMutation = useMutation({
-    mutationFn: (taskId: string) => api.deleteBacktestTask(server!, taskId),
-    onSuccess: (_, taskId) => {
-      if (selectedTaskId === taskId) setSelectedTaskId(null);
-      if (pinnedTaskId === taskId) setPinnedTaskId(null);
-      queryClient.invalidateQueries({ queryKey: ["backtest-tasks", server] });
-    },
-  });
+      },
+      { onSuccess: () => setToast("Backtest submitted successfully") },
+    );
+  }, [submitMutation, configId, startDate, endDate, resolution, tradeCost]);
 
   const applyPreset = useCallback((label: string, days: number) => {
     const now = Math.floor(Date.now() / 1000);
@@ -591,11 +529,19 @@ export function BacktestingTab() {
   }, []);
 
   const rawTaskResults = selectedTask?.result as Record<string, unknown> | undefined;
-  const processed = rawTaskResults ? extractResults(rawTaskResults) : null;
+  // Re-parse only when react-query hands us a new result reference, not on every
+  // keystroke/poll/toast re-render (candles/executors can be thousands of rows).
+  const processed = useMemo(
+    () => (rawTaskResults ? extractResults(rawTaskResults) : null),
+    [rawTaskResults],
+  );
 
   // Pinned task processed data for comparison
   const pinnedRawResults = pinnedTask?.result as Record<string, unknown> | undefined;
-  const pinnedProcessed = pinnedRawResults ? extractResults(pinnedRawResults) : null;
+  const pinnedProcessed = useMemo(
+    () => (pinnedRawResults ? extractResults(pinnedRawResults) : null),
+    [pinnedRawResults],
+  );
 
   // Extract config info from a task for display
   const getTaskConfigInfo = useCallback((task: Record<string, unknown>) => {
@@ -822,7 +768,7 @@ export function BacktestingTab() {
           {/* Right: Run button */}
           <div className="relative group lg:shrink-0">
             <button
-              onClick={() => submitMutation.mutate()}
+              onClick={submitBacktest}
               disabled={!!disabledReason}
               className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-white transition-all hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm shadow-[var(--color-primary)]/20"
             >
@@ -1073,227 +1019,6 @@ export function BacktestingTab() {
       </div>
     </div>
   );
-}
-
-// -- Data Types --
-
-interface CandleData {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-}
-
-interface ExecutorData {
-  id: string;
-  timestamp: number;
-  closeTimestamp: number;
-  side: string;
-  closeType: string;
-  netPnlQuote: number;
-  filledAmountQuote: number;
-  entryPrice: number;
-  closePrice: number;
-}
-
-interface PnlTimeseriesPoint {
-  time: number;
-  totalPnl: number;
-  executorRealizedPnl: number;
-  positionRealizedPnl: number;
-  positionUnrealizedPnl: number;
-}
-
-interface PositionHeldPoint {
-  time: number;
-  longAmount: number;
-  shortAmount: number;
-  netAmount: number;
-  unrealizedPnl: number;
-}
-
-interface BacktestData {
-  netPnlQuote: number;
-  netPnlPct: number;
-  maxDrawdownUsd: number;
-  maxDrawdownPct: number;
-  totalVolume: number;
-  sharpeRatio: number;
-  profitFactor: number;
-  totalExecutors: number;
-  accuracyLong: number;
-  accuracyShort: number;
-  totalFees: number;
-  closeTypes: Record<string, number>;
-  candles: CandleData[];
-  pnlTimeseries: PnlTimeseriesPoint[];
-  positionHeldTimeseries: PositionHeldPoint[];
-  executors: ExecutorData[];
-  raw: Record<string, unknown>;
-}
-
-// -- Results Extraction --
-
-function extractResults(taskResults: Record<string, unknown>): BacktestData | null {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = taskResults as any;
-
-  const metrics: Record<string, unknown> =
-    (raw.results && typeof raw.results === "object" && !Array.isArray(raw.results))
-      ? raw.results
-      : raw;
-
-  const num = (obj: Record<string, unknown>, ...keys: string[]): number => {
-    for (const k of keys) {
-      const v = obj[k];
-      if (typeof v === "number") return v;
-    }
-    return 0;
-  };
-
-  const netPnlQuote = num(metrics, "net_pnl_quote", "net_pnl", "total_pnl", "pnl");
-  const netPnlPct = num(metrics, "net_pnl", "net_pnl_pct", "return_pct");
-  const maxDrawdownUsd = num(metrics, "max_drawdown_usd", "max_drawdown");
-  const maxDrawdownPct = num(metrics, "max_drawdown_pct");
-  const totalVolume = num(metrics, "total_volume");
-  const sharpeRatio = num(metrics, "sharpe_ratio", "sharpe");
-  const profitFactor = num(metrics, "profit_factor");
-  const totalExecutors = num(metrics, "total_executors", "total_trades", "trade_count");
-  const accuracyLong = num(metrics, "accuracy_long");
-  const accuracyShort = num(metrics, "accuracy_short");
-  const totalFees = num(metrics, "total_fees_quote", "total_fees");
-
-  let closeTypes: Record<string, number> = {};
-  const rawCT = metrics.close_types;
-  if (rawCT && typeof rawCT === "object") {
-    closeTypes = rawCT as Record<string, number>;
-  }
-
-  let candles: CandleData[] = [];
-  const processedData = raw.processed_data;
-  if (processedData) {
-    const features = processedData.features ?? processedData;
-    if (Array.isArray(features)) {
-      candles = features.map((f: Record<string, unknown>) => ({
-        time: f.timestamp as number,
-        open: f.open as number,
-        high: f.high as number,
-        low: f.low as number,
-        close: f.close as number,
-      }));
-    } else if (features && typeof features === "object" && features.timestamp) {
-      const tsObj = features.timestamp as Record<string, number>;
-      if (Array.isArray(tsObj)) {
-        const timestamps = tsObj as unknown as number[];
-        const opens = features.open as unknown as number[];
-        const highs = features.high as unknown as number[];
-        const lows = features.low as unknown as number[];
-        const closes = features.close as unknown as number[];
-        candles = timestamps.map((t: number, i: number) => ({
-          time: t,
-          open: opens[i],
-          high: highs[i],
-          low: lows[i],
-          close: closes[i],
-        }));
-      } else {
-        const keys = Object.keys(tsObj).sort((a, b) => Number(a) - Number(b));
-        const opensObj = (features.open ?? {}) as Record<string, number>;
-        const highsObj = (features.high ?? {}) as Record<string, number>;
-        const lowsObj = (features.low ?? {}) as Record<string, number>;
-        const closesObj = (features.close ?? {}) as Record<string, number>;
-        candles = keys.map((k) => ({
-          time: tsObj[k],
-          open: opensObj[k],
-          high: highsObj[k],
-          low: lowsObj[k],
-          close: closesObj[k],
-        }));
-      }
-    }
-  }
-
-  let pnlTimeseries: PnlTimeseriesPoint[] = [];
-  const rawPnlTs = raw.pnl_timeseries;
-  if (Array.isArray(rawPnlTs) && rawPnlTs.length > 0) {
-    pnlTimeseries = rawPnlTs.map((p: Record<string, unknown>) => ({
-      time: p.timestamp as number,
-      totalPnl: (p.total_pnl ?? 0) as number,
-      executorRealizedPnl: (p.executor_realized_pnl ?? 0) as number,
-      positionRealizedPnl: (p.position_realized_pnl ?? 0) as number,
-      positionUnrealizedPnl: (p.position_unrealized_pnl ?? 0) as number,
-    }));
-  }
-
-  let executors: ExecutorData[] = [];
-  const rawExecutors = raw.executors;
-  if (Array.isArray(rawExecutors)) {
-    executors = rawExecutors
-      .filter((e: Record<string, unknown>) => e.timestamp != null)
-      .map((e: Record<string, unknown>) => {
-        const config = (e.config ?? {}) as Record<string, unknown>;
-        const customInfo = (e.custom_info ?? {}) as Record<string, unknown>;
-        return {
-          id: String(e.id ?? e.executor_id ?? ""),
-          timestamp: (e.timestamp ?? 0) as number,
-          closeTimestamp: (e.close_timestamp ?? 0) as number,
-          side: normalizeSide(e.side),
-          closeType: String(e.close_type ?? ""),
-          netPnlQuote: (e.net_pnl_quote ?? 0) as number,
-          filledAmountQuote: (e.filled_amount_quote ?? 0) as number,
-          entryPrice: (customInfo.current_position_average_price ?? config.entry_price ?? e.entry_price ?? 0) as number,
-          closePrice: (customInfo.close_price ?? e.close_price ?? 0) as number,
-        };
-      });
-  }
-
-  let positionHeldTimeseries: PositionHeldPoint[] = [];
-  const rawPosTs = raw.position_held_timeseries;
-  if (Array.isArray(rawPosTs) && rawPosTs.length > 0) {
-    positionHeldTimeseries = rawPosTs.map((p: Record<string, unknown>) => ({
-      time: (p.timestamp ?? 0) as number,
-      longAmount: (p.long_amount ?? 0) as number,
-      shortAmount: (p.short_amount ?? 0) as number,
-      netAmount: (p.net_amount ?? 0) as number,
-      unrealizedPnl: (p.unrealized_pnl ?? 0) as number,
-    }));
-  }
-
-  if (netPnlQuote === 0 && totalExecutors === 0 && candles.length === 0 && executors.length === 0 && pnlTimeseries.length === 0) {
-    const hasAnything = Object.keys(metrics).length > 0 || Object.keys(raw).length > 1;
-    if (!hasAnything) return null;
-  }
-
-  return {
-    netPnlQuote,
-    netPnlPct,
-    maxDrawdownUsd,
-    maxDrawdownPct,
-    totalVolume,
-    sharpeRatio,
-    profitFactor,
-    totalExecutors,
-    accuracyLong,
-    accuracyShort,
-    totalFees,
-    closeTypes,
-    candles,
-    pnlTimeseries,
-    positionHeldTimeseries,
-    executors,
-    raw: taskResults,
-  };
-}
-
-function normalizeSide(side: unknown): string {
-  if (typeof side === "string") {
-    if (side === "1" || side.toUpperCase() === "BUY" || side === "TradeType.BUY") return "BUY";
-    if (side === "2" || side.toUpperCase() === "SELL" || side === "TradeType.SELL") return "SELL";
-    return side;
-  }
-  if (typeof side === "number") return side === 1 ? "BUY" : "SELL";
-  return String(side ?? "");
 }
 
 // -- Results Display --

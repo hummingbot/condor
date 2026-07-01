@@ -49,13 +49,29 @@ def load_assistant(name: str) -> str:
     return body
 
 
+def _assistant_path(name: str) -> Path | None:
+    """Resolve an assistant's definition file.
+
+    Supports both the flat form (``assistants/{name}.md``) and the folder form
+    (``assistants/{name}/AGENT.md``, FEAT-003), where the assistant's store is
+    co-located under ``assistants/{name}/store/``. Flat form wins if both exist.
+    """
+    flat = _ASSISTANTS_DIR / f"{name}.md"
+    if flat.exists():
+        return flat
+    folder = _ASSISTANTS_DIR / name / "AGENT.md"
+    if folder.exists():
+        return folder
+    return None
+
+
 def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
     """Load metadata + body for an assistant. Cached after first read."""
     if name in _assistant_cache:
         return _assistant_cache[name]
-    path = _ASSISTANTS_DIR / f"{name}.md"
-    if not path.exists():
-        log.warning("Assistant prompt not found: %s", path)
+    path = _assistant_path(name)
+    if path is None:
+        log.warning("Assistant prompt not found: %s", _ASSISTANTS_DIR / name)
         return {"label": name, "description": ""}, ""
     result = _parse_assistant(path)
     _assistant_cache[name] = result
@@ -63,22 +79,32 @@ def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
 
 
 def discover_assistants() -> dict[str, dict[str, str]]:
-    """Auto-discover all assistants from assistants/*.md.
+    """Auto-discover all assistants from ``assistants/``.
 
-    Returns dict like: {"condor": {"label": "Condor", "description": "..."}, ...}
+    Picks up both ``assistants/{name}.md`` (flat) and ``assistants/{name}/AGENT.md``
+    (folder form, FEAT-003). Returns dict like:
+    {"condor": {"label": "Condor", "description": "..."}, ...}
     """
     result: dict[str, dict[str, str]] = {}
     if not _ASSISTANTS_DIR.exists():
         return result
-    for path in sorted(_ASSISTANTS_DIR.glob("*.md")):
-        name = path.stem
+    # Flat form: assistants/{name}.md
+    names = [path.stem for path in sorted(_ASSISTANTS_DIR.glob("*.md"))]
+    # Folder form (FEAT-003): assistants/{name}/AGENT.md
+    names += [path.parent.name for path in sorted(_ASSISTANTS_DIR.glob("*/AGENT.md"))]
+    for name in dict.fromkeys(names):  # dedupe, preserve order
         meta, _ = _load_assistant_full(name)
-        result[name] = {"label": meta["label"], "description": meta.get("description", "")}
+        result[name] = {
+            "label": meta["label"],
+            "description": meta.get("description", ""),
+        }
     return result
 
 
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "claude-code": {"label": "Claude Code"},
+    "claude-acp:opus": {"label": "Claude (ACP) — Opus"},
+    "claude-acp:sonnet": {"label": "Claude (ACP) — Sonnet"},
     "gemini": {"label": "Gemini CLI"},
     "copilot": {"label": "GitHub Copilot CLI"},
     "codex": {"label": "ChatGPT Codex"},
@@ -89,7 +115,25 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "openrouter:": {"label": "OpenRouter — Pick Model"},
 }
 
-DEFAULT_AGENT = "claude-code"
+
+def _default_agent() -> str:
+    """Resolve the fallback agent_key for users who haven't picked a model.
+
+    Precedence: ``CONDOR_DEFAULT_AGENT`` env > condor ``AGENT.md`` frontmatter
+    ``agent_key`` > ``"claude-code"``. A user's own /agent → Change LLM choice
+    (``agent_llm``) still overrides this at runtime; this is only the default.
+    Examples for the frontmatter / env: ``claude-code``, ``claude-acp:opus``,
+    ``ollama:qwen3:32b``.
+    """
+    import os
+
+    meta, _ = _load_assistant_full("condor")
+    return (
+        os.environ.get("CONDOR_DEFAULT_AGENT") or meta.get("agent_key") or "claude-code"
+    )
+
+
+DEFAULT_AGENT = _default_agent()
 
 # -- Agent modes (auto-discovered) --
 
@@ -97,54 +141,23 @@ AGENT_MODES = discover_assistants()
 DEFAULT_MODE = "condor"
 
 
+def normalize_mode(mode: str | None) -> str:
+    """Coerce a persisted ``agent_mode`` to a currently-valid one.
+
+    FEAT-004 collapsed the old multi-mode setup ('trading'/'agent_builder') into
+    the single 'condor' mode. Stale pickled ``user_data`` may still hold a mode
+    that is no longer in ``AGENT_MODES``; left as-is it would surface a raw broken
+    label or start a non-existent mode. Anything unknown falls back to
+    ``DEFAULT_MODE``.
+    """
+    return mode if mode in AGENT_MODES else DEFAULT_MODE
+
+
 def reload_assistants() -> None:
     """Re-scan assistants/ folder. Call after adding/removing .md files."""
     _assistant_cache.clear()
     AGENT_MODES.clear()
     AGENT_MODES.update(discover_assistants())
-
-
-# -- Mode context builders --
-
-# Registry of functions that enrich a mode's prompt with dynamic data.
-# Key = assistant name, value = callable() -> str with extra context.
-_MODE_CONTEXT_BUILDERS: dict[str, Any] = {}
-
-
-def _build_agent_builder_context() -> str:
-    """Append live strategy/agent data to the agent_builder prompt."""
-    from condor.trading_agent.strategy import StrategyStore
-    from condor.trading_agent.engine import get_all_engines
-
-    sections: list[str] = []
-
-    store = StrategyStore()
-    strategies = store.list_all()
-    if strategies:
-        strat_lines = ["Existing strategies:"]
-        for s in strategies:
-            skills = ", ".join(s.skills) if s.skills else "none"
-            pair = s.default_config.get("trading_pair", "")
-            strat_lines.append(f"- {s.name} (id={s.id}, agent={s.agent_key}, skills={skills}, pair={pair})")
-        sections.append("\n".join(strat_lines))
-    else:
-        sections.append("No strategies exist yet. Help the user create their first one.")
-
-    engines = get_all_engines()
-    if engines:
-        agent_lines = ["Running agents:"]
-        for eid, engine in engines.items():
-            info = engine.get_info()
-            agent_lines.append(
-                f"- {info['strategy']} ({eid}): {info['status']}, "
-                f"PnL=${info['daily_pnl']:+.2f}, snapshots={info['tick_count']}, "
-                f"open={info['open_executors']}"
-            )
-        sections.append("\n".join(agent_lines))
-    else:
-        sections.append("No agents are currently running.")
-
-    return "\n\n".join(sections)
 
 
 # -- Compact prompt templates --
@@ -200,6 +213,7 @@ def _build_system_prompt(platform: str = "telegram") -> str:
         f"{assistant_content}\n\n"
         f"{formatting}"
     )
+
 
 # Tools that require user confirmation before execution
 DANGEROUS_TOOLS = {
@@ -262,7 +276,8 @@ def get_project_dir() -> str:
 
 
 def _condor_mcp_args(
-    chat_id: int | str, user_id: int,
+    chat_id: int | str,
+    user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
 ) -> list[str]:
@@ -273,9 +288,12 @@ def _condor_mcp_args(
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
     effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
     args = [
-        "--chat-id", str(effective_chat_id),
-        "--user-id", str(user_id),
-        "--bot-token", os.environ.get("TELEGRAM_TOKEN", ""),
+        "--chat-id",
+        str(effective_chat_id),
+        "--user-id",
+        str(user_id),
+        "--bot-token",
+        os.environ.get("TELEGRAM_TOKEN", ""),
     ]
     if agent_slug:
         args.extend(["--agent-slug", agent_slug])
@@ -285,7 +303,9 @@ def _condor_mcp_args(
 
 
 def build_mcp_servers_for_session(
-    user_id: int, chat_id: int | str, user_data: dict | None = None,
+    user_id: int,
+    chat_id: int | str,
+    user_data: dict | None = None,
     execution_mode: str = "loop",
     server_name: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -312,7 +332,8 @@ def build_mcp_servers_for_session(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"] + _condor_mcp_args(chat_id, user_id, server_name=server_name),
+        "args": ["run", "python", "-m", "mcp_servers.condor"]
+        + _condor_mcp_args(chat_id, user_id, server_name=server_name),
         "env": [],
     }
 
@@ -320,7 +341,8 @@ def build_mcp_servers_for_session(
         log.warning(
             "No accessible server for user %s (chat %s) — "
             "agent will start without mcp-hummingbot",
-            user_id, chat_id,
+            user_id,
+            chat_id,
         )
         return [condor]
 
@@ -329,7 +351,8 @@ def build_mcp_servers_for_session(
         log.warning(
             "Server '%s' resolved for user %s but not found in servers config — "
             "agent will start without mcp-hummingbot",
-            server_name, user_id,
+            server_name,
+            user_id,
         )
         return [condor]
 
@@ -339,11 +362,18 @@ def build_mcp_servers_for_session(
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": [
-            "run", "python", "-m", "mcp_servers.hummingbot_api",
-            "--url", api_url,
-            "--username", server["username"],
-            "--password", server["password"],
-            "--server-name", server_name,
+            "run",
+            "python",
+            "-m",
+            "mcp_servers.hummingbot_api",
+            "--url",
+            api_url,
+            "--username",
+            server["username"],
+            "--password",
+            server["password"],
+            "--server-name",
+            server_name,
         ],
         "env": [],
     }
@@ -352,7 +382,10 @@ def build_mcp_servers_for_session(
 
 
 def build_mcp_servers_for_agent(
-    server_name: str, user_id: int, chat_id: int, agent_slug: str | None = None,
+    server_name: str,
+    user_id: int,
+    chat_id: int,
+    agent_slug: str | None = None,
     execution_mode: str = "loop",
 ) -> list[dict[str, Any]]:
     """Build MCP server configs for a trading agent bound to a specific server.
@@ -368,7 +401,8 @@ def build_mcp_servers_for_agent(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"] + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
+        "args": ["run", "python", "-m", "mcp_servers.condor"]
+        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
         "env": [],
     }
 
@@ -387,11 +421,18 @@ def build_mcp_servers_for_agent(
         "name": "mcp-hummingbot",
         "command": "uv",
         "args": [
-            "run", "python", "-m", "mcp_servers.hummingbot_api",
-            "--url", api_url,
-            "--username", server["username"],
-            "--password", server["password"],
-            "--server-name", server_name,
+            "run",
+            "python",
+            "-m",
+            "mcp_servers.hummingbot_api",
+            "--url",
+            api_url,
+            "--username",
+            server["username"],
+            "--password",
+            server["password"],
+            "--server-name",
+            server_name,
         ],
         "env": [],
     }
@@ -399,10 +440,21 @@ def build_mcp_servers_for_agent(
     return [mcp_hummingbot, condor]
 
 
-def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | None = None, agent_key: str | None = None, platform: str = "telegram", server_name: str | None = None) -> str:
+def build_initial_context(
+    user_id: int,
+    chat_id: int | str,
+    user_data: dict | None = None,
+    agent_key: str | None = None,
+    platform: str = "telegram",
+    server_name: str | None = None,
+) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
-    from config_manager import ServerPermission, get_config_manager, get_effective_server
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+    from config_manager import (
+        ServerPermission,
+        get_config_manager,
+        get_effective_server,
+    )
 
     cm = get_config_manager()
 
@@ -448,7 +500,6 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
                 "mcp__mcp-hummingbot__manage_gateway_config",
                 "mcp__mcp-hummingbot__manage_gateway_container",
                 "mcp__mcp-hummingbot__search_history",
-                "mcp__mcp-hummingbot__setup_connector",
                 "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
                 "mcp__condor__manage_routines",
                 "mcp__condor__manage_servers",
@@ -457,7 +508,8 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
                 "mcp__condor__trading_agent_journal_read",
                 "mcp__condor__trading_agent_journal_write",
                 "mcp__condor__send_notification",
-                "mcp__condor__manage_notes",
+                "mcp__condor__manage_memory",
+                "mcp__condor__manage_skill",
             ]
             tool_preload_hint = (
                 "IMPORTANT: At the very start of the session (before your first response), "
@@ -477,20 +529,134 @@ def build_initial_context(user_id: int, chat_id: int | str, user_data: dict | No
         if tool_preload_hint:
             server_info.extend([tool_preload_hint, ""])
 
-        server_info.extend([
-            "Available servers:",
-            *server_lines,
-            "",
-            "Server switching is not supported mid-session. If the user wants a different server, "
-            "tell them to start a new session with that server selected.",
-            "",
-            "Permission rules:",
-            f"- Your current permission on '{active_name}' is {active_perm_label}.",
-            "- OWNER: Full access including trading operations and server management.",
-            "- TRADER: Can trade, view balances, and manage own settings.",
-            "- Enforce the permission level for this server.",
-        ])
+        server_info.extend(
+            [
+                "Available servers:",
+                *server_lines,
+                "",
+                "Server switching is not supported mid-session. If the user wants a different server, "
+                "tell them to start a new session with that server selected.",
+                "",
+                "Permission rules:",
+                f"- Your current permission on '{active_name}' is {active_perm_label}.",
+                "- OWNER: Full access including trading operations and server management.",
+                "- TRADER: Can trade, view balances, and manage own settings.",
+                "- Enforce the permission level for this server.",
+            ]
+        )
 
         sections.append("\n".join(server_info))
+
+    # User memory index — what the chat assistant remembers about this user. This
+    # store is the chat's own (FEAT-003), not shared with the user's trading
+    # agents. Inject only the index; bodies are read on demand via
+    # manage_memory(action="read"). Nothing injected for new users.
+    try:
+        from condor.memory import MemoryStore
+
+        memory_index = MemoryStore(user_id).list_index()
+        if memory_index:
+            sections.append(
+                "[USER MEMORY — what you remember about this user]\n"
+                "Consider this before responding. Read a full memory with "
+                'manage_memory(action="read", name="..."). When you learn something '
+                'new and stable about the user, save it with manage_memory(action="write", ...).\n\n'
+                f"{memory_index}"
+            )
+    except Exception:
+        pass  # Memory is advisory — never block session start on it.
+
+    # Skills index — read-only playbooks the chat assistant ships (know-how +
+    # steps). Skills are general to the assistant, not learned per user; inject
+    # only the index, bodies are read on demand via manage_skill(action="read").
+    # Nothing injected when the assistant ships none.
+    try:
+        from condor.memory import SkillStore
+
+        skills_index = SkillStore().list_index()
+        if skills_index:
+            sections.append(
+                "[SKILLS — check here BEFORE handling a known flow with raw tools]\n"
+                "Read-only playbooks shipped with the assistant. Before using raw "
+                "tools for a flow below, read its playbook with "
+                'manage_skill(action="read", name="...") and follow the steps — '
+                "don't re-derive or hand-roll what a playbook already covers.\n\n"
+                f"{skills_index}"
+            )
+    except Exception:
+        pass  # Skills are advisory — never block session start on them.
+
+    # Agents index — domain Agents condor can consult (FEAT: coordinator model).
+    # condor delegates domain work via consult(...) instead of holding the domain's
+    # tools/context itself. Inject only the index of *consultable* Agents; nothing
+    # when none exist.
+    try:
+        from condor.agents.agent import AgentStore
+
+        agents_index = AgentStore().list_consultable_index()
+        if agents_index:
+            sections.append(
+                "[AGENTS — consult these BEFORE doing domain work with raw tools]\n"
+                "You are a coordinator. If a request falls in an agent's domain "
+                "below, delegate it with "
+                'consult(agent="<slug>", task="...", context="...") instead of '
+                "driving the domain's raw tools yourself — the agent has the focused "
+                "tools and domain memory. Relay a concise summary of its answer.\n\n"
+                f"{agents_index}"
+            )
+    except Exception:
+        pass  # Consultable agents are advisory — never block session start on them.
+
+    return "\n\n".join(sections)
+
+
+def build_agent_context(
+    agent: "Agent",  # noqa: F821 — condor.agents.agent.Agent
+    user_id: int,
+    task: str,
+    context: str = "",
+) -> str:
+    """Assemble the prompt for an Agent consult.
+
+    Mirrors :func:`build_initial_context` but for a worker run: the Agent's own
+    instructions become the system prompt, its domain-scoped memory/skills indexes
+    are injected (keyed by the Agent slug, FEAT-003 — the shared brain), and the
+    consult task is appended last. Read on demand via manage_memory/manage_skill
+    inside the run.
+    """
+    sections: list[str] = [agent.instructions]
+
+    try:
+        from condor.memory import MemoryStore
+
+        memory_index = MemoryStore(user_id, agent.slug).list_index()
+        if memory_index:
+            sections.append(
+                "[DOMAIN MEMORY — what you remember in this domain]\n"
+                'Read a full memory with manage_memory(action="read", name="..."). '
+                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
+                f"{memory_index}"
+            )
+    except Exception:
+        pass
+
+    try:
+        from condor.memory import SkillStore
+
+        skills_index = SkillStore(agent.slug).list_index()
+        if skills_index:
+            sections.append(
+                "[DOMAIN SKILLS — playbooks you can follow]\n"
+                "Read-only playbooks shipped with this Agent. Read one with "
+                'manage_skill(action="read", name="...") and follow its steps.\n\n'
+                f"{skills_index}"
+            )
+    except Exception:
+        pass
+
+    consult = f"[CONSULT REQUEST]\n{task}"
+    if context:
+        consult += f"\n\n[CONTEXT FROM CONDOR]\n{context}"
+    sections.append(consult)
 
     return "\n\n".join(sections)

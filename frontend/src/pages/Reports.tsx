@@ -1,32 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  FileText,
-  Loader2,
-  Maximize2,
-  Minimize2,
-  RefreshCw,
-  Search,
-  Trash2,
-  X,
-} from "lucide-react";
+import { FileText, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { useState } from "react";
 
+import { ReportViewer } from "@/components/routines/ReportViewer";
 import { type ReportSummary, api } from "@/lib/api";
-
-function formatAgo(iso: string): string {
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+import { formatRelativeTime } from "@/lib/formatters";
 
 export function Reports() {
   const qc = useQueryClient();
   const [selected, setSelected] = useState<ReportSummary | null>(null);
   const [search, setSearch] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [fullscreen, setFullscreen] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["reports", search],
@@ -40,7 +23,6 @@ export function Reports() {
     onSuccess: (_, id) => {
       qc.invalidateQueries({ queryKey: ["reports"] });
       if (selected?.id === id) setSelected(null);
-      setConfirmDelete(null);
     },
   });
 
@@ -112,7 +94,7 @@ export function Reports() {
                       {r.title}
                     </span>
                     <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">
-                      {formatAgo(r.created_at)}
+                      {formatRelativeTime(r.created_at)}
                     </span>
                   </div>
                   <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
@@ -137,81 +119,23 @@ export function Reports() {
         </div>
 
         {/* Right: Report viewer */}
-        <div className={`flex flex-col overflow-hidden ${
-          fullscreen
-            ? "fixed inset-0 z-50 rounded-none bg-[var(--color-bg)]"
-            : "flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]"
-        }`}>
-          {!selected ? (
+        {!selected ? (
+          <div className="flex flex-1 flex-col overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
             <div className="flex h-full items-center justify-center text-sm text-[var(--color-text-muted)]">
               <div className="text-center">
                 <FileText className="mx-auto mb-2 h-8 w-8 opacity-30" />
                 Select a report to view
               </div>
             </div>
-          ) : (
-            <>
-              {/* Report header */}
-              <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
-                <div className="min-w-0">
-                  <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
-                    {selected.title}
-                  </h2>
-                  <div className="flex items-center gap-2 text-[10px] text-[var(--color-text-muted)]">
-                    <span>{new Date(selected.created_at).toLocaleString()}</span>
-                    {selected.source_name && (
-                      <span>
-                        {selected.source_type}: {selected.source_name}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setFullscreen((f) => !f)}
-                    className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                    title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
-                  >
-                    {fullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-                  </button>
-                  {confirmDelete === selected.id ? (
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-[var(--color-red)]">Delete?</span>
-                      <button
-                        onClick={() => deleteMutation.mutate(selected.id)}
-                        disabled={deleteMutation.isPending}
-                        className="rounded px-2 py-1 text-xs font-semibold text-white bg-[var(--color-red)] hover:bg-[var(--color-red)]/80"
-                      >
-                        Yes
-                      </button>
-                      <button
-                        onClick={() => setConfirmDelete(null)}
-                        className="rounded px-2 py-1 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-                      >
-                        No
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setConfirmDelete(selected.id)}
-                      className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)]"
-                      title="Delete report"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Report iframe */}
-              <iframe
-                src={`/reports/${selected.filename}`}
-                className="flex-1 w-full border-0"
-                title={selected.title}
-              />
-            </>
-          )}
-        </div>
+          </div>
+        ) : (
+          <ReportViewer
+            report={selected}
+            reports={reports}
+            onSelect={setSelected}
+            onDelete={(id) => deleteMutation.mutate(id)}
+          />
+        )}
       </div>
     </div>
   );

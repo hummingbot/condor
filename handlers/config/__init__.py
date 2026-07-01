@@ -208,12 +208,18 @@ def get_modify_value_handler():
     1. Trading states (cex_state, dex_state) - highest priority
     2. Config states (server modification, API keys, gateway)
     """
-    from .api_keys import handle_api_key_input
     from .gateway import handle_gateway_input
     from .servers import handle_server_input
 
+    @restricted
     async def handle_all_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Route text input to appropriate handler based on context state"""
+        """Route text input to appropriate handler based on context state.
+
+        Guarded by @restricted: blocked/pending/unknown users are rejected
+        before any text input is routed to a sub-handler (defense at the
+        message-handler trust boundary, mirroring the @restricted entry
+        commands like /keys and /servers).
+        """
         logger.info(
             f"handle_all_text_input: user_data keys = {list(context.user_data.keys())}"
         )
@@ -254,12 +260,7 @@ def get_modify_value_handler():
             await handle_server_input(update, context)
             return
 
-        # 5. Check config flows - API keys
-        if context.user_data.get("awaiting_api_key_input"):
-            await handle_api_key_input(update, context)
-            return
-
-        # 6. Check config flows - gateway
+        # 5. Check config flows - gateway
         if (
             context.user_data.get("awaiting_gateway_input")
             or context.user_data.get("awaiting_wallet_input")

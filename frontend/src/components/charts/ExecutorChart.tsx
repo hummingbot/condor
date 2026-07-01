@@ -10,6 +10,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { escapeHtml, formatCompactUsd, tsToSeconds } from "@/lib/formatters";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 
 export interface SnapshotBubble {
@@ -45,10 +46,6 @@ const isActive = (status: string) => {
   const s = status?.toLowerCase() ?? "";
   return s === "running" || s === "active_position" || s === "active";
 };
-
-function tsToSeconds(ts: number): number {
-  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
-}
 
 /** Vertical line definition for grid box edges drawn directly on the canvas */
 interface GridVerticalLine {
@@ -254,14 +251,8 @@ export function ExecutorChart({
           if (Math.abs(p) >= 1) return p.toFixed(4);
           return p.toPrecision(6);
         };
-        const fmtUsd = (v: number) => {
-          if (Math.abs(v) >= 1_000_000) return "$" + (v / 1_000_000).toFixed(2) + "M";
-          if (Math.abs(v) >= 10_000) return "$" + (v / 1_000).toFixed(1) + "K";
-          return "$" + v.toFixed(2);
-        };
-
         const addRow = (label: string, value: string, color?: string) => {
-          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${label}</span><span style="font-family:monospace;${color ? `color:${color}` : `color:${textColor}`}">${value}</span></div>`;
+          detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:${textMuted}">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : `color:${textColor}`}">${escapeHtml(value)}</span></div>`;
         };
 
         if (o.type === "grid" && o.gridBox) {
@@ -276,7 +267,7 @@ export function ExecutorChart({
         }
 
         if (cfg.leverage != null && Number(cfg.leverage) > 1) addRow("Leverage", `${cfg.leverage}x`);
-        if (cfg.total_amount_quote != null) addRow("Amount", fmtUsd(Number(cfg.total_amount_quote)));
+        if (cfg.total_amount_quote != null) addRow("Amount", formatCompactUsd(Number(cfg.total_amount_quote)));
         else if (cfg.amount != null && Number(cfg.amount) > 0) addRow("Amount", String(cfg.amount));
 
         const tp = Number(tripleBarrier.take_profit || cfg.take_profit);
@@ -286,13 +277,13 @@ export function ExecutorChart({
 
         tooltip.innerHTML = `
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-weight:700;font-size:12px;font-family:monospace;color:${textColor}">${o.executorId.slice(0, 10)}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${o.side}</span>
-            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${o.status}</span>
+            <span style="font-weight:700;font-size:12px;font-family:monospace;color:${textColor}">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(o.side)}</span>
+            <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
-            <span style="background:${borderColor};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${borderColor};color:${textColor}">${o.type.toUpperCase()}</span>
-            ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${o.closeType}</span>` : ""}
+            <span style="background:${borderColor};padding:1px 5px;border-radius:3px;font-size:10px;border:1px solid ${borderColor};color:${textColor}">${escapeHtml(o.type.toUpperCase())}</span>
+            ${o.closeType ? `<span style="font-size:10px;color:${textMuted}">${escapeHtml(o.closeType)}</span>` : ""}
           </div>
           <div style="border-top:1px solid ${borderColor};margin:6px 0;padding-top:6px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px">
             <div><div style="color:${textMuted};font-size:9px;text-transform:uppercase;margin-bottom:1px">Net PnL</div><div style="font-weight:600;font-size:13px;color:${pnlClr};font-family:monospace">${pnlStr}</div></div>
