@@ -155,16 +155,28 @@ function CreateAgentDialog({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [serverName, setServerName] = useState("");
+
+  const { data: servers } = useQuery({
+    queryKey: ["servers"],
+    queryFn: api.getServers,
+  });
 
   const createMutation = useMutation({
     mutationFn: () =>
-      api.createAgent({ name, description, instructions }),
+      api.createAgent({
+        name,
+        description,
+        instructions,
+        server_name: serverName || undefined,
+      }),
     onSuccess: (agent) => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       onClose();
       setName("");
       setDescription("");
       setInstructions("");
+      setServerName("");
       navigate(`/agents/${agent.slug}`);
     },
   });
@@ -218,6 +230,27 @@ function CreateAgentDialog({
             />
             <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
               The agent's brain (AGENT.md). Add strategies afterward to make it loop.
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+              Server
+            </label>
+            <select
+              value={serverName}
+              onChange={(e) => setServerName(e.target.value)}
+              className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]"
+            >
+              <option value="">Follow active chat server</option>
+              {servers?.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
+              Pin this agent to a specific Hummingbot API server. Leave as “Follow
+              active chat server” to use whichever server the chat is on.
             </p>
           </div>
         </div>

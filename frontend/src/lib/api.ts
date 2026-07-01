@@ -442,6 +442,7 @@ export interface AgentDetail {
   when_to_consult: string;
   consultable: boolean;
   server_required: boolean;
+  server_name: string;
   strategies: StrategySummary[];
 }
 
@@ -969,6 +970,7 @@ export const api = {
     tools?: string[];
     when_to_consult?: string;
     server_required?: boolean;
+    server_name?: string;
   }) =>
     apiFetch<AgentSummary>("/api/v1/agents", {
       method: "POST",
