@@ -11,6 +11,8 @@ import {
   Zap,
 } from "lucide-react";
 import { useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Link, useNavigate } from "react-router-dom";
 
 import {
@@ -22,10 +24,29 @@ import {
 
 const STATUS_STYLES: Record<string, { dot: string; bg: string; label: string }> = {
   running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", bg: "border-emerald-500/30 bg-emerald-500/5", label: "LIVE" },
+  dry_run: { dot: "bg-blue-400", bg: "border-blue-500/30 bg-blue-500/5", label: "DRY RUN" },
   paused: { dot: "bg-amber-400", bg: "border-amber-500/30 bg-amber-500/5", label: "PAUSED" },
   stopped: { dot: "bg-red-400/60", bg: "border-red-500/20 bg-red-500/5", label: "STOPPED" },
   idle: { dot: "bg-[var(--color-text-muted)]/40", bg: "border-[var(--color-border)] bg-[var(--color-surface)]", label: "IDLE" },
 };
+
+// An agent counts as "live" only when it's running a real loop. If its only
+// running instance(s) are experiments (dry_run / run_once) — observation-only and
+// transient — surface it as "dry_run" so it doesn't read as a green LIVE loop or
+// inflate the Live Agents count. Mirrors the DRY RUN badge in the Active Sessions
+// table. The raw `agent.status` is "running" whenever any engine (incl. an
+// experiment) is alive.
+function deriveAgentStatus(agent: AgentSummary): string {
+  if (agent.status !== "running") return agent.status;
+  const runningInstances = (agent.instances || []).filter((i) => i.status === "running");
+  if (
+    runningInstances.length > 0 &&
+    runningInstances.every((i) => i.execution_mode === "dry_run" || i.execution_mode === "run_once")
+  ) {
+    return "dry_run";
+  }
+  return agent.status;
+}
 
 function StatusBadge({ status }: { status: string }) {
   const s = STATUS_STYLES[status] || STATUS_STYLES.idle;
@@ -42,7 +63,8 @@ function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick:
   const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
   const dayPnl = agent.daily_pnl ?? 0;
   const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const isLive = agent.status === "running";
+  const status = deriveAgentStatus(agent);
+  const isLive = status === "running";
 
   return (
     <button
@@ -66,8 +88,8 @@ function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick:
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <StatusBadge status={agent.status} />
-            {!isLive && (
+            <StatusBadge status={status} />
+            {agent.status !== "running" && (
               <div
                 className="opacity-0 transition-opacity group-hover:opacity-100"
                 onClick={(e) => { e.stopPropagation(); onDelete(); }}
@@ -384,9 +406,21 @@ function BackgroundTasks() {
                   <p className="mb-1 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
                     {d.status === "error" ? "Error" : "Result"}
                   </p>
-                  <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-[var(--color-text)]">
-                    {body || (d.status === "running" ? "Running…" : "(no output)")}
-                  </pre>
+                  {d.status === "error" ? (
+                    // Errors are raw (stack traces / plain messages) — keep monospace.
+                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-red-300">
+                      {body || "(no output)"}
+                    </pre>
+                  ) : body ? (
+                    // A delegation result is the agent's narrative final answer — render markdown.
+                    <div className="chat-markdown max-h-64 overflow-auto text-xs text-[var(--color-text)]">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-[var(--color-text-muted)]">
+                      {d.status === "running" ? "Running…" : "(no output)"}
+                    </p>
+                  )}
                 </div>
               )}
             </div>
@@ -459,8 +493,8 @@ export function Agents() {
     refetchInterval: 10000,
   });
 
-  const running = agents.filter((a) => a.status === "running");
-  const others = agents.filter((a) => a.status !== "running");
+  const running = agents.filter((a) => deriveAgentStatus(a) === "running");
+  const others = agents.filter((a) => deriveAgentStatus(a) !== "running");
 
   const activeSessions = useMemo<ActiveSession[]>(
     () =>

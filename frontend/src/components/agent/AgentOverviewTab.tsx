@@ -126,12 +126,23 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
           <span className="text-[var(--color-text-muted)]">frequency</span>
           <span className="text-[var(--color-text)]">{instance.frequency_sec}s</span>
         </div>
-        {Object.entries(riskLimits).map(([k, v]) => (
-          <div key={k} className="flex justify-between">
-            <span className="text-[var(--color-text-muted)]">{k.replace("max_", "").replace(/_/g, " ")}</span>
-            <span className="text-[var(--color-text)]">{String(v)}</span>
-          </div>
-        ))}
+        {Object.entries(riskLimits).map(([k, v]) => {
+          // These are risk LIMITS (max_*), not current values — keep the "max"
+          // so e.g. "open executors: 10" isn't misread as 10 executors open now.
+          const label =
+            k === "max_position_size_quote"
+              ? "max position"
+              : k === "max_open_executors"
+                ? "max executors"
+                : k.replace(/_/g, " ");
+          const val = k === "max_position_size_quote" ? `$${v}` : String(v);
+          return (
+            <div key={k} className="flex justify-between">
+              <span className="text-[var(--color-text-muted)]">{label}</span>
+              <span className="text-[var(--color-text)]">{val}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

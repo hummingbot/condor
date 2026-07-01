@@ -1,15 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
+  AlertTriangle,
   Camera,
+  Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   FlaskConical,
   LayoutList,
+  Loader2,
   X,
   Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import {
   SessionActivity,
@@ -18,7 +24,7 @@ import {
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
 import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
-import { formatDateTime } from "@/lib/formatters";
+import { formatDateTime, formatToolName } from "@/lib/formatters";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 const SUB_TABS = [
@@ -36,6 +42,7 @@ interface SidebarItem {
   created_at: string;
   execution_mode?: string;
   agent_key?: string;
+  error?: boolean;
 }
 
 // Per-execution-mode icon, label and color for experiment items.
@@ -52,6 +59,25 @@ function formatCreatedAt(value: string): string {
   const num = Number(value);
   if (!Number.isNaN(num) && num > 0) return formatDateTime(num * 1000);
   return value;
+}
+
+// A dry-run / run-once tick whose model call failed writes the raw error string
+// as its "Agent Response" (e.g. "(error: status_code: 404, model_name: ...)").
+// Detect that so we render it as an error banner instead of a normal analysis.
+function isErrorResponse(text: string): boolean {
+  const t = text.trimStart();
+  return /^\(?error\b/i.test(t) || /\berror: status_code:/i.test(t);
+}
+
+// Risk State is written as "- Label: value" bullet lines. Parse into label/value
+// pairs so we can render compact stat chips instead of raw markdown bullets.
+function parseRiskState(text: string): { label: string; value: string }[] {
+  const pairs: { label: string; value: string }[] = [];
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*-\s*([^:]+):\s*(.+)$/);
+    if (m) pairs.push({ label: m[1].trim(), value: m[2].trim() });
+  }
+  return pairs;
 }
 
 interface SessionReviewerProps {
@@ -83,6 +109,7 @@ export function SessionReviewer({
   const [selectedKind, setSelectedKind] = useState<"session" | "experiment">(initialKind);
   const [activeSubTab, setActiveSubTab] = useState<SubTabId>("overview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showSystemPrompt, setShowSystemPrompt] = useState(false);
 
   // Build unified sidebar items
   const sidebarItems = useMemo<SidebarItem[]>(() => {
@@ -100,6 +127,7 @@ export function SessionReviewer({
         created_at: e.created_at,
         execution_mode: e.execution_mode,
         agent_key: e.agent_key,
+        error: e.error,
       })),
     ];
     // Sort: sessions first (newest first), then experiments (newest first)
@@ -154,6 +182,7 @@ export function SessionReviewer({
     setSelectedNum(item.number);
     setSelectedKind(item.kind);
     setActiveSubTab("overview");
+    setShowSystemPrompt(false);
   }, []);
 
   // Snapshot click from chart → navigate to snapshots tab with that tick
@@ -228,7 +257,7 @@ export function SessionReviewer({
                   title={`${exp ? exp.label : "Session"} ${item.number}`}
                 >
                   {exp ? (
-                    <exp.Icon className={`h-3.5 w-3.5 ${exp.color}`} />
+                    <exp.Icon className={`h-3.5 w-3.5 ${item.error ? "text-red-400" : exp.color}`} />
                   ) : (
                     <span className="text-xs font-bold">{item.number}</span>
                   )}
@@ -252,7 +281,7 @@ export function SessionReviewer({
                   <span className={`text-xs font-medium ${isActive ? "text-[var(--color-text)]" : "text-[var(--color-text-muted)]"}`}>
                     {exp ? (
                       <span className="flex items-center gap-1">
-                        <exp.Icon className={`h-3 w-3 ${exp.color}`} />
+                        <exp.Icon className={`h-3 w-3 ${item.error ? "text-red-400" : exp.color}`} />
                         {exp.label} {item.number}
                       </span>
                     ) : (
@@ -267,6 +296,12 @@ export function SessionReviewer({
                   {isExp && item.execution_mode && (
                     <span className="rounded bg-amber-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-amber-400">
                       {item.execution_mode === "dry_run" ? "dry" : item.execution_mode === "run_once" ? "once" : item.execution_mode}
+                    </span>
+                  )}
+                  {isExp && item.error && (
+                    <span className="flex items-center gap-0.5 rounded bg-red-500/15 px-1 py-0.5 text-[8px] font-bold uppercase text-red-400">
+                      <AlertTriangle className="h-2.5 w-2.5" />
+                      failed
                     </span>
                   )}
                   <span className="text-[10px] text-[var(--color-text-muted)]/60">
@@ -330,23 +365,25 @@ export function SessionReviewer({
           </div>
         </div>
 
-        {/* Sub-tab bar */}
-        <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5">
-          {visibleSubTabs.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setActiveSubTab(id)}
-              className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
-                activeSubTab === id
-                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-            </button>
-          ))}
-        </div>
+        {/* Sub-tab bar — hidden when there's only one view (experiments) */}
+        {visibleSubTabs.length > 1 && (
+          <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5">
+            {visibleSubTabs.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setActiveSubTab(id)}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all ${
+                  activeSubTab === id
+                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-4">
@@ -358,37 +395,125 @@ export function SessionReviewer({
               </div>
             ) : (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-lg font-bold text-[var(--color-text)]">
                     Experiment #{selectedNum}
                   </span>
                   <span className="text-sm text-[var(--color-text-muted)]">{parsedSnapshot.timestamp}</span>
+                  {parsedSnapshot.model && (
+                    <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+                      {parsedSnapshot.model}
+                    </span>
+                  )}
+                  {parsedSnapshot.stats.duration > 0 && (
+                    <span className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]">
+                      {parsedSnapshot.stats.duration.toFixed(1)}s
+                    </span>
+                  )}
                 </div>
-                {parsedSnapshot.agentResponse && (
+                {parsedSnapshot.executorState && (
                   <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Agent Response</h3>
-                    <div className="whitespace-pre-wrap text-sm text-[var(--color-text)]">{parsedSnapshot.agentResponse}</div>
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Executor State</h3>
+                    <div className="whitespace-pre-wrap text-xs text-[var(--color-text-muted)]">{parsedSnapshot.executorState}</div>
                   </div>
                 )}
+                {parsedSnapshot.agentResponse &&
+                  (isErrorResponse(parsedSnapshot.agentResponse) ? (
+                    <div className="rounded-lg border border-red-500/40 bg-red-500/5 p-4">
+                      <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-400">
+                        <AlertTriangle className="h-3.5 w-3.5" />
+                        Agent Error
+                      </h3>
+                      <div className="whitespace-pre-wrap font-mono text-xs text-red-300">
+                        {parsedSnapshot.agentResponse}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Agent Response</h3>
+                      <div className="chat-markdown text-sm text-[var(--color-text)]">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{parsedSnapshot.agentResponse}</ReactMarkdown>
+                      </div>
+                    </div>
+                  ))}
                 {parsedSnapshot.toolCalls.length > 0 && (
                   <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
                     <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
                       Tool Calls ({parsedSnapshot.toolCalls.length})
                     </h3>
-                    <div className="space-y-2">
+                    <div className="space-y-1.5">
                       {parsedSnapshot.toolCalls.map((tc, i) => (
-                        <div key={i} className="rounded-md bg-[var(--color-bg)]/50 px-3 py-2 text-xs">
-                          <span className="font-medium text-[var(--color-primary)]">{tc.name}</span>
-                          <span className="ml-2 text-[var(--color-text-muted)]">({tc.status})</span>
+                        <div key={i} className="flex items-center gap-2 rounded-md bg-[var(--color-bg)]/50 px-3 py-2 text-xs">
+                          {tc.status === "completed" ? (
+                            <Check className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                          ) : tc.status === "failed" ? (
+                            <X className="h-3.5 w-3.5 shrink-0 text-red-400" />
+                          ) : (
+                            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-text-muted)]" />
+                          )}
+                          <span className="font-medium capitalize text-[var(--color-text)]">{formatToolName(tc.name)}</span>
+                          <span className="ml-auto font-mono text-[10px] text-[var(--color-text-muted)]/60">{tc.name}</span>
                         </div>
                       ))}
                     </div>
                   </div>
                 )}
-                {parsedSnapshot.riskState && (
-                  <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Risk State</h3>
-                    <div className="whitespace-pre-wrap text-xs text-[var(--color-text-muted)]">{parsedSnapshot.riskState}</div>
+                {parsedSnapshot.riskState &&
+                  (() => {
+                    const risk = parseRiskState(parsedSnapshot.riskState);
+                    return (
+                      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Risk State</h3>
+                        {risk.length > 0 ? (
+                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            {risk.map((r) => (
+                              <div key={r.label}>
+                                <div className="text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">{r.label}</div>
+                                <div
+                                  className={`text-sm font-medium ${
+                                    r.label === "Status"
+                                      ? r.value === "ACTIVE"
+                                        ? "text-emerald-400"
+                                        : "text-amber-400"
+                                      : "text-[var(--color-text)]"
+                                  }`}
+                                >
+                                  {r.value}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="whitespace-pre-wrap text-xs text-[var(--color-text-muted)]">{parsedSnapshot.riskState}</div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                {parsedSnapshot.systemPrompt && (
+                  <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+                    <button
+                      onClick={() => setShowSystemPrompt((v) => !v)}
+                      className="flex w-full items-center justify-between p-4 text-left"
+                    >
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                        System Prompt
+                        {parsedSnapshot.systemPromptLength > 0 && (
+                          <span className="ml-1.5 font-normal normal-case tracking-normal">
+                            ({parsedSnapshot.systemPromptLength.toLocaleString()} chars)
+                          </span>
+                        )}
+                      </h3>
+                      {showSystemPrompt ? (
+                        <ChevronDown className="h-4 w-4 text-[var(--color-text-muted)]" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 text-[var(--color-text-muted)]" />
+                      )}
+                    </button>
+                    {showSystemPrompt && (
+                      <pre className="max-h-96 overflow-auto whitespace-pre-wrap border-t border-[var(--color-border)] p-4 text-[11px] leading-relaxed text-[var(--color-text-muted)]">
+                        {parsedSnapshot.systemPrompt}
+                      </pre>
+                    )}
                   </div>
                 )}
               </div>

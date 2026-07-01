@@ -1,5 +1,12 @@
 // ── Centralized Formatters ──
 
+/** Humanize a tool-call name: strip the `mcp__<server>__` prefix and underscores.
+ *  e.g. "mcp__condor__manage_routines" → "manage routines", "ToolSearch" → "ToolSearch". */
+export function formatToolName(title: string): string {
+  const name = title.includes("__") ? title.split("__").pop()! : title;
+  return name.replace(/_/g, " ");
+}
+
 /** Escape a string for safe interpolation into innerHTML. */
 export function escapeHtml(val: string): string {
   return val

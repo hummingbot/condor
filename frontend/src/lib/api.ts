@@ -428,6 +428,7 @@ export interface ExperimentInfo {
   agent_key: string;
   snapshot_count: number;
   created_at: string;
+  error?: boolean;
 }
 
 // Agent = identity + brain (AGENT.md, tools, consult capability) that owns strategies.

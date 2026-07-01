@@ -158,6 +158,7 @@ class ExperimentInfo(BaseModel):
     agent_key: str = ""
     snapshot_count: int = 0
     created_at: str = ""
+    error: bool = False  # the tick's model call failed (Agent Response is an error)
 
 
 class AgentDetail(BaseModel):
@@ -426,6 +427,16 @@ def _list_experiments(strategy_dir: Path) -> list[ExperimentInfo]:
         ts_match = re.search(r"^# Experiment #\d+ — (.+)$", content, re.MULTILINE)
         if ts_match:
             created = ts_match.group(1)
+        # A tick whose model call failed writes the raw error string as its Agent
+        # Response (e.g. "(error: status_code: 404, ...)"). Flag it so the UI can
+        # mark the run as failed without opening it.
+        error = bool(
+            re.search(
+                r"^## Agent Response\s*\n+\(?error\b",
+                content,
+                re.MULTILINE | re.IGNORECASE,
+            )
+        )
         experiments.append(
             ExperimentInfo(
                 number=num,
@@ -433,6 +444,7 @@ def _list_experiments(strategy_dir: Path) -> list[ExperimentInfo]:
                 agent_key=agent_key,
                 snapshot_count=1,
                 created_at=created,
+                error=error,
             )
         )
     return experiments
