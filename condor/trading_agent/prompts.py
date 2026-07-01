@@ -285,6 +285,18 @@ risk engine. A blocked call returns an error result — do not retry it; \
 journal why instead.
 """
 
+CURSOR_MEMORY_PROTOCOL = """\
+MEMORY (filesystem):
+- Long-term memory lives under your agent directory in ``memory/``:
+  - memory/playbooks.md — setups that worked, with exact indicator values at entry.
+  - memory/mistakes.md — every loss or error: state at entry, what happened, prevention rule.
+  - memory/regimes.md — regime-specific behavior notes and SL calibration.
+- Review memory/ at session start (read via manage_routines or journal context).
+- Update memory/ after every closed position and at session end. Keep entries dated and numeric.
+- Memory complements the journal: ALWAYS also write journal entries via trading_agent_journal_write.
+- ``learnings.md`` is injected each tick for novelty filtering; curate durable patterns into memory/.
+"""
+
 MANAGED_MEMORY_PROTOCOL = """\
 MEMORY (/mnt/memory):
 - A persistent memory directory is mounted at /mnt/memory. It survives across \
@@ -336,6 +348,20 @@ def build_managed_system_prompt(
             f"appetite, and trading style:\n\n{trading_context}"
         )
     return "\n\n".join(sections)
+
+
+def build_cursor_system_prompt(
+    strategy: Strategy,
+    config: dict[str, Any],
+    routines_section: str = "",
+) -> str:
+    """Static system prompt for Cursor SDK agents."""
+    return build_managed_system_prompt(
+        strategy,
+        config,
+        routines_section=routines_section,
+        memory_protocol=CURSOR_MEMORY_PROTOCOL,
+    )
 
 
 def _trim_learnings_for_managed(text: str, max_lines: int = 30) -> str:

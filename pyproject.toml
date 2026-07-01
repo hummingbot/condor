@@ -24,6 +24,7 @@ dependencies = [
     "pydantic-ai[mcp]",
     "beautifulsoup4>=4.14.3",
     "anthropic>=0.109.1",
+    "cursor-sdk>=0.1.8",
 ]
 
 [project.optional-dependencies]

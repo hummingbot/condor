@@ -121,6 +121,25 @@ trading_agents/
 
 Requires `ANTHROPIC_API_KEY` and `anthropic>=0.109`.
 
+#### Cursor SDK agents (`cursor-managed`)
+
+`agent_key: cursor-managed` (optionally `cursor-managed:composer-2.5`) runs the brain on the **Cursor SDK** local bridge with a persistent hosted conversation, similar to managed agents but with filesystem memory under `trading_agents/{slug}/memory/` instead of `/mnt/memory`.
+
+- **Persistent conversation** — one Cursor agent id per Condor *session*; ticks are follow-up messages. Starting a **new** Condor session auto-rotates the Cursor agent so you get a fresh remote conversation.
+- **Local execution** — trading tools use the same `McpToolBridge` + MCP servers as `claude-managed`.
+- **State** — agent id + fingerprint persist in `trading_agents/{slug}/state/cursor_agent.json`.
+
+Requires `CURSOR_API_KEY` and `cursor-sdk>=0.1.8`.
+
+**Troubleshooting (cursor-managed)**
+
+| Symptom | Likely cause | Fix |
+|---------|----------------|-----|
+| `internal: internal error` | Stale or wedged remote Cursor agent | Stop agent, start new session (auto-rotates); or restart Condor |
+| `Bridge request failed: ConnectError` | Dead local `cursor-sdk-bridge` process | Restart Condor; only one session per slug |
+| Tick errors every 5 min, no snapshots | Same broken agent/bridge reused | Engine rotates after 2 consecutive Cursor errors |
+| `409 already running` | Second start while session active | Stop the existing session first |
+
 ---
 
 ## 3. The executor / position-hold pattern in detail
