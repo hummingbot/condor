@@ -25,10 +25,28 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
+from condor.acp.cursor_agent_client import (
+    CursorAgentClient,
+    is_cursor_agent_key,
+    is_cursor_provider_error,
+    is_persistent_provider_key,
+    reset_cursor_bridge,
+    resolve_cursor_model,
+)
+from condor.acp.managed_agent_client import (
+    ManagedAgentClient,
+    is_managed_agent_key,
+    resolve_managed_model,
+)
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 
 from .journal import JournalManager, next_experiment_number, next_session_number
-from .prompts import build_tick_prompt
+from .prompts import (
+    build_cursor_system_prompt,
+    build_managed_system_prompt,
+    build_managed_tick_prompt,
+    build_tick_prompt,
+)
 from .risk import RiskEngine, RiskLimits, auto_approve_with_risk_check
 from .strategy import Strategy
 from .providers import ProviderRegistry
@@ -37,6 +55,13 @@ log = logging.getLogger(__name__)
 
 # Module-level registry of running engines
 _engines: dict[str, "TickEngine"] = {}
+
+# After this many consecutive tick timeouts, rotate the managed session
+# (wedged hosted sessions otherwise dead-loop silently) and alert the user.
+ROTATE_AFTER_CONSECUTIVE_TIMEOUTS = 3
+
+# Cursor SDK bridge / remote-agent failures — rotate sooner than timeouts.
+ROTATE_AFTER_CONSECUTIVE_CURSOR_ERRORS = 2
 
 
 class _NullTracker:
@@ -81,6 +106,9 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
+    _consecutive_timeouts: int = field(default=0, init=False)
+    _consecutive_cursor_errors: int = field(default=0, init=False)
+    _memory_bootstrap_sent: bool = field(default=False, init=False)
 
     def __post_init__(self):
         agent_dir = self.strategy.agent_dir
@@ -123,6 +151,21 @@ class TickEngine:
         """Start the tick loop as an asyncio task."""
         if self._running:
             return
+
+        agent_key = self.config.get("agent_key") or self.strategy.agent_key
+        if not self.is_experiment and is_cursor_agent_key(agent_key):
+            rotated = await CursorAgentClient.rotate_persisted_agent(
+                self.strategy.agent_dir
+            )
+            if rotated:
+                log.info(
+                    "TickEngine %s: rotated Cursor agent %s for new session_%d",
+                    self.agent_id,
+                    rotated,
+                    self.session_num,
+                )
+            await reset_cursor_bridge()
+
         self._running = True
         self._bot = bot
         self._task = asyncio.create_task(self._loop())
@@ -182,6 +225,7 @@ class TickEngine:
                 try:
                     await self._tick()
                     self._last_error = ""
+                    self._consecutive_cursor_errors = 0
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
@@ -190,6 +234,7 @@ class TickEngine:
                     if self.journal:
                         self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
+                    await self._handle_cursor_error_streak(e)
 
                 # Single-tick modes: stop after first tick
                 if mode in ("dry_run", "run_once"):
@@ -272,18 +317,33 @@ class TickEngine:
                 self._cached_routines_section = ""
 
         next_tick = self.journal.tick_count + 1 if self.journal else 1
-        prompt = build_tick_prompt(
-            strategy=self.strategy,
-            config=self.config,
-            core_data=core_data_summaries,
-            learnings=learnings,
-            summary=summary,
-            recent_decisions=recent_decisions,
-            risk_state=risk_state.to_dict(),
-            tick_number=next_tick,
-            agent_id=self.agent_id,
-            cached_routines_section=self._cached_routines_section or None,
-        )
+        agent_key = self.config.get("agent_key") or self.strategy.agent_key
+        if is_persistent_provider_key(agent_key):
+            # Managed / Cursor sessions are persistent: static content lives in
+            # the system prompt; per-tick message only carries dynamic state.
+            prompt = build_managed_tick_prompt(
+                config=self.config,
+                core_data=core_data_summaries,
+                learnings=learnings,
+                risk_state=risk_state.to_dict(),
+                tick_number=next_tick,
+                agent_id=self.agent_id,
+                summary=summary,
+                recent_decisions=recent_decisions,
+            )
+        else:
+            prompt = build_tick_prompt(
+                strategy=self.strategy,
+                config=self.config,
+                core_data=core_data_summaries,
+                learnings=learnings,
+                summary=summary,
+                recent_decisions=recent_decisions,
+                risk_state=risk_state.to_dict(),
+                tick_number=next_tick,
+                agent_id=self.agent_id,
+                cached_routines_section=self._cached_routines_section or None,
+            )
 
         # Inject pending user directives
         if self._pending_directives:
@@ -299,6 +359,7 @@ class TickEngine:
         response_chunks: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         tool_call_map: dict[str, dict[str, Any]] = {}
+        tick_timed_out = False
 
         await acp_client.start()
         try:
@@ -335,10 +396,13 @@ class TickEngine:
                             if event.output:
                                 tc["output"] = event.output
         except asyncio.TimeoutError:
+            tick_timed_out = True
             log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
             response_chunks.append("(timed out)")
         finally:
             await acp_client.stop()
+
+        await self._handle_timeout_streak(tick_timed_out)
 
         response_text = "".join(response_chunks)
         tick_duration = time.time() - self._last_tick_at
@@ -420,8 +484,10 @@ class TickEngine:
     # Client factory
     # ------------------------------------------------------------------
 
-    async def _create_client(self) -> "ACPClient | PydanticAIClient":
-        """Build an ACP or PydanticAI client (does NOT start it)."""
+    async def _create_client(
+        self,
+    ) -> "ACPClient | PydanticAIClient | ManagedAgentClient | CursorAgentClient":
+        """Build an ACP, PydanticAI, ManagedAgent, or CursorAgent client (does NOT start it)."""
         from handlers.agents._shared import (
             build_mcp_servers_for_agent,
             build_mcp_servers_for_session,
@@ -446,6 +512,64 @@ class TickEngine:
         permission_cb = auto_approve_with_risk_check(self.risk, risk_state, execution_mode=mode)
 
         agent_key = self.config.get("agent_key") or self.strategy.agent_key
+
+        if is_managed_agent_key(agent_key):
+            from .prompts import read_learnings_bootstrap
+
+            memory_bootstrap = ""
+            if not self._memory_bootstrap_sent and self.journal and self.journal.tick_count == 0:
+                memory_bootstrap = read_learnings_bootstrap(self.strategy.agent_dir)
+                if memory_bootstrap:
+                    self._memory_bootstrap_sent = True
+            # Claude Managed Agents: persistent hosted session + memory store.
+            # Trading tools execute locally via the MCP bridge, gated by the
+            # same permission callback. Experiments get ephemeral sessions so
+            # dry runs never pollute the live conversation.
+            model = resolve_managed_model(agent_key, self.config.get("model") or "")
+            system_prompt = build_managed_system_prompt(
+                self.strategy, self.config,
+                routines_section=self._cached_routines_section or "",
+            )
+            return ManagedAgentClient(
+                model=model,
+                system_prompt=system_prompt,
+                agent_name=self.config.get("managed_agent_name") or self.strategy.name,
+                slug=self.strategy.slug,
+                agent_dir=self.strategy.agent_dir,
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+                persist_session=not self.is_experiment,
+                working_dir=get_project_dir(),
+                memory_bootstrap=memory_bootstrap,
+            )
+
+        if is_cursor_agent_key(agent_key):
+            from .prompts import read_learnings_bootstrap
+
+            memory_bootstrap = ""
+            if not self._memory_bootstrap_sent and self.journal and self.journal.tick_count == 0:
+                memory_bootstrap = read_learnings_bootstrap(self.strategy.agent_dir)
+                if memory_bootstrap:
+                    self._memory_bootstrap_sent = True
+            model = resolve_cursor_model(agent_key, self.config.get("model") or "")
+            system_prompt = build_cursor_system_prompt(
+                self.strategy,
+                self.config,
+                routines_section=self._cached_routines_section or "",
+            )
+            return CursorAgentClient(
+                model=model,
+                system_prompt=system_prompt,
+                agent_name=self.config.get("managed_agent_name") or self.strategy.name,
+                slug=self.strategy.slug,
+                agent_dir=self.strategy.agent_dir,
+                mcp_servers=mcp_servers,
+                permission_callback=permission_cb,
+                persist_session=not self.is_experiment,
+                working_dir=get_project_dir(),
+                memory_bootstrap=memory_bootstrap,
+            )
+
         use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
         if use_pydantic_ai:
@@ -509,6 +633,94 @@ class TickEngine:
         except Exception:
             log.exception("Failed to get API client for agent %s", self.agent_id)
             return None
+
+    async def _handle_timeout_streak(self, timed_out: bool) -> None:
+        """Track consecutive tick timeouts; rotate the managed session and alert
+        after ROTATE_AFTER_CONSECUTIVE_TIMEOUTS.
+
+        A wedged hosted session (stops echoing user messages) otherwise
+        dead-loops silently.
+        """
+        if not timed_out:
+            self._consecutive_timeouts = 0
+            return
+
+        self._consecutive_timeouts += 1
+        n = self._consecutive_timeouts
+        if n < ROTATE_AFTER_CONSECUTIVE_TIMEOUTS:
+            return
+
+        rotated = ""
+        agent_key = self.config.get("agent_key") or self.strategy.agent_key
+        if is_managed_agent_key(agent_key):
+            try:
+                rotated = await ManagedAgentClient.rotate_persisted_session(
+                    self.strategy.agent_dir
+                )
+            except Exception:
+                log.exception("Session rotation failed for %s", self.agent_id)
+        elif is_cursor_agent_key(agent_key):
+            try:
+                rotated = await CursorAgentClient.rotate_persisted_agent(
+                    self.strategy.agent_dir
+                )
+            except Exception:
+                log.exception("Cursor agent rotation failed for %s", self.agent_id)
+
+        log.warning(
+            "TickEngine %s: %d consecutive timeouts%s",
+            self.agent_id, n,
+            f"; rotated managed session {rotated}" if rotated else "",
+        )
+        await self._notify(
+            f"⚠️ Agent {self.agent_id}: {n} consecutive LLM tick timeouts"
+            + (
+                f" — rotated managed session {rotated}; a fresh session starts next tick."
+                if rotated
+                else " — check the LLM provider."
+            )
+        )
+        self._consecutive_timeouts = 0
+
+    async def _handle_cursor_error_streak(self, exc: Exception) -> None:
+        """Track consecutive Cursor SDK failures; rotate bridge + agent after threshold."""
+        if not is_cursor_provider_error(exc):
+            self._consecutive_cursor_errors = 0
+            return
+
+        agent_key = self.config.get("agent_key") or self.strategy.agent_key
+        if not is_cursor_agent_key(agent_key):
+            return
+
+        self._consecutive_cursor_errors += 1
+        n = self._consecutive_cursor_errors
+        if n < ROTATE_AFTER_CONSECUTIVE_CURSOR_ERRORS:
+            return
+
+        rotated = ""
+        try:
+            await reset_cursor_bridge()
+            rotated = await CursorAgentClient.rotate_persisted_agent(
+                self.strategy.agent_dir
+            )
+        except Exception:
+            log.exception("Cursor bridge/agent rotation failed for %s", self.agent_id)
+
+        log.warning(
+            "TickEngine %s: %d consecutive Cursor provider errors%s",
+            self.agent_id,
+            n,
+            f"; rotated agent {rotated}" if rotated else "",
+        )
+        await self._notify(
+            f"⚠️ Agent {self.agent_id}: {n} consecutive Cursor SDK errors"
+            + (
+                f" — rotated agent {rotated}; fresh conversation next tick."
+                if rotated
+                else " — check CURSOR_API_KEY and network."
+            )
+        )
+        self._consecutive_cursor_errors = 0
 
     async def _notify(self, message: str) -> None:
         """Send a notification to the user via Telegram."""

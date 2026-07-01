@@ -869,6 +869,21 @@ async def start_agent(
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
         config_dict["trading_context"] = strategy.default_trading_context
 
+    agent_key = config_dict.get("agent_key") or strategy.agent_key
+    from condor.acp.cursor_agent_client import is_cursor_agent_key
+
+    if is_cursor_agent_key(agent_key):
+        running = [e for e in _get_engines_for_slug(slug) if e.is_running]
+        if running:
+            active = running[0].agent_id
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Agent '{slug}' is already running as {active}. "
+                    "Stop it before starting a new session."
+                ),
+            )
+
     new_engine = TickEngine(
         strategy=strategy,
         config=config_dict,
