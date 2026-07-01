@@ -19,6 +19,9 @@ class RiskLimits:
     max_position_size_quote: float = 500.0
     max_open_executors: int = 5
     max_drawdown_pct: float = -1.0
+    # Hard kill-switch: a deeper drawdown than the soft ``max_drawdown_pct`` pause;
+    # breaching it winds down positions (see condor.agents.shutdown). -1 = disabled.
+    shutdown_drawdown_pct: float = -1.0
 
     @classmethod
     def from_dict(cls, d: dict) -> RiskLimits:
@@ -32,6 +35,10 @@ class RiskState:
     drawdown_pct: float = 0.0
     is_blocked: bool = False
     block_reason: str = ""
+    # Hard escalation: set when the shutdown drawdown threshold is breached. The
+    # soft ``is_blocked`` only pauses the tick; this triggers an emergency winddown.
+    should_shutdown: bool = False
+    shutdown_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -40,10 +47,13 @@ class RiskState:
             "drawdown_pct": self.drawdown_pct,
             "is_blocked": self.is_blocked,
             "block_reason": self.block_reason,
+            "should_shutdown": self.should_shutdown,
+            "shutdown_reason": self.shutdown_reason,
             # Include limits for prompt display
             "max_position_size": self._limits.max_position_size_quote if hasattr(self, "_limits") else 500,
             "max_open_executors": self._limits.max_open_executors if hasattr(self, "_limits") else 5,
             "max_drawdown_pct": self._limits.max_drawdown_pct if hasattr(self, "_limits") else -1,
+            "shutdown_drawdown_pct": self._limits.shutdown_drawdown_pct if hasattr(self, "_limits") else -1,
         }
 
 
@@ -77,6 +87,19 @@ class RiskEngine:
         if reasons:
             state.is_blocked = True
             state.block_reason = "; ".join(reasons)
+
+        # Hard kill-switch: a deeper drawdown than the soft pause. Evaluated
+        # independently so a breach escalates to a winddown even though it also
+        # trips the soft block (the engine checks should_shutdown first).
+        if (
+            self.limits.shutdown_drawdown_pct >= 0
+            and state.drawdown_pct > self.limits.shutdown_drawdown_pct
+        ):
+            state.should_shutdown = True
+            state.shutdown_reason = (
+                f"Drawdown {state.drawdown_pct:.1f}% exceeds shutdown limit "
+                f"{self.limits.shutdown_drawdown_pct:.1f}%"
+            )
 
         return state
 

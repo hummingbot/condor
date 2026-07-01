@@ -357,6 +357,12 @@ class TickEngine:
         # 4. Get risk state (experiments pass None — returns clean state)
         risk_state = self.risk.get_state(self.journal or _NullTracker())
 
+        # Hard kill-switch: escalate to an emergency winddown before the soft
+        # pause below. Experiments never trade for real, so they never shut down.
+        if risk_state.should_shutdown and not self.is_experiment:
+            await self._run_shutdown(reason=risk_state.shutdown_reason)
+            return
+
         if risk_state.is_blocked and not self.is_experiment:
             self.journal.append_action(
                 self.journal.tick_count + 1,

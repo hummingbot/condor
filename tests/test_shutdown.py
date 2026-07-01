@@ -309,3 +309,52 @@ def test_run_shutdown_idempotent(monkeypatch):
     assert calls == ["first"]  # second call is a guarded no-op
     assert stub._running is False
     assert stub._shutting_down is True
+
+
+# ── soft-vs-hard drawdown triggers ──
+
+
+class _FakeTracker:
+    def __init__(self, drawdown_pct):
+        self._dd = drawdown_pct
+
+    def get_total_exposure(self):
+        return 0.0
+
+    def get_open_executor_count(self):
+        return 0
+
+    def get_drawdown_pct(self):
+        return self._dd
+
+
+def _risk(soft, hard):
+    from condor.agents.risk import RiskEngine, RiskLimits
+
+    return RiskEngine(RiskLimits(max_drawdown_pct=soft, shutdown_drawdown_pct=hard))
+
+
+def test_drawdown_below_soft_does_nothing():
+    state = _risk(soft=10.0, hard=20.0).get_state(_FakeTracker(5.0))
+    assert state.is_blocked is False
+    assert state.should_shutdown is False
+
+
+def test_drawdown_between_soft_and_hard_pauses_only():
+    state = _risk(soft=10.0, hard=20.0).get_state(_FakeTracker(15.0))
+    assert state.is_blocked is True
+    assert state.should_shutdown is False
+
+
+def test_drawdown_beyond_hard_triggers_shutdown():
+    state = _risk(soft=10.0, hard=20.0).get_state(_FakeTracker(25.0))
+    assert state.is_blocked is True  # also over soft
+    assert state.should_shutdown is True
+    assert "shutdown limit" in state.shutdown_reason
+
+
+def test_shutdown_threshold_disabled_by_default():
+    # hard = -1 (disabled): even a huge drawdown never escalates to shutdown.
+    state = _risk(soft=-1.0, hard=-1.0).get_state(_FakeTracker(99.0))
+    assert state.should_shutdown is False
+    assert state.is_blocked is False
