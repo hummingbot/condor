@@ -424,6 +424,7 @@ async def manage_skill(
     max_entries: int = 30,
     strategy_id: str | None = None,
     file: str | None = None,
+    content: str | None = None,
 ) -> dict:
     """Manage your SKILLS — playbooks (know-how) you can follow and refine.
 
@@ -444,6 +445,10 @@ async def manage_skill(
     playbook. "read" lists them under `files`; pull one on demand with
     "read_file" (name + file). This is progressive disclosure — the index shows
     only the playbook, the companions stay out of context until you ask for one.
+    Author or update a companion with "write_file" (name + file + content):
+    prefer it over a raw filesystem write so the path resolves through the skill
+    slug and stays inside the skill folder. ("write_file" only touches companion
+    files — edit the playbook body itself with "edit".)
 
     Skills are scoped per-assistant: a launched agent reads/writes ONLY its own
     library. From the chat you can target a specific agent's local skill library
@@ -454,6 +459,7 @@ async def manage_skill(
     Actions:
     - "read": Get a full playbook + routine validation + companion `files` (requires name).
     - "read_file": Get the contents of one bundled companion file (requires name + file).
+    - "write_file": Create/overwrite one bundled companion file (requires name + file + content).
     - "search": Keyword search over the skills (requires query).
     - "list": Return the skills index (one line per skill).
     - "create": Add/overwrite a skill (requires name, description, when_to_use, body).
@@ -461,7 +467,7 @@ async def manage_skill(
     - "delete": Remove a skill (requires name).
 
     Args:
-        action: read | read_file | search | list | create | edit | delete
+        action: read | read_file | write_file | search | list | create | edit | delete
         name: Short kebab/snake name (e.g. "grid-en-band-walk").
         description: One-line summary (create/edit).
         when_to_use: The trigger/condition for the playbook (create/edit).
@@ -471,7 +477,8 @@ async def manage_skill(
         max_entries: Cap for search results (default 30).
         strategy_id: Target a specific agent's local skill library (chat-side
             authoring). Composite "agent_slug.strategy_slug" key or bare agent slug.
-        file: Bare name of a bundled companion file to fetch (for read_file).
+        file: Bare name of a bundled companion file (for read_file/write_file).
+        content: Full contents to write to the companion file (for write_file).
 
     Returns:
         Action-specific result dict.
@@ -487,6 +494,7 @@ async def manage_skill(
         max_entries=max_entries,
         strategy_id=strategy_id,
         file=file,
+        content=content,
     )
 
 

@@ -246,6 +246,51 @@ class SkillStore:
             }
         return {"skill": slug, "file": fname, "content": target.read_text()}
 
+    def write_file(self, name: str, filename: str, content: str) -> dict:
+        """Create or overwrite a companion file bundled beside a skill's SKILL.md.
+
+        The write counterpart to :meth:`read_file`: same flat namespace, same
+        traversal guards, so a skill can only ever write inside its own folder.
+        ``SKILL.md`` is off-limits here — edit the playbook itself through
+        :meth:`edit` (which preserves frontmatter). The skill must already
+        exist; this only manages its attached reference files (config templates,
+        etc.). Prefer this over a raw filesystem write so path resolution goes
+        through the slug and the companion index stays consistent.
+        """
+        if not self.skills_dir:
+            return {"error": "this assistant has no skills library"}
+        if content is None:
+            return {"error": "content is required for write_file"}
+        slug = _slugify(name)
+        skill_dir = self.skills_dir / slug
+        if not (skill_dir / "SKILL.md").exists():
+            return {"error": f"Skill '{name}' not found"}
+
+        fname = (filename or "").strip()
+        if not fname or fname == "SKILL.md":
+            return {"error": "filename is required (a companion file, not SKILL.md)"}
+        # Companion files are flat inside the skill dir: reject any path component.
+        if "/" in fname or "\\" in fname or Path(fname).name != fname:
+            return {"error": f"Invalid file name '{filename}'"}
+
+        target = skill_dir / fname
+        # Defense in depth: the resolved path must stay within the skill folder.
+        try:
+            if not target.resolve().is_relative_to(skill_dir.resolve()):
+                return {"error": f"Invalid file name '{filename}'"}
+        except (OSError, ValueError):
+            return {"error": f"Invalid file name '{filename}'"}
+
+        created = not target.exists()
+        _atomic_write(target, content)
+        return {
+            "saved": True,
+            "created": created,
+            "skill": slug,
+            "file": fname,
+            "files": self._companion_files(skill_dir),
+        }
+
     @staticmethod
     def _companion_files(skill_dir: Path) -> list[str]:
         """Names of attached reference files in a skill folder (all but SKILL.md).

@@ -51,6 +51,23 @@ _INTERVAL_SECONDS: dict[str, int] = {
 _CANDLE_BUFFER_IDLE_TTL = 600  # 10 minutes
 
 
+def _coerce_duration(value: object) -> int | None:
+    """Coerce a client-supplied candle duration to a positive int (seconds).
+
+    WS messages are untrusted input: a non-numeric value must not raise, or the
+    ValueError would escape handle_message and tear down the client's entire
+    multiplexed connection. Returns None for missing/invalid/non-positive values.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        duration = int(float(value))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid candle duration from client: %r", value)
+        return None
+    return duration if duration > 0 else None
+
+
 class _CandleBuffer:
     """Per-channel candle buffer with dynamic sizing based on interval + duration."""
 
@@ -471,19 +488,19 @@ class WebSocketManager:
 
         elif action == "set_candle_duration" and channel:
             # Frontend changed duration without re-subscribing
-            duration = msg.get("duration")
+            duration = _coerce_duration(msg.get("duration"))
             if channel.startswith("candles:") and duration:
-                await self._handle_candle_duration_change(conn, channel, int(duration))
+                await self._handle_candle_duration_change(conn, channel, duration)
 
     async def _handle_candle_subscribe(
-        self, conn: _Connection, channel: str, duration: int | None
+        self, conn: _Connection, channel: str, duration: object
     ) -> None:
         """Handle candle channel subscription with optional duration."""
         parts = channel.split(":")
         if len(parts) < 5:
             return
         interval = parts[4]
-        dur = int(duration) if duration else 3 * 86400  # default 3 days
+        dur = _coerce_duration(duration) or 3 * 86400  # default 3 days
 
         # Cancel any pending teardown — a subscriber just came back
         timer = self._candle_teardown_timers.pop(channel, None)

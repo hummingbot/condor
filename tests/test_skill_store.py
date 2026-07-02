@@ -259,6 +259,45 @@ def test_read_file_rejects_path_traversal(project_root):
         assert "content" not in res, bad
 
 
+def test_write_file_creates_and_overwrites_companion(project_root):
+    """write_file authors a companion beside SKILL.md and read_file reads it back."""
+    _write_skill(project_root, None, "pmm_playbook", when_to_use="pick a config")
+    s = SkillStore()
+
+    res = s.write_file("PMM Playbook", "config_aggressive.md", "tight spreads")
+    assert res["saved"] is True
+    assert res["created"] is True
+    assert res["skill"] == "pmm_playbook"
+    assert res["files"] == ["config_aggressive.md"]
+    assert s.read_file("pmm_playbook", "config_aggressive.md")["content"] == "tight spreads"
+
+    # Second write to the same name overwrites (created flips to False).
+    res2 = s.write_file("pmm_playbook", "config_aggressive.md", "wider spreads")
+    assert res2["created"] is False
+    assert s.read_file("pmm_playbook", "config_aggressive.md")["content"] == "wider spreads"
+
+
+def test_write_file_missing_skill_errors(project_root):
+    assert "error" in SkillStore().write_file("nope", "x.md", "body")
+
+
+def test_write_file_requires_content(project_root):
+    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
+    assert "error" in SkillStore().write_file("pmm_playbook", "x.md", None)
+
+
+def test_write_file_rejects_skill_md_and_traversal(project_root):
+    """A companion write must never clobber SKILL.md or escape the skill folder."""
+    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
+    s = SkillStore()
+    for bad in ("SKILL.md", "../secret.md", "/etc/passwd", "sub/x.md", ""):
+        res = s.write_file("pmm_playbook", bad, "payload")
+        assert "error" in res, bad
+        assert "saved" not in res, bad
+    # The traversal target must not have been created outside the skill folder.
+    assert not (s.skills_dir / "secret.md").exists()
+
+
 def test_create_requires_all_fields(project_root):
     err = SkillStore().create("only_name", "", "", "")
     assert "error" in err

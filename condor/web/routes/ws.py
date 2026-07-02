@@ -24,7 +24,14 @@ async def websocket_endpoint(ws: WebSocket, token: str | None = Query(default=No
     try:
         while True:
             raw = await ws.receive_text()
-            await manager.handle_message(conn, raw)
+            try:
+                await manager.handle_message(conn, raw)
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                # One malformed/failing message must not tear down the whole
+                # multiplexed connection (all subscribed channels).
+                log.exception("WS message error for user %s (ignored)", conn.user_id)
     except WebSocketDisconnect:
         pass
     except Exception:
