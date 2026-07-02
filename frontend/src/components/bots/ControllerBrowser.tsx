@@ -6,7 +6,6 @@ import {
   ChevronUp,
   Circle,
   Loader2,
-  MessageSquare,
   Pause,
   Play,
   RotateCcw,
@@ -18,6 +17,7 @@ import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
+import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { api, type ControllerInfo } from "@/lib/api";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
@@ -454,16 +454,7 @@ export function ControllerBrowser({
               )}
             </button>
             {/* Agent chat toggle */}
-            <button
-              onClick={() => {
-                window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
-              }}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 border border-amber-500/30 transition-all"
-              title="Agent (Cmd+K)"
-            >
-              <MessageSquare className="h-3.5 w-3.5" />
-              <span>Agent</span>
-            </button>
+            <AgentToggleButton />
             <button
               onClick={onClose}
               className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

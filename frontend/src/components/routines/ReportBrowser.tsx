@@ -9,7 +9,6 @@ import {
   Clock,
   Download,
   Loader2,
-  MessageSquare,
   Moon,
   Play,
   PlayCircle,
@@ -23,6 +22,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { type RoutineInstance, api } from "@/lib/api";
 import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
@@ -675,16 +675,7 @@ export function ReportBrowser({
               {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
             {/* Agent chat toggle */}
-            <button
-              onClick={() => {
-                window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
-              }}
-              className="ml-1 flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 border border-amber-500/30 transition-all"
-              title="Agent (⌘K)"
-            >
-              <MessageSquare className="h-3.5 w-3.5" />
-              <span>Agent</span>
-            </button>
+            <AgentToggleButton className="ml-1" />
             {/* Close */}
             <button
               onClick={onClose}
