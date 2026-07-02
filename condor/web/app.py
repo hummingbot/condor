@@ -87,6 +87,7 @@ def create_app() -> FastAPI:
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
     if dist.is_dir():
         index_html = dist / "index.html"
+        dist_root = dist.resolve()
         app.mount(
             "/assets", StaticFiles(directory=str(dist / "assets")), name="static-assets"
         )
@@ -94,9 +95,19 @@ def create_app() -> FastAPI:
         @app.get("/{full_path:path}")
         async def serve_spa(request: Request, full_path: str):
             """SPA fallback: serve index.html for all non-API routes."""
-            file_path = dist / full_path
-            if full_path and file_path.is_file():
-                return FileResponse(file_path)
+            if full_path:
+                try:
+                    candidate = (dist / full_path).resolve()
+                except (OSError, ValueError):
+                    candidate = None
+                # SEC-044: confine to dist — encoded traversal (%2e%2e, ..%2f)
+                # reaches here decoded, and FileResponse applies no guard.
+                if (
+                    candidate is not None
+                    and candidate.is_relative_to(dist_root)
+                    and candidate.is_file()
+                ):
+                    return FileResponse(candidate)
             return FileResponse(index_html)
 
     return app
