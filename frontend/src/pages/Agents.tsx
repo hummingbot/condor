@@ -15,48 +15,14 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link, useNavigate } from "react-router-dom";
 
+import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { StatusBadge } from "@/components/agent/StatusBadge";
 import {
   type AgentSummary,
   type Delegation,
   type RunningInstance,
   api,
 } from "@/lib/api";
-
-const STATUS_STYLES: Record<string, { dot: string; bg: string; label: string }> = {
-  running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", bg: "border-emerald-500/30 bg-emerald-500/5", label: "LIVE" },
-  dry_run: { dot: "bg-blue-400", bg: "border-blue-500/30 bg-blue-500/5", label: "DRY RUN" },
-  paused: { dot: "bg-amber-400", bg: "border-amber-500/30 bg-amber-500/5", label: "PAUSED" },
-  stopped: { dot: "bg-red-400/60", bg: "border-red-500/20 bg-red-500/5", label: "STOPPED" },
-  idle: { dot: "bg-[var(--color-text-muted)]/40", bg: "border-[var(--color-border)] bg-[var(--color-surface)]", label: "IDLE" },
-};
-
-// An agent counts as "live" only when it's running a real loop. If its only
-// running instance(s) are experiments (dry_run / run_once) — observation-only and
-// transient — surface it as "dry_run" so it doesn't read as a green LIVE loop or
-// inflate the Live Agents count. Mirrors the DRY RUN badge in the Active Sessions
-// table. The raw `agent.status` is "running" whenever any engine (incl. an
-// experiment) is alive.
-function deriveAgentStatus(agent: AgentSummary): string {
-  if (agent.status !== "running") return agent.status;
-  const runningInstances = (agent.instances || []).filter((i) => i.status === "running");
-  if (
-    runningInstances.length > 0 &&
-    runningInstances.every((i) => i.execution_mode === "dry_run" || i.execution_mode === "run_once")
-  ) {
-    return "dry_run";
-  }
-  return agent.status;
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const s = STATUS_STYLES[status] || STATUS_STYLES.idle;
-  return (
-    <span className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest ${s.bg} border`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
-      {s.label}
-    </span>
-  );
-}
 
 function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick: () => void; onDelete: () => void }) {
   const totalPnl = agent.total_pnl ?? 0;

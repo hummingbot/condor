@@ -21,25 +21,10 @@ import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { StatusBadge } from "@/components/agent/StatusBadge";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { type StrategySummary, api } from "@/lib/api";
-
-const STATUS_STYLES: Record<string, { dot: string; bg: string; label: string }> = {
-  running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", bg: "border-emerald-500/30 bg-emerald-500/5", label: "LIVE" },
-  paused: { dot: "bg-amber-400", bg: "border-amber-500/30 bg-amber-500/5", label: "PAUSED" },
-  stopped: { dot: "bg-red-400/60", bg: "border-red-500/20 bg-red-500/5", label: "STOPPED" },
-  idle: { dot: "bg-[var(--color-text-muted)]/40", bg: "border-[var(--color-border)] bg-[var(--color-surface)]", label: "IDLE" },
-};
-
-function StatusBadge({ status }: { status: string }) {
-  const s = STATUS_STYLES[status] || STATUS_STYLES.idle;
-  return (
-    <span className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest ${s.bg} border`}>
-      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
-      {s.label}
-    </span>
-  );
-}
 
 // ── Strategy Card ──
 
@@ -57,7 +42,8 @@ function StrategyCard({
   const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
   const dayPnl = strategy.daily_pnl ?? 0;
   const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const isLive = strategy.status === "running";
+  const status = deriveAgentStatus(strategy);
+  const isLive = status === "running";
 
   return (
     <button
@@ -72,8 +58,8 @@ function StrategyCard({
         <div className="mb-3 flex items-start justify-between">
           <h3 className="text-sm font-semibold text-[var(--color-text)]">{strategy.name}</h3>
           <div className="flex items-center gap-2">
-            <StatusBadge status={strategy.status} />
-            {!isLive && (
+            <StatusBadge status={status} />
+            {strategy.status !== "running" && (
               <div
                 className="opacity-0 transition-opacity group-hover:opacity-100"
                 onClick={(e) => { e.stopPropagation(); onDelete(); }}
