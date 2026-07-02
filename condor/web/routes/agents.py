@@ -245,13 +245,13 @@ class StartStrategyRequest(BaseModel):
     config: dict[str, Any] = {}
     trading_context: str = ""
     chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
-    user_id: int | None = None  # Override user_id (for internal/MCP calls)
+    user_id: int | None = None  # Accepted for compat but ignored (see handler)
 
 
 class DelegateRequest(BaseModel):
     task: str
     chat_id: int = 0  # Telegram chat for the completion notification
-    user_id: int | None = None  # Override user_id (for internal/MCP calls)
+    user_id: int | None = None  # Accepted for compat but ignored (see handler)
     server_name: str | None = None
     timeout_s: int = 900
 
@@ -891,9 +891,12 @@ async def delegate_agent(
     ):
         raise HTTPException(status_code=403, detail="No access")
 
+    # Web callers always act as themselves (mirror consult): honoring
+    # ``req.user_id`` here would let any authenticated session run a delegation
+    # under another user's memory scope and server grants.
     dt = await start_delegation(
         agent_slug=slug,
-        user_id=req.user_id or user.id,
+        user_id=user.id,
         chat_id=req.chat_id,
         server_name=req.server_name,
         task=req.task,
@@ -1190,12 +1193,15 @@ async def start_strategy(
     elif not config_dict.get("trading_context") and strategy.default_trading_context:
         config_dict["trading_context"] = strategy.default_trading_context
 
+    # Web callers always act as themselves (mirror consult): honoring
+    # ``req.user_id`` would let any authenticated session start the engine
+    # under another user's memory scope and accessible-servers fallback.
     new_engine = TickEngine(
         agent=agent,
         strategy=strategy,
         config=config_dict,
         chat_id=req.chat_id,
-        user_id=req.user_id or user.id,
+        user_id=user.id,
     )
     await new_engine.start()
     return {
