@@ -83,7 +83,7 @@ export function StartSessionDialog({
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-[var(--color-text)]">Start New Session</h2>
-          <button onClick={onClose} className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
+          <button onClick={onClose} className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]" title="Close" aria-label="Close">
             <X className="h-4 w-4" />
           </button>
         </div>

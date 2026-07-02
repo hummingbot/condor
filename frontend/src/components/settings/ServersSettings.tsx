@@ -236,6 +236,8 @@ export function ServersSettings() {
                       <button
                         onClick={() => setConfirmDelete(null)}
                         className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                        title="Cancel delete"
+                        aria-label="Cancel delete"
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>

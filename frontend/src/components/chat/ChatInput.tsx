@@ -267,6 +267,8 @@ export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputP
           onClick={handleSubmit}
           disabled={disabled || !value.trim() || isRecording || isTranscribing}
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+          title="Send message"
+          aria-label="Send message"
         >
           <Send className="h-4 w-4" />
         </button>

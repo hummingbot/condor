@@ -902,6 +902,8 @@ export function ReportBrowser({
             <button
               onClick={goPrevReport}
               className="absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"
+              title="Previous report"
+              aria-label="Previous report"
             >
               <ChevronLeft className="h-5 w-5" />
             </button>
@@ -910,6 +912,8 @@ export function ReportBrowser({
             <button
               onClick={goNextReport}
               className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"
+              title="Next report"
+              aria-label="Next report"
             >
               <ChevronRight className="h-5 w-5" />
             </button>

@@ -216,6 +216,8 @@ function BulkActionBar({
       <button
         onClick={onClear}
         className="p-1 rounded hover:bg-[var(--color-surface-hover)] transition-colors"
+        title="Clear selection"
+        aria-label="Clear selection"
       >
         <X className="h-4 w-4" />
       </button>
