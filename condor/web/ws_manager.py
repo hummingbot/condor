@@ -5,7 +5,7 @@ import json
 import logging
 import math
 import time
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 
@@ -844,6 +844,126 @@ class WebSocketManager:
         self._last_data.pop(channel, None)
         # NOTE: candle buffer is NOT deleted — the existing idle cleanup loop handles that
 
+    @staticmethod
+    def _is_permanent_ws_error(error_str: str) -> bool:
+        """True if a stream error will never succeed on retry.
+
+        Besides auth/not-found (401/403/404), an invalid trading pair (wrong
+        symbol for this connector) will never become valid, so retrying
+        forever just spams logs and hammers the exchange until Condor
+        restarts (issue #134).
+        """
+        lowered = error_str.lower()
+        return (
+            any(code in error_str for code in ("401", "403", "404"))
+            or "appears to be invalid" in lowered
+            or "invalid symbol" in lowered
+        )
+
+    async def _run_ws_stream(
+        self,
+        channel: str,
+        server_name: str,
+        *,
+        label: str,
+        open_ws: Callable[[Any], Any],
+        subscribe: Callable[[Any], Awaitable[None]],
+        on_message: Callable[[dict], Awaitable[None]],
+        backoff_on_empty_close: bool = False,
+    ) -> None:
+        """Shared connect/reconnect skeleton for all Hummingbot WS streams.
+
+        Owns the while-True loop, subscriber check, heartbeat/error message
+        handling, permanent-error detection (``_is_permanent_ws_error``) and
+        exponential backoff capped at 60s. Each stream supplies only:
+
+        - ``open_ws``: client -> the WS async context manager to enter
+          (e.g. ``lambda c: c.ws.market_data()``).
+        - ``subscribe``: performs the subscription on the open socket.
+        - ``on_message``: handles data messages (heartbeat/error are
+          handled here).
+
+        ``backoff_on_empty_close`` reproduces the executor stream's
+        behavior: don't reset backoff on subscribe; after a clean close,
+        reset it only if at least one message arrived, otherwise back off
+        (guards against a server that accepts then immediately drops).
+        """
+        from config_manager import get_config_manager
+
+        cm = get_config_manager()
+        backoff = 5
+        lower_label = label[0].lower() + label[1:]
+        subscribed_label = label if label.endswith("WS") else f"{label} WS"
+
+        while True:
+            try:
+                client = await cm.get_client(server_name)
+                async with open_ws(client) as ws:
+                    await subscribe(ws)
+                    logger.info("%s subscribed: %s", subscribed_label, channel)
+                    if not backoff_on_empty_close:
+                        backoff = 5
+                    got_message = False
+                    async for msg in ws:
+                        if not self._has_subscribers(channel):
+                            logger.info(
+                                "No subscribers for %s, closing %s stream",
+                                channel,
+                                lower_label,
+                            )
+                            return
+
+                        got_message = True
+                        msg_type = msg.get("type")
+                        if msg_type == "heartbeat":
+                            continue
+                        if msg_type == "error":
+                            logger.warning(
+                                "%s stream error for %s: %s",
+                                label,
+                                channel,
+                                msg.get("message", "unknown error"),
+                            )
+                            break
+                        await on_message(msg)
+
+                    if backoff_on_empty_close:
+                        # Connection closed cleanly — back off if short-lived
+                        if got_message:
+                            backoff = 5
+                        else:
+                            logger.warning(
+                                "%s stream closed immediately for %s, "
+                                "reconnecting in %ds...",
+                                label,
+                                channel,
+                                backoff,
+                            )
+                            await asyncio.sleep(backoff)
+                            backoff = min(backoff * 2, 60)
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                if self._is_permanent_ws_error(str(e)):
+                    logger.warning(
+                        "%s stream permanent error for %s: %s — giving up",
+                        label,
+                        channel,
+                        e,
+                    )
+                    return
+
+                logger.warning(
+                    "%s stream error for %s: %s, reconnecting in %ds...",
+                    label,
+                    channel,
+                    e,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
     async def _candle_stream(self, channel: str) -> None:
         parts = channel.split(":")
         if len(parts) < 5:
@@ -955,17 +1075,9 @@ class WebSocketManager:
                 return
             except Exception as e:
                 error_str = str(e)
-                # Detect permanent failures — don't retry. Besides auth/not-found,
-                # an invalid trading pair (wrong symbol for this connector) will
-                # never become valid, so retrying forever just spams logs and
-                # hammers the exchange until Condor restarts (issue #134).
-                lowered = error_str.lower()
-                is_permanent = (
-                    any(code in error_str for code in ("401", "403", "404"))
-                    or "appears to be invalid" in lowered
-                    or "invalid symbol" in lowered
-                )
-                if is_permanent:
+                # Detect permanent failures — don't retry (issue #134, see
+                # _is_permanent_ws_error).
+                if self._is_permanent_ws_error(error_str):
                     logger.warning(
                         "Candle stream permanent error for %s: %s — giving up",
                         channel,
@@ -1116,82 +1228,39 @@ class WebSocketManager:
             return
         _, server_name, connector, pair = parts[:4]
 
-        from config_manager import get_config_manager
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_trades(
+                connector,
+                pair,
+                update_interval=1.0,
+            )
 
-        cm = get_config_manager()
-        backoff = 5
-
-        while True:
-            try:
-                client = await cm.get_client(server_name)
-                async with client.ws.market_data() as ws:
-                    await ws.subscribe_trades(
-                        connector,
-                        pair,
-                        update_interval=1.0,
-                    )
-                    logger.info("Trade WS subscribed: %s", channel)
-                    backoff = 5
-                    async for msg in ws:
-                        if not self._has_subscribers(channel):
-                            logger.info(
-                                "No subscribers for %s, closing trade stream", channel
-                            )
-                            return
-
-                        msg_type = msg.get("type")
-                        if msg_type == "trades":
-                            trade_data = msg.get("data", [])
-                            trades = []
-                            for t in trade_data:
-                                if isinstance(t, dict):
-                                    trades.append(
-                                        {
-                                            "price": float(t.get("price", 0)),
-                                            "amount": float(
-                                                t.get("amount", t.get("quantity", 0))
-                                            ),
-                                            "side": t.get(
-                                                "side", t.get("trade_type", "buy")
-                                            ).lower(),
-                                            "timestamp": float(t.get("timestamp", 0)),
-                                        }
-                                    )
-                            if trades:
-                                await self.broadcast(
-                                    channel,
-                                    {"type": "trades", "data": trades},
-                                )
-                        elif msg_type == "heartbeat":
-                            continue
-                        elif msg_type == "error":
-                            error_msg = msg.get("message", "unknown error")
-                            logger.warning(
-                                "Trade stream error for %s: %s", channel, error_msg
-                            )
-                            break
-
-            except asyncio.CancelledError:
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "trades":
                 return
-            except Exception as e:
-                error_str = str(e)
-                is_permanent = any(code in error_str for code in ("401", "403", "404"))
-                if is_permanent:
-                    logger.warning(
-                        "Trade stream permanent error for %s: %s — giving up",
-                        channel,
-                        e,
+            trade_data = msg.get("data", [])
+            trades = []
+            for t in trade_data:
+                if isinstance(t, dict):
+                    trades.append(
+                        {
+                            "price": float(t.get("price", 0)),
+                            "amount": float(t.get("amount", t.get("quantity", 0))),
+                            "side": t.get("side", t.get("trade_type", "buy")).lower(),
+                            "timestamp": float(t.get("timestamp", 0)),
+                        }
                     )
-                    return
+            if trades:
+                await self.broadcast(channel, {"type": "trades", "data": trades})
 
-                logger.warning(
-                    "Trade stream error for %s: %s, reconnecting in %ds...",
-                    channel,
-                    e,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Trade",
+            open_ws=lambda client: client.ws.market_data(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
 
     # -- Candle buffer helpers --
 
@@ -1246,96 +1315,50 @@ class WebSocketManager:
             return
         _, server_name, connector, pair = parts[:4]
 
-        from config_manager import get_config_manager
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_order_book(
+                connector,
+                pair,
+                depth=20,
+                update_interval=1.0,
+            )
 
-        cm = get_config_manager()
-        backoff = 5
-
-        while True:
-            try:
-                client = await cm.get_client(server_name)
-                async with client.ws.market_data() as ws:
-                    await ws.subscribe_order_book(
-                        connector,
-                        pair,
-                        depth=20,
-                        update_interval=1.0,
-                    )
-                    logger.info("Order book WS subscribed: %s", channel)
-                    backoff = 5
-                    async for msg in ws:
-                        if not self._has_subscribers(channel):
-                            logger.info(
-                                "No subscribers for %s, closing order book stream",
-                                channel,
-                            )
-                            return
-
-                        msg_type = msg.get("type")
-                        if msg_type == "order_book":
-                            raw_data = msg.get("data", {})
-                            bids = []
-                            asks = []
-                            for b in raw_data.get("bids") or []:
-                                if isinstance(b, dict):
-                                    bids.append(
-                                        {
-                                            "price": float(b.get("price", 0)),
-                                            "amount": float(
-                                                b.get("amount", b.get("quantity", 0))
-                                            ),
-                                        }
-                                    )
-                                elif isinstance(b, (list, tuple)) and len(b) >= 2:
-                                    bids.append(
-                                        {"price": float(b[0]), "amount": float(b[1])}
-                                    )
-                            for a in raw_data.get("asks") or []:
-                                if isinstance(a, dict):
-                                    asks.append(
-                                        {
-                                            "price": float(a.get("price", 0)),
-                                            "amount": float(
-                                                a.get("amount", a.get("quantity", 0))
-                                            ),
-                                        }
-                                    )
-                                elif isinstance(a, (list, tuple)) and len(a) >= 2:
-                                    asks.append(
-                                        {"price": float(a[0]), "amount": float(a[1])}
-                                    )
-                            ob_data = {"bids": bids, "asks": asks}
-                            await self.broadcast(channel, ob_data)
-                        elif msg_type == "heartbeat":
-                            continue
-                        elif msg_type == "error":
-                            error_msg = msg.get("message", "unknown error")
-                            logger.warning(
-                                "Order book stream error for %s: %s", channel, error_msg
-                            )
-                            break
-
-            except asyncio.CancelledError:
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "order_book":
                 return
-            except Exception as e:
-                error_str = str(e)
-                is_permanent = any(code in error_str for code in ("401", "403", "404"))
-                if is_permanent:
-                    logger.warning(
-                        "Order book stream permanent error for %s: %s — giving up",
-                        channel,
-                        e,
+            raw_data = msg.get("data", {})
+            bids = []
+            asks = []
+            for b in raw_data.get("bids") or []:
+                if isinstance(b, dict):
+                    bids.append(
+                        {
+                            "price": float(b.get("price", 0)),
+                            "amount": float(b.get("amount", b.get("quantity", 0))),
+                        }
                     )
-                    return
+                elif isinstance(b, (list, tuple)) and len(b) >= 2:
+                    bids.append({"price": float(b[0]), "amount": float(b[1])})
+            for a in raw_data.get("asks") or []:
+                if isinstance(a, dict):
+                    asks.append(
+                        {
+                            "price": float(a.get("price", 0)),
+                            "amount": float(a.get("amount", a.get("quantity", 0))),
+                        }
+                    )
+                elif isinstance(a, (list, tuple)) and len(a) >= 2:
+                    asks.append({"price": float(a[0]), "amount": float(a[1])})
+            await self.broadcast(channel, {"bids": bids, "asks": asks})
 
-                logger.warning(
-                    "Order book stream error for %s: %s, reconnecting in %ds...",
-                    channel,
-                    e,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Order book",
+            open_ws=lambda client: client.ws.market_data(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
 
     # -- Executor streaming (via Hummingbot WS) --
 
@@ -1348,7 +1371,6 @@ class WebSocketManager:
         from config_manager import get_config_manager
 
         cm = get_config_manager()
-        backoff = 5
 
         # Try SDS cache first (pre-warmed by auto_subscribe_servers or REST prefetch)
         from condor.server_data_service import ServerDataType, get_server_data_service
@@ -1443,69 +1465,24 @@ class WebSocketManager:
             except Exception as e:
                 logger.warning("Executor pre-fetch failed for %s: %s", channel, e)
 
-        while True:
-            try:
-                client = await cm.get_client(server_name)
-                async with client.ws.executors() as ws:
-                    await ws.subscribe_executors(update_interval=2.0)
-                    logger.info("Executor WS subscribed: %s", channel)
-                    got_message = False
-                    async for msg in ws:
-                        if not self._has_subscribers(channel):
-                            logger.info(
-                                "No subscribers for %s, closing executor stream",
-                                channel,
-                            )
-                            return
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_executors(update_interval=2.0)
 
-                        got_message = True
-                        msg_type = msg.get("type")
-                        if msg_type == "executors":
-                            raw_data = msg.get("data", [])
-                            executors = self._transform_executors(raw_data)
-                            await self._broadcast_update(channel, executors)
-                        elif msg_type == "heartbeat":
-                            continue
-                        elif msg_type == "error":
-                            error_msg = msg.get("message", "unknown error")
-                            logger.warning(
-                                "Executor stream error for %s: %s", channel, error_msg
-                            )
-                            break
-
-                    # Connection closed cleanly — apply backoff if it was short-lived
-                    if got_message:
-                        backoff = 5
-                    else:
-                        logger.warning(
-                            "Executor stream closed immediately for %s, reconnecting in %ds...",
-                            channel,
-                            backoff,
-                        )
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 60)
-
-            except asyncio.CancelledError:
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "executors":
                 return
-            except Exception as e:
-                error_str = str(e)
-                is_permanent = any(code in error_str for code in ("401", "403", "404"))
-                if is_permanent:
-                    logger.warning(
-                        "Executor stream permanent error for %s: %s — giving up",
-                        channel,
-                        e,
-                    )
-                    return
+            executors = self._transform_executors(msg.get("data", []))
+            await self._broadcast_update(channel, executors)
 
-                logger.warning(
-                    "Executor stream error for %s: %s, reconnecting in %ds...",
-                    channel,
-                    e,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Executor",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+            backoff_on_empty_close=True,
+        )
 
     # -- Bots WS streaming (via Hummingbot /ws/executors all_bots_status) --
 
@@ -1515,11 +1492,6 @@ class WebSocketManager:
         if len(parts) < 2:
             return
         server_name = parts[1]
-
-        from config_manager import get_config_manager
-
-        cm = get_config_manager()
-        backoff = 5
 
         # Send SDS-cached bots data as initial snapshot
         if channel not in self._last_data:
@@ -1537,79 +1509,47 @@ class WebSocketManager:
                 except Exception as e:
                     logger.debug("Failed to send initial bots snapshot: %s", e)
 
-        while True:
-            try:
-                client = await cm.get_client(server_name)
-                async with client.ws.executors() as ws:
-                    # all_bots_status is not in the client library, send raw
-                    await ws._send(
-                        {
-                            "action": "subscribe",
-                            "type": "all_bots_status",
-                            "update_interval": 5.0,
-                        }
-                    )
-                    resp = await ws._receive()
-                    if resp.get("type") == "error":
-                        raise RuntimeError(f"Subscribe failed: {resp.get('message')}")
+        async def subscribe(ws: Any) -> None:
+            # all_bots_status is not in the client library, send raw
+            await ws._send(
+                {
+                    "action": "subscribe",
+                    "type": "all_bots_status",
+                    "update_interval": 5.0,
+                }
+            )
+            resp = await ws._receive()
+            if resp.get("type") == "error":
+                raise RuntimeError(f"Subscribe failed: {resp.get('message')}")
 
-                    logger.info("Bots WS subscribed: %s", channel)
-                    backoff = 5
-                    async for msg in ws:
-                        if not self._has_subscribers(channel):
-                            logger.info(
-                                "No subscribers for %s, closing bots WS stream", channel
-                            )
-                            return
-
-                        msg_type = msg.get("type")
-                        if msg_type == "all_bots_status":
-                            raw_data = msg.get("data", {})
-                            # Update SDS cache so REST and Telegram benefit
-                            from condor.server_data_service import (
-                                ServerDataType,
-                                get_server_data_service,
-                            )
-
-                            get_server_data_service().put(
-                                server_name, ServerDataType.BOTS_STATUS, raw_data
-                            )
-                            try:
-                                data = self._transform_bots(raw_data)
-                                self._overlay_stopping_state(server_name, data)
-                                await self._broadcast_update(channel, data)
-                            except Exception as e:
-                                logger.debug("Failed to transform bots WS data: %s", e)
-                        elif msg_type == "heartbeat":
-                            continue
-                        elif msg_type == "error":
-                            logger.warning(
-                                "Bots WS stream error for %s: %s",
-                                channel,
-                                msg.get("message"),
-                            )
-                            break
-
-            except asyncio.CancelledError:
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "all_bots_status":
                 return
+            raw_data = msg.get("data", {})
+            # Update SDS cache so REST and Telegram benefit
+            from condor.server_data_service import (
+                ServerDataType,
+                get_server_data_service,
+            )
+
+            get_server_data_service().put(
+                server_name, ServerDataType.BOTS_STATUS, raw_data
+            )
+            try:
+                data = self._transform_bots(raw_data)
+                self._overlay_stopping_state(server_name, data)
+                await self._broadcast_update(channel, data)
             except Exception as e:
-                error_str = str(e)
-                is_permanent = any(code in error_str for code in ("401", "403", "404"))
-                if is_permanent:
-                    logger.warning(
-                        "Bots WS stream permanent error for %s: %s — giving up",
-                        channel,
-                        e,
-                    )
-                    return
-                logger.warning(
-                    "Bots WS stream error for %s: %s, reconnecting in %ds...",
-                    channel,
-                    e,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+                logger.debug("Failed to transform bots WS data: %s", e)
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Bots WS",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
 
     # -- Positions WS streaming (via Hummingbot /ws/executors positions) --
 
@@ -1620,69 +1560,32 @@ class WebSocketManager:
             return
         server_name = parts[1]
 
-        from config_manager import get_config_manager
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_positions(update_interval=5.0)
 
-        cm = get_config_manager()
-        backoff = 5
-
-        while True:
-            try:
-                client = await cm.get_client(server_name)
-                async with client.ws.executors() as ws:
-                    await ws.subscribe_positions(update_interval=5.0)
-                    logger.info("Positions WS subscribed: %s", channel)
-                    backoff = 5
-                    async for msg in ws:
-                        if not self._has_subscribers(channel):
-                            logger.info(
-                                "No subscribers for %s, closing positions WS stream",
-                                channel,
-                            )
-                            return
-
-                        msg_type = msg.get("type")
-                        if msg_type == "positions":
-                            raw_data = msg.get("data", [])
-                            # Update SDS cache
-                            from condor.server_data_service import (
-                                ServerDataType,
-                                get_server_data_service,
-                            )
-
-                            get_server_data_service().put(
-                                server_name, ServerDataType.POSITIONS, raw_data
-                            )
-                            await self._broadcast_update(channel, raw_data)
-                        elif msg_type == "heartbeat":
-                            continue
-                        elif msg_type == "error":
-                            logger.warning(
-                                "Positions WS stream error for %s: %s",
-                                channel,
-                                msg.get("message"),
-                            )
-                            break
-
-            except asyncio.CancelledError:
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "positions":
                 return
-            except Exception as e:
-                error_str = str(e)
-                is_permanent = any(code in error_str for code in ("401", "403", "404"))
-                if is_permanent:
-                    logger.warning(
-                        "Positions WS stream permanent error for %s: %s — giving up",
-                        channel,
-                        e,
-                    )
-                    return
-                logger.warning(
-                    "Positions WS stream error for %s: %s, reconnecting in %ds...",
-                    channel,
-                    e,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+            raw_data = msg.get("data", [])
+            # Update SDS cache
+            from condor.server_data_service import (
+                ServerDataType,
+                get_server_data_service,
+            )
+
+            get_server_data_service().put(
+                server_name, ServerDataType.POSITIONS, raw_data
+            )
+            await self._broadcast_update(channel, raw_data)
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Positions WS",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
 
     # -- Performance WS streaming (via Hummingbot /ws/executors performance) --
 
@@ -1693,60 +1596,22 @@ class WebSocketManager:
             return
         server_name = parts[1]
 
-        from config_manager import get_config_manager
+        async def subscribe(ws: Any) -> None:
+            await ws.subscribe_performance(update_interval=5.0)
 
-        cm = get_config_manager()
-        backoff = 5
-
-        while True:
-            try:
-                client = await cm.get_client(server_name)
-                async with client.ws.executors() as ws:
-                    await ws.subscribe_performance(update_interval=5.0)
-                    logger.info("Performance WS subscribed: %s", channel)
-                    backoff = 5
-                    async for msg in ws:
-                        if not self._has_subscribers(channel):
-                            logger.info(
-                                "No subscribers for %s, closing performance WS stream",
-                                channel,
-                            )
-                            return
-
-                        msg_type = msg.get("type")
-                        if msg_type == "performance":
-                            raw_data = msg.get("data", {})
-                            await self._broadcast_update(channel, raw_data)
-                        elif msg_type == "heartbeat":
-                            continue
-                        elif msg_type == "error":
-                            logger.warning(
-                                "Performance WS stream error for %s: %s",
-                                channel,
-                                msg.get("message"),
-                            )
-                            break
-
-            except asyncio.CancelledError:
+        async def on_message(msg: dict) -> None:
+            if msg.get("type") != "performance":
                 return
-            except Exception as e:
-                error_str = str(e)
-                is_permanent = any(code in error_str for code in ("401", "403", "404"))
-                if is_permanent:
-                    logger.warning(
-                        "Performance WS stream permanent error for %s: %s — giving up",
-                        channel,
-                        e,
-                    )
-                    return
-                logger.warning(
-                    "Performance WS stream error for %s: %s, reconnecting in %ds...",
-                    channel,
-                    e,
-                    backoff,
-                )
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+            await self._broadcast_update(channel, msg.get("data", {}))
+
+        await self._run_ws_stream(
+            channel,
+            server_name,
+            label="Performance WS",
+            open_ws=lambda client: client.ws.executors(),
+            subscribe=subscribe,
+            on_message=on_message,
+        )
 
     # -- Controller Performance polling stream --
 
