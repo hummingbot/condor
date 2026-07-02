@@ -23,6 +23,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { StatusBadge } from "@/components/agent/StatusBadge";
+import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type StrategySummary, api } from "@/lib/api";
@@ -278,6 +279,9 @@ export function AgentDetail() {
   const queryClient = useQueryClient();
 
   const [showBrainModal, setShowBrainModal] = useState(false);
+  // Unsaved-edit guard for the Brain (AGENT.md) editor (CORR-093)
+  const [brainDirty, setBrainDirty] = useState(false);
+  const [showBrainDiscardConfirm, setShowBrainDiscardConfirm] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteStrategy, setDeleteStrategy] = useState<StrategySummary | null>(null);
@@ -308,8 +312,25 @@ export function AgentDetail() {
     },
   });
 
-  // Close modals on Escape
-  useEscapeKey(showBrainModal, () => setShowBrainModal(false));
+  // Close the brain modal, dropping any unsaved-edit guards.
+  const closeBrainModal = () => {
+    setShowBrainModal(false);
+    setShowBrainDiscardConfirm(false);
+    setBrainDirty(false);
+  };
+
+  // Backdrop click, Escape and the X button all route through here: with
+  // unsaved edits they ask for confirmation instead of silently discarding.
+  const requestCloseBrainModal = () => {
+    if (brainDirty) {
+      setShowBrainDiscardConfirm(true);
+    } else {
+      closeBrainModal();
+    }
+  };
+
+  // Close modals on Escape (the discard dialog owns Escape while open)
+  useEscapeKey(showBrainModal && !showBrainDiscardConfirm, requestCloseBrainModal);
   useEscapeKey(showDeleteConfirm, () => setShowDeleteConfirm(false));
   useEscapeKey(!!deleteStrategy, () => setDeleteStrategy(null));
 
@@ -496,14 +517,14 @@ export function AgentDetail() {
       {/* Brain Modal (AGENT.md) */}
       {showBrainModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/60" onClick={() => setShowBrainModal(false)} />
+          <div className="absolute inset-0 bg-black/60" onClick={requestCloseBrainModal} />
           <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-5xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
             <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-3">
               <h3 className="text-sm font-semibold text-[var(--color-text)]">
                 Agent Brain — {agent.name}
               </h3>
               <button
-                onClick={() => setShowBrainModal(false)}
+                onClick={requestCloseBrainModal}
                 className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               >
                 <X className="h-4 w-4" />
@@ -516,9 +537,18 @@ export function AgentDetail() {
                 content={agent.agent_md}
                 onSave={(value) => api.updateAgentMd(agent.slug, value)}
                 invalidateKey={["agent", slug]}
+                onDirtyChange={setBrainDirty}
               />
             </div>
           </div>
+          {/* Unsaved-changes confirmation before discarding edits */}
+          {showBrainDiscardConfirm && (
+            <DiscardChangesDialog
+              fileName="AGENT.md"
+              onDiscard={closeBrainModal}
+              onClose={() => setShowBrainDiscardConfirm(false)}
+            />
+          )}
         </div>
       )}
 

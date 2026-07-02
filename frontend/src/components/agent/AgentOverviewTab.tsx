@@ -21,12 +21,15 @@ export function MarkdownEditor({
   content,
   onSave,
   invalidateKey,
+  onDirtyChange,
 }: {
   label: string;
   sublabel: string;
   content: string;
   onSave: (value: string) => Promise<unknown>;
   invalidateKey: unknown[];
+  /** Notifies the host (e.g. a closable modal) when there are unsaved edits. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const [value, setValue] = useState(content);
@@ -37,13 +40,15 @@ export function MarkdownEditor({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: invalidateKey });
       setDirty(false);
+      onDirtyChange?.(false);
     },
   });
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value);
     setDirty(true);
-  }, []);
+    onDirtyChange?.(true);
+  }, [onDirtyChange]);
 
   return (
     <div className="flex flex-col gap-2">

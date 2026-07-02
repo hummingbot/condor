@@ -106,7 +106,7 @@ export function DiscardChangesDialog({
           <span className="font-mono font-medium text-[var(--color-text)]">
             {fileName}
           </span>{" "}
-          has unsaved changes. Closing this tab will discard them.
+          has unsaved changes. Closing will discard them.
         </p>
         <div className="flex items-center justify-end gap-3">
           <button

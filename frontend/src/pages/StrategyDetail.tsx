@@ -11,6 +11,7 @@ import {
   PerformancePanel,
 } from "@/components/agent/AgentOverviewTab";
 import { SessionReviewer } from "@/components/agent/SessionReviewer";
+import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
@@ -36,6 +37,10 @@ export function StrategyDetail() {
   const [showStrategyModal, setShowStrategyModal] = useState(false);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // Unsaved-edit guards for the Playbook/Learnings editors (CORR-093)
+  const [playbookDirty, setPlaybookDirty] = useState(false);
+  const [learningsDirty, setLearningsDirty] = useState(false);
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
 
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug!, sslug!),
@@ -54,8 +59,26 @@ export function StrategyDetail() {
     }
   }, [location.state, location.pathname, navigate]);
 
-  // Close strategy modal on Escape
-  useEscapeKey(showStrategyModal, () => setShowStrategyModal(false));
+  // Close the strategy modal, dropping any unsaved-edit guards.
+  const closeStrategyModal = useCallback(() => {
+    setShowStrategyModal(false);
+    setShowDiscardConfirm(false);
+    setPlaybookDirty(false);
+    setLearningsDirty(false);
+  }, []);
+
+  // Backdrop click, Escape and the X button all route through here: with
+  // unsaved edits they ask for confirmation instead of silently discarding.
+  const requestCloseStrategyModal = useCallback(() => {
+    if (playbookDirty || learningsDirty) {
+      setShowDiscardConfirm(true);
+    } else {
+      closeStrategyModal();
+    }
+  }, [playbookDirty, learningsDirty, closeStrategyModal]);
+
+  // Close strategy modal on Escape (the discard dialog owns Escape while open)
+  useEscapeKey(showStrategyModal && !showDiscardConfirm, requestCloseStrategyModal);
 
   const { data: strategy, isLoading, error } = useQuery({
     queryKey: ["strategy", slug, sslug],
@@ -278,7 +301,7 @@ export function StrategyDetail() {
           {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/60"
-            onClick={() => setShowStrategyModal(false)}
+            onClick={requestCloseStrategyModal}
           />
           {/* Modal panel */}
           <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-7xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
@@ -288,7 +311,7 @@ export function StrategyDetail() {
                 Playbook & Learnings — {strategy.name}
               </h3>
               <button
-                onClick={() => setShowStrategyModal(false)}
+                onClick={requestCloseStrategyModal}
                 className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               >
                 <X className="h-4 w-4" />
@@ -303,6 +326,7 @@ export function StrategyDetail() {
                   content={strategy.strategy_md}
                   onSave={(value) => api.updateStrategyMd(slug!, sslug!, value)}
                   invalidateKey={["strategy", slug, sslug]}
+                  onDirtyChange={setPlaybookDirty}
                 />
                 <MarkdownEditor
                   label="Learnings"
@@ -310,10 +334,25 @@ export function StrategyDetail() {
                   content={strategy.learnings}
                   onSave={(value) => api.updateStrategyLearnings(slug!, sslug!, value)}
                   invalidateKey={["strategy", slug, sslug]}
+                  onDirtyChange={setLearningsDirty}
                 />
               </div>
             </div>
           </div>
+          {/* Unsaved-changes confirmation before discarding edits */}
+          {showDiscardConfirm && (
+            <DiscardChangesDialog
+              fileName={
+                playbookDirty && learningsDirty
+                  ? "strategy.md & learnings"
+                  : playbookDirty
+                    ? "strategy.md"
+                    : "learnings"
+              }
+              onDiscard={closeStrategyModal}
+              onClose={() => setShowDiscardConfirm(false)}
+            />
+          )}
         </div>
       )}
 
