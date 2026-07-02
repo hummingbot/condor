@@ -14,7 +14,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Awaitable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from .jsonrpc import JSONRPCPeer
 
@@ -278,6 +278,48 @@ class Heartbeat:
 ACPEvent = (
     TextChunk | ThoughtChunk | ToolCallEvent | ToolCallUpdate | PromptDone | Heartbeat
 )
+
+
+def fold_tool_call_event(
+    tc_map: dict[str, dict], event: ToolCallEvent | ToolCallUpdate
+) -> dict | None:
+    """Fold a streamed tool-call event into ``tc_map``, keyed by tool_call_id.
+
+    Shared reduction used by ``TickEngine._tick`` and ``delegate._make_event_sink``
+    so the create/patch semantics can't drift (ARCH-063). A :class:`ToolCallEvent`
+    creates an entry (returned so the caller can append it to its own list) or
+    patches ``status``/``name``/``input`` in place; a :class:`ToolCallUpdate`
+    patches ``status``/``name``/``output``. Returns the newly created entry, or
+    ``None`` when the event patched an existing (or unknown) one.
+    """
+    if isinstance(event, ToolCallEvent):
+        tc = tc_map.get(event.tool_call_id)
+        if tc is None:
+            tc = {
+                "id": event.tool_call_id,
+                "name": event.title,
+                "status": event.status,
+                "kind": event.kind,
+            }
+            if event.input:
+                tc["input"] = event.input
+            tc_map[event.tool_call_id] = tc
+            return tc
+        tc["status"] = event.status
+        if event.title:
+            tc["name"] = event.title
+        if event.input:
+            tc["input"] = event.input
+    else:  # ToolCallUpdate
+        tc = tc_map.get(event.tool_call_id)
+        if tc is not None:
+            if event.status:
+                tc["status"] = event.status
+            if event.title:
+                tc["name"] = event.title
+            if event.output:
+                tc["output"] = event.output
+    return None
 
 
 # Type alias for the permission callback

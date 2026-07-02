@@ -23,6 +23,7 @@ from condor.acp.client import (
     TextChunk,
     ToolCallEvent,
     ToolCallUpdate,
+    fold_tool_call_event,
     resolve_acp,
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
@@ -445,34 +446,10 @@ class TickEngine:
                 async for event in self._collect_stream(acp_client, prompt):
                     if isinstance(event, TextChunk):
                         response_chunks.append(event.text)
-                    elif isinstance(event, ToolCallEvent):
-                        if event.tool_call_id in tool_call_map:
-                            tc = tool_call_map[event.tool_call_id]
-                            tc["status"] = event.status
-                            if event.title:
-                                tc["name"] = event.title
-                            if event.input:
-                                tc["input"] = event.input
-                        else:
-                            tc = {
-                                "id": event.tool_call_id,
-                                "name": event.title,
-                                "status": event.status,
-                                "kind": event.kind,
-                            }
-                            if event.input:
-                                tc["input"] = event.input
-                            tool_calls.append(tc)
-                            tool_call_map[event.tool_call_id] = tc
-                    elif isinstance(event, ToolCallUpdate):
-                        if event.tool_call_id in tool_call_map:
-                            tc = tool_call_map[event.tool_call_id]
-                            if event.status:
-                                tc["status"] = event.status
-                            if event.title:
-                                tc["name"] = event.title
-                            if event.output:
-                                tc["output"] = event.output
+                    elif isinstance(event, (ToolCallEvent, ToolCallUpdate)):
+                        new_tc = fold_tool_call_event(tool_call_map, event)
+                        if new_tc is not None:
+                            tool_calls.append(new_tc)
         except asyncio.TimeoutError:
             log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
             response_chunks.append("(timed out)")

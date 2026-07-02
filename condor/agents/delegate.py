@@ -106,11 +106,19 @@ async def start_delegation(
 def _make_event_sink(dt: DelegateTask):
     """Build a callback that folds streamed ACP events into ``dt.events``.
 
-    Mirrors :class:`condor.agents.engine.TickEngine`'s event reduction: consecutive
-    thought/text chunks are merged, and a ``ToolCallUpdate`` patches the matching
-    ``ToolCallEvent`` entry in place so each tool call shows its final input/output.
+    Consecutive thought/text chunks are merged here; the tool-call create/patch
+    reduction (a ``ToolCallUpdate`` patches the matching ``ToolCallEvent`` entry in
+    place so each tool call shows its final input/output) is shared with
+    :class:`condor.agents.engine.TickEngine` via
+    :func:`condor.acp.client.fold_tool_call_event`.
     """
-    from condor.acp.client import TextChunk, ThoughtChunk, ToolCallEvent, ToolCallUpdate
+    from condor.acp.client import (
+        TextChunk,
+        ThoughtChunk,
+        ToolCallEvent,
+        ToolCallUpdate,
+        fold_tool_call_event,
+    )
 
     tl = dt.events
     tc_map: dict[str, dict] = {}
@@ -126,35 +134,11 @@ def _make_event_sink(dt: DelegateTask):
                 tl[-1]["text"] += event.text
             else:
                 tl.append({"type": "text", "text": event.text})
-        elif isinstance(event, ToolCallEvent):
-            tc = tc_map.get(event.tool_call_id)
-            if tc is None:
-                tc = {
-                    "type": "tool",
-                    "id": event.tool_call_id,
-                    "name": event.title,
-                    "status": event.status,
-                    "kind": event.kind,
-                    "input": event.input,
-                    "output": None,
-                }
-                tc_map[event.tool_call_id] = tc
-                tl.append(tc)
-            else:
-                tc["status"] = event.status
-                if event.title:
-                    tc["name"] = event.title
-                if event.input:
-                    tc["input"] = event.input
-        elif isinstance(event, ToolCallUpdate):
-            tc = tc_map.get(event.tool_call_id)
+        elif isinstance(event, (ToolCallEvent, ToolCallUpdate)):
+            tc = fold_tool_call_event(tc_map, event)
             if tc is not None:
-                if event.status:
-                    tc["status"] = event.status
-                if event.title:
-                    tc["name"] = event.title
-                if event.output:
-                    tc["output"] = event.output
+                tc["type"] = "tool"
+                tl.append(tc)
 
     return sink
 
