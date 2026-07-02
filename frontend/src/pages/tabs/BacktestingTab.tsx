@@ -1,5 +1,6 @@
 import {
   Calendar,
+  Check,
   CheckCircle2,
   ChevronDown,
   Circle,
@@ -488,6 +489,7 @@ export function BacktestingTab() {
   const [configSearch, setConfigSearch] = useState("");
   const [activePreset, setActivePreset] = useState<string | null>("1W");
   const [toast, setToast] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Toast auto-dismiss
   useEffect(() => {
@@ -846,7 +848,10 @@ export function BacktestingTab() {
             return (
               <button
                 key={task.task_id}
-                onClick={() => setSelectedTaskId(task.task_id)}
+                onClick={() => {
+                  setSelectedTaskId(task.task_id);
+                  setConfirmDeleteId(null);
+                }}
                 className={`group flex w-full items-start gap-2 rounded-lg border px-3 py-2.5 text-left text-sm transition-colors ${
                   isSelected
                     ? "border-[var(--color-primary)]/50 bg-[var(--color-primary)]/5"
@@ -926,16 +931,44 @@ export function BacktestingTab() {
                       {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
                     </button>
                   )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteMutation.mutate(task.task_id);
-                    }}
-                    className="rounded p-0.5 text-[var(--color-text-muted)] opacity-0 transition-all hover:text-[var(--color-red)] group-hover:opacity-100"
-                    title="Delete task"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  {confirmDeleteId === task.task_id ? (
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteMutation.mutate(task.task_id);
+                          setConfirmDeleteId(null);
+                        }}
+                        className="rounded p-1 text-[var(--color-red)] transition-all hover:bg-red-500/10"
+                        title="Confirm delete"
+                        aria-label="Confirm delete"
+                      >
+                        <Check className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmDeleteId(null);
+                        }}
+                        className="rounded p-1 text-[var(--color-text-muted)] transition-all hover:bg-[var(--color-surface-hover)]"
+                        title="Cancel delete"
+                        aria-label="Cancel delete"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDeleteId(task.task_id);
+                      }}
+                      className="rounded p-1 text-[var(--color-text-muted)] opacity-0 transition-all hover:text-[var(--color-red)] group-hover:opacity-100"
+                      title="Delete task"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               </button>
             );
