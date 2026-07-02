@@ -40,17 +40,6 @@ interface TradeChartProps {
   onExecutorDeselect?: () => void;
 }
 
-function getChartColors() {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
-    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
-    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
-    up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
-    down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
-  };
-}
-
 export function TradeChart({
   server,
   connector,
@@ -162,7 +151,7 @@ export function TradeChart({
       if (cancelled || !containerRef.current) return;
       chartModuleRef.current = mod;
 
-      const colors = getChartColors();
+      const colors = getThemeColors();
       const chart = mod.createChart(containerRef.current, {
         autoSize: true,
         layout: {
@@ -447,7 +436,7 @@ export function TradeChart({
     const chart = chartRef.current;
     const mod = chartModuleRef.current;
     const observer = new MutationObserver(() => {
-      const colors = getChartColors();
+      const colors = getThemeColors();
       chart.applyOptions({
         layout: {
           background: { type: mod.ColorType.Solid, color: colors.bg },

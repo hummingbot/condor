@@ -4,6 +4,9 @@ type ThemeColors = {
   green: string;
   red: string;
   yellow: string;
+  bg: string;
+  grid: string;
+  text: string;
 };
 
 // Cached theme colors — computed once and refreshed only when the theme changes.
@@ -19,6 +22,9 @@ function readThemeColors(): ThemeColors {
     green: style.getPropertyValue("--color-green").trim() || "#22c55e",
     red: style.getPropertyValue("--color-red").trim() || "#ef4444",
     yellow: style.getPropertyValue("--color-yellow").trim() || "#eab308",
+    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
+    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
+    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
   };
 }
 

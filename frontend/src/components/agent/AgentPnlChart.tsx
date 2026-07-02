@@ -2,17 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { formatCurrencyPnl } from "@/lib/formatters";
 import type { MetricEntry } from "@/lib/parse-agent";
-
-function getChartColors() {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
-    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
-    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
-    up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
-    down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
-  };
-}
+import { getThemeColors } from "@/lib/theme-colors";
 
 interface PnlDataPoint {
   time: number; // unix seconds
@@ -28,6 +18,7 @@ interface AgentPnlChartProps {
 export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
+  const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
   const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Baseline"> | null>(null);
   // Tracks the point count of the last applied dataset, so we only auto-fit
@@ -40,8 +31,9 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
     let cancelled = false;
     import("lightweight-charts").then((mod) => {
       if (cancelled || !containerRef.current) return;
+      chartModuleRef.current = mod;
 
-      const colors = getChartColors();
+      const colors = getThemeColors();
       const chart = mod.createChart(containerRef.current, {
         autoSize: true,
         layout: {
@@ -126,10 +118,33 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
         chartRef.current.remove();
         chartRef.current = null;
         seriesRef.current = null;
+        chartModuleRef.current = null;
       }
       lastLenRef.current = 0;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Re-apply chart colors on theme change ──
+  useEffect(() => {
+    if (!chartRef.current || !chartModuleRef.current) return;
+    const chart = chartRef.current;
+    const mod = chartModuleRef.current;
+    const observer = new MutationObserver(() => {
+      const colors = getThemeColors();
+      chart.applyOptions({
+        layout: {
+          background: { type: mod.ColorType.Solid, color: colors.bg },
+          textColor: colors.text,
+        },
+        grid: {
+          vertLines: { color: colors.grid },
+          horzLines: { color: colors.grid },
+        },
+      });
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, [chartReady]);
 
   // ── Push live `data` to the series whenever it changes ──
   // Runs once the series exists (chartReady) and on every `data` update, so the

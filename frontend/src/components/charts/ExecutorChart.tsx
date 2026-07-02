@@ -31,17 +31,6 @@ interface ExecutorChartProps {
   onSnapshotClick?: (tick: number) => void;
 }
 
-function getChartColors() {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
-    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
-    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
-    up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
-    down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
-  };
-}
-
 const isActive = (status: string) => {
   const s = status?.toLowerCase() ?? "";
   return s === "running" || s === "active_position" || s === "active";
@@ -118,7 +107,7 @@ export function ExecutorChart({
       if (cancelled || !containerRef.current) return;
       chartModuleRef.current = mod;
 
-      const colors = getChartColors();
+      const colors = getThemeColors();
       const chart = mod.createChart(containerRef.current, {
         autoSize: true,
         layout: {
@@ -395,6 +384,28 @@ export function ExecutorChart({
       setChartReady(false);
     };
   }, []);
+
+  // ── Re-apply chart colors on theme change ──
+  useEffect(() => {
+    if (!chartRef.current || !chartModuleRef.current) return;
+    const chart = chartRef.current;
+    const mod = chartModuleRef.current;
+    const observer = new MutationObserver(() => {
+      const colors = getThemeColors();
+      chart.applyOptions({
+        layout: {
+          background: { type: mod.ColorType.Solid, color: colors.bg },
+          textColor: colors.text,
+        },
+        grid: {
+          vertLines: { color: colors.grid },
+          horzLines: { color: colors.grid },
+        },
+      });
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, [chartReady]);
 
   // Set initial candle data
   useEffect(() => {
