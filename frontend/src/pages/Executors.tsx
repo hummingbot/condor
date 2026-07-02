@@ -314,6 +314,7 @@ export function Executors() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [pendingStopIds, setPendingStopIds] = useState<string[] | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [kpiPeriod, setKpiPeriod] = useState<string>("3M");
 
   // WebSocket for real-time updates
@@ -355,11 +356,24 @@ export function Executors() {
 
   const stopMutation = useMutation({
     mutationFn: async ({ ids, keepPosition }: { ids: string[]; keepPosition: boolean }) => {
+      setStopError(null);
       setStoppingIds((prev) => new Set([...prev, ...ids]));
       const results = await Promise.allSettled(
         ids.map((id) => api.stopExecutor(server!, id, keepPosition)),
       );
       return results;
+    },
+    onSuccess: (results, vars) => {
+      const failed = results.filter(
+        (r): r is PromiseRejectedResult => r.status === "rejected",
+      );
+      if (failed.length > 0) {
+        const reason = failed[0].reason;
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setStopError(
+          `Failed to stop ${failed.length} of ${vars.ids.length} executor${vars.ids.length === 1 ? "" : "s"}: ${message}`,
+        );
+      }
     },
     onSettled: (_data, _error, vars) => {
       setStoppingIds((prev) => {
@@ -581,6 +595,8 @@ export function Executors() {
           </button>
         </div>
       </div>
+
+      {stopError && <p className="text-[var(--color-red)]">{stopError}</p>}
 
       {isLoading ? (
         <p className="text-[var(--color-text-muted)]">Loading...</p>
