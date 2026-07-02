@@ -11,9 +11,8 @@ import hashlib
 import logging
 import time
 import traceback
-from typing import Any
-
 from pathlib import Path
+from typing import Any
 
 import condor.reports as reports
 from condor import routine_hooks
@@ -331,7 +330,7 @@ class RoutineStore:
     ) -> None:
         ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
         start = time.time()
-        reports._last_report_id = None
+        reports.reset_last_report_id()
         try:
             cfg = routine.config_class(**config)
             with reports.attribute_to(_agent_of(routine)):
@@ -350,7 +349,7 @@ class RoutineStore:
             failed = False
 
         duration = time.time() - start
-        report_id = reports._last_report_id
+        report_id = reports.get_last_report_id()
         self._results[instance_id] = result
 
         if instance_id in self._instances:
@@ -492,7 +491,7 @@ class RoutineStore:
             while instance_id in self._instances:
                 ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
                 start = time.time()
-                reports._last_report_id = None
+                reports.reset_last_report_id()
                 try:
                     cfg = routine.config_class(**config)
                     with reports.attribute_to(_agent_of(routine)):
@@ -511,7 +510,7 @@ class RoutineStore:
                     run_failed = False
 
                 duration = time.time() - start
-                report_id = reports._last_report_id
+                report_id = reports.get_last_report_id()
                 self._results[instance_id] = result
 
                 if instance_id in self._instances:

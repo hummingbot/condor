@@ -17,9 +17,24 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Module-level variable to capture the last saved report ID.
-# Safe in asyncio (single-threaded); reset before each routine execution.
-_last_report_id: str | None = None
+# The ID of the last report saved by the current task. Runners reset it before
+# a routine's execution and read it back afterwards to attach the report to the
+# run. Task-local (ContextVar), so concurrent routine tasks don't steal each
+# other's report IDs.
+_last_report_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "last_report_id", default=None
+)
+
+
+def reset_last_report_id() -> None:
+    """Clear the last-saved report ID for the current task (call before a run)."""
+    _last_report_id.set(None)
+
+
+def get_last_report_id() -> str | None:
+    """Return the ID of the last report saved by the current task, if any."""
+    return _last_report_id.get()
+
 
 # The assistant/expert a report is attributed to (the producer). Reports stay in
 # one flat store; this stamps each entry so the dashboard can filter by who made
@@ -397,8 +412,6 @@ class ReportBuilder:
             sections_html=sections_html,
         )
 
-        global _last_report_id
-
         async with _index_lock:
             if report_id is not None:
                 # Update existing report
@@ -414,7 +427,7 @@ class ReportBuilder:
                 entry["tags"] = self._tags
                 _write_index(entries)
 
-                _last_report_id = report_id
+                _last_report_id.set(report_id)
                 logger.info(f"Report updated: {entry['filename']}")
                 return report_id
 
@@ -442,7 +455,7 @@ class ReportBuilder:
             _write_index(entries)
             _cleanup_locked()
 
-        _last_report_id = new_id
+        _last_report_id.set(new_id)
         logger.info(f"Report saved: {filename}")
         return new_id
 

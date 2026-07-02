@@ -18,10 +18,10 @@ from datetime import time as dt_time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, ContextTypes
 
-from handlers import clear_all_input_states
 import condor.reports
 from condor import routine_hooks
 from condor.routine_store import get_routine_store
+from handlers import clear_all_input_states
 from routines.base import (
     discover_routines,
     get_routine,
@@ -277,7 +277,7 @@ async def _execute_routine(
     context._user_data = user_data
 
     # Reset report capture before execution
-    condor.reports._last_report_id = None
+    condor.reports.reset_last_report_id()
 
     try:
         config = routine.config_class(**config_dict)
@@ -290,7 +290,7 @@ async def _execute_routine(
         logger.error(f"Routine {routine_name}[{instance_id}] failed: {e}")
 
     duration = time.time() - start
-    report_id = condor.reports._last_report_id
+    report_id = condor.reports.get_last_report_id()
 
     # Bridge to shared store so web dashboard can see Telegram-triggered results
     if rich_result:
@@ -304,7 +304,9 @@ async def _execute_routine(
     # On failure rich_result is None — pass the error text so the notification
     # reflects the failure instead of a misleading "Completed".
     failed = rich_result is None
-    hook_result = rich_result if rich_result is not None else normalize_result(result_text)
+    hook_result = (
+        rich_result if rich_result is not None else normalize_result(result_text)
+    )
     try:
         await routine_hooks.dispatch(
             routine_name,
