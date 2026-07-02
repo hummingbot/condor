@@ -236,6 +236,11 @@ function CreateAgentDialog({
             {createMutation.isPending ? "Creating..." : "Create Agent"}
           </button>
         </div>
+        {createMutation.isError && (
+          <p className="mt-3 text-xs text-red-400">
+            Failed to create agent{createMutation.error instanceof Error ? `: ${createMutation.error.message}` : "."}
+          </p>
+        )}
       </div>
     </div>
   );
