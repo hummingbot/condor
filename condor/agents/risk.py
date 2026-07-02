@@ -121,6 +121,11 @@ class RiskEngine:
     ) -> tuple[bool, str]:
         """Check if an executor creation is within risk limits.
 
+        On approval of a "create", accumulates it into ``current_state``
+        (executor count and exposure) so subsequent checks within the same
+        tick see the running totals instead of the frozen per-tick snapshot.
+        The state is recomputed from the journal at the start of each tick.
+
         Returns (allowed, reason).
         """
         input_data = tool_call.get("input", {})
@@ -148,6 +153,11 @@ class RiskEngine:
                 f"Would exceed position limit: ${current_state.total_exposure + amount:.2f} > "
                 f"${self.limits.max_position_size_quote:.2f}"
             )
+
+        # Approved: accumulate into the snapshot so the next create in this
+        # tick is gated against the running totals, not the pre-tick numbers.
+        current_state.executor_count += 1
+        current_state.total_exposure += amount
 
         return True, ""
 
