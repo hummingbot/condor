@@ -225,9 +225,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         {chat.permissionRequest && (
           <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">
             <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
               <div className="flex-1 text-sm">
-                <p className="font-medium text-amber-200">Confirm action</p>
+                <p className="font-medium text-[var(--color-yellow)]">Confirm action</p>
                 <p className="mt-0.5 text-[var(--color-text-muted)]">
                   {chat.permissionRequest.summary}
                 </p>
