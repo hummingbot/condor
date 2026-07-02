@@ -7,6 +7,7 @@ the same instances, schedule runs, and read results.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 import time
@@ -146,8 +147,12 @@ class RoutineStore:
 
         The chat ``condor`` sees the general library plus every agent's routines
         (prefixed). Each agent's own routines stay isolated under its slug.
+
+        Discovery is mtime-cached in routines.base: only new/changed files are
+        (re)imported, so this stays cheap on every list call while edits are
+        still picked up without a restart.
         """
-        all_routines = dict(discover_routines(force_reload=True))
+        all_routines = dict(discover_routines())
 
         # Scan agents/*/routines/
         agents_dir = Path(__file__).resolve().parent.parent / "agents"
@@ -161,9 +166,11 @@ class RoutineStore:
                     routines_path, agent_slug=slug
                 )
                 for rname, rinfo in agent_routines.items():
-                    prefixed = f"{slug}/{rname}"
-                    rinfo.name = prefixed
-                    all_routines[prefixed] = rinfo
+                    # Shallow-copy before prefixing: the RoutineInfo is shared
+                    # with the discovery cache and must keep its bare name.
+                    prefixed_info = copy.copy(rinfo)
+                    prefixed_info.name = f"{slug}/{rname}"
+                    all_routines[prefixed_info.name] = prefixed_info
 
         return all_routines
 
