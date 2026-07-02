@@ -1,5 +1,16 @@
 // ── Shared helpers for PNL evolution charts ──
 
+/**
+ * Fixed series colors shared by strokes, axis ticks, header stats and tooltips
+ * across AggregatedPnlChart and ControllerPnlChart. Realized and total are
+ * theme-driven (getThemeColors / pnlColor), so only the three fixed series live here.
+ */
+export const PNL_SERIES_COLORS = {
+  unrealized: "#f59e0b",
+  volume: "#3b82f6",
+  position: "#a78bfa",
+} as const;
+
 /** A single point on a PNL evolution chart (per-controller or aggregated). */
 export interface PnlChartPoint {
   time: number;

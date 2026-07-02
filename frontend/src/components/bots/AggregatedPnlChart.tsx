@@ -13,9 +13,10 @@ import {
 } from "recharts";
 
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl, formatDateTime, formatTime, pnlColor, toMs } from "@/lib/formatters";
-import { positionQuoteValue, type PnlChartPoint } from "@/lib/pnl-chart";
+import { formatCurrencyVolume, formatCurrencyPnl, formatTime, pnlColor, toMs } from "@/lib/formatters";
+import { positionQuoteValue, PNL_SERIES_COLORS, type PnlChartPoint } from "@/lib/pnl-chart";
 import { getThemeColors } from "@/lib/theme-colors";
+import { BottomTooltip, PnlTooltip } from "./PnlChartTooltips";
 
 // ── Aggregation ──
 
@@ -114,68 +115,6 @@ function aggregate(
   return points;
 }
 
-// ── Custom tooltips ──
-
-function PnlTooltip({ active, payload, label, symbol }: {
-  active?: boolean;
-  payload?: Array<{ dataKey: string; value: number }>;
-  label?: number;
-  symbol: string;
-}) {
-  if (!active || !payload?.length || !label) return null;
-  const byKey: Record<string, number> = {};
-  for (const p of payload) byKey[p.dataKey] = p.value;
-  const total = byKey.total ?? (byKey.realized ?? 0) + (byKey.unrealized ?? 0);
-  const sign = (v: number) => (v >= 0 ? "+" : "");
-
-  return (
-    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[150px]">
-      <div className="text-[var(--color-text-muted)] text-[10px] mb-1">{formatDateTime(label)}</div>
-      <div className="flex justify-between gap-3">
-        <span className="text-[var(--color-text-muted)]">Total</span>
-        <span className="font-semibold" style={{ color: pnlColor(total) }}>
-          {sign(total)}{formatCurrencyVolume(total, symbol)}
-        </span>
-      </div>
-      <div className="flex justify-between gap-3">
-        <span className="text-[var(--color-text-muted)]">Realized</span>
-        <span style={{ color: "var(--color-green)" }}>{sign(byKey.realized ?? 0)}{formatCurrencyVolume(byKey.realized ?? 0, symbol)}</span>
-      </div>
-      <div className="flex justify-between gap-3">
-        <span className="text-[var(--color-text-muted)]">Unrealized</span>
-        <span style={{ color: "#f59e0b" }}>{sign(byKey.unrealized ?? 0)}{formatCurrencyVolume(byKey.unrealized ?? 0, symbol)}</span>
-      </div>
-    </div>
-  );
-}
-
-function BottomTooltip({ active, payload, label, symbol }: {
-  active?: boolean;
-  payload?: Array<{ dataKey: string; value: number }>;
-  label?: number;
-  symbol: string;
-}) {
-  if (!active || !payload?.length || !label) return null;
-  const byKey: Record<string, number> = {};
-  for (const p of payload) byKey[p.dataKey] = p.value;
-
-  return (
-    <div className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]/95 backdrop-blur-sm px-2.5 py-2 text-[11px] leading-relaxed shadow-lg min-w-[130px]">
-      <div className="text-[var(--color-text-muted)] text-[10px] mb-1">{formatDateTime(label)}</div>
-      <div className="flex justify-between gap-3">
-        <span style={{ color: "#3b82f6" }}>Volume</span>
-        <span style={{ color: "#3b82f6" }}>{formatCurrencyVolume(byKey.volume ?? 0, symbol)}</span>
-      </div>
-      {byKey.position !== undefined && byKey.position !== 0 && (
-        <div className="flex justify-between gap-3">
-          <span style={{ color: "#a78bfa" }}>Position</span>
-          <span style={{ color: "#a78bfa" }}>{formatCurrencyVolume(byKey.position, symbol)}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Controller color palette ──
 
 const CTRL_COLORS = ["#22c55e", "#3b82f6", "#f59e0b", "#ef4444", "#a78bfa", "#ec4899", "#14b8a6", "#f97316"];
@@ -270,14 +209,14 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
                 R: <span style={{ color: "var(--color-green)" }}>{fmtPnl(latest.realized)}</span>
               </span>
               <span className="text-[var(--color-text-muted)]">
-                U: <span style={{ color: "#f59e0b" }}>{fmtPnl(latest.unrealized)}</span>
+                U: <span style={{ color: PNL_SERIES_COLORS.unrealized }}>{fmtPnl(latest.unrealized)}</span>
               </span>
               <span className="text-[var(--color-text-muted)]">
-                Vol: <span style={{ color: "#3b82f6" }}>{formatCurrencyVolume(latest.volume, currencySymbol)}</span>
+                Vol: <span style={{ color: PNL_SERIES_COLORS.volume }}>{formatCurrencyVolume(latest.volume, currencySymbol)}</span>
               </span>
               {latest.position !== 0 && (
                 <span className="text-[var(--color-text-muted)]">
-                  Pos: <span style={{ color: "#a78bfa" }}>{formatCurrencyVolume(latest.position, currencySymbol)}</span>
+                  Pos: <span style={{ color: PNL_SERIES_COLORS.position }}>{formatCurrencyVolume(latest.position, currencySymbol)}</span>
                 </span>
               )}
             </div>
@@ -365,7 +304,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
             <Area type="monotone" dataKey="total" stroke="none" fill="url(#aggPnlGrad)" activeDot={false} legendType="none" />
             <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
             <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
-            <Line type="monotone" dataKey="unrealized" stroke="#f59e0b" strokeWidth={2} strokeDasharray="5 3" dot={false} />
+            <Line type="monotone" dataKey="unrealized" stroke={PNL_SERIES_COLORS.unrealized} strokeWidth={2} strokeDasharray="5 3" dot={false} />
             <Legend
               verticalAlign="top"
               align="right"
@@ -394,7 +333,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
             <YAxis
               yAxisId="vol"
               tickFormatter={fmtVolAxis}
-              tick={{ fontSize: 10, fill: "#3b82f6" }}
+              tick={{ fontSize: 10, fill: PNL_SERIES_COLORS.volume }}
               stroke="var(--color-border)"
               tickLine={false}
               axisLine={false}
@@ -405,7 +344,7 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
                 yAxisId="pos"
                 orientation="right"
                 tickFormatter={fmtVolAxis}
-                tick={{ fontSize: 10, fill: "#a78bfa" }}
+                tick={{ fontSize: 10, fill: PNL_SERIES_COLORS.position }}
                 stroke="var(--color-border)"
                 tickLine={false}
                 axisLine={false}
@@ -413,9 +352,9 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
               />
             )}
             <Tooltip content={<BottomTooltip symbol={currencySymbol} />} />
-            <Line yAxisId="vol" type="monotone" dataKey="volume" stroke="#3b82f6" strokeWidth={1.5} dot={false} />
+            <Line yAxisId="vol" type="monotone" dataKey="volume" stroke={PNL_SERIES_COLORS.volume} strokeWidth={1.5} dot={false} />
             {hasPosition && (
-              <Line yAxisId="pos" type="monotone" dataKey="position" stroke="#a78bfa" strokeWidth={1.5} dot={false} />
+              <Line yAxisId="pos" type="monotone" dataKey="position" stroke={PNL_SERIES_COLORS.position} strokeWidth={1.5} dot={false} />
             )}
           </ComposedChart>
         </ResponsiveContainer>
