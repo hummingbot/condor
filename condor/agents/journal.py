@@ -184,6 +184,19 @@ def next_experiment_number(agent_dir: Path) -> int:
     return max(existing, default=0) + 1
 
 
+# Line format written by JournalManager.record_tick; count_journal_ticks and
+# _count_ticks parse it back, so the format has a single owner here.
+TICK_LINE_PREFIX = "- tick#"
+
+
+def count_journal_ticks(journal_path: Path) -> int:
+    """Count tick entries in a session's journal.md (lines record_tick writes)."""
+    if not journal_path.exists():
+        return 0
+    text = journal_path.read_text(errors="replace")
+    return sum(1 for line in text.splitlines() if line.startswith(TICK_LINE_PREFIX))
+
+
 EXPERIMENT_TEMPLATE = """\
 # Experiment #{num} — {timestamp}
 Mode: {execution_mode}
@@ -765,14 +778,17 @@ class JournalManager:
 
     def _count_ticks(self) -> int:
         section = self._get_section("Ticks")
-        return len([l for l in section.splitlines() if l.startswith("- tick#")])
+        return len([l for l in section.splitlines() if l.startswith(TICK_LINE_PREFIX)])
 
     def record_tick(self, response_summary: str = "", actions: int = 0) -> int:
         """Record a tick entry. Returns the new tick number."""
         self._tick_count += 1
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         summary = response_summary[:200].replace("\n", " ")
-        entry = f"- tick#{self._tick_count} | {now} | actions={actions} | {summary}"
+        entry = (
+            f"{TICK_LINE_PREFIX}{self._tick_count} | {now} "
+            f"| actions={actions} | {summary}"
+        )
         self._append_to_section("Ticks", entry)
         return self._tick_count
 
@@ -852,7 +868,7 @@ class JournalManager:
         section = self._get_section("Ticks")
         results = []
         for line in section.splitlines():
-            if not line.startswith("- tick#"):
+            if not line.startswith(TICK_LINE_PREFIX):
                 continue
             entry: dict[str, Any] = {}
             parts = line[2:].split(" | ")

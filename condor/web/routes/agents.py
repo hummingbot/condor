@@ -26,6 +26,16 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from condor.agents.sessions_index import (
+    count_experiments,
+    count_sessions,
+    enumerate_agent_ids,
+    find_experiment_file,
+    find_session_dir,
+    infer_latest_session_status,
+    list_experiments,
+    list_sessions,
+)
 from condor.web.auth import get_current_user
 from condor.web.models import ReportSummary, WebUser
 
@@ -299,173 +309,10 @@ def _get_engines_for(agent_slug: str, sslug: str) -> list:
     ]
 
 
-# ── Disk helpers (keyed by the strategy dir + run_key) ──
-
-
-def _infer_latest_session_status(
-    strategy_dir: Path, run_key: str
-) -> dict[str, Any] | None:
-    """Infer status from the latest session on disk when no engine is in memory."""
-    sessions_dir = strategy_dir / "sessions"
-    if not sessions_dir.exists():
-        return None
-
-    session_dirs = sorted(
-        [
-            d
-            for d in sessions_dir.iterdir()
-            if d.is_dir() and d.name.startswith("session_")
-        ],
-        key=lambda d: d.stat().st_mtime,
-        reverse=True,
-    )
-    if not session_dirs:
-        return None
-
-    latest = session_dirs[0]
-    try:
-        num = int(latest.name.split("_", 1)[1])
-    except (ValueError, IndexError):
-        return None
-
-    # If no engine is in memory, the agent is not running — idle metadata only.
-    tick_count = 0
-    journal_path = latest / "journal.md"
-    if journal_path.exists():
-        text = journal_path.read_text(errors="replace")
-        tick_count = len(re.findall(r"^- tick#", text, re.MULTILINE))
-
-    return {
-        "agent_id": f"{run_key}_{num}",
-        "session_num": num,
-        "status": "idle",
-        "tick_count": tick_count,
-    }
-
-
-def _count_sessions(strategy_dir: Path) -> int:
-    for dirname in ("sessions", "trading_sessions"):
-        sessions_dir = strategy_dir / dirname
-        if sessions_dir.exists():
-            return len(
-                [
-                    d
-                    for d in sessions_dir.iterdir()
-                    if d.is_dir() and d.name.startswith("session_")
-                ]
-            )
-    return 0
-
-
-def _count_experiments(strategy_dir: Path) -> int:
-    count = 0
-    for dirname in ("dry_runs", "experiments"):
-        d = strategy_dir / dirname
-        if d.exists():
-            count += len(
-                [
-                    f
-                    for f in d.iterdir()
-                    if f.is_file()
-                    and f.suffix == ".md"
-                    and f.name.startswith("experiment_")
-                ]
-            )
-    return count
-
-
-def _list_sessions(strategy_dir: Path) -> list[SessionInfo]:
-    sessions = []
-    for dirname in ("sessions", "trading_sessions"):
-        sessions_dir = strategy_dir / dirname
-        if not sessions_dir.exists():
-            continue
-        for d in sorted(sessions_dir.iterdir(), reverse=True):
-            if not d.is_dir() or not d.name.startswith("session_"):
-                continue
-            try:
-                num = int(d.name.split("_", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            snap_count = 0
-            for snap_dir_name in ("snapshots", "runs"):
-                snap_dir = d / snap_dir_name
-                if snap_dir.exists():
-                    snap_count = len(list(snap_dir.glob("*.md")))
-                    break
-            created = ""
-            if (d / "journal.md").exists():
-                import os
-
-                created = str(os.path.getctime(d / "journal.md"))
-            sessions.append(
-                SessionInfo(number=num, snapshot_count=snap_count, created_at=created)
-            )
-    return sessions
-
-
-# Experiment snapshots are write-once (save_experiment_snapshot allocates a new
-# number and writes each file exactly once), so an mtime-keyed cache avoids
-# re-reading potentially hundreds of KB of .md files on every poll of the
-# strategy detail endpoint.
-_experiment_info_cache: dict[Path, tuple[float, ExperimentInfo]] = {}
-
-
-def _parse_experiment_file(f: Path, num: int) -> ExperimentInfo:
-    execution_mode = ""
-    agent_key = ""
-    content = f.read_text(errors="replace")
-    mode_match = re.search(r"^Mode:\s*(\S+)", content, re.MULTILINE)
-    if mode_match:
-        execution_mode = mode_match.group(1)
-    model_match = re.search(r"^Model:\s*(\S+)", content, re.MULTILINE)
-    if model_match:
-        agent_key = model_match.group(1)
-    created = ""
-    ts_match = re.search(r"^# Experiment #\d+ — (.+)$", content, re.MULTILINE)
-    if ts_match:
-        created = ts_match.group(1)
-    # A tick whose model call failed writes the raw error string as its Agent
-    # Response (e.g. "(error: status_code: 404, ...)"). Flag it so the UI can
-    # mark the run as failed without opening it.
-    error = bool(
-        re.search(
-            r"^## Agent Response\s*\n+\(?error\b",
-            content,
-            re.MULTILINE | re.IGNORECASE,
-        )
-    )
-    return ExperimentInfo(
-        number=num,
-        execution_mode=execution_mode,
-        agent_key=agent_key,
-        snapshot_count=1,
-        created_at=created,
-        error=error,
-    )
-
-
-def _list_experiments(strategy_dir: Path) -> list[ExperimentInfo]:
-    experiments = []
-    all_files = []
-    for dirname in ("dry_runs", "experiments"):
-        d = strategy_dir / dirname
-        if d.exists():
-            all_files.extend(d.glob("experiment_*.md"))
-    stated = [(f, f.stat().st_mtime) for f in all_files]
-    for f, mtime in sorted(stated, key=lambda x: x[1], reverse=True):
-        m = re.match(r"experiment_(\d+)\.md", f.name)
-        if not m:
-            continue
-        num = int(m.group(1))
-        cached = _experiment_info_cache.get(f)
-        if cached is not None and cached[0] == mtime:
-            info = cached[1]
-        else:
-            info = _parse_experiment_file(f, num)
-            _experiment_info_cache[f] = (mtime, info)
-        experiments.append(info)
-    return experiments
+# ── Disk lookups ──
+# Enumeration/counting of sessions & experiments on disk lives in
+# condor.agents.sessions_index (imported at the top), next to the journal
+# code that owns the layout. This module keeps only HTTP concerns.
 
 
 async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | None):
@@ -489,43 +336,6 @@ async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | No
     return client, server_name
 
 
-def _enumerate_agent_ids(
-    run_key: str, strategy_dir: Path
-) -> list[tuple[str, int, str]]:
-    """Return (agent_id, session_num, kind) for every session and experiment on disk."""
-    ids: list[tuple[str, int, str]] = []
-    for dirname in ("sessions", "trading_sessions"):
-        d = strategy_dir / dirname
-        if not d.exists():
-            continue
-        for sd in d.iterdir():
-            if not sd.is_dir() or not sd.name.startswith("session_"):
-                continue
-            try:
-                n = int(sd.name.split("_", 1)[1])
-            except (ValueError, IndexError):
-                continue
-            ids.append((f"{run_key}_{n}", n, "session"))
-    for dirname in ("dry_runs", "experiments"):
-        d = strategy_dir / dirname
-        if not d.exists():
-            continue
-        for f in d.glob("experiment_*.md"):
-            m = re.match(r"experiment_(\d+)\.md", f.name)
-            if not m:
-                continue
-            n = int(m.group(1))
-            ids.append((f"{run_key}_e{n}", n, "experiment"))
-    seen: set[str] = set()
-    unique: list[tuple[str, int, str]] = []
-    for tup in ids:
-        if tup[0] in seen:
-            continue
-        seen.add(tup[0])
-        unique.append(tup)
-    return unique
-
-
 async def _compute_strategy_performance(
     run_key: str, strategy_dir: Path, default_config: dict | None
 ):
@@ -537,7 +347,7 @@ async def _compute_strategy_performance(
     if cached is not None:
         return cached
 
-    ids = _enumerate_agent_ids(run_key, strategy_dir)
+    ids = enumerate_agent_ids(run_key, strategy_dir)
     client, _server = await _get_client_for_strategy(strategy_dir, default_config)
 
     # Controller mode: a strategy with a configured bot_name attributes that bot's
@@ -591,22 +401,6 @@ async def _compute_strategy_performance(
     result = (sessions, totals)
     _cache_set(f"perf:{run_key}", result)
     return result
-
-
-def _get_session_dir(strategy_dir: Path, session_num: int) -> Path | None:
-    for dirname in ("sessions", "trading_sessions"):
-        path = strategy_dir / dirname / f"session_{session_num}"
-        if path.exists():
-            return path
-    return None
-
-
-def _get_experiment_file(strategy_dir: Path, experiment_num: int) -> Path | None:
-    for dirname in ("dry_runs", "experiments"):
-        path = strategy_dir / dirname / f"experiment_{experiment_num}.md"
-        if path.exists():
-            return path
-    return None
 
 
 def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
@@ -664,7 +458,7 @@ async def _build_strategy_summary(strategy) -> StrategySummary:
             tick_count = inst.tick_count
 
     if not engines:
-        disk_info = _infer_latest_session_status(strategy_dir, run_key)
+        disk_info = infer_latest_session_status(strategy_dir, run_key)
         if disk_info:
             status = disk_info["status"]
             agent_id = disk_info["agent_id"]
@@ -686,8 +480,8 @@ async def _build_strategy_summary(strategy) -> StrategySummary:
         description=strategy.description,
         status=status,
         agent_id=agent_id,
-        session_count=_count_sessions(strategy_dir),
-        experiment_count=_count_experiments(strategy_dir),
+        session_count=count_sessions(strategy_dir),
+        experiment_count=count_experiments(strategy_dir),
         tick_count=tick_count,
         daily_pnl=latest_session_pnl,
         total_pnl=float(totals.get("total_pnl", 0.0)),
@@ -1060,7 +854,7 @@ async def get_strategy(
             agent_id = inst.agent_id
 
     if not engines:
-        disk_info = _infer_latest_session_status(strategy_dir, run_key)
+        disk_info = infer_latest_session_status(strategy_dir, run_key)
         if disk_info:
             status = disk_info["status"]
             agent_id = disk_info["agent_id"]
@@ -1076,8 +870,8 @@ async def get_strategy(
         learnings=learnings,
         status=status,
         agent_id=agent_id,
-        sessions=_list_sessions(strategy_dir),
-        experiments=_list_experiments(strategy_dir),
+        sessions=[SessionInfo(**s) for s in list_sessions(strategy_dir)],
+        experiments=[ExperimentInfo(**e) for e in list_experiments(strategy_dir)],
         instances=instances,
     )
 
@@ -1372,8 +1166,8 @@ async def list_strategy_sessions(
 ):
     """List sessions for a strategy."""
     strategy = _get_strategy(slug, sslug)
-    sessions = _list_sessions(strategy.dir)
-    return {"sessions": [s.model_dump() for s in sessions]}
+    sessions = list_sessions(strategy.dir)
+    return {"sessions": [SessionInfo(**s).model_dump() for s in sessions]}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/journal")
@@ -1385,7 +1179,7 @@ async def get_journal(
 ):
     """Read journal.md for a session."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = _get_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.dir, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
     journal_path = session_dir / "journal.md"
@@ -1402,7 +1196,7 @@ async def list_snapshots(
 ):
     """List snapshots for a session."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = _get_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.dir, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -1440,7 +1234,7 @@ async def get_snapshot(
 ):
     """Read a specific snapshot."""
     strategy = _get_strategy(slug, sslug)
-    session_dir = _get_session_dir(strategy.dir, session_num)
+    session_dir = find_session_dir(strategy.dir, session_num)
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
@@ -1460,8 +1254,8 @@ async def list_strategy_experiments(
 ):
     """List experiments for a strategy."""
     strategy = _get_strategy(slug, sslug)
-    experiments = _list_experiments(strategy.dir)
-    return {"experiments": [e.model_dump() for e in experiments]}
+    experiments = list_experiments(strategy.dir)
+    return {"experiments": [ExperimentInfo(**e).model_dump() for e in experiments]}
 
 
 @router.get("/{slug}/strategies/{sslug}/experiments/{exp_num}")
@@ -1470,7 +1264,7 @@ async def get_experiment(
 ):
     """Read an experiment snapshot."""
     strategy = _get_strategy(slug, sslug)
-    path = _get_experiment_file(strategy.dir, exp_num)
+    path = find_experiment_file(strategy.dir, exp_num)
     if not path:
         raise HTTPException(status_code=404, detail=f"Experiment {exp_num} not found")
     return {"content": path.read_text(), "number": exp_num}
