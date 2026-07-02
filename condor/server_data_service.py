@@ -250,6 +250,8 @@ class ServerDataService:
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._fetch_registry: Dict[ServerDataType, FetchSpec] = {}
         self._poll_task: Optional[asyncio.Task] = None
+        # In-flight fetches per key (single-flight coalescing)
+        self._inflight: Dict[CacheKey, asyncio.Task] = {}
         self._running = False
         self._last_cleanup = time.time()
         # Sync listeners (e.g. WebSocketManager broadcasts)
@@ -690,6 +692,20 @@ class ServerDataService:
         await asyncio.gather(*[_rate_limited_fetch(k) for k in due_keys])
 
     async def _fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
+        """Fetch data and update cache, coalescing concurrent fetches per key.
+
+        If a fetch for the same key is already in flight, await it instead of
+        starting a duplicate backend request. The in-flight entry is cleared
+        when the fetch settles, so a failure never poisons subsequent fetches.
+        """
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(self._do_fetch_and_cache(key))
+            self._inflight[key] = task
+            task.add_done_callback(lambda _t, k=key: self._inflight.pop(k, None))
+        return await task
+
+    async def _do_fetch_and_cache(self, key: CacheKey) -> Optional[Any]:
         """Fetch data and update cache. Returns the fetched value."""
         spec = self._fetch_registry.get(key.data_type)
         if not spec:
