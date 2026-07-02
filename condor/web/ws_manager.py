@@ -317,6 +317,8 @@ class WebSocketManager:
             self._cleanup_task.cancel()
             self._cleanup_task = None
 
+        self._last_data.clear()
+
     def _cleanup_sds_subscriptions(self) -> None:
         """Remove all SDS subscriptions."""
         from condor.server_data_service import get_server_data_service
@@ -378,6 +380,10 @@ class WebSocketManager:
         """Unsubscribe from SDS if no WS clients remain for this channel."""
         if self._has_subscribers(channel):
             return
+
+        # Drop the retained last payload — re-subscribers get a fresh snapshot
+        # from the SDS cache when the subscription restarts.
+        self._last_data.pop(channel, None)
 
         if channel in self._sds_subscriptions:
             from condor.server_data_service import get_server_data_service
@@ -967,6 +973,7 @@ class WebSocketManager:
         if task and not task.done():
             task.cancel()
             logger.info(spec["stop_log"], channel)
+        self._last_data.pop(channel, None)
 
     def _maybe_stop_candle_stream(self, channel: str) -> None:
         # If subscribers still exist, cancel any pending teardown and return
@@ -1014,6 +1021,8 @@ class WebSocketManager:
             poll_task.cancel()
         self._last_candle_ws_update.pop(channel, None)
         self._candle_first_msg_logged.discard(channel)
+        # Snapshot-on-resubscribe is served by _candle_buffers, not _last_data
+        self._last_data.pop(channel, None)
         # NOTE: candle buffer is NOT deleted — the existing idle cleanup loop handles that
 
     async def _candle_stream(self, channel: str) -> None:
