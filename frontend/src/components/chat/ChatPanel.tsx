@@ -578,11 +578,20 @@ function SessionTab({
       )}
       <span
         role="button"
+        tabIndex={0}
+        aria-label="Close session"
         onClick={(e) => {
           e.stopPropagation();
           onClose();
         }}
-        className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-[var(--color-surface-hover)] group-hover:opacity-100"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            onClose();
+          }
+        }}
+        className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-[var(--color-surface-hover)] group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100"
       >
         <X className="h-2.5 w-2.5" />
       </span>
