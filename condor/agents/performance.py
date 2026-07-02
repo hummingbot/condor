@@ -178,12 +178,17 @@ async def fetch_agent_performance_batch(
     client: Any,
     agent_ids: list[str],
     bot_names: dict[str, str] | None = None,
+    failed_ids: set[str] | None = None,
 ) -> dict[str, AgentPerformance]:
     """Batched multi-agent fetch via a single cursor-paginated executor search.
 
     ``bot_names`` maps ``agent_id -> bot_name`` for agents running in controller
     mode; each such agent's bot aggregate (one shared snapshot fetch for the whole
     batch) is merged into its executor-derived totals.
+
+    ``failed_ids``, when provided, is populated with the agent_ids whose executor
+    search raised — their entries may be partial/empty. This lets callers avoid
+    caching a failed fetch as a genuinely empty result.
     """
     out: dict[str, AgentPerformance] = {
         aid: AgentPerformance(agent_id=aid) for aid in agent_ids
@@ -228,6 +233,8 @@ async def fetch_agent_performance_batch(
                 cursor = next_cursor
         except Exception as e:
             log.warning("search_executors(%s) failed: %s", aid, e)
+            if failed_ids is not None:
+                failed_ids.add(aid)
         return rows
 
     rows_lists = await asyncio.gather(*[_fetch_rows(aid) for aid in agent_ids])

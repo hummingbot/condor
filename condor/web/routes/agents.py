@@ -43,6 +43,14 @@ from condor.web.models import ReportSummary, WebUser
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
 _PERF_TTL = 30.0  # seconds
 
+# Long-lived cache for CLOSED sessions/experiments, keyed by agent_id.
+# A closed session's executors are immutable (no engine running, no open
+# executors), so its performance never changes — fetch it once and freeze it.
+# Only ids that are inactive (no registered engine, not the newest session),
+# fetched successfully, with open_count == 0, and not in controller mode land
+# here; everything else keeps flowing through the 30s TTL path above.
+_CLOSED_PERF_CACHE: dict[str, Any] = {}
+
 
 def _cache_get(key: str) -> Any | None:
     entry = _PERF_CACHE.get(key)
@@ -339,7 +347,12 @@ async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | No
 async def _compute_strategy_performance(
     run_key: str, strategy_dir: Path, default_config: dict | None
 ):
-    """Return list of AgentPerformanceModel plus rolled-up totals. Cached ~30s."""
+    """Return list of AgentPerformanceModel plus rolled-up totals.
+
+    The assembled rollup is cached ~30s (``_PERF_CACHE``); underneath, closed
+    sessions/experiments are served from ``_CLOSED_PERF_CACHE`` so only active
+    ids hit the backend after the TTL expires.
+    """
     from condor.agents.config import load_full_config
     from condor.agents.performance import fetch_agent_performance_batch
 
@@ -358,16 +371,63 @@ async def _compute_strategy_performance(
 
     sessions: list[AgentPerformanceModel] = []
     if client and ids:
-        agent_ids = [aid for aid, _, _ in ids]
-        try:
-            perf_map = await fetch_agent_performance_batch(client, agent_ids, bot_names)
-        except Exception as e:
-            log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
-            perf_map = {}
+        from condor.agents.engine import get_all_engines
+
+        # Split ids by state: closed sessions/experiments are immutable, so only
+        # ids with a live engine (running/paused, incl. experiments) plus the
+        # newest session — whose executors may still be closing out — are
+        # re-fetched; everything else is served from the long-lived frozen cache.
+        engine_ids = {e.agent_id for e in get_all_engines().values()}
+        latest_session = max((n for _, n, k in ids if k == "session"), default=None)
+        active_ids = {
+            aid
+            for aid, num, kind in ids
+            if aid in engine_ids or (kind == "session" and num == latest_session)
+        }
+        # An id active again (e.g. restored engine) must not serve a stale
+        # frozen value once it goes idle — evict so it gets one final fetch.
+        for aid in active_ids:
+            _CLOSED_PERF_CACHE.pop(aid, None)
+
+        if bot_name:
+            # Controller mode attributes the bot's live aggregate to every
+            # session, so no per-session result is immutable — fetch all.
+            fetch_ids = [aid for aid, _, _ in ids]
+        else:
+            fetch_ids = [
+                aid
+                for aid, _, _ in ids
+                if aid in active_ids or aid not in _CLOSED_PERF_CACHE
+            ]
+
+        perf_map: dict[str, Any] = {}
+        failed_ids: set[str] = set()
+        if fetch_ids:
+            try:
+                perf_map = await fetch_agent_performance_batch(
+                    client, fetch_ids, bot_names, failed_ids=failed_ids
+                )
+            except Exception as e:
+                log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
+                perf_map = {}
+                failed_ids = set(fetch_ids)
+
         for agent_id, num, kind in ids:
             perf = perf_map.get(agent_id)
             if perf is None:
+                perf = _CLOSED_PERF_CACHE.get(agent_id)
+            if perf is None:
                 continue
+            # Freeze immutable results: fetched fine, no engine, not the newest
+            # session, and nothing still open whose unrealized PnL could move.
+            if (
+                not bot_name
+                and agent_id in perf_map
+                and agent_id not in active_ids
+                and agent_id not in failed_ids
+                and perf.open_count == 0
+            ):
+                _CLOSED_PERF_CACHE[agent_id] = perf
             if kind == "experiment" and perf.trade_count == 0:
                 continue
             sessions.append(
