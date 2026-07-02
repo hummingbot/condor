@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import html
 import json
 import logging
 import os
@@ -401,12 +402,15 @@ class ReportBuilder:
         sections_html = self._render_sections()
         meta_badges = ""
         if self._source_type:
-            meta_badges += f"<span>{self._source_type}: {self._source_name}</span>"
+            meta_badges += (
+                f"<span>{html.escape(str(self._source_type))}: "
+                f"{html.escape(str(self._source_name))}</span>"
+            )
         for tag in self._tags:
-            meta_badges += f"<span>#{tag}</span>"
+            meta_badges += f"<span>#{html.escape(str(tag))}</span>"
 
         html_content = _HTML_TEMPLATE.format(
-            title=self._title,
+            title=html.escape(str(self._title)),
             created_at=now.strftime("%Y-%m-%d %H:%M UTC"),
             meta_badges=meta_badges,
             sections_html=sections_html,
@@ -482,11 +486,12 @@ class ReportBuilder:
                     delta_html = ""
                     if k["delta"]:
                         cls = f' {k["trend"]}' if k["trend"] in ("up", "down") else ""
-                        delta_html = f'<div class="delta{cls}">{k["delta"]}</div>'
+                        delta = html.escape(str(k["delta"]))
+                        delta_html = f'<div class="delta{cls}">{delta}</div>'
                     cards.append(
                         f'<div class="kpi-card">'
-                        f'<div class="label">{k["label"]}</div>'
-                        f'<div class="value">{k["value"]}</div>'
+                        f'<div class="label">{html.escape(str(k["label"]))}</div>'
+                        f'<div class="value">{html.escape(str(k["value"]))}</div>'
                         f"{delta_html}</div>"
                     )
                 parts.append(f'<div class="kpi-bar">{"".join(cards)}</div>')
@@ -509,10 +514,12 @@ class ReportBuilder:
 
     @staticmethod
     def _render_table(columns: list[str], rows: list[dict]) -> str:
-        header = "".join(f"<th>{c}</th>" for c in columns)
+        header = "".join(f"<th>{html.escape(str(c))}</th>" for c in columns)
         body_rows = []
         for row in rows:
-            cells = "".join(f"<td>{row.get(c, '')}</td>" for c in columns)
+            cells = "".join(
+                f"<td>{html.escape(str(row.get(c, '')))}</td>" for c in columns
+            )
             body_rows.append(f"<tr>{cells}</tr>")
         body = "\n".join(body_rows)
         return f'<div class="section section-table"><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table></div>'
