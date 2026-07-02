@@ -333,6 +333,14 @@ class JournalManager:
         # Also support legacy runs/ dir for reading
         self._legacy_runs_dir = self._session_dir / "runs"
 
+        # Read cache: journal.md text keyed by (mtime_ns, size), plus parsed
+        # sections derived from that text. Invalidated when the stamp changes
+        # (external writers, e.g. the MCP journal_write tool) or explicitly on
+        # our own writes (mtime granularity could otherwise mask them).
+        self._cache_stamp: tuple[int, int] | None = None
+        self._cache_text: str = ""
+        self._parsed_cache: dict[str, list[dict]] = {}
+
         if not self._path.exists():
             self._path.write_text(JOURNAL_TEMPLATE.format(agent_id=agent_id))
 
@@ -480,10 +488,23 @@ class JournalManager:
     # ------------------------------------------------------------------
 
     def read_full(self) -> str:
-        """Return the entire journal contents."""
-        if not self._path.exists():
+        """Return the entire journal contents (cached until the file changes)."""
+        try:
+            stat = self._path.stat()
+        except OSError:
             return ""
-        return self._path.read_text()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        if stamp != self._cache_stamp:
+            self._cache_text = self._path.read_text()
+            self._cache_stamp = stamp
+            self._parsed_cache.clear()
+        return self._cache_text
+
+    def _write_journal(self, text: str) -> None:
+        """Write journal.md and invalidate the read cache."""
+        self._path.write_text(text)
+        self._cache_stamp = None
+        self._parsed_cache.clear()
 
     def read_summary(self) -> str:
         """Return the summary section."""
@@ -826,7 +847,7 @@ class JournalManager:
             new_line += f" | stopped={now}"
 
         text = text.replace(old_line, new_line)
-        self._path.write_text(text)
+        self._write_journal(text)
 
     # ------------------------------------------------------------------
     # Metric snapshots (inline in journal)
@@ -851,6 +872,10 @@ class JournalManager:
     # ------------------------------------------------------------------
 
     def _parse_executors(self) -> list[dict]:
+        self.read_full()  # refresh parsed cache if the file changed
+        cached = self._parsed_cache.get("executors")
+        if cached is not None:
+            return cached
         section = self._get_section("Executors")
         results = []
         for line in section.splitlines():
@@ -862,9 +887,14 @@ class JournalManager:
                     k, v = part.split("=", 1)
                     entry[k.strip()] = v.strip()
             results.append(entry)
+        self._parsed_cache["executors"] = results
         return results
 
     def _parse_ticks(self) -> list[dict]:
+        self.read_full()  # refresh parsed cache if the file changed
+        cached = self._parsed_cache.get("ticks")
+        if cached is not None:
+            return cached
         section = self._get_section("Ticks")
         results = []
         for line in section.splitlines():
@@ -883,9 +913,14 @@ class JournalManager:
                     else:
                         entry["summary"] = part.strip()
             results.append(entry)
+        self._parsed_cache["ticks"] = results
         return results
 
     def _parse_snapshots(self) -> list[dict]:
+        self.read_full()  # refresh parsed cache if the file changed
+        cached = self._parsed_cache.get("snapshots")
+        if cached is not None:
+            return cached
         section = self._get_section("Snapshots")
         results = []
         for line in section.splitlines():
@@ -907,6 +942,7 @@ class JournalManager:
                 elif re.match(r"\d{4}-\d{2}-\d{2}", part):
                     entry["timestamp"] = part
             results.append(entry)
+        self._parsed_cache["snapshots"] = results
         return results
 
     def get_daily_pnl(self) -> float:
@@ -994,7 +1030,7 @@ class JournalManager:
         )
         if count == 0:
             new_text = text.rstrip() + f"\n\n## {name}\n{content}\n"
-        self._path.write_text(new_text)
+        self._write_journal(new_text)
 
     def _append_to_section(self, section: str, entry: str) -> None:
         """Append a line to a section."""
@@ -1010,7 +1046,7 @@ class JournalManager:
                 text += entry + "\n"
             else:
                 text = text[:next_section] + entry + "\n" + text[next_section:]
-        self._path.write_text(text)
+        self._write_journal(text)
 
     # ------------------------------------------------------------------
     # Info
