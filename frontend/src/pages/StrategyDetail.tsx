@@ -14,6 +14,7 @@ import { SessionReviewer } from "@/components/agent/SessionReviewer";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
@@ -54,17 +55,7 @@ export function StrategyDetail() {
   }, [location.state, location.pathname, navigate]);
 
   // Close strategy modal on Escape
-  useEffect(() => {
-    if (!showStrategyModal) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setShowStrategyModal(false);
-        e.preventDefault();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [showStrategyModal]);
+  useEscapeKey(showStrategyModal, () => setShowStrategyModal(false));
 
   const { data: strategy, isLoading, error } = useQuery({
     queryKey: ["strategy", slug, sslug],

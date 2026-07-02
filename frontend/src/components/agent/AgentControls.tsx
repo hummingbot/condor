@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
 
 // ── Start Session Dialog ──
@@ -31,6 +32,7 @@ export function StartSessionDialog({
   defaultContext: string;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(open, onClose);
   const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
 
   const [executionMode, setExecutionMode] = useState<"dry_run" | "run_once" | "loop">("loop");

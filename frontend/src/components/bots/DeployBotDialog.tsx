@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import {
   api,
   type ControllerConfigSummary,
@@ -386,6 +387,8 @@ export function DeployBotDialog({
       setBotName(`bot_${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "").slice(0, 15)}`);
     }
   }, [open]);
+
+  useEscapeKey(open, handleClose);
 
   if (!open) return null;
 

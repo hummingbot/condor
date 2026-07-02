@@ -15,7 +15,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
@@ -24,6 +24,7 @@ import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type StrategySummary, api } from "@/lib/api";
 import { formatCurrencyPnl } from "@/lib/formatters";
 
@@ -128,6 +129,7 @@ function CreateStrategyDialog({
 }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  useEscapeKey(open, onClose);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [defaultContext, setDefaultContext] = useState("");
@@ -306,15 +308,10 @@ export function AgentDetail() {
     },
   });
 
-  // Close brain modal on Escape
-  useEffect(() => {
-    if (!showBrainModal) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { setShowBrainModal(false); e.preventDefault(); }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [showBrainModal]);
+  // Close modals on Escape
+  useEscapeKey(showBrainModal, () => setShowBrainModal(false));
+  useEscapeKey(showDeleteConfirm, () => setShowDeleteConfirm(false));
+  useEscapeKey(!!deleteStrategy, () => setDeleteStrategy(null));
 
   const { data: agent, isLoading, error } = useQuery({
     queryKey: ["agent", slug],

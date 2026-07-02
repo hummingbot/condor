@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import yaml from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api, type ControllerConfigSummary } from "@/lib/api";
 import { configToYaml } from "@/lib/configYaml";
 
@@ -21,6 +22,7 @@ export function DeleteConfirmDialog({
   onDeleted?: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
 
   const deleteMutation = useMutation({
     mutationFn: () => {
@@ -96,6 +98,7 @@ export function UploadDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
   const [mode, setMode] = useState<UploadMode>("config");
   const [content, setContent] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
@@ -355,6 +358,7 @@ export function CloneConfigDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
   const [newId, setNewId] = useState(`${sourceConfig.id}_copy`);
   const [yamlContent, setYamlContent] = useState("");
   const [yamlError, setYamlError] = useState<string | null>(null);
@@ -496,6 +500,7 @@ export function NewConfigDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
   const [configId, setConfigId] = useState("");
   const [fieldValues, setFieldValues] = useState<Record<string, unknown>>({});
 

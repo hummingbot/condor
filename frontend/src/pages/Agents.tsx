@@ -21,6 +21,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ModeBadge } from "@/components/agent/ModeBadge";
 import { StatusBadge } from "@/components/agent/StatusBadge";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import {
   type AgentSummary,
   type Delegation,
@@ -124,6 +125,7 @@ function CreateAgentDialog({
 }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  useEscapeKey(open, onClose);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
@@ -468,6 +470,7 @@ function DeleteAgentDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(!!agent, onClose);
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteAgent(agent!.slug),
     onSuccess: () => {

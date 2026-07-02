@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { useNavigate } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import {
   DetailPanel,
   ExecutorTable,
@@ -238,6 +239,7 @@ function StopConfirmDialog({
   onConfirm: (ids: string[], keepPosition: boolean) => void;
   onCancel: () => void;
 }) {
+  useEscapeKey(true, onCancel);
   const [keepPosition, setKeepPosition] = useState(false);
   const count = ids.length;
 
