@@ -33,11 +33,7 @@ from handlers.agents._shared import (
     load_assistant,
 )
 from handlers.agents.confirmation import _format_tool_summary
-from handlers.agents.session import (
-    destroy_session,
-    get_or_create_session,
-    get_session,
-)
+from handlers.agents.session import destroy_session, get_or_create_session, get_session
 
 log = logging.getLogger(__name__)
 
@@ -69,13 +65,15 @@ def _get_user_sessions(user_id: int) -> list[dict]:
         key = _session_key(user_id, slot_id)
         session = get_session(key)
         if session and session.client.alive:
-            result.append({
-                "slot_id": slot_id,
-                "agent_key": session.agent_key,
-                "mode": session.mode,
-                "is_busy": session.is_busy,
-                "server_name": session.server_name,
-            })
+            result.append(
+                {
+                    "slot_id": slot_id,
+                    "agent_key": session.agent_key,
+                    "mode": session.mode,
+                    "is_busy": session.is_busy,
+                    "server_name": session.server_name,
+                }
+            )
     return result
 
 
@@ -98,17 +96,22 @@ async def _web_permission_callback(
             if opt.get("kind") in ("allow_once", "allow_always"):
                 return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
         if options:
-            return {"outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}}
+            return {
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+            }
         return {"outcome": {"outcome": "cancelled"}}
 
     request_id = str(uuid.uuid4())[:8]
     summary = _format_tool_summary(tool_call)
 
-    await _send(ws, {
-        "event": "permission_request",
-        "request_id": request_id,
-        "summary": summary,
-    })
+    await _send(
+        ws,
+        {
+            "event": "permission_request",
+            "request_id": request_id,
+            "summary": summary,
+        },
+    )
 
     future: asyncio.Future = asyncio.get_event_loop().create_future()
     _pending_permissions[request_id] = future
@@ -126,7 +129,9 @@ async def _web_permission_callback(
             if opt.get("kind") in ("allow_once", "allow_always"):
                 return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
         if options:
-            return {"outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}}
+            return {
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+            }
 
     return {"outcome": {"outcome": "cancelled"}}
 
@@ -145,7 +150,15 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
         await ws.close(code=4001, reason="Invalid token")
         return
 
+    from config_manager import UserRole, get_config_manager
+
     user_id = int(payload["sub"])
+    cm = get_config_manager()
+    role = cm.get_user_role(user_id)
+    if role not in (UserRole.USER, UserRole.ADMIN):
+        await ws.close(code=4003, reason="Forbidden")
+        return
+
     await ws.accept(subprotocol=accept_subprotocol)
 
     # Send list of existing alive sessions on connect
@@ -185,7 +198,9 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             elif action == "abort_prompt":
                 _spawn(_handle_abort_prompt(ws, user_id, msg))
             else:
-                await _send(ws, {"event": "error", "message": f"Unknown action: {action}"})
+                await _send(
+                    ws, {"event": "error", "message": f"Unknown action: {action}"}
+                )
 
     except WebSocketDisconnect:
         pass
@@ -200,7 +215,9 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
 
 
 async def _handle_start_session(
-    ws: WebSocket, user_id: int, msg: dict,
+    ws: WebSocket,
+    user_id: int,
+    msg: dict,
 ) -> None:
     agent_key = msg.get("agent_key", DEFAULT_AGENT)
     mode = msg.get("mode", DEFAULT_MODE)
@@ -217,7 +234,9 @@ async def _handle_start_session(
     _user_slots[user_id] = alive_slots
 
     if len(alive_slots) >= MAX_SESSIONS_PER_USER:
-        await _send(ws, {"event": "error", "message": f"Max {MAX_SESSIONS_PER_USER} sessions"})
+        await _send(
+            ws, {"event": "error", "message": f"Max {MAX_SESSIONS_PER_USER} sessions"}
+        )
         return
 
     slot_id = str(uuid.uuid4())[:8]
@@ -243,23 +262,30 @@ async def _handle_start_session(
             mode_context = load_assistant(mode)
             if mode_context:
                 existing = session.pending_context or ""
-                session.pending_context = f"{existing}\n\n{mode_context}".strip() or None
+                session.pending_context = (
+                    f"{existing}\n\n{mode_context}".strip() or None
+                )
 
         _user_slots.setdefault(user_id, []).append(slot_id)
-        await _send(ws, {
-            "event": "session_started",
-            "slot_id": slot_id,
-            "agent_key": agent_key,
-            "mode": mode,
-            "server_name": session.server_name,
-        })
+        await _send(
+            ws,
+            {
+                "event": "session_started",
+                "slot_id": slot_id,
+                "agent_key": agent_key,
+                "mode": mode,
+                "server_name": session.server_name,
+            },
+        )
     except Exception as e:
         log.exception("Failed to start chat session for user %d", user_id)
         await _send(ws, {"event": "error", "message": f"Failed to start session: {e}"})
 
 
 async def _handle_send_message(
-    ws: WebSocket, user_id: int, msg: dict,
+    ws: WebSocket,
+    user_id: int,
+    msg: dict,
 ) -> None:
     slot_id = msg.get("slot_id", "")
     text = msg.get("text", "").strip()
@@ -279,8 +305,17 @@ async def _handle_send_message(
         slots = _user_slots.get(user_id, [])
         if slot_id in slots:
             slots.remove(slot_id)
-        await _send(ws, {"event": "error", "slot_id": slot_id, "message": "Session ended. Start a new one."})
-        await _send(ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": True})
+        await _send(
+            ws,
+            {
+                "event": "error",
+                "slot_id": slot_id,
+                "message": "Session ended. Start a new one.",
+            },
+        )
+        await _send(
+            ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": True}
+        )
         return
 
     if session.is_busy:
@@ -295,45 +330,70 @@ async def _handle_send_message(
     try:
         async for event in session.prompt_stream(text):
             if isinstance(event, TextChunk):
-                await _send(ws, {"event": "text_chunk", "slot_id": slot_id, "text": event.text})
+                await _send(
+                    ws, {"event": "text_chunk", "slot_id": slot_id, "text": event.text}
+                )
             elif isinstance(event, ThoughtChunk):
-                await _send(ws, {"event": "thought_chunk", "slot_id": slot_id, "text": event.text})
+                await _send(
+                    ws,
+                    {"event": "thought_chunk", "slot_id": slot_id, "text": event.text},
+                )
             elif isinstance(event, ToolCallEvent):
-                await _send(ws, {
-                    "event": "tool_call",
-                    "slot_id": slot_id,
-                    "tool_call_id": event.tool_call_id,
-                    "title": event.title,
-                    "status": event.status,
-                })
+                await _send(
+                    ws,
+                    {
+                        "event": "tool_call",
+                        "slot_id": slot_id,
+                        "tool_call_id": event.tool_call_id,
+                        "title": event.title,
+                        "status": event.status,
+                    },
+                )
             elif isinstance(event, ToolCallUpdate):
-                await _send(ws, {
-                    "event": "tool_call_update",
-                    "slot_id": slot_id,
-                    "tool_call_id": event.tool_call_id,
-                    "status": event.status,
-                })
+                await _send(
+                    ws,
+                    {
+                        "event": "tool_call_update",
+                        "slot_id": slot_id,
+                        "tool_call_id": event.tool_call_id,
+                        "status": event.status,
+                    },
+                )
             elif isinstance(event, Heartbeat):
-                await _send(ws, {
-                    "event": "heartbeat",
-                    "slot_id": slot_id,
-                    "elapsed_seconds": event.elapsed_seconds,
-                })
+                await _send(
+                    ws,
+                    {
+                        "event": "heartbeat",
+                        "slot_id": slot_id,
+                        "elapsed_seconds": event.elapsed_seconds,
+                    },
+                )
             elif isinstance(event, PromptDone):
-                await _send(ws, {
-                    "event": "prompt_done",
-                    "slot_id": slot_id,
-                    "stop_reason": event.stop_reason,
-                })
+                await _send(
+                    ws,
+                    {
+                        "event": "prompt_done",
+                        "slot_id": slot_id,
+                        "stop_reason": event.stop_reason,
+                    },
+                )
     except asyncio.CancelledError:
-        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
+        await _send(
+            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"}
+        )
     except RuntimeError as e:
         await _send(ws, {"event": "error", "slot_id": slot_id, "message": str(e)})
-        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"})
+        await _send(
+            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
+        )
     except Exception:
         log.exception("Error streaming prompt for user %d", user_id)
-        await _send(ws, {"event": "error", "slot_id": slot_id, "message": "Stream error"})
-        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"})
+        await _send(
+            ws, {"event": "error", "slot_id": slot_id, "message": "Stream error"}
+        )
+        await _send(
+            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
+        )
     finally:
         _active_prompt_tasks.pop(task_key, None)
 
@@ -364,7 +424,9 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
             pass
     else:
         # No active task to cancel — send prompt_done directly so the frontend resets
-        await _send(ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"})
+        await _send(
+            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"}
+        )
 
 
 async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> None:
@@ -385,7 +447,9 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     if slot_id in slots:
         slots.remove(slot_id)
 
-    await _send(ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": destroyed})
+    await _send(
+        ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": destroyed}
+    )
 
 
 def _handle_resolve_permission(msg: dict) -> None:
@@ -398,14 +462,12 @@ def _handle_resolve_permission(msg: dict) -> None:
 
 # ── REST endpoint for chat options ──
 
+
 @router.get("/chat/options")
 async def get_chat_options(user: WebUser = Depends(get_current_user)):
     """Return available agent models and modes."""
     return {
-        "agents": [
-            {"key": k, "label": v["label"]}
-            for k, v in AGENT_OPTIONS.items()
-        ],
+        "agents": [{"key": k, "label": v["label"]} for k, v in AGENT_OPTIONS.items()],
         "modes": [
             {"key": k, "label": v["label"], "description": v["description"]}
             for k, v in AGENT_MODES.items()
