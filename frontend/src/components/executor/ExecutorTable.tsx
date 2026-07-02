@@ -230,6 +230,11 @@ const ExecutorRow = memo(function ExecutorRow({
 
 // ── Executor Table ──
 
+// Cap how many rows mount at once so large history sets (up to ~2000) don't
+// render ~26k DOM cells or re-reconcile every row on each sort click.
+const INITIAL_VISIBLE = 100;
+const VISIBLE_STEP = 100;
+
 export function ExecutorTable({
   executors,
   sortKey,
@@ -267,6 +272,12 @@ export function ExecutorTable({
     () => [...executors].sort((a, b) => compareExecutors(a, b, sortKey, sortDir)),
     [executors, sortKey, sortDir],
   );
+
+  // Incremental reveal: sort on the full array (so top-N by any column stays
+  // correct) but only mount the first `visibleCount` rows.
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
+  const visible = useMemo(() => sorted.slice(0, visibleCount), [sorted, visibleCount]);
+  const remaining = sorted.length - visible.length;
 
   const fmtPnl = useMemo<RowFormatter>(
     () => rateFormatPnl ?? ((val: number) => formatPnl(val)),
@@ -310,7 +321,7 @@ export function ExecutorTable({
             </tr>
           </thead>
           <tbody>
-            {sorted.map((ex) => (
+            {visible.map((ex) => (
               <ExecutorRow
                 key={ex.id}
                 ex={ex}
@@ -328,6 +339,19 @@ export function ExecutorTable({
           </tbody>
         </table>
       </div>
+      {remaining > 0 && (
+        <div className="flex items-center justify-center gap-3 border-t border-[var(--color-border)] px-4 py-2.5">
+          <span className="text-xs text-[var(--color-text-muted)] tabular-nums">
+            Showing {visible.length} of {sorted.length}
+          </span>
+          <button
+            onClick={() => setVisibleCount((c) => c + VISIBLE_STEP)}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+          >
+            Show {Math.min(VISIBLE_STEP, remaining)} more
+          </button>
+        </div>
+      )}
     </div>
   );
 }
