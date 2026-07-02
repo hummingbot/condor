@@ -107,6 +107,45 @@ def test_callback_second_create_cancelled_same_tick():
     assert second["outcome"]["outcome"] == "cancelled"
 
 
+# ---------------------------------------------------------------------------
+# get_state fails closed when the tracker raises (CORR-055)
+# ---------------------------------------------------------------------------
+
+
+class _BrokenTracker:
+    """Tracker whose metrics raise (e.g. corrupted journal)."""
+
+    def get_total_exposure(self) -> float:
+        raise ValueError("could not convert string to float: 'garbage'")
+
+    def get_open_executor_count(self) -> int:
+        return 0
+
+    def get_drawdown_pct(self) -> float:
+        return 0.0
+
+
+def test_get_state_fails_closed_when_tracker_raises():
+    """A tracker error must yield a blocked state, not a clean zeroed one."""
+    state = RiskEngine(RiskLimits()).get_state(_BrokenTracker())
+
+    assert state.is_blocked
+    assert "risk state unavailable" in state.block_reason
+    assert "garbage" in state.block_reason
+
+
+def test_get_state_null_tracker_stays_unblocked():
+    """Experiments use _NullTracker, which never raises: state stays clean."""
+    from condor.agents.engine import _NullTracker
+
+    state = RiskEngine(RiskLimits()).get_state(_NullTracker())
+
+    assert not state.is_blocked
+    assert state.block_reason == ""
+    assert state.total_exposure == 0.0
+    assert state.executor_count == 0
+
+
 def test_callback_cumulative_exposure_cancelled_same_tick():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState(total_exposure=250.0)

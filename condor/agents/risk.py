@@ -82,8 +82,13 @@ class RiskEngine:
             state.total_exposure = tracker.get_total_exposure()
             state.executor_count = tracker.get_open_executor_count()
             state.drawdown_pct = tracker.get_drawdown_pct()
-        except Exception:
+        except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
+            # Fail closed: without real metrics we must not approve creates
+            # against zeroed exposure/count. A blocked state makes the engine
+            # pause the tick and notify instead of trading blind.
+            state.is_blocked = True
+            state.block_reason = f"risk state unavailable: {exc}"
             return state
 
         # Check blocking conditions
