@@ -473,73 +473,80 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
 
-  // Compute scales
-  const minTs = points.length > 0 ? points[0].timestamp : 0;
-  const maxTs = points.length > 0 ? points[points.length - 1].timestamp : 1;
-  const values = points.map((p) => p.total_usd);
-  const minVal = stacked ? 0 : (values.length > 0 ? Math.min(...values) * 0.98 : 0);
-  const maxVal = values.length > 0 ? Math.max(...values) * 1.02 : 1;
-  const valRange = maxVal - minVal || 1;
-  const tsRange = maxTs - minTs || 1;
+  // Memoize chart geometry so hover re-renders only rebuild the crosshair/tooltip,
+  // not the scales and SVG path strings (theme-dependent colors stay outside).
+  const { minTs, tsRange, toX, toY, stackedAreaPaths, linePath, areaPath, yTicks, xTicks } = useMemo(() => {
+    // Compute scales
+    const minTs = points.length > 0 ? points[0].timestamp : 0;
+    const maxTs = points.length > 0 ? points[points.length - 1].timestamp : 1;
+    const values = points.map((p) => p.total_usd);
+    const minVal = stacked ? 0 : (values.length > 0 ? Math.min(...values) * 0.98 : 0);
+    const maxVal = values.length > 0 ? Math.max(...values) * 1.02 : 1;
+    const valRange = maxVal - minVal || 1;
+    const tsRange = maxTs - minTs || 1;
 
-  const toX = (ts: number) => PAD.left + ((ts - minTs) / tsRange) * plotW;
-  const toY = (val: number) => PAD.top + plotH - ((val - minVal) / valRange) * plotH;
+    const toX = (ts: number) => PAD.left + ((ts - minTs) / tsRange) * plotW;
+    const toY = (val: number) => PAD.top + plotH - ((val - minVal) / valRange) * plotH;
+
+    // Build stacked area paths
+    const stackedAreaPaths: { token: string; path: string }[] = [];
+    if (stacked && topTokens.length > 0 && points.length > 1) {
+      // For each point, compute cumulative bounds per token
+      const tokenOrder = topTokens;
+      for (let ti = 0; ti < tokenOrder.length; ti++) {
+        const token = tokenOrder[ti];
+
+        // Upper line (cumulative up to and including this token)
+        const upperPoints = points.map((p) => {
+          let cumUpper = 0;
+          for (let j = 0; j <= ti; j++) {
+            cumUpper += p.tokens?.[tokenOrder[j]] ?? 0;
+          }
+          return { x: toX(p.timestamp).toFixed(2), y: toY(cumUpper).toFixed(2) };
+        });
+
+        // Lower line (cumulative up to but NOT including this token)
+        const lowerPoints = points.map((p) => {
+          let cumLower = 0;
+          for (let j = 0; j < ti; j++) {
+            cumLower += p.tokens?.[tokenOrder[j]] ?? 0;
+          }
+          return { x: toX(p.timestamp).toFixed(2), y: toY(cumLower).toFixed(2) };
+        });
+
+        const upperPath = upperPoints.map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x} ${pt.y}`).join(" ");
+        const lowerPath = [...lowerPoints].reverse().map((pt, i) => `${i === 0 ? "L" : "L"} ${pt.x} ${pt.y}`).join(" ");
+        const areaPath = `${upperPath} ${lowerPath} Z`;
+
+        stackedAreaPaths.push({ token, path: areaPath });
+      }
+    }
+
+    // Build line path (normal mode)
+    const linePath =
+      !stacked && points.length > 1
+        ? points.map((p, i) => `${i === 0 ? "M" : "L"} ${toX(p.timestamp).toFixed(2)} ${toY(p.total_usd).toFixed(2)}`).join(" ")
+        : "";
+
+    const areaPath =
+      !stacked && points.length > 1
+        ? linePath +
+          ` L ${toX(points[points.length - 1].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)}` +
+          ` L ${toX(points[0].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)} Z`
+        : "";
+
+    // Y-axis gridlines (5 lines)
+    const yTicks = Array.from({ length: 5 }, (_, i) => minVal + (valRange * i) / 4);
+
+    // X-axis labels (5 labels)
+    const xTicks = Array.from({ length: 5 }, (_, i) => minTs + (tsRange * i) / 4);
+
+    return { minTs, tsRange, toX, toY, stackedAreaPaths, linePath, areaPath, yTicks, xTicks };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [points, stacked, topTokens]);
 
   const chartColors = getChartColors();
-
-  // Build stacked area paths
-  const stackedAreas: { token: string; color: string; path: string }[] = [];
-  if (stacked && topTokens.length > 0 && points.length > 1) {
-    // For each point, compute cumulative bounds per token
-    const tokenOrder = topTokens;
-    for (let ti = 0; ti < tokenOrder.length; ti++) {
-      const token = tokenOrder[ti];
-      const color = chartColors[ti % chartColors.length];
-
-      // Upper line (cumulative up to and including this token)
-      const upperPoints = points.map((p) => {
-        let cumUpper = 0;
-        for (let j = 0; j <= ti; j++) {
-          cumUpper += p.tokens?.[tokenOrder[j]] ?? 0;
-        }
-        return { x: toX(p.timestamp).toFixed(2), y: toY(cumUpper).toFixed(2) };
-      });
-
-      // Lower line (cumulative up to but NOT including this token)
-      const lowerPoints = points.map((p) => {
-        let cumLower = 0;
-        for (let j = 0; j < ti; j++) {
-          cumLower += p.tokens?.[tokenOrder[j]] ?? 0;
-        }
-        return { x: toX(p.timestamp).toFixed(2), y: toY(cumLower).toFixed(2) };
-      });
-
-      const upperPath = upperPoints.map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x} ${pt.y}`).join(" ");
-      const lowerPath = [...lowerPoints].reverse().map((pt, i) => `${i === 0 ? "L" : "L"} ${pt.x} ${pt.y}`).join(" ");
-      const areaPath = `${upperPath} ${lowerPath} Z`;
-
-      stackedAreas.push({ token, color, path: areaPath });
-    }
-  }
-
-  // Build line path (normal mode)
-  const linePath =
-    !stacked && points.length > 1
-      ? points.map((p, i) => `${i === 0 ? "M" : "L"} ${toX(p.timestamp).toFixed(2)} ${toY(p.total_usd).toFixed(2)}`).join(" ")
-      : "";
-
-  const areaPath =
-    !stacked && points.length > 1
-      ? linePath +
-        ` L ${toX(points[points.length - 1].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)}` +
-        ` L ${toX(points[0].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)} Z`
-      : "";
-
-  // Y-axis gridlines (5 lines)
-  const yTicks = Array.from({ length: 5 }, (_, i) => minVal + (valRange * i) / 4);
-
-  // X-axis labels (5 labels)
-  const xTicks = Array.from({ length: 5 }, (_, i) => minTs + (tsRange * i) / 4);
+  const stackedAreas = stackedAreaPaths.map((area, ti) => ({ ...area, color: chartColors[ti % chartColors.length] }));
 
   // Handle mouse move
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
