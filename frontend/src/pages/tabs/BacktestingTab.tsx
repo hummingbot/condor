@@ -613,6 +613,8 @@ export function BacktestingTab() {
             <div className="relative">
               <button
                 onClick={() => setConfigDropdownOpen((o) => !o)}
+                aria-expanded={configDropdownOpen}
+                aria-haspopup="listbox"
                 className="flex w-full items-center justify-between rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm transition-colors hover:border-[var(--color-primary)]/50 focus:border-[var(--color-primary)] focus:outline-none"
               >
                 <div className="min-w-0 flex-1 text-left">
@@ -638,6 +640,12 @@ export function BacktestingTab() {
                         type="text"
                         value={configSearch}
                         onChange={(e) => setConfigSearch(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") {
+                            setConfigDropdownOpen(false);
+                            setConfigSearch("");
+                          }
+                        }}
                         placeholder="Search configs..."
                         autoFocus
                         className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm focus:border-[var(--color-primary)] focus:outline-none"

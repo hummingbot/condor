@@ -34,15 +34,22 @@ export function ServerSelector() {
     }
   }, [server, onlineServerNames, setServer]);
 
-  // Close on outside click
+  // Close on outside click or Escape
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         setOpen(false);
       }
     };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler);
+    };
   }, []);
 
   const current = servers?.find((s) => s.name === server);
@@ -51,6 +58,8 @@ export function ServerSelector() {
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
         className="flex items-center gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-sm hover:bg-[var(--color-surface-hover)] transition-colors"
       >
         <Server className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />

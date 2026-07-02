@@ -179,8 +179,15 @@ export function SelectField({
         setOpen(false);
       }
     };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler);
+    };
   }, [open]);
 
   const selected = options.find((o) => o.value === value) ?? options[0];
@@ -191,6 +198,8 @@ export function SelectField({
       <button
         type="button"
         aria-label={label}
+        aria-expanded={open}
+        aria-haspopup="listbox"
         onClick={() => setOpen(!open)}
         className="flex w-full items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]"
       >

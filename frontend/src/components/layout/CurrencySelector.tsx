@@ -19,14 +19,23 @@ export function CurrencySelector() {
         setOpen(false);
       }
     };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler);
+    };
   }, []);
 
   return (
     <div ref={ref} className="relative">
       <button
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
         className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm hover:bg-[var(--color-surface-hover)] transition-colors"
         title="Display currency"
       >
