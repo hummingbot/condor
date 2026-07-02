@@ -12,7 +12,7 @@ import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
-import { formatCompactUsd } from "@/lib/formatters";
+import { formatCompactUsd, formatCurrencyPnl } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
 import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/executor/ExecutorTable";
 
@@ -303,7 +303,7 @@ export function SessionExecutors({
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Net PnL</span>
           <span className={`font-mono text-sm font-semibold ${stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-            {stats.totalPnl >= 0 ? "+" : ""}{formatCompactUsd(stats.totalPnl)}
+            {formatCurrencyPnl(stats.totalPnl)}
           </span>
         </div>
         <div>
@@ -375,7 +375,7 @@ export function SessionExecutors({
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text-muted)]">${entry.toFixed(2)}</td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${current.toFixed(2)}</td>
                       <td className={`py-2 pr-3 text-right font-mono ${upnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                        {upnl >= 0 ? "+" : ""}${upnl.toFixed(2)}
+                        {formatCurrencyPnl(upnl)}
                       </td>
                       <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{p.leverage ? `${p.leverage}x` : "—"}</td>
                     </tr>
@@ -398,7 +398,7 @@ export function SessionExecutors({
                 <span className="text-xs font-medium text-[var(--color-text)]">{group[0].trading_pair}</span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
                 <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                  {pairPnl >= 0 ? "+" : ""}{formatCompactUsd(pairPnl)}
+                  {formatCurrencyPnl(pairPnl)}
                 </span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group.length} exec</span>
               </div>

@@ -25,6 +25,7 @@ import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { type StrategySummary, api } from "@/lib/api";
+import { formatCurrencyPnl } from "@/lib/formatters";
 
 // ── Strategy Card ──
 
@@ -86,13 +87,13 @@ function StrategyCard({
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
             <span className={`text-sm font-mono font-semibold ${totalPnlColor}`}>
-              ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+              {formatCurrencyPnl(totalPnl)}
             </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Session</span>
             <span className={`text-sm font-mono ${dayPnlColor}`}>
-              ${dayPnl >= 0 ? "+" : ""}{dayPnl.toFixed(2)}
+              {formatCurrencyPnl(dayPnl)}
             </span>
           </div>
           <div>

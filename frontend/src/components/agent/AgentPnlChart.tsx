@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { formatCurrencyPnl } from "@/lib/formatters";
 import type { MetricEntry } from "@/lib/parse-agent";
 
 function getChartColors() {
@@ -55,7 +56,7 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
         timeScale: { timeVisible: true, secondsVisible: false },
         rightPriceScale: { borderVisible: false },
         localization: {
-          priceFormatter: (price: number) => `$${price >= 0 ? "+" : ""}${price.toFixed(2)}`,
+          priceFormatter: (price: number) => formatCurrencyPnl(price),
         },
       });
       chartRef.current = chart;
@@ -94,7 +95,6 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
 
         const pnl = (seriesData as { value: number }).value;
         const pnlColor = pnl >= 0 ? colors.up : colors.down;
-        const sign = pnl >= 0 ? "+" : "";
         const ts = typeof param.time === "number" ? param.time : 0;
         const date = new Date(ts * 1000);
         const timeStr = date.toLocaleString("en-US", {
@@ -106,7 +106,7 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
 
         tooltip.innerHTML = `
           <div style="color:#9ca3af;font-size:10px;margin-bottom:2px">${timeStr}</div>
-          <div style="color:${pnlColor};font-weight:600;font-size:13px">$${sign}${pnl.toFixed(2)}</div>
+          <div style="color:${pnlColor};font-weight:600;font-size:13px">${formatCurrencyPnl(pnl)}</div>
         `;
         tooltip.style.display = "block";
 

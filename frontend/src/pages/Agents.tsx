@@ -23,6 +23,7 @@ import {
   type RunningInstance,
   api,
 } from "@/lib/api";
+import { formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
 
 function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick: () => void; onDelete: () => void }) {
   const totalPnl = agent.total_pnl ?? 0;
@@ -82,13 +83,13 @@ function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick:
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
             <span className={`text-sm font-mono font-semibold ${totalPnlColor}`}>
-              ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+              {formatCurrencyPnl(totalPnl)}
             </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Session</span>
             <span className={`text-sm font-mono ${dayPnlColor}`}>
-              ${dayPnl >= 0 ? "+" : ""}{dayPnl.toFixed(2)}
+              {formatCurrencyPnl(dayPnl)}
             </span>
           </div>
           <div>
@@ -304,13 +305,13 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
                     <span className="line-clamp-1">{s.trading_context || "—"}</span>
                   </td>
                   <td className={`px-2 py-2 text-right ${realizedColor}`}>
-                    ${s.realized_pnl >= 0 ? "+" : ""}{s.realized_pnl.toFixed(2)}
+                    {formatCurrencyPnl(s.realized_pnl)}
                   </td>
                   <td className={`px-2 py-2 text-right ${unrealizedColor}`}>
-                    ${s.unrealized_pnl >= 0 ? "+" : ""}{s.unrealized_pnl.toFixed(2)}
+                    {formatCurrencyPnl(s.unrealized_pnl)}
                   </td>
                   <td className="px-2 py-2 text-right text-[var(--color-text)]">
-                    ${s.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    {formatCurrencyVolume(s.volume)}
                   </td>
                   <td className="px-2 py-2 text-right text-[var(--color-text)]">{s.open_count}</td>
                 </tr>
@@ -549,13 +550,13 @@ export function Agents() {
           <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
             <span className={`text-lg font-mono font-semibold ${aggTotalColor}`}>
-              ${aggTotalPnl >= 0 ? "+" : ""}{aggTotalPnl.toFixed(2)}
+              {formatCurrencyPnl(aggTotalPnl)}
             </span>
           </div>
           <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
             <span className="text-lg font-mono text-[var(--color-text)]">
-              ${aggVolume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              {formatCurrencyVolume(aggVolume)}
             </span>
           </div>
           <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">

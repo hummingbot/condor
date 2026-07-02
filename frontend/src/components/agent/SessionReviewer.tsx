@@ -24,7 +24,7 @@ import {
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
 import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
-import { formatDateTime, formatToolName } from "@/lib/formatters";
+import { formatCurrencyPnl, formatDateTime, formatToolName } from "@/lib/formatters";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
 const SUB_TABS = [
@@ -343,7 +343,7 @@ export function SessionReviewer({
             )}
             {!isExperiment && (
               <span className={`text-sm font-mono font-semibold ${pnlColor}`}>
-                ${pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                {formatCurrencyPnl(pnl)}
               </span>
             )}
           </div>

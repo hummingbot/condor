@@ -10,6 +10,7 @@ import { useCallback, useMemo, useState } from "react";
 
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { api } from "@/lib/api";
+import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
 
 // ── Markdown Editor ──
 
@@ -101,7 +102,7 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
         <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>Ticks: {instance.tick_count}</span>
           <span className={instance.daily_pnl >= 0 ? "text-emerald-400" : "text-red-400"}>
-            PnL: ${instance.daily_pnl.toFixed(2)}
+            PnL: {formatCurrencyPnl(instance.daily_pnl)}
           </span>
         </div>
       </div>
@@ -199,26 +200,26 @@ export function PerformancePanel({
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
             <span className={`text-lg font-mono font-semibold ${pnlColor}`}>
-              ${totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}
+              {formatCurrencyPnl(totalPnl)}
             </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Realized</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">${realized.toFixed(2)}</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">{formatCurrencyPnl(realized)}</span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Unrealized</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">${unrealized.toFixed(2)}</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">{formatCurrencyPnl(unrealized)}</span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
             <span className="text-lg font-mono text-[var(--color-text)]">
-              ${volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              {formatCurrencyVolume(volume)}
             </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">${fees.toFixed(2)}</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">{formatCurrency(fees)}</span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Win Rate</span>
@@ -298,12 +299,12 @@ export function PerformancePanel({
                           {s.status || "—"}
                         </td>
                         <td className={`px-2 py-1.5 text-right ${pnlCol}`}>
-                          ${s.total_pnl >= 0 ? "+" : ""}{s.total_pnl.toFixed(2)}
+                          {formatCurrencyPnl(s.total_pnl)}
                         </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">${s.realized_pnl.toFixed(2)}</td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">${s.unrealized_pnl.toFixed(2)}</td>
+                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{formatCurrencyPnl(s.realized_pnl)}</td>
+                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{formatCurrencyPnl(s.unrealized_pnl)}</td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
-                          ${s.volume.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                          {formatCurrencyVolume(s.volume)}
                         </td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.trade_count}</td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.open_count}</td>
