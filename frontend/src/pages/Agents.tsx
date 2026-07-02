@@ -57,9 +57,10 @@ function AgentCard({ agent, onClick, onDelete }: { agent: AgentSummary; onClick:
             <StatusBadge status={status} />
             {agent.status !== "running" && (
               <div
-                className="opacity-0 transition-opacity group-hover:opacity-100"
+                aria-label="Delete agent"
+                className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
                 onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onDelete(); } }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onDelete(); } }}
                 role="button"
                 tabIndex={0}
               >
