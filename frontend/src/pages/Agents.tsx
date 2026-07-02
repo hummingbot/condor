@@ -19,6 +19,7 @@ import remarkGfm from "remark-gfm";
 import { Link, useNavigate } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { ModeBadge } from "@/components/agent/ModeBadge";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
@@ -470,7 +471,6 @@ function DeleteAgentDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  useEscapeKey(!!agent, onClose);
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteAgent(agent!.slug),
     onSuccess: () => {
@@ -479,38 +479,18 @@ function DeleteAgentDialog({
     },
   });
 
-  if (!agent) return null;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div
-        className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="mb-2 text-lg font-semibold text-[var(--color-text)]">Delete Agent</h2>
-        <p className="mb-6 text-sm text-[var(--color-text-muted)]">
-          Delete <strong className="text-[var(--color-text)]">{agent.name}</strong>? This cannot be undone.
-        </p>
-        <div className="flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => deleteMutation.mutate()}
-            disabled={deleteMutation.isPending}
-            className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-red-600 disabled:opacity-40"
-          >
-            {deleteMutation.isPending ? "Deleting..." : "Delete"}
-          </button>
-        </div>
-        {deleteMutation.isError && (
-          <p className="mt-3 text-xs text-red-400">Failed to delete agent. It may be running.</p>
-        )}
-      </div>
-    </div>
+    <ConfirmDialog
+      open={!!agent}
+      title="Delete Agent"
+      isPending={deleteMutation.isPending}
+      isError={deleteMutation.isError}
+      errorText="Failed to delete agent. It may be running."
+      onConfirm={() => deleteMutation.mutate()}
+      onClose={onClose}
+    >
+      Delete <strong className="text-[var(--color-text)]">{agent?.name}</strong>? This cannot be undone.
+    </ConfirmDialog>
   );
 }
 

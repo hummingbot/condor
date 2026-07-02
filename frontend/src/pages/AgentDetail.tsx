@@ -22,6 +22,7 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
@@ -329,10 +330,9 @@ export function AgentDetail() {
     }
   };
 
-  // Close modals on Escape (the discard dialog owns Escape while open)
+  // Close modals on Escape (the discard dialog owns Escape while open;
+  // the delete dialogs handle Escape internally via ConfirmDialog).
   useEscapeKey(showBrainModal && !showBrainDiscardConfirm, requestCloseBrainModal);
-  useEscapeKey(showDeleteConfirm, () => setShowDeleteConfirm(false));
-  useEscapeKey(!!deleteStrategy, () => setDeleteStrategy(null));
 
   const { data: agent, isLoading, error } = useQuery({
     queryKey: ["agent", slug],
@@ -560,70 +560,30 @@ export function AgentDetail() {
       />
 
       {/* Delete Agent Confirmation */}
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowDeleteConfirm(false)}>
-          <div
-            className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="mb-2 text-lg font-semibold text-[var(--color-text)]">Delete Agent</h2>
-            <p className="mb-6 text-sm text-[var(--color-text-muted)]">
-              Delete <strong className="text-[var(--color-text)]">{agent.name}</strong> and all its strategies? This cannot be undone.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setShowDeleteConfirm(false)}
-                className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => deleteAgentMutation.mutate()}
-                disabled={deleteAgentMutation.isPending}
-                className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-red-600 disabled:opacity-40"
-              >
-                {deleteAgentMutation.isPending ? "Deleting..." : "Delete"}
-              </button>
-            </div>
-            {deleteAgentMutation.isError && (
-              <p className="mt-3 text-xs text-red-400">Failed to delete agent. It may have running strategies.</p>
-            )}
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        title="Delete Agent"
+        isPending={deleteAgentMutation.isPending}
+        isError={deleteAgentMutation.isError}
+        errorText="Failed to delete agent. It may have running strategies."
+        onConfirm={() => deleteAgentMutation.mutate()}
+        onClose={() => setShowDeleteConfirm(false)}
+      >
+        Delete <strong className="text-[var(--color-text)]">{agent.name}</strong> and all its strategies? This cannot be undone.
+      </ConfirmDialog>
 
       {/* Delete Strategy Confirmation */}
-      {deleteStrategy && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setDeleteStrategy(null)}>
-          <div
-            className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="mb-2 text-lg font-semibold text-[var(--color-text)]">Delete Strategy</h2>
-            <p className="mb-6 text-sm text-[var(--color-text-muted)]">
-              Delete <strong className="text-[var(--color-text)]">{deleteStrategy.name}</strong>? This cannot be undone.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setDeleteStrategy(null)}
-                className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => deleteStrategyMutation.mutate()}
-                disabled={deleteStrategyMutation.isPending}
-                className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-red-600 disabled:opacity-40"
-              >
-                {deleteStrategyMutation.isPending ? "Deleting..." : "Delete"}
-              </button>
-            </div>
-            {deleteStrategyMutation.isError && (
-              <p className="mt-3 text-xs text-red-400">Failed to delete strategy. It may be running.</p>
-            )}
-          </div>
-        </div>
-      )}
+      <ConfirmDialog
+        open={!!deleteStrategy}
+        title="Delete Strategy"
+        isPending={deleteStrategyMutation.isPending}
+        isError={deleteStrategyMutation.isError}
+        errorText="Failed to delete strategy. It may be running."
+        onConfirm={() => deleteStrategyMutation.mutate()}
+        onClose={() => setDeleteStrategy(null)}
+      >
+        Delete <strong className="text-[var(--color-text)]">{deleteStrategy?.name}</strong>? This cannot be undone.
+      </ConfirmDialog>
     </div>
   );
 }
