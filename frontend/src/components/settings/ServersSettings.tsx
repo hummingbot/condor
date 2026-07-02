@@ -100,7 +100,10 @@ export function ServersSettings() {
 
       {/* Add / Edit form */}
       {(adding || editing) && (
-        <div className="rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-surface)] p-4">
+        <form
+          onSubmit={(e) => { e.preventDefault(); submitForm(); }}
+          className="rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-surface)] p-4"
+        >
           <h3 className="mb-3 text-sm font-semibold text-[var(--color-text)]">
             {editing ? `Edit ${editing}` : "Add Server"}
           </h3>
@@ -156,7 +159,7 @@ export function ServersSettings() {
           </div>
           <div className="mt-3 flex items-center gap-2">
             <button
-              onClick={submitForm}
+              type="submit"
               disabled={addMut.isPending || updateMut.isPending || (!editing && !form.name)}
               className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
             >
@@ -164,6 +167,7 @@ export function ServersSettings() {
               {editing ? "Save" : "Add"}
             </button>
             <button
+              type="button"
               onClick={() => { setAdding(false); setEditing(null); setForm(EMPTY_FORM); }}
               className="rounded-md px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
             >
@@ -175,7 +179,7 @@ export function ServersSettings() {
               {(addMut.error || updateMut.error)?.message}
             </p>
           )}
-        </div>
+        </form>
       )}
 
       {/* Server list */}
