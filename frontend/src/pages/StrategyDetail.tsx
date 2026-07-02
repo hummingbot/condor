@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, FileText, FlaskConical, ScrollText, Trash2, X, Zap } from "lucide-react";
+import { AlertCircle, ArrowLeft, FileText, FlaskConical, ScrollText, Trash2, X, Zap } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 
@@ -66,7 +66,7 @@ export function StrategyDetail() {
     return () => window.removeEventListener("keydown", handler);
   }, [showStrategyModal]);
 
-  const { data: strategy, isLoading } = useQuery({
+  const { data: strategy, isLoading, error } = useQuery({
     queryKey: ["strategy", slug, sslug],
     queryFn: () => api.getStrategy(slug!, sslug!),
     enabled: !!slug && !!sslug,
@@ -108,6 +108,26 @@ export function StrategyDetail() {
     setReviewerSessionNum(sessionNum);
     setReviewerKind(kind || "session");
   }, []);
+
+  if (error && !strategy) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="max-w-sm rounded-lg border border-red-500/30 bg-[var(--color-surface)] p-8 text-center">
+          <AlertCircle className="mx-auto mb-3 h-10 w-10 text-[var(--color-red)]" />
+          <h2 className="mb-1 text-lg font-semibold">Failed to Load Strategy</h2>
+          <p className="text-sm text-[var(--color-text-muted)]">
+            {error instanceof Error ? error.message : "An unexpected error occurred."}
+          </p>
+          <button
+            onClick={() => navigate(`/agents/${slug}`)}
+            className="mt-4 inline-flex items-center gap-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Agent
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading || !strategy) {
     return (

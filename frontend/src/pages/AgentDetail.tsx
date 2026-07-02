@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertCircle,
   ArrowLeft,
   Brain,
   ChevronRight,
@@ -327,12 +328,32 @@ export function AgentDetail() {
     return () => window.removeEventListener("keydown", handler);
   }, [showBrainModal]);
 
-  const { data: agent, isLoading } = useQuery({
+  const { data: agent, isLoading, error } = useQuery({
     queryKey: ["agent", slug],
     queryFn: () => api.getAgent(slug!),
     enabled: !!slug,
     refetchInterval: 5000,
   });
+
+  if (error && !agent) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="max-w-sm rounded-lg border border-red-500/30 bg-[var(--color-surface)] p-8 text-center">
+          <AlertCircle className="mx-auto mb-3 h-10 w-10 text-[var(--color-red)]" />
+          <h2 className="mb-1 text-lg font-semibold">Failed to Load Agent</h2>
+          <p className="text-sm text-[var(--color-text-muted)]">
+            {error instanceof Error ? error.message : "An unexpected error occurred."}
+          </p>
+          <button
+            onClick={() => navigate("/agents")}
+            className="mt-4 inline-flex items-center gap-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" /> Back to Agents
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (isLoading || !agent) {
     return (
