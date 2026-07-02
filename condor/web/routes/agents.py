@@ -404,6 +404,47 @@ def _list_sessions(strategy_dir: Path) -> list[SessionInfo]:
     return sessions
 
 
+# Experiment snapshots are write-once (save_experiment_snapshot allocates a new
+# number and writes each file exactly once), so an mtime-keyed cache avoids
+# re-reading potentially hundreds of KB of .md files on every poll of the
+# strategy detail endpoint.
+_experiment_info_cache: dict[Path, tuple[float, ExperimentInfo]] = {}
+
+
+def _parse_experiment_file(f: Path, num: int) -> ExperimentInfo:
+    execution_mode = ""
+    agent_key = ""
+    content = f.read_text(errors="replace")
+    mode_match = re.search(r"^Mode:\s*(\S+)", content, re.MULTILINE)
+    if mode_match:
+        execution_mode = mode_match.group(1)
+    model_match = re.search(r"^Model:\s*(\S+)", content, re.MULTILINE)
+    if model_match:
+        agent_key = model_match.group(1)
+    created = ""
+    ts_match = re.search(r"^# Experiment #\d+ — (.+)$", content, re.MULTILINE)
+    if ts_match:
+        created = ts_match.group(1)
+    # A tick whose model call failed writes the raw error string as its Agent
+    # Response (e.g. "(error: status_code: 404, ...)"). Flag it so the UI can
+    # mark the run as failed without opening it.
+    error = bool(
+        re.search(
+            r"^## Agent Response\s*\n+\(?error\b",
+            content,
+            re.MULTILINE | re.IGNORECASE,
+        )
+    )
+    return ExperimentInfo(
+        number=num,
+        execution_mode=execution_mode,
+        agent_key=agent_key,
+        snapshot_count=1,
+        created_at=created,
+        error=error,
+    )
+
+
 def _list_experiments(strategy_dir: Path) -> list[ExperimentInfo]:
     experiments = []
     all_files = []
@@ -411,44 +452,19 @@ def _list_experiments(strategy_dir: Path) -> list[ExperimentInfo]:
         d = strategy_dir / dirname
         if d.exists():
             all_files.extend(d.glob("experiment_*.md"))
-    for f in sorted(all_files, key=lambda x: x.stat().st_mtime, reverse=True):
+    stated = [(f, f.stat().st_mtime) for f in all_files]
+    for f, mtime in sorted(stated, key=lambda x: x[1], reverse=True):
         m = re.match(r"experiment_(\d+)\.md", f.name)
         if not m:
             continue
         num = int(m.group(1))
-        execution_mode = ""
-        agent_key = ""
-        content = f.read_text(errors="replace")
-        mode_match = re.search(r"^Mode:\s*(\S+)", content, re.MULTILINE)
-        if mode_match:
-            execution_mode = mode_match.group(1)
-        model_match = re.search(r"^Model:\s*(\S+)", content, re.MULTILINE)
-        if model_match:
-            agent_key = model_match.group(1)
-        created = ""
-        ts_match = re.search(r"^# Experiment #\d+ — (.+)$", content, re.MULTILINE)
-        if ts_match:
-            created = ts_match.group(1)
-        # A tick whose model call failed writes the raw error string as its Agent
-        # Response (e.g. "(error: status_code: 404, ...)"). Flag it so the UI can
-        # mark the run as failed without opening it.
-        error = bool(
-            re.search(
-                r"^## Agent Response\s*\n+\(?error\b",
-                content,
-                re.MULTILINE | re.IGNORECASE,
-            )
-        )
-        experiments.append(
-            ExperimentInfo(
-                number=num,
-                execution_mode=execution_mode,
-                agent_key=agent_key,
-                snapshot_count=1,
-                created_at=created,
-                error=error,
-            )
-        )
+        cached = _experiment_info_cache.get(f)
+        if cached is not None and cached[0] == mtime:
+            info = cached[1]
+        else:
+            info = _parse_experiment_file(f, num)
+            _experiment_info_cache[f] = (mtime, info)
+        experiments.append(info)
     return experiments
 
 
