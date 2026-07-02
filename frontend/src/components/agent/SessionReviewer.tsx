@@ -208,7 +208,7 @@ export function SessionReviewer({
 
   // PnL for current session
   const pnl = sessionPerf?.total_pnl ?? 0;
-  const pnlColor = pnl >= 0 ? "text-emerald-400" : "text-red-400";
+  const pnlColor = pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 
   // Visible sub-tabs depend on kind
   const visibleSubTabs = isExperiment

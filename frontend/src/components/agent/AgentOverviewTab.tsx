@@ -92,7 +92,7 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
         </div>
         <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>Ticks: {instance.tick_count}</span>
-          <span className={instance.daily_pnl >= 0 ? "text-emerald-400" : "text-red-400"}>
+          <span className={instance.daily_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}>
             PnL: {formatCurrencyPnl(instance.daily_pnl)}
           </span>
         </div>
@@ -170,7 +170,7 @@ export function PerformancePanel({
   const volume = Number(totals.volume ?? 0);
   const fees = Number(totals.fees ?? 0);
   const openPos = Number(totals.open_positions ?? 0);
-  const pnlColor = totalPnl >= 0 ? "text-emerald-400" : "text-red-400";
+  const pnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 
   const closed = sessions.reduce((s, x) => s + x.closed_count, 0);
   const wins = sessions.reduce((s, x) => s + Math.round(x.win_rate * x.closed_count), 0);
@@ -267,7 +267,7 @@ export function PerformancePanel({
                   .slice()
                   .sort((a, b) => (b.kind === a.kind ? b.session_num - a.session_num : a.kind === "experiment" ? 1 : -1))
                   .map((s) => {
-                    const pnlCol = s.total_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+                    const pnlCol = s.total_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
                     const isExperiment = s.kind === "experiment";
                     return (
                       <tr

@@ -278,8 +278,8 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
           </thead>
           <tbody>
             {sessions.map((s) => {
-              const realizedColor = s.realized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
-              const unrealizedColor = s.unrealized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
+              const realizedColor = s.realized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
+              const unrealizedColor = s.unrealized_pnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
               return (
                 <tr key={s.agent_id} className="border-t border-[var(--color-border)]/40 font-mono">
                   <td className="px-2 py-2">

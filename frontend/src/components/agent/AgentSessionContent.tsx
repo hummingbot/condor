@@ -302,7 +302,7 @@ export function SessionExecutors({
         )}
         <div>
           <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Net PnL</span>
-          <span className={`font-mono text-sm font-semibold ${stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+          <span className={`font-mono text-sm font-semibold ${stats.totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
             {formatCurrencyPnl(stats.totalPnl)}
           </span>
         </div>
@@ -367,14 +367,14 @@ export function SessionExecutors({
                     <tr key={`${p.trading_pair}-${i}`} className="border-b border-[var(--color-border)]/30">
                       <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{p.trading_pair}</td>
                       <td className="py-2 pr-3">
-                        <span className={side.toLowerCase().includes("long") || side.toLowerCase() === "buy" ? "text-emerald-400" : "text-red-400"}>
+                        <span className={side.toLowerCase().includes("long") || side.toLowerCase() === "buy" ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}>
                           {side.toUpperCase()}
                         </span>
                       </td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">{Math.abs(amount).toFixed(4)}</td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text-muted)]">${entry.toFixed(2)}</td>
                       <td className="py-2 pr-3 text-right font-mono text-[var(--color-text)]">${current.toFixed(2)}</td>
-                      <td className={`py-2 pr-3 text-right font-mono ${upnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      <td className={`py-2 pr-3 text-right font-mono ${upnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
                         {formatCurrencyPnl(upnl)}
                       </td>
                       <td className="py-2 text-right font-mono text-[var(--color-text-muted)]">{p.leverage ? `${p.leverage}x` : "—"}</td>
@@ -397,7 +397,7 @@ export function SessionExecutors({
               <div className="mb-1.5 flex items-center gap-2 px-1">
                 <span className="text-xs font-medium text-[var(--color-text)]">{group[0].trading_pair}</span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
-                <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
                   {formatCurrencyPnl(pairPnl)}
                 </span>
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group.length} exec</span>

@@ -20,7 +20,7 @@ function formatPnl(v: number) {
 }
 
 function pnlColor(v: number) {
-  return v >= 0 ? "text-emerald-400" : "text-red-400";
+  return v >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 }
 
 function formatDate(epoch: number | null) {
@@ -274,7 +274,7 @@ function ExecutorTable({ server, dbPath, executorCount }: { server: string; dbPa
             <tbody>
               {sorted.map((ex, i) => {
                 const sideColor =
-                  ex.side === "BUY" ? "text-emerald-400" : ex.side === "SELL" ? "text-red-400" : "";
+                  ex.side === "BUY" ? "text-[var(--color-green)]" : ex.side === "SELL" ? "text-[var(--color-red)]" : "";
                 return (
                   <tr
                     key={`${ex.id}-${i}`}
