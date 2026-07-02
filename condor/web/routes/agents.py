@@ -745,6 +745,52 @@ def _aggregate_strategy_perf(strategies: list[StrategySummary]) -> dict[str, Any
     }
 
 
+# ── Delegation status/list routes ──
+# NOTE: Starlette matches routes in registration order, so these literal
+# /delegations paths MUST be registered before the /{slug} catch-all below;
+# otherwise GET /agents/delegations would match get_agent with
+# slug="delegations" and 404.
+
+
+@router.get("/delegations")
+async def list_delegations(user: WebUser = Depends(get_current_user)):
+    """List in-flight and finished delegations (this process).
+
+    Returns the full record per task (status + result/error) so the dashboard can
+    render an at-a-glance list without a follow-up fetch per row. The registry is
+    in-memory and small (ephemeral, per-process), so the payload stays cheap.
+    """
+    from condor.agents.delegate import get_all_delegations
+
+    return {"delegations": [dt.to_dict() for dt in get_all_delegations().values()]}
+
+
+@router.get("/delegations/{task_id}")
+async def get_delegation_status(
+    task_id: str, user: WebUser = Depends(get_current_user)
+):
+    """Get a delegation's status + result/error."""
+    from condor.agents.delegate import get_delegation
+
+    dt = get_delegation(task_id)
+    if dt is None:
+        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    return dt.to_dict()
+
+
+@router.post("/delegations/{task_id}/stop")
+async def stop_delegation_route(
+    task_id: str, user: WebUser = Depends(get_current_user)
+):
+    """Cancel a running delegation (status -> stopped)."""
+    from condor.agents.delegate import get_delegation, stop_delegation
+
+    if get_delegation(task_id) is None:
+        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    stopped = await stop_delegation(task_id)
+    return {"stopped": stopped}
+
+
 @router.get("/{slug}", response_model=AgentDetail)
 async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     """Get Agent detail + its strategies."""
@@ -903,45 +949,6 @@ async def delegate_agent(
         timeout_s=req.timeout_s,
     )
     return {"task_id": dt.task_id, "status": dt.status}
-
-
-@router.get("/delegations")
-async def list_delegations(user: WebUser = Depends(get_current_user)):
-    """List in-flight and finished delegations (this process).
-
-    Returns the full record per task (status + result/error) so the dashboard can
-    render an at-a-glance list without a follow-up fetch per row. The registry is
-    in-memory and small (ephemeral, per-process), so the payload stays cheap.
-    """
-    from condor.agents.delegate import get_all_delegations
-
-    return {"delegations": [dt.to_dict() for dt in get_all_delegations().values()]}
-
-
-@router.get("/delegations/{task_id}")
-async def get_delegation_status(
-    task_id: str, user: WebUser = Depends(get_current_user)
-):
-    """Get a delegation's status + result/error."""
-    from condor.agents.delegate import get_delegation
-
-    dt = get_delegation(task_id)
-    if dt is None:
-        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-    return dt.to_dict()
-
-
-@router.post("/delegations/{task_id}/stop")
-async def stop_delegation_route(
-    task_id: str, user: WebUser = Depends(get_current_user)
-):
-    """Cancel a running delegation (status -> stopped)."""
-    from condor.agents.delegate import get_delegation, stop_delegation
-
-    if get_delegation(task_id) is None:
-        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-    stopped = await stop_delegation(task_id)
-    return {"stopped": stopped}
 
 
 # ── Strategy CRUD ──
