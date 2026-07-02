@@ -76,6 +76,13 @@ export function useChatSocket() {
   const { token } = useAuth();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Trailing debounce for localStorage persistence: streaming chunks update
+  // `slots` per token, so serializing on every change would run JSON.stringify
+  // hundreds of times per response on the main thread.
+  const persistTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Set by events that should persist immediately (e.g. prompt_done) instead
+  // of waiting for the trailing debounce.
+  const persistNow = useRef(false);
   // Track current assistant message per slot
   const currentAssistantMsg = useRef<Record<string, string | null>>({});
 
@@ -346,6 +353,8 @@ export function useChatSocket() {
             );
             currentAssistantMsg.current[slotId] = null;
           }
+          // Flush the debounced persistence as soon as the response settles.
+          persistNow.current = true;
           setStreamingSlotId(null);
           break;
 
@@ -467,17 +476,30 @@ export function useChatSocket() {
   useEffect(() => {
     return () => {
       clearTimeout(reconnectTimer.current);
+      clearTimeout(persistTimer.current);
+      // Flush any pending debounced persistence so no messages are lost.
+      if (hydrated.current) saveSlotMessages(slotsRef.current);
       wsRef.current?.close();
     };
   }, []);
 
-  // Persist messages to localStorage on every change (but only after initial hydration
-  // to avoid the empty initial state wiping saved messages before WS reconnects)
+  // Persist messages to localStorage on change (but only after initial hydration
+  // to avoid the empty initial state wiping saved messages before WS reconnects).
+  // Writes are debounced with a trailing timer so streaming chunks don't
+  // re-serialize the whole history per token; prompt_done flushes immediately.
   useEffect(() => {
     slotsRef.current = slots;
-    if (hydrated.current) {
+    if (!hydrated.current) return;
+    clearTimeout(persistTimer.current);
+    if (persistNow.current) {
+      persistNow.current = false;
       saveSlotMessages(slots);
+      return;
     }
+    persistTimer.current = setTimeout(
+      () => saveSlotMessages(slotsRef.current),
+      1000,
+    );
   }, [slots]);
 
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;
