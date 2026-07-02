@@ -3,6 +3,7 @@ import { useEffect, useMemo, useReducer, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, CheckCircle, Loader2, Rocket } from "lucide-react";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
@@ -147,7 +148,7 @@ export function CreateGridExecutor() {
   );
 
   if (!server) {
-    return <p className="p-6 text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to create a grid executor." />;
   }
 
   return (

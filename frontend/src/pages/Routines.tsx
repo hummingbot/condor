@@ -15,6 +15,7 @@ import {
 import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { RoutineTable, type RoutineRow } from "@/components/routines/RoutineTable";
 import { useServer } from "@/hooks/useServer";
@@ -179,11 +180,7 @@ export function Routines() {
   }, [qc]);
 
   if (!server) {
-    return (
-      <div className="flex h-full items-center justify-center text-[var(--color-text-muted)]">
-        Select a server to view routines
-      </div>
-    );
+    return <NoServerCard message="Select a server from the sidebar to view routines." />;
   }
 
   return (

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
@@ -670,7 +671,7 @@ export function ActiveBotsTab() {
   const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
 
   if (!server) {
-    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to view active bots." />;
   }
   if (isLoading) return <FallbackSpinner />;
   if (error)

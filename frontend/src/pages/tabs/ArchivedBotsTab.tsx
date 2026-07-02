@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { ArrowLeft, Calendar, ChevronLeft, ChevronRight, Database, Loader2, TrendingDown, TrendingUp } from "lucide-react";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { ArchivedPerformanceCharts } from "@/components/charts/ArchivedPerformanceCharts";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
@@ -108,11 +109,7 @@ function ArchivedBotsList() {
   }
 
   if (!server) {
-    return (
-      <div className="flex items-center justify-center h-64 text-[var(--color-text-muted)]">
-        Select a server to view archived bots
-      </div>
-    );
+    return <NoServerCard message="Select a server from the sidebar to view archived bots." />;
   }
 
   if (isLoading) {

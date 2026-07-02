@@ -14,6 +14,7 @@ import {
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
@@ -855,17 +856,7 @@ export function Portfolio() {
   );
 
   if (!server) {
-    return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-8 text-center max-w-sm">
-          <Server className="h-10 w-10 mx-auto mb-3 text-[var(--color-text-muted)]" />
-          <h2 className="text-lg font-semibold mb-1">No Server Selected</h2>
-          <p className="text-sm text-[var(--color-text-muted)]">
-            Select a server from the sidebar to view your portfolio.
-          </p>
-        </div>
-      </div>
-    );
+    return <NoServerCard message="Select a server from the sidebar to view your portfolio." />;
   }
 
   if (isLoading && !data) {

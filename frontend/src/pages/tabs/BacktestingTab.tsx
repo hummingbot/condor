@@ -18,6 +18,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { IChartApi } from "lightweight-charts";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { useBacktest } from "@/hooks/useBacktest";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
@@ -561,7 +562,7 @@ export function BacktestingTab() {
   }, []);
 
   if (!server)
-    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to run backtests." />;
 
   const selectedConfig = configsData?.configs.find((c) => c.id === configId);
 

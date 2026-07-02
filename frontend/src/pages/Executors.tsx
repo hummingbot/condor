@@ -17,6 +17,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import {
   DetailPanel,
   ExecutorTable,
@@ -522,8 +523,7 @@ export function Executors() {
     exportCsv(selected.length > 0 ? selected : filteredExecutors);
   }, [selectedIds, executors, filteredExecutors]);
 
-  if (!server)
-    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+  if (!server) return <NoServerCard message="Select a server from the sidebar to view executors." />;
 
   return (
     <div className="flex gap-0 -m-6 h-[calc(100vh)] overflow-hidden">

@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import yaml from "js-yaml";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import {
   CloneConfigDialog,
@@ -621,7 +622,7 @@ export function EditorTab() {
   );
 
   if (!server) {
-    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to edit controller configs." />;
   }
 
   if (isLoading) {

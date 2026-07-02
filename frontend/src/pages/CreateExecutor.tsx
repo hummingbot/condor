@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
@@ -347,7 +348,7 @@ export function CreateExecutor() {
   });
 
   if (!server) {
-    return <p className="p-6 text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to create an executor." />;
   }
 
   return (

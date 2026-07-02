@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Circle, Database, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api, type BotRunInfo } from "@/lib/api";
@@ -221,7 +222,7 @@ export function BotRunsTab() {
   };
 
   if (!server) {
-    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to view bot runs." />;
   }
 
   if (isLoading) return <FallbackSpinner />;
