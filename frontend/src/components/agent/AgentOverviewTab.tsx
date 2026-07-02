@@ -9,6 +9,7 @@ import {
 import { useCallback, useMemo, useState } from "react";
 
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
+import { ModeBadge } from "@/components/agent/ModeBadge";
 import { api } from "@/lib/api";
 import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
 
@@ -80,12 +81,6 @@ export function MarkdownEditor({
 export function InstanceCard({ instance }: { instance: import("@/lib/api").RunningInstance }) {
   const riskLimits = (instance.risk_limits || {}) as Record<string, unknown>;
   const statusColor = instance.status === "running" ? "text-emerald-400" : instance.status === "paused" ? "text-amber-400" : "text-[var(--color-text-muted)]";
-  const mode = instance.execution_mode || "loop";
-  const modeBadge = mode === "dry_run"
-    ? { label: "DRY RUN", cls: "border-blue-500/30 bg-blue-500/10 text-blue-400" }
-    : mode === "run_once"
-      ? { label: "RUN ONCE", cls: "border-amber-500/30 bg-amber-500/10 text-amber-400" }
-      : null;
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-4">
@@ -93,11 +88,7 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm font-bold text-[var(--color-text)]">{instance.agent_id}</span>
           <span className={`text-xs font-semibold uppercase ${statusColor}`}>{instance.status}</span>
-          {modeBadge && (
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${modeBadge.cls}`}>
-              {modeBadge.label}
-            </span>
-          )}
+          <ModeBadge mode={instance.execution_mode} />
         </div>
         <div className="flex items-center gap-3 text-xs text-[var(--color-text-muted)]">
           <span>Ticks: {instance.tick_count}</span>

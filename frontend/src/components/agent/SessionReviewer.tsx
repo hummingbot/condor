@@ -23,6 +23,7 @@ import {
   SessionOverview,
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
+import { MODE_STYLES } from "@/components/agent/modeStyles";
 import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
 import { formatCurrencyPnl, formatDateTime, formatToolName } from "@/lib/formatters";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
@@ -45,10 +46,12 @@ interface SidebarItem {
   error?: boolean;
 }
 
-// Per-execution-mode icon, label and color for experiment items.
+// Per-execution-mode icon, label and color for experiment items. Colors come
+// from the shared MODE_STYLES map; the compact icon+short-label rendering is
+// specific to this sidebar.
 function expDisplay(mode?: string): { Icon: typeof FlaskConical; label: string; color: string } {
-  if (mode === "run_once") return { Icon: Zap, label: "Run", color: "text-amber-400" };
-  if (mode === "dry_run") return { Icon: FlaskConical, label: "Dry", color: "text-blue-400" };
+  if (mode === "run_once") return { Icon: Zap, label: "Run", color: MODE_STYLES.run_once.text };
+  if (mode === "dry_run") return { Icon: FlaskConical, label: "Dry", color: MODE_STYLES.dry_run.text };
   return { Icon: FlaskConical, label: "Exp", color: "text-amber-400" };
 }
 

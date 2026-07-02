@@ -19,6 +19,7 @@ import remarkGfm from "remark-gfm";
 import { Link, useNavigate } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { ModeBadge } from "@/components/agent/ModeBadge";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import {
   type AgentSummary,
@@ -279,11 +280,6 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
             {sessions.map((s) => {
               const realizedColor = s.realized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
               const unrealizedColor = s.unrealized_pnl >= 0 ? "text-emerald-400" : "text-red-400";
-              const modeBadge = s.execution_mode === "dry_run"
-                ? { label: "DRY RUN", cls: "border-blue-500/30 bg-blue-500/10 text-blue-400" }
-                : s.execution_mode === "run_once"
-                  ? { label: "RUN ONCE", cls: "border-amber-500/30 bg-amber-500/10 text-amber-400" }
-                  : null;
               return (
                 <tr key={s.agent_id} className="border-t border-[var(--color-border)]/40 font-mono">
                   <td className="px-2 py-2">
@@ -297,11 +293,7 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
                   <td className="px-2 py-2 text-[var(--color-text)]">
                     <span className="flex items-center gap-1.5">
                       #{s.session_num}
-                      {modeBadge && (
-                        <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-bold uppercase ${modeBadge.cls}`}>
-                          {modeBadge.label}
-                        </span>
-                      )}
+                      <ModeBadge mode={s.execution_mode} />
                     </span>
                   </td>
                   <td className="max-w-[200px] px-2 py-2 text-[var(--color-text-muted)]">
