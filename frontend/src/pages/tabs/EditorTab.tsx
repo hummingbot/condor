@@ -24,6 +24,7 @@ import { CodeEditor } from "@/components/editor/CodeEditor";
 import {
   CloneConfigDialog,
   DeleteConfirmDialog,
+  DiscardChangesDialog,
   NewConfigDialog,
   UploadDialog,
 } from "@/components/editor/EditorDialogs";
@@ -475,6 +476,7 @@ export function EditorTab() {
 
   // Dialog state
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+  const [closeTarget, setCloseTarget] = useState<FileEntry | null>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [cloneTarget, setCloneTarget] = useState<ControllerConfigSummary | null>(null);
   const [newConfigTarget, setNewConfigTarget] = useState<{ type?: string; name?: string } | null>(null);
@@ -564,6 +566,19 @@ export function EditorTab() {
       });
     },
     [activeTabId, splitTabId],
+  );
+
+  // Tab-bar close: confirm before discarding unsaved edits, close clean tabs instantly
+  const requestCloseTab = useCallback(
+    (id: string) => {
+      const tab = openTabs.find((t) => t.file.id === id);
+      if (tab && tab.content !== tab.originalContent) {
+        setCloseTarget(tab.file);
+      } else {
+        closeTab(id);
+      }
+    },
+    [openTabs, closeTab],
   );
 
   const updateContent = useCallback((id: string, content: string) => {
@@ -709,7 +724,7 @@ export function EditorTab() {
                   tabs={openTabs}
                   activeTabId={activeTabId}
                   onSelect={setActiveTabId}
-                  onClose={closeTab}
+                  onClose={requestCloseTab}
                 />
               </div>
               {openTabs.length >= 2 && (
@@ -813,6 +828,16 @@ export function EditorTab() {
       )}
 
       {/* Dialogs */}
+      {closeTarget && (
+        <DiscardChangesDialog
+          fileName={`${closeTarget.label}${closeTarget.kind === "config" ? ".yml" : ".py"}`}
+          onDiscard={() => {
+            closeTab(closeTarget.id);
+            setCloseTarget(null);
+          }}
+          onClose={() => setCloseTarget(null)}
+        />
+      )}
       {deleteTarget && (
         <DeleteConfirmDialog
           server={server}
