@@ -208,6 +208,43 @@ class SkillStore:
             result["routine_ok"] = _routine_exists(ref, self.agent_slug)
         return result
 
+    def _resolve_companion(
+        self, name: str, filename: str
+    ) -> tuple[Path | None, dict | None]:
+        """Validate a companion-file reference and resolve its target path.
+
+        Shared guard sequence for :meth:`read_file` / :meth:`write_file`:
+        skills-dir presence, skill existence, bare-filename checks (no
+        ``SKILL.md``, no path separators) and the resolve()/is_relative_to
+        traversal defense, so a skill can never touch anything outside its own
+        folder. Returns ``(target, None)`` on success or ``(None, error_dict)``
+        on failure.
+        """
+        if not self.skills_dir:
+            return None, {"error": "this assistant has no skills library"}
+        slug = _slugify(name)
+        skill_dir = self.skills_dir / slug
+        if not (skill_dir / "SKILL.md").exists():
+            return None, {"error": f"Skill '{name}' not found"}
+
+        fname = (filename or "").strip()
+        if not fname or fname == "SKILL.md":
+            return None, {
+                "error": "filename is required (a companion file, not SKILL.md)"
+            }
+        # Companion files are flat inside the skill dir: reject any path component.
+        if "/" in fname or "\\" in fname or Path(fname).name != fname:
+            return None, {"error": f"Invalid file name '{filename}'"}
+
+        target = skill_dir / fname
+        # Defense in depth: the resolved path must stay within the skill folder.
+        try:
+            if not target.resolve().is_relative_to(skill_dir.resolve()):
+                return None, {"error": f"Invalid file name '{filename}'"}
+        except (OSError, ValueError):
+            return None, {"error": f"Invalid file name '{filename}'"}
+        return target, None
+
     def read_file(self, name: str, filename: str) -> dict:
         """Return the contents of a companion file bundled in a skill's folder.
 
@@ -215,36 +252,20 @@ class SkillStore:
         links them (e.g. config templates) and the agent pulls one only when
         needed, so the bulk stays out of the prompt until requested. ``filename``
         must be a bare name living directly inside the skill folder — any path
-        separator or traversal is rejected so a skill can never read outside its
-        own directory.
+        separator or traversal is rejected (see :meth:`_resolve_companion`) so a
+        skill can never read outside its own directory.
         """
-        if not self.skills_dir:
-            return {"error": "this assistant has no skills library"}
-        slug = _slugify(name)
-        skill_dir = self.skills_dir / slug
-        if not (skill_dir / "SKILL.md").exists():
-            return {"error": f"Skill '{name}' not found"}
-
-        fname = (filename or "").strip()
-        if not fname or fname == "SKILL.md":
-            return {"error": "filename is required (a companion file, not SKILL.md)"}
-        # Companion files are flat inside the skill dir: reject any path component.
-        if "/" in fname or "\\" in fname or Path(fname).name != fname:
-            return {"error": f"Invalid file name '{filename}'"}
-
-        target = skill_dir / fname
-        # Defense in depth: the resolved path must stay within the skill folder.
-        try:
-            if not target.resolve().is_relative_to(skill_dir.resolve()):
-                return {"error": f"Invalid file name '{filename}'"}
-        except (OSError, ValueError):
-            return {"error": f"Invalid file name '{filename}'"}
+        target, error = self._resolve_companion(name, filename)
+        if error:
+            return error
+        skill_dir = target.parent
+        slug = skill_dir.name
         if not target.is_file():
             return {
                 "error": f"File '{filename}' not found in skill '{slug}'",
                 "files": self._companion_files(skill_dir),
             }
-        return {"skill": slug, "file": fname, "content": target.read_text()}
+        return {"skill": slug, "file": target.name, "content": target.read_text()}
 
     def write_file(self, name: str, filename: str, content: str) -> dict:
         """Create or overwrite a companion file bundled beside a skill's SKILL.md.
@@ -261,33 +282,18 @@ class SkillStore:
             return {"error": "this assistant has no skills library"}
         if content is None:
             return {"error": "content is required for write_file"}
-        slug = _slugify(name)
-        skill_dir = self.skills_dir / slug
-        if not (skill_dir / "SKILL.md").exists():
-            return {"error": f"Skill '{name}' not found"}
+        target, error = self._resolve_companion(name, filename)
+        if error:
+            return error
 
-        fname = (filename or "").strip()
-        if not fname or fname == "SKILL.md":
-            return {"error": "filename is required (a companion file, not SKILL.md)"}
-        # Companion files are flat inside the skill dir: reject any path component.
-        if "/" in fname or "\\" in fname or Path(fname).name != fname:
-            return {"error": f"Invalid file name '{filename}'"}
-
-        target = skill_dir / fname
-        # Defense in depth: the resolved path must stay within the skill folder.
-        try:
-            if not target.resolve().is_relative_to(skill_dir.resolve()):
-                return {"error": f"Invalid file name '{filename}'"}
-        except (OSError, ValueError):
-            return {"error": f"Invalid file name '{filename}'"}
-
+        skill_dir = target.parent
         created = not target.exists()
         _atomic_write(target, content)
         return {
             "saved": True,
             "created": created,
-            "skill": slug,
-            "file": fname,
+            "skill": skill_dir.name,
+            "file": target.name,
             "files": self._companion_files(skill_dir),
         }
 
