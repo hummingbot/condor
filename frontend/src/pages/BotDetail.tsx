@@ -124,7 +124,7 @@ export function BotDetail() {
       </Link>
 
       <div className="mb-6 flex items-center gap-3">
-        <h2 className="text-xl font-bold">{bot.name}</h2>
+        <h1 className="text-xl font-bold text-[var(--color-text)]">{bot.name}</h1>
         <span className={`flex items-center gap-1.5 text-sm ${statusColor}`}>
           <Circle className="h-2 w-2 fill-current" />
           {bot.status}

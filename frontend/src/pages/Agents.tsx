@@ -547,7 +547,7 @@ export function Agents() {
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--color-text)]">Trading Agents</h1>
+          <h1 className="text-xl font-bold text-[var(--color-text)]">Trading Agents</h1>
           <p className="mt-1 text-sm text-[var(--color-text-muted)]">
             {agents.length} agent{agents.length !== 1 ? "s" : ""}
             {running.length > 0 && (

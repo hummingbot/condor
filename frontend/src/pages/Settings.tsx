@@ -24,7 +24,7 @@ export function Settings() {
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-bold text-[var(--color-text)]">Settings</h1>
+        <h1 className="text-xl font-bold text-[var(--color-text)]">Settings</h1>
         <button
           onClick={logout}
           className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"

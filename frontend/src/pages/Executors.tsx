@@ -531,7 +531,7 @@ export function Executors() {
       <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <h2 className="text-xl font-bold">Executors</h2>
+        <h1 className="text-xl font-bold text-[var(--color-text)]">Executors</h1>
       </div>
 
       {/* Filters */}

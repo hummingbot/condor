@@ -154,7 +154,7 @@ export function StrategyDetail() {
 
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h1 className="text-2xl font-bold text-[var(--color-text)]">
+            <h1 className="text-xl font-bold text-[var(--color-text)]">
               <span className="text-[var(--color-text-muted)]">{slug}</span>
               <span className="mx-1 text-[var(--color-text-muted)]">/</span>
               {strategy.name}

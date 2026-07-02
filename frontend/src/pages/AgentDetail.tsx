@@ -372,7 +372,7 @@ export function AgentDetail() {
               <div className="flex h-8 w-8 items-center justify-center rounded-md bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]">
                 <Brain className="h-4 w-4" />
               </div>
-              <h1 className="text-2xl font-bold text-[var(--color-text)]">{agent.name}</h1>
+              <h1 className="text-xl font-bold text-[var(--color-text)]">{agent.name}</h1>
             </div>
             {agent.description && (
               <p className="mt-1 text-sm text-[var(--color-text-muted)]">{agent.description}</p>
