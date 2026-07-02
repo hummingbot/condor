@@ -65,6 +65,11 @@ def clear_bot_stopping(server: str, bot_name: str) -> None:
         _stopping_bots.pop(f"{server}:{bot_name}", None)
 
 
+def clear_controller_stopping(server: str, bot_name: str, controller_id: str) -> None:
+    with _stopping_lock:
+        _stopping_controllers.pop(f"{server}:{bot_name}:{controller_id}", None)
+
+
 def get_stopping_bots(server: str) -> set[str]:
     """Return bot names currently in stopping state for a server."""
     now = time.monotonic()
@@ -99,6 +104,58 @@ def get_stopping_controllers(server: str) -> set[str]:
         for key in expired:
             _stopping_controllers.pop(key, None)
     return result
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    return (
+        obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+    )
+
+
+def _set(obj: Any, key: str, value: Any) -> None:
+    if isinstance(obj, dict):
+        obj[key] = value
+    else:
+        setattr(obj, key, value)
+
+
+def overlay_stopping_state(server: str, controllers: list, bots: list) -> None:
+    """Overlay transitional 'stopping' state onto bots and controllers.
+
+    Shared by the REST path (Pydantic models) and the WS broadcast path
+    (plain dicts); the `_get`/`_set` adapter handles both shapes.
+    """
+    stopping_bot_names = get_stopping_bots(server)
+    stopping_ctrl_keys = get_stopping_controllers(server)
+
+    if not stopping_bot_names and not stopping_ctrl_keys:
+        return
+
+    active_bot_names = set()
+    for bot in bots:
+        bot_name = _get(bot, "bot_name", "")
+        active_bot_names.add(bot_name)
+        if bot_name in stopping_bot_names:
+            if _get(bot, "status") == "running":
+                _set(bot, "status", "stopping")
+            else:
+                # Bot already reports non-running → the stop landed
+                clear_bot_stopping(server, bot_name)
+
+    # Clear stopping bots that disappeared from the response (fully stopped)
+    for sbn in stopping_bot_names:
+        if sbn not in active_bot_names:
+            clear_bot_stopping(server, sbn)
+
+    for ctrl in controllers:
+        bot_name = _get(ctrl, "bot_name")
+        controller_id = _get(ctrl, "controller_id")
+        if f"{bot_name}:{controller_id}" in stopping_ctrl_keys:
+            # If kill switch is already on, the stop landed → clear
+            if (_get(ctrl, "config") or {}).get("manual_kill_switch") is True:
+                clear_controller_stopping(server, bot_name, controller_id)
+            else:
+                _set(ctrl, "status", "stopping")
 
 
 def _parse_bot(bot: dict) -> BotInfo:
@@ -435,32 +492,7 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
         )
 
     # Overlay transitional "stopping" state
-    stopping_bot_names = get_stopping_bots(name)
-    stopping_ctrl_keys = get_stopping_controllers(name)
-
-    for bot in bots:
-        if bot.bot_name in stopping_bot_names:
-            # Bot is no longer in the active list from API → it actually stopped
-            if bot.status not in ("running",):
-                clear_bot_stopping(name, bot.bot_name)
-            else:
-                bot.status = "stopping"
-
-    # Clear stopping bots that are no longer in the response at all
-    active_bot_names = {b.bot_name for b in bots}
-    for sbn in list(stopping_bot_names):
-        if sbn not in active_bot_names:
-            clear_bot_stopping(name, sbn)
-
-    for ctrl in controllers:
-        key = f"{ctrl.bot_name}:{ctrl.controller_id}"
-        if key in stopping_ctrl_keys:
-            # If kill switch is already on, the stop landed → clear
-            if ctrl.config.get("manual_kill_switch") is True:
-                with _stopping_lock:
-                    _stopping_controllers.pop(f"{name}:{key}", None)
-            else:
-                ctrl.status = "stopping"
+    overlay_stopping_state(name, controllers, bots)
 
     return BotsPageResponse(
         controllers=controllers,
