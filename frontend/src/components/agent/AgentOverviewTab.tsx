@@ -59,6 +59,11 @@ export function MarkdownEditor({
           {saveMut.isPending ? "Saving..." : "Save"}
         </button>
       </div>
+      {saveMut.isError && (
+        <div className="rounded-md border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
+          {saveMut.error instanceof Error ? saveMut.error.message : "Save failed"}
+        </div>
+      )}
       <textarea
         value={value}
         onChange={handleChange}
