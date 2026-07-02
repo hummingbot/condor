@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -31,6 +31,7 @@ export function PriceField({
   hint?: string;
 }) {
   const isActive = activePickField === field;
+  const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(value === 0 ? "" : String(value));
 
@@ -42,7 +43,7 @@ export function PriceField({
 
   return (
     <div>
-      <label className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+      <label htmlFor={id} className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
         {label}
         {value > 0 && (
           valid
@@ -52,6 +53,7 @@ export function PriceField({
       </label>
       <div className="flex gap-1">
         <input
+          id={id}
           ref={inputRef}
           type="number"
           step="any"
@@ -114,6 +116,7 @@ export function NumberField({
   isPercent?: boolean;
 }) {
   const displayValue = isPercent ? value * 100 : value;
+  const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(displayValue === 0 ? "" : String(displayValue));
 
@@ -125,9 +128,10 @@ export function NumberField({
 
   return (
     <div>
-      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
+      <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
       <div className="flex items-center gap-1">
         <input
+          id={id}
           ref={inputRef}
           type="number"
           step={isPercent ? step * 100 : step}
@@ -186,6 +190,7 @@ export function SelectField({
       <label className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
       <button
         type="button"
+        aria-label={label}
         onClick={() => setOpen(!open)}
         className="flex w-full items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]"
       >
@@ -335,6 +340,7 @@ export function AmountField({
   pair?: string;
 }) {
   const [inQuote, setInQuote] = useState(false);
+  const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const baseAsset = pair?.split("-")[0] ?? "base";
@@ -377,11 +383,12 @@ export function AmountField({
 
   return (
     <div>
-      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">
+      <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">
         Amount ({inQuote ? quoteAsset : baseAsset})
       </label>
       <div className="flex items-center gap-1">
         <input
+          id={id}
           ref={inputRef}
           type="number"
           step={inQuote && currentPrice ? step * currentPrice : step}
@@ -418,12 +425,14 @@ export function LeverageField({
   dispatch: FieldDispatch;
   isSpot?: boolean;
 }) {
+  const id = useId();
   if (isSpot) {
     return (
       <div>
-        <label className="mb-1 block text-xs text-[var(--color-text-muted)]">Leverage</label>
+        <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">Leverage</label>
         <div className="flex items-center gap-1">
           <input
+            id={id}
             type="text"
             value="1"
             disabled

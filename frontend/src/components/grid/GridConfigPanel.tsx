@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -37,6 +37,7 @@ function PriceField({
   hint?: string;
 }) {
   const isActive = activePickField === field;
+  const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(value === 0 ? "" : String(value));
 
@@ -49,7 +50,7 @@ function PriceField({
 
   return (
     <div>
-      <label className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+      <label htmlFor={id} className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
         {label}
         {value > 0 && (
           valid
@@ -59,6 +60,7 @@ function PriceField({
       </label>
       <div className="flex gap-1">
         <input
+          id={id}
           ref={inputRef}
           type="number"
           step="any"
@@ -119,6 +121,7 @@ function NumberField({
   isPercent?: boolean;
 }) {
   const displayValue = isPercent ? value * 100 : value;
+  const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(displayValue === 0 ? "" : String(displayValue));
 
@@ -130,9 +133,10 @@ function NumberField({
 
   return (
     <div>
-      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
+      <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
       <div className="flex items-center gap-1">
         <input
+          id={id}
           ref={inputRef}
           type="number"
           step={isPercent ? step * 100 : step}
