@@ -236,7 +236,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     onClick={() =>
                       chat.resolvePermission(chat.permissionRequest!.request_id, true)
                     }
-                    className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-500"
+                    className="rounded bg-[var(--color-green)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
                   >
                     Approve
                   </button>
@@ -244,7 +244,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     onClick={() =>
                       chat.resolvePermission(chat.permissionRequest!.request_id, false)
                     }
-                    className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-500"
+                    className="rounded bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
                   >
                     Reject
                   </button>
