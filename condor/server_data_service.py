@@ -19,7 +19,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -59,43 +59,27 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.PORTFOLIO: DataTypeDefaults(interval=10, ttl=60, stale_threshold=5),
     ServerDataType.PRICES: DataTypeDefaults(interval=3, ttl=30, stale_threshold=2),
     ServerDataType.POSITIONS: DataTypeDefaults(interval=10, ttl=60, stale_threshold=5),
-    ServerDataType.ACTIVE_ORDERS: DataTypeDefaults(interval=10, ttl=60, stale_threshold=5),
-    ServerDataType.TRADING_RULES: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
-    ServerDataType.CONNECTORS: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
+    ServerDataType.ACTIVE_ORDERS: DataTypeDefaults(
+        interval=10, ttl=60, stale_threshold=5
+    ),
+    ServerDataType.TRADING_RULES: DataTypeDefaults(
+        interval=300, ttl=600, stale_threshold=30
+    ),
+    ServerDataType.CONNECTORS: DataTypeDefaults(
+        interval=300, ttl=600, stale_threshold=30
+    ),
     ServerDataType.BOTS_STATUS: DataTypeDefaults(interval=5, ttl=30, stale_threshold=3),
     ServerDataType.EXECUTORS: DataTypeDefaults(interval=2, ttl=30, stale_threshold=1),
     ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120, stale_threshold=10),
-    ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
-    ServerDataType.SERVER_STATUS: DataTypeDefaults(interval=60, ttl=120, stale_threshold=15),
-    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
-}
-
-
-# Mapping from old DataManager DataType names to ServerDataType
-_OLD_DATATYPE_MAP = {
-    "CEX_BALANCES": ServerDataType.PORTFOLIO,
-    "CEX_PRICES": ServerDataType.PRICES,
-    "CEX_POSITIONS": ServerDataType.POSITIONS,
-    "CEX_ACTIVE_ORDERS": ServerDataType.ACTIVE_ORDERS,
-    "CEX_TRADING_RULES": ServerDataType.TRADING_RULES,
-    "CEX_CONNECTORS": ServerDataType.CONNECTORS,
-    "PORTFOLIO": ServerDataType.PORTFOLIO,
-    "BOTS_STATUS": ServerDataType.BOTS_STATUS,
-    "EXECUTORS": ServerDataType.EXECUTORS,
-}
-
-# Mapping from old invalidation group names to ServerDataTypes
-_OLD_GROUP_MAP = {
-    "cex_balances": [ServerDataType.PORTFOLIO],
-    "cex_prices": [ServerDataType.PRICES],
-    "cex_positions": [ServerDataType.POSITIONS],
-    "cex_orders": [ServerDataType.ACTIVE_ORDERS],
-    "cex_rules": [ServerDataType.TRADING_RULES],
-    "cex_connectors": [ServerDataType.CONNECTORS],
-    "portfolio": [ServerDataType.PORTFOLIO],
-    "bots": [ServerDataType.BOTS_STATUS],
-    "executors": [ServerDataType.EXECUTORS],
-    "all": list(ServerDataType),
+    ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(
+        interval=300, ttl=600, stale_threshold=30
+    ),
+    ServerDataType.SERVER_STATUS: DataTypeDefaults(
+        interval=60, ttl=120, stale_threshold=15
+    ),
+    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(
+        interval=300, ttl=600, stale_threshold=30
+    ),
 }
 
 
@@ -225,10 +209,14 @@ class RateLimiter:
     def _refill(self) -> None:
         now = time.monotonic()
         elapsed_sec = now - self._last_refill_sec
-        self._tokens_sec = min(self._per_second, self._tokens_sec + elapsed_sec * self._per_second)
+        self._tokens_sec = min(
+            self._per_second, self._tokens_sec + elapsed_sec * self._per_second
+        )
         self._last_refill_sec = now
         elapsed_min = now - self._last_refill_min
-        self._tokens_min = min(self._per_minute, self._tokens_min + elapsed_min * (self._per_minute / 60.0))
+        self._tokens_min = min(
+            self._per_minute, self._tokens_min + elapsed_min * (self._per_minute / 60.0)
+        )
         self._last_refill_min = now
 
 
@@ -264,7 +252,7 @@ class ServerDataService:
         self._poll_task: Optional[asyncio.Task] = None
         self._running = False
         self._last_cleanup = time.time()
-        # Listeners for DataManager compatibility (sync callbacks)
+        # Sync listeners (e.g. WebSocketManager broadcasts)
         self._listeners: List[Callable] = []
 
     # ------ Fetch registry ------
@@ -277,6 +265,7 @@ class ServerDataService:
 
     async def _get_client(self, server_name: str):
         from config_manager import get_config_manager
+
         return await get_config_manager().get_client(server_name)
 
     # ------ Rate limiter per server ------
@@ -326,7 +315,10 @@ class ServerDataService:
 
         logger.debug(
             "SDS subscribe: %s -> %s:%s (interval=%.1fs, subs=%d)",
-            subscriber_id, server, data_type.value, interval,
+            subscriber_id,
+            server,
+            data_type.value,
+            interval,
             len(self._subscriptions[key]),
         )
 
@@ -381,7 +373,9 @@ class ServerDataService:
         # No subscribers — use idle TTL
         return entry.value if age <= defaults.ttl else None
 
-    async def get_or_fetch(self, server: str, data_type: ServerDataType, **params) -> Optional[Any]:
+    async def get_or_fetch(
+        self, server: str, data_type: ServerDataType, **params
+    ) -> Optional[Any]:
         """Return cached data if fresh, otherwise fetch. For REST/one-shot reads."""
         key = CacheKey.make(server, data_type, **params)
 
@@ -393,7 +387,9 @@ class ServerDataService:
         # Fetch fresh
         return await self._fetch_and_cache(key)
 
-    def get_entry(self, server: str, data_type: ServerDataType, **params) -> Optional[CacheEntry]:
+    def get_entry(
+        self, server: str, data_type: ServerDataType, **params
+    ) -> Optional[CacheEntry]:
         """Get the full cache entry (for age/metadata checks)."""
         key = CacheKey.make(server, data_type, **params)
         return self._cache.get(key)
@@ -422,30 +418,28 @@ class ServerDataService:
     def invalidate(self, server: str, *data_types: ServerDataType) -> None:
         """Invalidate cache entries for specific data types on a server."""
         keys_to_remove = [
-            k for k in self._cache
-            if k.server == server and k.data_type in data_types
+            k for k in self._cache if k.server == server and k.data_type in data_types
         ]
         for k in keys_to_remove:
             del self._cache[k]
         if keys_to_remove:
-            logger.debug("SDS invalidated %d entries for %s: %s", len(keys_to_remove), server,
-                         [dt.value for dt in data_types])
-
-    def invalidate_by_groups(self, server: str, *groups: str) -> None:
-        """Invalidate using old DataManager group names (compatibility)."""
-        data_types: Set[ServerDataType] = set()
-        for group in groups:
-            mapped = _OLD_GROUP_MAP.get(group, [])
-            data_types.update(mapped)
-        if data_types:
-            self.invalidate(server, *data_types)
+            logger.debug(
+                "SDS invalidated %d entries for %s: %s",
+                len(keys_to_remove),
+                server,
+                [dt.value for dt in data_types],
+            )
 
     def invalidate_server(self, server: str) -> None:
         """Clear all cached data for a server."""
         keys_to_remove = [k for k in self._cache if k.server == server]
         for k in keys_to_remove:
             del self._cache[k]
-        logger.info("SDS invalidated all cache for server %s (%d entries)", server, len(keys_to_remove))
+        logger.info(
+            "SDS invalidated all cache for server %s (%d entries)",
+            server,
+            len(keys_to_remove),
+        )
 
     # ------ Listener compatibility (for WebSocketManager) ------
 
@@ -460,7 +454,6 @@ class ServerDataService:
         """Notify listeners with server/channel/data_type/value arguments.
 
         The WS manager uses the data_type name string to map to channels.
-        No longer imports from data_manager — passes the ServerDataType directly.
         """
         if not self._listeners:
             return
@@ -528,10 +521,14 @@ class ServerDataService:
         # Launch all core subscriptions concurrently
         async def _sub(name: str, dt: ServerDataType) -> bool:
             try:
-                await self.subscribe(server=name, data_type=dt, subscriber_id=subscriber_id)
+                await self.subscribe(
+                    server=name, data_type=dt, subscriber_id=subscriber_id
+                )
                 return True
             except Exception as e:
-                logger.debug("SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e)
+                logger.debug(
+                    "SDS auto-subscribe failed for %s/%s: %s", name, dt.value, e
+                )
                 return False
 
         tasks = [_sub(name, dt) for name in servers for dt in core_types]
@@ -539,7 +536,10 @@ class ServerDataService:
         count = sum(1 for r in results if r)
 
         # Pre-subscribe trading rules concurrently across servers
-        tr_tasks = [self._subscribe_trading_rules_for_server(name, subscriber_id) for name in servers]
+        tr_tasks = [
+            self._subscribe_trading_rules_for_server(name, subscriber_id)
+            for name in servers
+        ]
         tr_results = await asyncio.gather(*tr_tasks, return_exceptions=True)
         for r in tr_results:
             if isinstance(r, int):
@@ -552,9 +552,13 @@ class ServerDataService:
             key = CacheKey.make(name, ServerDataType.CONNECTORS)
             subs = self._subscriptions.get(key, {})
             if subscriber_id in subs:
-                subs[subscriber_id].callback = self._make_connectors_change_callback(name)
+                subs[subscriber_id].callback = self._make_connectors_change_callback(
+                    name
+                )
 
-        logger.info("SDS auto-subscribe: %d subscriptions for %d servers", count, len(servers))
+        logger.info(
+            "SDS auto-subscribe: %d subscriptions for %d servers", count, len(servers)
+        )
 
     async def _subscribe_trading_rules_for_server(
         self, server_name: str, subscriber_id: str = "_auto"
@@ -566,7 +570,8 @@ class ServerDataService:
         count = 0
         for connector in connectors:
             key = CacheKey.make(
-                server_name, ServerDataType.TRADING_RULES,
+                server_name,
+                ServerDataType.TRADING_RULES,
                 connector_name=connector,
             )
             if key in self._subscriptions:
@@ -585,19 +590,23 @@ class ServerDataService:
                     self._cache.pop(key, None)  # Clean up error-only entry
                     logger.info(
                         "SDS: skipping trading rules for %s/%s (connector unavailable)",
-                        server_name, connector,
+                        server_name,
+                        connector,
                     )
                     continue
                 count += 1
             except Exception as e:
                 logger.debug(
                     "SDS auto-subscribe failed for %s/trading_rules/%s: %s",
-                    server_name, connector, e,
+                    server_name,
+                    connector,
+                    e,
                 )
         return count
 
     def _make_connectors_change_callback(self, server_name: str) -> Callable:
         """Create a callback that auto-subscribes TRADING_RULES when CONNECTORS change."""
+
         async def _on_connectors_change(key: CacheKey, old_value, new_value):
             if not new_value:
                 return
@@ -605,8 +614,10 @@ class ServerDataService:
             if added:
                 logger.info(
                     "SDS: auto-subscribed %d new TRADING_RULES for %s after CONNECTORS update",
-                    added, server_name,
+                    added,
+                    server_name,
                 )
+
         return _on_connectors_change
 
     def stop(self) -> None:
@@ -657,7 +668,7 @@ class ServerDataService:
 
                 # Exponential backoff on consecutive errors
                 if entry.consecutive_errors >= 3:
-                    backoff = min(60, 2 ** entry.consecutive_errors)
+                    backoff = min(60, 2**entry.consecutive_errors)
                     if now - entry.last_error_at < backoff:
                         continue
 
@@ -692,7 +703,9 @@ class ServerDataService:
             client = await self._get_client(key.server)
             result = await spec.fetch_func(client, **key.params_dict)
         except Exception as e:
-            logger.debug("SDS fetch failed %s:%s: %s", key.server, key.data_type.value, e)
+            logger.debug(
+                "SDS fetch failed %s:%s: %s", key.server, key.data_type.value, e
+            )
             health.record_error()
 
             # Record error on cache entry
@@ -704,8 +717,11 @@ class ServerDataService:
             else:
                 # Create error-only entry
                 self._cache[key] = CacheEntry(
-                    key=key, value=None, fetched_at=0.0,
-                    consecutive_errors=1, last_error_at=time.time(),
+                    key=key,
+                    value=None,
+                    fetched_at=0.0,
+                    consecutive_errors=1,
+                    last_error_at=time.time(),
                 )
             return None
 
@@ -802,18 +818,20 @@ def register_default_fetches() -> None:
     All fetch functions live in condor.fetchers — no handler imports.
     """
     from condor.fetchers import (
-        fetch_portfolio,
-        fetch_current_price as _fetch_price,
-        fetch_positions,
         fetch_active_orders,
-        fetch_trading_rules,
-        fetch_connectors,
         fetch_available_cex_connectors,
-        fetch_executors,
-        fetch_bots_status,
         fetch_bot_runs,
+        fetch_bots_status,
         fetch_candle_connectors,
+        fetch_connectors,
+    )
+    from condor.fetchers import fetch_current_price as _fetch_price
+    from condor.fetchers import (
+        fetch_executors,
+        fetch_portfolio,
+        fetch_positions,
         fetch_server_status,
+        fetch_trading_rules,
     )
 
     sds = get_server_data_service()
@@ -821,8 +839,11 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.PORTFOLIO, fetch_portfolio)
 
     # Prices needs a thin wrapper to match the (client, **params) signature
-    async def _fetch_prices(client, connector_name: str = "", trading_pair: str = "", **_kw):
+    async def _fetch_prices(
+        client, connector_name: str = "", trading_pair: str = "", **_kw
+    ):
         return await _fetch_price(client, connector_name, trading_pair)
+
     sds.register_fetch(ServerDataType.PRICES, _fetch_prices)
 
     sds.register_fetch(ServerDataType.POSITIONS, fetch_positions)
@@ -836,4 +857,7 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, fetch_candle_connectors)
     sds.register_fetch(ServerDataType.SERVER_STATUS, fetch_server_status)
 
-    logger.info("ServerDataService: registered fetch functions for %d data types", len(sds._fetch_registry))
+    logger.info(
+        "ServerDataService: registered fetch functions for %d data types",
+        len(sds._fetch_registry),
+    )

@@ -26,7 +26,6 @@ _SDT_TO_CHANNEL_PREFIX = {
     "PORTFOLIO": "portfolio",
     "BOTS_STATUS": "bots",
     "PRICES": "prices",
-    "CEX_PRICES": "prices",  # Legacy DataManager name
 }
 
 # Interval string -> seconds for buffer sizing
@@ -837,7 +836,7 @@ class WebSocketManager:
             return
 
         # Build channel name
-        if dt_name in ("CEX_PRICES", "PRICES"):
+        if dt_name == "PRICES":
             parts = cache_key.split(":")
             if len(parts) >= 3:
                 channel = f"prices:{server_name}:{parts[1]}:{parts[2]}"
@@ -854,10 +853,6 @@ class WebSocketManager:
         # (the WS stream handler already broadcasts directly)
         if dt_name == "BOTS_STATUS" and channel in self._bots_ws_tasks:
             task = self._bots_ws_tasks.get(channel)
-            if task and not task.done():
-                return
-        if dt_name == "EXECUTORS" and channel in self._executor_tasks:
-            task = self._executor_tasks.get(channel)
             if task and not task.done():
                 return
 

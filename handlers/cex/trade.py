@@ -174,7 +174,7 @@ async def handle_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     context.user_data["cex_state"] = "trade"
 
-    # Set DataManager context for active TTLs and background refresh
+    # Subscribe to SDS data types for active trading refresh
     params = context.user_data.get("trade_params", {})
     user_id = context.user_data.get("_user_id")
     if user_id:
@@ -1313,7 +1313,7 @@ async def handle_trade_connector_select(
     _invalidate_trade_cache(context.user_data)
     invalidate_cache(context.user_data, "balances", "positions", "trading_rules")
 
-    # Invalidate DataManager and update context for new connector
+    # Invalidate SDS cache and update subscription for new connector
     user_id = context.user_data.get("_user_id")
     from handlers.config.user_preferences import get_active_server
 
@@ -1561,7 +1561,7 @@ async def handle_trade_execute(
         # Invalidate cache and flag for refresh on next fetch
         invalidate_cache(context.user_data, "balances", "orders", "positions")
         context.user_data["_force_cex_balance_refresh"] = True
-        # Also invalidate DataManager (server-scoped)
+        # Also invalidate SDS cache (server-scoped)
         from handlers.config.user_preferences import get_active_server
 
         exec_server = get_active_server(context.user_data)
@@ -1644,7 +1644,7 @@ async def _update_trade_menu_after_input(
         account = get_clob_account(context.user_data)
         is_perpetual = _is_perpetual_connector(connector)
 
-        # Get cached data from DataManager (server-scoped), fall back to old cache
+        # Get cached data from SDS (server-scoped), fall back to old cache
         from handlers.config.user_preferences import get_active_server
 
         input_server = get_active_server(context.user_data)

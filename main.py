@@ -248,7 +248,6 @@ def reload_handlers():
         "utils.auth",
         "utils.telegram_formatters",
         "config_manager",
-        "condor.data_manager",
     ]
 
     for module_name in modules_to_reload:
@@ -263,8 +262,6 @@ def reload_handlers():
         sds_register()
     except Exception as e:
         logger.warning(f"Failed to re-register SDS fetches: {e}")
-
-    # DataManager register_default_fetches is now a no-op (SDS handles registrations)
 
 
 def register_handlers(application: Application) -> None:
@@ -284,14 +281,11 @@ def register_handlers(application: Application) -> None:
         new_bot_command,
     )
     from handlers.cex import cex_callback_handler
-    from handlers.delegations import (
-        delegations_callback_handler,
-        delegations_command,
-    )
     from handlers.config import get_config_callback_handler, get_modify_value_handler
     from handlers.config.api_keys import keys_command
     from handlers.config.gateway import gateway_command
     from handlers.config.servers import servers_command
+    from handlers.delegations import delegations_callback_handler, delegations_command
     from handlers.dex import dex_callback_handler, lp_command
     from handlers.executors import executors_callback_handler, executors_command
     from handlers.memory import memory_callback_handler, memory_command
@@ -318,9 +312,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
-    application.add_handler(
-        CommandHandler("delegations", delegations_command)
-    )
+    application.add_handler(CommandHandler("delegations", delegations_command))
     application.add_handler(CommandHandler("memory", memory_command))
 
     # Add configuration commands (direct access)
@@ -520,11 +512,6 @@ async def post_init(application: Application) -> None:
     sds = get_server_data_service()
     sds.start()
     await sds.auto_subscribe_servers()
-
-    # DataManager legacy wrapper — kept for any unmigrated code
-    from condor.data_manager import get_data_manager
-
-    get_data_manager().start()
 
     # Start agent session health monitor
     from handlers.agents.session import start_health_monitor
@@ -769,9 +756,7 @@ async def _run_dual(application: Application) -> None:
 
     try:
         # Exit on a shutdown signal OR if the web server stops/crashes on its own.
-        await asyncio.wait(
-            {web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
-        )
+        await asyncio.wait({web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         # Always run teardown — even if the run raised — so post_shutdown
         # (destroy_all_sessions + engine.stop) reaps every ACP subprocess tree.
