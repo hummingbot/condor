@@ -259,52 +259,17 @@ class WebSocketManager:
             handle.cancel()
         self._candle_teardown_timers.clear()
 
-        for task in self._candle_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._candle_tasks.clear()
-
-        for task in self._candle_poll_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._candle_poll_tasks.clear()
+        # Cancel every registered stream task (all 8 stream types), plus the
+        # candle REST poll fallbacks which live outside the registry.
+        task_dicts = [spec["task_dict"] for spec in self._stream_registry().values()]
+        task_dicts.append(self._candle_poll_tasks)
+        for tasks in task_dicts:
+            for task in tasks.values():
+                if not task.done():
+                    task.cancel()
+            tasks.clear()
         self._last_candle_ws_update.clear()
         self._candle_first_msg_logged.clear()
-
-        for task in self._trade_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._trade_tasks.clear()
-
-        for task in self._executor_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._executor_tasks.clear()
-
-        for task in self._order_book_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._order_book_tasks.clear()
-
-        for task in self._bots_ws_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._bots_ws_tasks.clear()
-
-        for task in self._positions_ws_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._positions_ws_tasks.clear()
-
-        for task in self._performance_ws_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._performance_ws_tasks.clear()
-
-        for task in self._controller_perf_tasks.values():
-            if not task.done():
-                task.cancel()
-        self._controller_perf_tasks.clear()
 
         # Cancel any still-pending one-shot tasks (snapshot: cancel() fires the
         # done-callback that mutates the set).
@@ -357,22 +322,9 @@ class WebSocketManager:
             self._connections.remove(conn)
             logger.info("WS disconnected: user %s", conn.user_id)
             for channel in list(conn.channels):
-                if channel.startswith("candles:"):
-                    self._maybe_stop_candle_stream(channel)
-                elif channel.startswith("trades:"):
-                    self._maybe_stop_trade_stream(channel)
-                elif channel.startswith("executors:"):
-                    self._maybe_stop_executor_stream(channel)
-                elif channel.startswith("orderbook:"):
-                    self._maybe_stop_order_book_stream(channel)
-                elif channel.startswith("bots_ws:"):
-                    self._maybe_stop_bots_ws_stream(channel)
-                elif channel.startswith("positions_ws:"):
-                    self._maybe_stop_positions_ws_stream(channel)
-                elif channel.startswith("performance_ws:"):
-                    self._maybe_stop_performance_ws_stream(channel)
-                elif channel.startswith("controller_perf:"):
-                    self._maybe_stop_controller_perf_stream(channel)
+                prefix = channel.split(":", 1)[0]
+                if prefix in self._stream_registry():
+                    self._maybe_stop_stream(prefix, channel)
                 else:
                     self._maybe_unsub_sds(channel)
 
@@ -433,38 +385,17 @@ class WebSocketManager:
                 return
             conn.channels.add(channel)
             logger.info("WS subscribe: user=%s channel=%s", conn.user_id, channel)
-            # Send last known data immediately (candles use buffer instead)
-            if channel.startswith("candles:"):
+            prefix = channel.split(":", 1)[0]
+            if prefix == "candles":
+                # Candles are special: snapshot comes from the candle buffer
+                # (not _last_data) and the subscribe carries a duration param.
                 duration = msg.get("duration")  # seconds, sent by frontend
                 await self._handle_candle_subscribe(conn, channel, duration)
-            elif channel.startswith("orderbook:"):
+            elif prefix in self._stream_registry():
+                # Send last known data immediately, then ensure the stream runs
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
-                self._ensure_order_book_stream(channel)
-            elif channel.startswith("trades:"):
-                if channel in self._last_data:
-                    await self._send(conn, channel, self._last_data[channel])
-                self._ensure_trade_stream(channel)
-            elif channel.startswith("executors:"):
-                if channel in self._last_data:
-                    await self._send(conn, channel, self._last_data[channel])
-                self._ensure_executor_stream(channel)
-            elif channel.startswith("bots_ws:"):
-                if channel in self._last_data:
-                    await self._send(conn, channel, self._last_data[channel])
-                self._ensure_bots_ws_stream(channel)
-            elif channel.startswith("positions_ws:"):
-                if channel in self._last_data:
-                    await self._send(conn, channel, self._last_data[channel])
-                self._ensure_positions_ws_stream(channel)
-            elif channel.startswith("performance_ws:"):
-                if channel in self._last_data:
-                    await self._send(conn, channel, self._last_data[channel])
-                self._ensure_performance_ws_stream(channel)
-            elif channel.startswith("controller_perf:"):
-                if channel in self._last_data:
-                    await self._send(conn, channel, self._last_data[channel])
-                self._ensure_controller_perf_stream(channel)
+                self._ensure_stream(prefix, channel)
             else:
                 if channel in self._last_data:
                     await self._send(conn, channel, self._last_data[channel])
@@ -472,22 +403,9 @@ class WebSocketManager:
 
         elif action == "unsubscribe" and channel:
             conn.channels.discard(channel)
-            if channel.startswith("candles:"):
-                self._maybe_stop_candle_stream(channel)
-            elif channel.startswith("orderbook:"):
-                self._maybe_stop_order_book_stream(channel)
-            elif channel.startswith("trades:"):
-                self._maybe_stop_trade_stream(channel)
-            elif channel.startswith("executors:"):
-                self._maybe_stop_executor_stream(channel)
-            elif channel.startswith("bots_ws:"):
-                self._maybe_stop_bots_ws_stream(channel)
-            elif channel.startswith("positions_ws:"):
-                self._maybe_stop_positions_ws_stream(channel)
-            elif channel.startswith("performance_ws:"):
-                self._maybe_stop_performance_ws_stream(channel)
-            elif channel.startswith("controller_perf:"):
-                self._maybe_stop_controller_perf_stream(channel)
+            prefix = channel.split(":", 1)[0]
+            if prefix in self._stream_registry():
+                self._maybe_stop_stream(prefix, channel)
             else:
                 self._maybe_unsub_sds(channel)
 
@@ -533,7 +451,7 @@ class WebSocketManager:
             await self._send(conn, channel, {"type": "candles", "data": sorted_candles})
 
         # If the stream task is still running (kept alive during grace period), skip restart
-        self._ensure_candle_stream(channel)
+        self._ensure_stream("candles", channel)
 
     async def _handle_candle_duration_change(
         self, conn: _Connection, channel: str, duration: int
@@ -881,46 +799,40 @@ class WebSocketManager:
     async def _send(self, conn: _Connection, channel: str, data: Any) -> None:
         await conn.ws.send_json({"channel": channel, "data": data, "ts": time.time()})
 
-    # -- Candle streaming --
-
-    def _ensure_candle_stream(self, channel: str) -> None:
-        self._ensure_stream("candle", channel)
+    # -- Generic stream lifecycle --
 
     def _has_subscribers(self, channel: str) -> bool:
         """True if any connection is currently subscribed to the channel."""
         return any(channel in c.channels for c in self._connections)
 
-    # -- Generic stream lifecycle --
-    #
     # All 8 stream types share the same start/stop lifecycle; only candle needs
     # a non-uniform stop (deferred teardown with keep-alive) supplied via
-    # ``teardown_hook``. The thin ``_ensure_*_stream`` / ``_maybe_stop_*_stream``
-    # wrappers delegate to ``_ensure_stream`` / ``_maybe_stop_stream`` so the
-    # lifecycle logic lives in one place.
+    # ``teardown_hook``. The registry is keyed by channel prefix so that
+    # subscribe/unsubscribe/disconnect resolve a stream with one lookup.
     def _stream_registry(self) -> dict:
-        """stream_type -> {task_dict, factory, start_log, stop_log, teardown_hook?}."""
+        """channel prefix -> {task_dict, factory, start_log, stop_log, teardown_hook?}."""
         if self._stream_registry_cache is None:
             self._stream_registry_cache = {
-                "candle": {
+                "candles": {
                     "task_dict": self._candle_tasks,
                     "factory": self._candle_stream,
                     "start_log": "Started candle stream for %s",
                     # Non-uniform stop: deferred teardown with keep-alive.
                     "teardown_hook": self._maybe_stop_candle_stream,
                 },
-                "trade": {
+                "trades": {
                     "task_dict": self._trade_tasks,
                     "factory": self._trade_stream,
                     "start_log": "Started trade stream for %s",
                     "stop_log": "Stopped trade stream for %s",
                 },
-                "order_book": {
+                "orderbook": {
                     "task_dict": self._order_book_tasks,
                     "factory": self._order_book_stream,
                     "start_log": "Started order book stream for %s",
                     "stop_log": "Stopped order book stream for %s",
                 },
-                "executor": {
+                "executors": {
                     "task_dict": self._executor_tasks,
                     "factory": self._executor_stream,
                     "start_log": "Started executor stream for %s",
@@ -953,16 +865,16 @@ class WebSocketManager:
             }
         return self._stream_registry_cache
 
-    def _ensure_stream(self, stream_type: str, channel: str) -> None:
-        spec = self._stream_registry()[stream_type]
+    def _ensure_stream(self, prefix: str, channel: str) -> None:
+        spec = self._stream_registry()[prefix]
         tasks = spec["task_dict"]
         if channel in tasks and not tasks[channel].done():
             return
         tasks[channel] = asyncio.create_task(spec["factory"](channel))
         logger.info(spec["start_log"], channel)
 
-    def _maybe_stop_stream(self, stream_type: str, channel: str) -> None:
-        spec = self._stream_registry()[stream_type]
+    def _maybe_stop_stream(self, prefix: str, channel: str) -> None:
+        spec = self._stream_registry()[prefix]
         teardown_hook = spec.get("teardown_hook")
         if teardown_hook is not None:
             teardown_hook(channel)
@@ -1291,12 +1203,6 @@ class WebSocketManager:
 
     # -- Trade streaming --
 
-    def _ensure_trade_stream(self, channel: str) -> None:
-        self._ensure_stream("trade", channel)
-
-    def _maybe_stop_trade_stream(self, channel: str) -> None:
-        self._maybe_stop_stream("trade", channel)
-
     async def _trade_stream(self, channel: str) -> None:
         parts = channel.split(":")
         if len(parts) < 4:
@@ -1427,12 +1333,6 @@ class WebSocketManager:
 
     # -- Order book streaming --
 
-    def _ensure_order_book_stream(self, channel: str) -> None:
-        self._ensure_stream("order_book", channel)
-
-    def _maybe_stop_order_book_stream(self, channel: str) -> None:
-        self._maybe_stop_stream("order_book", channel)
-
     async def _order_book_stream(self, channel: str) -> None:
         parts = channel.split(":")
         if len(parts) < 4:
@@ -1531,12 +1431,6 @@ class WebSocketManager:
                 backoff = min(backoff * 2, 60)
 
     # -- Executor streaming (via Hummingbot WS) --
-
-    def _ensure_executor_stream(self, channel: str) -> None:
-        self._ensure_stream("executor", channel)
-
-    def _maybe_stop_executor_stream(self, channel: str) -> None:
-        self._maybe_stop_stream("executor", channel)
 
     async def _executor_stream(self, channel: str) -> None:
         parts = channel.split(":")
@@ -1708,12 +1602,6 @@ class WebSocketManager:
 
     # -- Bots WS streaming (via Hummingbot /ws/executors all_bots_status) --
 
-    def _ensure_bots_ws_stream(self, channel: str) -> None:
-        self._ensure_stream("bots_ws", channel)
-
-    def _maybe_stop_bots_ws_stream(self, channel: str) -> None:
-        self._maybe_stop_stream("bots_ws", channel)
-
     async def _bots_ws_stream(self, channel: str) -> None:
         """Stream all_bots_status from Hummingbot /ws/executors and update SDS cache."""
         parts = channel.split(":")
@@ -1818,12 +1706,6 @@ class WebSocketManager:
 
     # -- Positions WS streaming (via Hummingbot /ws/executors positions) --
 
-    def _ensure_positions_ws_stream(self, channel: str) -> None:
-        self._ensure_stream("positions_ws", channel)
-
-    def _maybe_stop_positions_ws_stream(self, channel: str) -> None:
-        self._maybe_stop_stream("positions_ws", channel)
-
     async def _positions_ws_stream(self, channel: str) -> None:
         """Stream positions from Hummingbot /ws/executors and update SDS cache."""
         parts = channel.split(":")
@@ -1897,12 +1779,6 @@ class WebSocketManager:
 
     # -- Performance WS streaming (via Hummingbot /ws/executors performance) --
 
-    def _ensure_performance_ws_stream(self, channel: str) -> None:
-        self._ensure_stream("performance_ws", channel)
-
-    def _maybe_stop_performance_ws_stream(self, channel: str) -> None:
-        self._maybe_stop_stream("performance_ws", channel)
-
     async def _performance_ws_stream(self, channel: str) -> None:
         """Stream performance from Hummingbot /ws/executors and update SDS cache."""
         parts = channel.split(":")
@@ -1966,12 +1842,6 @@ class WebSocketManager:
                 backoff = min(backoff * 2, 60)
 
     # -- Controller Performance polling stream --
-
-    def _ensure_controller_perf_stream(self, channel: str) -> None:
-        self._ensure_stream("controller_perf", channel)
-
-    def _maybe_stop_controller_perf_stream(self, channel: str) -> None:
-        self._maybe_stop_stream("controller_perf", channel)
 
     async def _controller_perf_stream(self, channel: str) -> None:
         """Poll latest controller performance every 30s and broadcast snapshots."""
