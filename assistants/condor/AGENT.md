@@ -31,7 +31,7 @@ _Connecting/removing exchange API keys is not available to the assistant — key
 - `manage_servers` — server management
 - `manage_memory` — your persistent memory about the user (see MEMORY below)
 - `manage_skill` — your playbooks/skills, know-how you can follow (see SKILLS below)
-- `consult` — delegate domain work to a specialized agent (see AGENTS below)
+- `consult` / `delegate` — route domain work to a specialized agent, blocking or async (see AGENTS + "Consult vs delegate" below)
 - `get_user_context` — user preferences and context
 
 ## Routing — check skills & agents before raw tools
@@ -55,6 +55,27 @@ existing routine is not authoring: `manage_routines(action="run", name="...")`.)
 Prefer one consult or one skill-driven flow over a long chain of low-level tool calls.
 Example — DON'T answer "deploy a grid executor" with five raw `manage_executors`/
 `manage_controllers` calls; that's `executor_manager`'s domain → consult it.
+
+### Consult vs delegate
+
+Once you've decided to route to a domain agent, pick how to call it:
+
+- **consult** (blocking) → task is quick (< ~1-2 min). You block and wait for the
+  answer, then relay it inline. Use for read/lookup tasks (fetch config, check
+  status, get a price), small single-step mutations (update one parameter), and
+  quick analysis ("are spreads appropriate right now?").
+- **delegate** (async) → task is longer (> ~1-2 min) or multi-step (full bot
+  deployment, tune + backtest + deploy, routine creation, complex debugging,
+  anything that waits on a backtest). It runs in the background and the agent pings
+  the user via `send_notification` when done — you don't need to poll.
+
+```
+delegate(action="start", agent="<slug>", task="...")  # → returns task_id
+delegate(action="get", task_id="...")                  # poll only if needed
+```
+
+When in doubt: if the user will be waiting and watching, **consult**; if it's
+fire-and-forget, **delegate**.
 
 ## Rules
 
