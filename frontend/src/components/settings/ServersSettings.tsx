@@ -228,10 +228,15 @@ export function ServersSettings() {
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => deleteMut.mutate(s.name)}
-                        className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10"
+                        disabled={deleteMut.isPending}
+                        className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10 disabled:opacity-50"
                         title="Confirm delete"
                       >
-                        <Check className="h-3.5 w-3.5" />
+                        {deleteMut.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Check className="h-3.5 w-3.5" />
+                        )}
                       </button>
                       <button
                         onClick={() => setConfirmDelete(null)}
@@ -260,6 +265,12 @@ export function ServersSettings() {
         {servers.length === 0 && (
           <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
             No servers configured. Add one to get started.
+          </p>
+        )}
+
+        {(deleteMut.error || defaultMut.error) && (
+          <p className="text-xs text-[var(--color-red)]">
+            {(deleteMut.error || defaultMut.error)?.message}
           </p>
         )}
       </div>
