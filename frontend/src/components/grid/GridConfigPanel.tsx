@@ -8,7 +8,7 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { LeverageField, SelectField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
+import { LeverageField, SelectField, ToggleField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
 
 interface GridConfigPanelProps {
@@ -155,36 +155,6 @@ function NumberField({
   );
 }
 
-
-function ToggleField({
-  label,
-  value,
-  field,
-  dispatch,
-}: {
-  label: string;
-  value: boolean;
-  field: string;
-  dispatch: React.Dispatch<GridAction>;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        onClick={() => dispatch({ type: "SET_FIELD", field, value: !value })}
-        className={`relative h-5 w-9 rounded-full transition-colors ${
-          value ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
-            value ? "left-[18px]" : "left-0.5"
-          }`}
-        />
-      </button>
-      <span className="text-xs text-[var(--color-text)]">{label}</span>
-    </div>
-  );
-}
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (

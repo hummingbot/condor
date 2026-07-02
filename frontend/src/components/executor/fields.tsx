@@ -236,8 +236,12 @@ export function ToggleField({
   dispatch: FieldDispatch;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <label className="flex items-center gap-2 cursor-pointer select-none">
       <button
+        type="button"
+        role="switch"
+        aria-checked={value}
+        aria-label={label}
         onClick={() => dispatch({ type: "SET_FIELD", field, value: !value })}
         className={`relative h-5 w-9 rounded-full transition-colors ${
           value ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
@@ -250,7 +254,7 @@ export function ToggleField({
         />
       </button>
       <span className="text-xs text-[var(--color-text)]">{label}</span>
-    </div>
+    </label>
   );
 }
 
