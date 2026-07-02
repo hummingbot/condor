@@ -1,13 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Brain,
+  Check,
   ChevronRight,
   CircleDot,
+  Loader2,
   Pause,
   Plus,
   Radio,
   Square,
   Trash2,
+  X,
   Zap,
 } from "lucide-react";
 import { useMemo, useState } from "react";
@@ -337,6 +340,7 @@ const DELEGATION_STATUS: Record<
 function BackgroundTasks() {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
 
   const { data } = useQuery({
     queryKey: ["delegations"],
@@ -346,7 +350,10 @@ function BackgroundTasks() {
 
   const stopMutation = useMutation({
     mutationFn: (taskId: string) => api.stopDelegation(taskId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["delegations"] }),
+    onSuccess: () => {
+      setConfirmStopId(null);
+      queryClient.invalidateQueries({ queryKey: ["delegations"] });
+    },
   });
 
   const delegations = data?.delegations ?? [];
@@ -395,17 +402,41 @@ function BackgroundTasks() {
                 <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wider ${s.text}`}>
                   {s.label}
                 </span>
-                {d.status === "running" && (
-                  <button
-                    type="button"
-                    onClick={() => stopMutation.mutate(d.task_id)}
-                    disabled={stopMutation.isPending}
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-40"
-                    title="Stop task"
-                  >
-                    <Square className="h-3 w-3" />
-                  </button>
-                )}
+                {d.status === "running" &&
+                  (confirmStopId === d.task_id ? (
+                    <div className="flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => stopMutation.mutate(d.task_id)}
+                        disabled={stopMutation.isPending}
+                        className="flex h-6 w-6 items-center justify-center rounded border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-40"
+                        title="Confirm stop"
+                      >
+                        {stopMutation.isPending ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Check className="h-3 w-3" />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmStopId(null)}
+                        className="flex h-6 w-6 items-center justify-center rounded border border-[var(--color-border)]/60 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)]"
+                        title="Cancel stop"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmStopId(d.task_id)}
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20"
+                      title="Stop task"
+                    >
+                      <Square className="h-3 w-3" />
+                    </button>
+                  ))}
               </div>
               {isOpen && (
                 <div className="border-t border-[var(--color-border)]/40 px-3 py-2">
