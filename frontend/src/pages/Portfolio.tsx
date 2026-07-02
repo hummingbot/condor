@@ -16,6 +16,7 @@ import { useNavigate } from "react-router-dom";
 
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import {
   api,
   type AgentSummary,
@@ -793,11 +794,21 @@ export function Portfolio() {
     placeholderData: keepPreviousData,
   });
 
+  // Subscribe to the executors WS channel so the KPI strip updates live;
+  // the query below shares the canonical ["executors", server, ""] cache key
+  // (prefetched by usePrefetchData, pushed by useWebSocket) with a relaxed
+  // poll as fallback.
+  const executorChannels = useMemo(
+    () => (server ? [`executors:${server}`] : []),
+    [server],
+  );
+  useCondorWebSocket(executorChannels, server ?? null);
+
   const { data: allExecutors } = useQuery({
-    queryKey: ["executors-all", server],
+    queryKey: ["executors", server, ""],
     queryFn: () => api.getExecutors(server!),
     enabled: !!server,
-    refetchInterval: 30000,
+    refetchInterval: 60000,
     placeholderData: keepPreviousData,
   });
 
