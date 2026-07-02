@@ -344,7 +344,7 @@ export function Executors() {
         limit: PAGE_SIZE,
       }),
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
-    refetchInterval: 10000,
+    refetchInterval: 60000, // Slow fallback only — WS handles real-time updates
     refetchOnWindowFocus: false,
   });
 
