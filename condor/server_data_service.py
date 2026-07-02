@@ -368,11 +368,7 @@ class ServerDataService:
         if age <= defaults.stale_threshold:
             return entry.value
 
-        # If subscribed, data is actively refreshed — use TTL
-        if key in self._subscriptions and self._subscriptions[key]:
-            return entry.value if age <= defaults.ttl else None
-
-        # No subscribers — use idle TTL
+        # Past the stale threshold: still usable until the TTL expires
         return entry.value if age <= defaults.ttl else None
 
     async def get_or_fetch(
