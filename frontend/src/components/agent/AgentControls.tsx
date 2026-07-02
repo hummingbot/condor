@@ -254,6 +254,9 @@ export function StartSessionDialog({
                   : "Start Session"}
           </button>
         </div>
+        {startMut.isError && (
+          <p className="mt-3 text-xs text-red-400">{startMut.error.message}</p>
+        )}
       </div>
     </div>
   );
@@ -279,6 +282,7 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
   });
 
   const loading = stopMut.isPending || pauseMut.isPending || resumeMut.isPending;
+  const controlError = stopMut.error || pauseMut.error || resumeMut.error;
 
   return (
     <>
@@ -325,6 +329,9 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
             </button>
           </>
         ) : null}
+        {controlError && (
+          <p className="text-xs text-red-400">{controlError.message}</p>
+        )}
       </div>
 
       <StartSessionDialog
