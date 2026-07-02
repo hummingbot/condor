@@ -14,6 +14,7 @@ import { Link, useParams } from "react-router-dom";
 import yaml from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import { configToYaml } from "@/lib/configYaml";
@@ -97,7 +98,7 @@ export function BotDetail() {
   };
 
   if (!server || !id) return null;
-  if (isLoading) return <p className="text-[var(--color-text-muted)]">Loading...</p>;
+  if (isLoading) return <FallbackSpinner />;
   if (error)
     return (
       <p className="text-[var(--color-red)]">

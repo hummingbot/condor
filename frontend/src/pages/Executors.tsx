@@ -23,6 +23,7 @@ import {
   type SortDir,
   type SortKey,
 } from "@/components/executor/ExecutorTable";
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useRates } from "@/hooks/useRates";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useServer } from "@/hooks/useServer";
@@ -601,7 +602,7 @@ export function Executors() {
       {stopError && <p className="text-[var(--color-red)]">{stopError}</p>}
 
       {isLoading ? (
-        <p className="text-[var(--color-text-muted)]">Loading...</p>
+        <FallbackSpinner />
       ) : error ? (
         <p className="text-[var(--color-red)]">
           {error instanceof Error ? error.message : "Error"}

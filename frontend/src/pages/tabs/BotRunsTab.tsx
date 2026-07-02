@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Circle, Database, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api, type BotRunInfo } from "@/lib/api";
 
@@ -223,7 +224,7 @@ export function BotRunsTab() {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
   }
 
-  if (isLoading) return <p className="text-[var(--color-text-muted)]">Loading...</p>;
+  if (isLoading) return <FallbackSpinner />;
   if (error) {
     return (
       <p className="text-[var(--color-red)]">

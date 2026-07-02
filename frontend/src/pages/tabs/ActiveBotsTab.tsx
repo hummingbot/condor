@@ -19,6 +19,7 @@ import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { PnlSparkline } from "@/components/bots/PnlSparkline";
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
@@ -671,7 +672,7 @@ export function ActiveBotsTab() {
   if (!server) {
     return <p className="text-[var(--color-text-muted)]">Select a server</p>;
   }
-  if (isLoading) return <p className="text-[var(--color-text-muted)]">Loading...</p>;
+  if (isLoading) return <FallbackSpinner />;
   if (error)
     return (
       <p className="text-[var(--color-red)]">
