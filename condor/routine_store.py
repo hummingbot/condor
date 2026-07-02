@@ -271,6 +271,94 @@ class RoutineStore:
                 f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
             )
 
+    def _new_instance_meta(
+        self,
+        routine_name: str,
+        config: dict,
+        server_name: str,
+        user_id: int,
+        source: str,
+        **extra,
+    ) -> dict:
+        """Fresh instance-metadata dict shared by execute/start_continuous/schedule."""
+        return {
+            "routine_name": routine_name,
+            "config": config,
+            "status": "running",
+            "source": source,
+            "server_name": server_name,
+            "user_id": user_id,
+            "created_at": time.time(),
+            "last_run_at": None,
+            "last_result": None,
+            "last_duration": None,
+            "run_count": 0,
+            **extra,
+        }
+
+    async def _execute_and_record(
+        self,
+        instance_id: str,
+        routine,
+        config: dict,
+        server_name: str,
+        user_id: int = 0,
+        *,
+        status_after: str,
+        failed_status: str | None = None,
+        fire_hooks: bool = True,
+    ) -> None:
+        """Run a routine once, store the result, update instance metadata, fire hooks.
+
+        Shared by one-shot, continuous and scheduled runs — the entry points
+        only differ in loop/cancellation semantics. ``status_after`` is the
+        instance status recorded after the run; ``failed_status`` (defaults to
+        ``status_after``) is used when the run raises. ``CancelledError`` is
+        recorded as a clean "Stopped by user" run so a stopped continuous
+        routine still stores its final result.
+        """
+        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
+        start = time.time()
+        reports.reset_last_report_id()
+        error_msg = None
+        failed = False
+        try:
+            cfg = routine.config_class(**config)
+            with reports.attribute_to(_agent_of(routine)):
+                raw = await routine.run_fn(cfg, ctx)
+            result = normalize_result(raw)
+        except asyncio.CancelledError:
+            result = RoutineResult(text="Stopped by user")
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(
+                f"Routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
+            )
+            error_msg = f"{type(e).__name__}: {e}"
+            result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
+            failed = True
+
+        duration = time.time() - start
+        report_id = reports.get_last_report_id()
+        self._results[instance_id] = result
+
+        if instance_id in self._instances:
+            self._instances[instance_id].update(
+                {
+                    "status": (
+                        (failed_status or status_after) if failed else status_after
+                    ),
+                    "last_run_at": time.time(),
+                    "last_result": result.text[:500],
+                    "last_duration": duration,
+                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                    "error": error_msg,
+                }
+            )
+
+        if fire_hooks:
+            await self._fire_hooks(instance_id, result, report_id, failed)
+
     def _resolve_routine(self, routine_name: str):
         """Resolve a routine by name, supporting 'agent_slug/routine_name' format."""
         # Try global first
@@ -300,19 +388,9 @@ class RoutineStore:
             raise ValueError(f"Routine '{routine_name}' not found")
 
         instance_id = self._gen_id()
-        self._instances[instance_id] = {
-            "routine_name": routine_name,
-            "config": config,
-            "status": "running",
-            "source": "web",
-            "server_name": server_name,
-            "user_id": user_id,
-            "created_at": time.time(),
-            "last_run_at": None,
-            "last_result": None,
-            "last_duration": None,
-            "run_count": 0,
-        }
+        self._instances[instance_id] = self._new_instance_meta(
+            routine_name, config, server_name, user_id, source="web"
+        )
 
         task = asyncio.create_task(
             self._run_oneshot(instance_id, routine, config, server_name, user_id)
@@ -328,43 +406,15 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
     ) -> None:
-        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
-        start = time.time()
-        reports.reset_last_report_id()
-        try:
-            cfg = routine.config_class(**config)
-            with reports.attribute_to(_agent_of(routine)):
-                raw = await routine.run_fn(cfg, ctx)
-            result = normalize_result(raw)
-        except Exception as e:
-            tb = traceback.format_exc()
-            logger.error(
-                f"Web routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
-            )
-            error_msg = f"{type(e).__name__}: {e}"
-            result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
-            failed = True
-        else:
-            error_msg = None
-            failed = False
-
-        duration = time.time() - start
-        report_id = reports.get_last_report_id()
-        self._results[instance_id] = result
-
-        if instance_id in self._instances:
-            self._instances[instance_id].update(
-                {
-                    "status": "failed" if failed else "completed",
-                    "last_run_at": time.time(),
-                    "last_result": result.text[:500],
-                    "last_duration": duration,
-                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                    "error": error_msg,
-                }
-            )
-
-        await self._fire_hooks(instance_id, result, report_id, failed)
+        await self._execute_and_record(
+            instance_id,
+            routine,
+            config,
+            server_name,
+            user_id,
+            status_after="completed",
+            failed_status="failed",
+        )
 
     async def start_continuous(
         self,
@@ -383,19 +433,9 @@ class RoutineStore:
             )
 
         instance_id = self._gen_id()
-        self._instances[instance_id] = {
-            "routine_name": routine_name,
-            "config": config,
-            "status": "running",
-            "source": "mcp",
-            "server_name": server_name,
-            "user_id": user_id,
-            "created_at": time.time(),
-            "last_run_at": None,
-            "last_result": None,
-            "last_duration": None,
-            "run_count": 0,
-        }
+        self._instances[instance_id] = self._new_instance_meta(
+            routine_name, config, server_name, user_id, source="mcp"
+        )
 
         task = asyncio.create_task(
             self._run_continuous(instance_id, routine, config, server_name, user_id)
@@ -411,35 +451,18 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
     ) -> None:
-        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
-        start = time.time()
-        try:
-            cfg = routine.config_class(**config)
-            with reports.attribute_to(_agent_of(routine)):
-                raw = await routine.run_fn(cfg, ctx)
-            result = normalize_result(raw)
-        except asyncio.CancelledError:
-            result = RoutineResult(text="Stopped by user")
-        except Exception as e:
-            tb = traceback.format_exc()
-            logger.error(
-                f"Continuous routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
-            )
-            result = RoutineResult(text=f"Error: {type(e).__name__}: {e}\n\n{tb}")
-
-        duration = time.time() - start
-        self._results[instance_id] = result
-
-        if instance_id in self._instances:
-            self._instances[instance_id].update(
-                {
-                    "status": "stopped",
-                    "last_run_at": time.time(),
-                    "last_result": result.text[:500],
-                    "last_duration": duration,
-                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                }
-            )
+        # Continuous routines message the user from inside their own loop and
+        # only end on stop/error, so per-run completion hooks are intentionally
+        # not fired for them (they would only trigger once, at shutdown).
+        await self._execute_and_record(
+            instance_id,
+            routine,
+            config,
+            server_name,
+            user_id,
+            status_after="stopped",
+            fire_hooks=False,
+        )
 
     async def schedule(
         self,
@@ -455,20 +478,15 @@ class RoutineStore:
             raise ValueError(f"Routine '{routine_name}' not found")
 
         instance_id = self._gen_id()
-        self._instances[instance_id] = {
-            "routine_name": routine_name,
-            "config": config,
-            "status": "scheduled",
-            "source": "web",
-            "server_name": server_name,
-            "user_id": user_id,
-            "schedule": {"type": "interval", "interval_sec": interval_sec},
-            "created_at": time.time(),
-            "last_run_at": None,
-            "last_result": None,
-            "last_duration": None,
-            "run_count": 0,
-        }
+        self._instances[instance_id] = self._new_instance_meta(
+            routine_name,
+            config,
+            server_name,
+            user_id,
+            source="web",
+            status="scheduled",
+            schedule={"type": "interval", "interval_sec": interval_sec},
+        )
 
         task = asyncio.create_task(
             self._run_scheduled(
@@ -489,47 +507,19 @@ class RoutineStore:
     ) -> None:
         try:
             while instance_id in self._instances:
-                ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
-                start = time.time()
-                reports.reset_last_report_id()
-                try:
-                    cfg = routine.config_class(**config)
-                    with reports.attribute_to(_agent_of(routine)):
-                        raw = await routine.run_fn(cfg, ctx)
-                    result = normalize_result(raw)
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    logger.error(
-                        f"Scheduled routine {routine.name}[{instance_id}] error: {type(e).__name__}: {e}\n{tb}"
-                    )
-                    error_msg = f"{type(e).__name__}: {e}"
-                    result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
-                    run_failed = True
-                else:
-                    error_msg = None
-                    run_failed = False
-
-                duration = time.time() - start
-                report_id = reports.get_last_report_id()
-                self._results[instance_id] = result
-
-                if instance_id in self._instances:
-                    self._instances[instance_id].update(
-                        {
-                            "status": "scheduled",
-                            "last_run_at": time.time(),
-                            "last_result": result.text[:500],
-                            "last_duration": duration,
-                            "run_count": self._instances[instance_id].get(
-                                "run_count", 0
-                            )
-                            + 1,
-                            "error": error_msg,
-                        }
-                    )
-
-                await self._fire_hooks(instance_id, result, report_id, run_failed)
-
+                await self._execute_and_record(
+                    instance_id,
+                    routine,
+                    config,
+                    server_name,
+                    user_id,
+                    status_after="scheduled",
+                )
+                # A cancel that lands mid-run is swallowed (and recorded) by
+                # _execute_and_record; stop() removed the instance, so bail out
+                # instead of sleeping through one more interval.
+                if instance_id not in self._instances:
+                    break
                 await asyncio.sleep(interval_sec)
         except asyncio.CancelledError:
             logger.info(f"Scheduled routine {instance_id} cancelled")
