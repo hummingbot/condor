@@ -11,6 +11,12 @@
       "command": "uv",
       "args": ["run", "python", "-m", "mcp_servers.condor"],
       "env": {}
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+      "env": {}
     }
   }
 }
