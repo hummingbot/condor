@@ -39,8 +39,8 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-# Pending permission futures for web clients: request_id -> Future[bool]
-_pending_permissions: dict[str, asyncio.Future] = {}
+# Pending permission futures for web clients: request_id -> (user_id, Future[bool])
+_pending_permissions: dict[str, tuple[int, asyncio.Future]] = {}
 
 # Track which session slots exist per user: user_id -> [slot_id, ...]
 _user_slots: dict[int, list[str]] = {}
@@ -87,6 +87,7 @@ async def _send(ws: WebSocket, event: dict) -> None:
 
 async def _web_permission_callback(
     ws: WebSocket,
+    user_id: int,
     tool_call: dict[str, Any],
     options: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -114,7 +115,7 @@ async def _web_permission_callback(
     )
 
     future: asyncio.Future = asyncio.get_event_loop().create_future()
-    _pending_permissions[request_id] = future
+    _pending_permissions[request_id] = (user_id, future)
 
     try:
         approved = await asyncio.wait_for(future, timeout=PERMISSION_TIMEOUT)
@@ -194,7 +195,7 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
                 sessions = _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
-                _handle_resolve_permission(msg)
+                _handle_resolve_permission(user_id, msg)
             elif action == "abort_prompt":
                 _spawn(_handle_abort_prompt(ws, user_id, msg))
             else:
@@ -243,7 +244,7 @@ async def _handle_start_session(
     session_key = _session_key(user_id, slot_id)
 
     async def perm_cb(tool_call: dict, options: list[dict]) -> dict:
-        return await _web_permission_callback(ws, tool_call, options)
+        return await _web_permission_callback(ws, user_id, tool_call, options)
 
     try:
         session = await get_or_create_session(
@@ -452,11 +453,22 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     )
 
 
-def _handle_resolve_permission(msg: dict) -> None:
+def _handle_resolve_permission(user_id: int, msg: dict) -> None:
     request_id = msg.get("request_id", "")
     approved = msg.get("approved", False)
-    future = _pending_permissions.get(request_id)
-    if future and not future.done():
+    entry = _pending_permissions.get(request_id)
+    if entry is None:
+        return
+    owner_id, future = entry
+    if owner_id != user_id:
+        # Ignore attempts to resolve another user's pending permission
+        log.warning(
+            "User %d tried to resolve permission %s owned by another user",
+            user_id,
+            request_id,
+        )
+        return
+    if not future.done():
         future.set_result(approved)
 
 
