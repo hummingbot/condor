@@ -16,6 +16,7 @@ import {
 import { api, type ControllerInfo } from "@/lib/api";
 import { formatCurrencyVolume, formatCurrencyPnl, formatDateTime, formatTime, pnlColor, toMs } from "@/lib/formatters";
 import { positionQuoteValue, type PnlChartPoint } from "@/lib/pnl-chart";
+import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Tooltips ──
 
@@ -177,6 +178,8 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
     );
   }
 
+  const tc = getThemeColors();
+  const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
   const pnlH = Math.round(height * 0.65);
   const bottomH = height - pnlH;
   const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
@@ -214,8 +217,8 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
           <ComposedChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} syncId="ctrl">
             <defs>
               <linearGradient id="ctrlPnlGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.15} />
-                <stop offset="95%" stopColor={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.02} />
+                <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
+                <stop offset="95%" stopColor={totalColor} stopOpacity={0.02} />
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
@@ -250,8 +253,8 @@ export function ControllerPnlChart({ server, controllerId, botName, deployedAt, 
             <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
             <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
             <Area type="monotone" dataKey="total" stroke="none" fill="url(#ctrlPnlGrad)" activeDot={false} legendType="none" />
-            <Line type="monotone" dataKey="total" stroke={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} strokeWidth={2} dot={false} strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="realized" stroke="#22c55e" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
             <Line type="monotone" dataKey="unrealized" stroke="#f59e0b" strokeWidth={2} strokeDasharray="5 3" dot={false} />
             <Legend
               verticalAlign="top"

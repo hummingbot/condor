@@ -15,6 +15,7 @@ import {
 import type { ControllerInfo, ControllerPerformanceSnapshot } from "@/lib/api";
 import { formatCurrencyVolume, formatCurrencyPnl, formatDateTime, formatTime, pnlColor, toMs } from "@/lib/formatters";
 import { positionQuoteValue, type PnlChartPoint } from "@/lib/pnl-chart";
+import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Aggregation ──
 
@@ -246,6 +247,8 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
 
   if (!snapshots || snapshots.length === 0 || data.length < 2) return null;
 
+  const tc = getThemeColors();
+  const totalColor = (latest?.total ?? 0) >= 0 ? tc.up : tc.down;
   const fmtPnl = (v: number) => formatCurrencyPnl(v, currencySymbol);
   const fmtAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(Math.abs(v) < 10 ? 2 : 0)}`;
   const fmtVolAxis = (v: number) => `${currencySymbol}${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "K" : v.toFixed(0)}`;
@@ -324,8 +327,8 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
           <ComposedChart data={data} margin={{ top: 12, right: 12, left: 0, bottom: 0 }} syncId="agg">
             <defs>
               <linearGradient id="aggPnlGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.15} />
-                <stop offset="95%" stopColor={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} stopOpacity={0.02} />
+                <stop offset="5%" stopColor={totalColor} stopOpacity={0.15} />
+                <stop offset="95%" stopColor={totalColor} stopOpacity={0.02} />
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" strokeOpacity={0.5} />
@@ -360,8 +363,8 @@ export function AggregatedPnlChart({ snapshots, controllers, currencySymbol = "$
             <ReferenceLine y={0} stroke="var(--color-text-muted)" strokeOpacity={0.3} strokeDasharray="4 4" />
             <Tooltip content={<PnlTooltip symbol={currencySymbol} />} />
             <Area type="monotone" dataKey="total" stroke="none" fill="url(#aggPnlGrad)" activeDot={false} legendType="none" />
-            <Line type="monotone" dataKey="total" stroke={(latest?.total ?? 0) >= 0 ? "#22c55e" : "#ef4444"} strokeWidth={2} dot={false} strokeOpacity={0.6} />
-            <Line type="monotone" dataKey="realized" stroke="#22c55e" strokeWidth={2} dot={false} />
+            <Line type="monotone" dataKey="total" stroke={totalColor} strokeWidth={2} dot={false} strokeOpacity={0.6} />
+            <Line type="monotone" dataKey="realized" stroke={tc.up} strokeWidth={2} dot={false} />
             <Line type="monotone" dataKey="unrealized" stroke="#f59e0b" strokeWidth={2} strokeDasharray="5 3" dot={false} />
             <Legend
               verticalAlign="top"
