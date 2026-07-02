@@ -681,24 +681,6 @@ class JournalManager:
                 )
         return results
 
-    # Keep for backward compat with existing code that calls these
-    def save_run_snapshot(self, **kwargs) -> Path:
-        """Legacy compat: redirect to save_full_snapshot with adapted args."""
-        return self.save_full_snapshot(
-            tick=kwargs.get("tick", 0),
-            timestamp=kwargs.get("timestamp", ""),
-            system_prompt=kwargs.get("system_prompt", ""),
-            response_text=kwargs.get("response_text", ""),
-            tool_calls=kwargs.get("tool_calls", []),
-            executors_data="\n".join(
-                f"### {name}\n{summary}"
-                for name, summary in kwargs.get("core_data_summaries", {}).items()
-            )
-            or "",
-            risk_state=kwargs.get("risk_state", {}),
-            duration=kwargs.get("duration", 0),
-        )
-
     def read_run_snapshot(self, tick: int) -> str:
         """Legacy compat: try snapshots first, then runs."""
         return self.read_snapshot(tick)
@@ -1050,32 +1032,3 @@ def _word_overlap(a: str, b: str) -> float:
         return 0.0
     intersection = words_a & words_b
     return len(intersection) / min(len(words_a), len(words_b))
-
-
-def migrate_legacy_agents() -> int:
-    """Move old hex-ID agent folders to _legacy/.
-
-    Returns the number of folders moved.
-    """
-    import shutil
-
-    legacy_dir = _DATA_ROOT / "_legacy"
-    moved = 0
-
-    if not _DATA_ROOT.exists():
-        return 0
-
-    for d in _DATA_ROOT.iterdir():
-        if not d.is_dir():
-            continue
-        if d.name in ("strategies", "_legacy"):
-            continue
-        if re.fullmatch(r"[0-9a-f]{8}", d.name):
-            legacy_dir.mkdir(parents=True, exist_ok=True)
-            dest = legacy_dir / d.name
-            if not dest.exists():
-                shutil.move(str(d), str(dest))
-                moved += 1
-                log.info("Migrated legacy agent folder %s to _legacy/", d.name)
-
-    return moved
