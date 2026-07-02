@@ -115,6 +115,7 @@ export function BotRunsTab() {
   const { server } = useServer();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<BotRunInfo | "bulk" | null>(null);
   const queryClient = useQueryClient();
 
@@ -161,6 +162,7 @@ export function BotRunsTab() {
   const handleDelete = async (run: BotRunInfo) => {
     if (!run.bot_run_id) return;
     setDeleting(run.bot_name);
+    setDeleteError(null);
     try {
       await deleteMutation.mutateAsync(run.bot_run_id);
       setSelected((prev) => {
@@ -168,6 +170,10 @@ export function BotRunsTab() {
         next.delete(run.bot_name);
         return next;
       });
+    } catch (err) {
+      setDeleteError(
+        `Failed to delete "${run.bot_name}": ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       setDeleting(null);
     }
@@ -181,13 +187,23 @@ export function BotRunsTab() {
     const toDelete = bulkDeletable;
     if (toDelete.length === 0) return;
 
+    setDeleteError(null);
+    let failedCount = 0;
+    let firstErrorMessage = "";
     for (const run of toDelete) {
       setDeleting(run.bot_name);
       try {
         await deleteMutation.mutateAsync(run.bot_run_id!);
-      } catch {
+      } catch (err) {
+        failedCount += 1;
+        if (!firstErrorMessage) {
+          firstErrorMessage = err instanceof Error ? err.message : String(err);
+        }
         // continue with remaining
       }
+    }
+    if (failedCount > 0) {
+      setDeleteError(`Failed to delete ${failedCount} run(s): ${firstErrorMessage}`);
     }
     setSelected(new Set());
     setDeleting(null);
@@ -227,6 +243,8 @@ export function BotRunsTab() {
 
   return (
     <div className="space-y-4">
+      {deleteError && <p className="text-[var(--color-red)]">{deleteError}</p>}
+
       {selected.size > 0 && (
         <div className="flex justify-end">
           <button
