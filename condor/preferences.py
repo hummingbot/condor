@@ -42,6 +42,7 @@ def _sync_to_cm(user_data: Dict, key: str, value) -> None:
         return
     try:
         from config_manager import get_config_manager
+
         cm = get_config_manager()
         cm.set_user_preference(user_id, key, value)
     except Exception as e:
@@ -55,6 +56,7 @@ def _sync_section_to_cm(user_data: Dict, section: str) -> None:
         return
     try:
         from config_manager import get_config_manager
+
         prefs = user_data.get(USER_PREFERENCES_KEY, {})
         section_data = prefs.get(section)
         if section_data is not None:
@@ -73,6 +75,7 @@ def _load_from_cm(user_data: Dict) -> None:
         return
     try:
         from config_manager import get_config_manager
+
         cm = get_config_manager()
         cm_prefs = cm.get_user_preferences(user_id)
         if cm_prefs and USER_PREFERENCES_KEY not in user_data:
@@ -80,7 +83,9 @@ def _load_from_cm(user_data: Dict) -> None:
             defaults = _get_default_preferences()
             for section, section_defaults in defaults.items():
                 if section in cm_prefs:
-                    if isinstance(section_defaults, dict) and isinstance(cm_prefs[section], dict):
+                    if isinstance(section_defaults, dict) and isinstance(
+                        cm_prefs[section], dict
+                    ):
                         merged = {**section_defaults, **cm_prefs[section]}
                         defaults[section] = merged
                     else:
@@ -222,21 +227,21 @@ class ExecutorPrefs(TypedDict, total=False):
 
 
 class TradingAgentPrefs(TypedDict, total=False):
-    last_strategy_id: Optional[str]     # Last selected strategy
-    default_frequency_sec: int          # Default tick frequency
-    default_risk_limits: Dict[str, Any] # Default risk limits
+    last_strategy_id: Optional[str]  # Last selected strategy
+    default_frequency_sec: int  # Default tick frequency
+    default_risk_limits: Dict[str, Any]  # Default risk limits
 
 
 class AgentPrefs(TypedDict, total=False):
-    default_agent: str       # "claude-code", "gemini", "codex", "copilot"
-    show_tool_calls: bool    # Show tool call indicators (default True)
-    tool_filter_mode: str    # "essential", "moderate", or "full" for PydanticAI models
+    default_agent: str  # "claude-code", "gemini", "codex", "copilot"
+    show_tool_calls: bool  # Show tool call indicators (default True)
+    tool_filter_mode: str  # "essential", "moderate", or "full" for PydanticAI models
 
 
 class VoicePrefs(TypedDict, total=False):
-    whisper_model: str       # "tiny", "base", "small", "medium", "large-v3"
+    whisper_model: str  # "tiny", "base", "small", "medium", "large-v3"
     language: Optional[str]  # ISO code ("en", "es", ...) or None for auto-detect
-    auto_send: bool          # Send message immediately after transcription
+    auto_send: bool  # Send message immediately after transcription
 
 
 # Available whisper models with descriptions
@@ -378,11 +383,14 @@ def _migrate_legacy_data(user_data: Dict) -> None:
     - trading_context: old CLOB/DEX trading context
     - portfolio_config: old portfolio settings
     """
-    # Skip entirely once migration has already run for this user
+    # Always guarantee the preferences structure exists (cheap fast path),
+    # even when migration already ran — e.g. after clear_preferences().
+    prefs = _ensure_preferences(user_data)
+
+    # Skip migration work once it has already run for this user
     if user_data.get(_MIGRATION_DONE_KEY):
         return
 
-    prefs = _ensure_preferences(user_data)
     migrated = False
 
     # Migrate old trading_context
@@ -981,11 +989,16 @@ def set_executor_last_config(
 def get_agent_prefs(user_data: Dict) -> "AgentPrefs":
     """Get agent preferences"""
     _migrate_legacy_data(user_data)
-    return deepcopy(user_data[USER_PREFERENCES_KEY].get("agent", {
-        "default_agent": "claude-code",
-        "show_tool_calls": True,
-        "tool_filter_mode": "essential",
-    }))
+    return deepcopy(
+        user_data[USER_PREFERENCES_KEY].get(
+            "agent",
+            {
+                "default_agent": "claude-code",
+                "show_tool_calls": True,
+                "tool_filter_mode": "essential",
+            },
+        )
+    )
 
 
 def set_default_agent(user_data: Dict, agent_key: str) -> None:
@@ -1006,11 +1019,16 @@ def set_default_agent(user_data: Dict, agent_key: str) -> None:
 def get_voice_prefs(user_data: Dict) -> "VoicePrefs":
     """Get voice preferences"""
     _migrate_legacy_data(user_data)
-    return deepcopy(user_data[USER_PREFERENCES_KEY].get("voice", {
-        "whisper_model": "small",
-        "language": None,
-        "auto_send": True,
-    }))
+    return deepcopy(
+        user_data[USER_PREFERENCES_KEY].get(
+            "voice",
+            {
+                "whisper_model": "small",
+                "language": None,
+                "auto_send": True,
+            },
+        )
+    )
 
 
 def set_voice_prefs(user_data: Dict, **kwargs) -> None:
@@ -1071,6 +1089,9 @@ def clear_preferences(user_data: Dict) -> None:
     """Clear all user preferences (reset to defaults)"""
     if USER_PREFERENCES_KEY in user_data:
         del user_data[USER_PREFERENCES_KEY]
+    # Reset bookkeeping flags so migration/hydration rebuild consistently
+    user_data.pop(_MIGRATION_DONE_KEY, None)
+    user_data.pop("_prefs_hydrated", None)
     logger.info("Cleared all user preferences")
 
 
