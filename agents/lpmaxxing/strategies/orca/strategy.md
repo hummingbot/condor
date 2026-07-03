@@ -27,6 +27,7 @@ default_config:
     stats_windows:
     - 24h
     - 7d
+    - 30d
     categories: []
   gates:
     min_tvl_usd: 500000
@@ -105,8 +106,8 @@ The selection path uses Orca public pool data only:
 - token symbols, mints, and decimals;
 - current price;
 - TVL;
-- 24h and 7d volume;
-- 24h and 7d fees;
+- 24h, 7d, and rolling 30d volume;
+- 24h, 7d, and rolling 30d fees;
 - yield-over-TVL where available;
 - 24h price delta;
 - warning flags, fee tier, and tick spacing when exposed.
@@ -147,6 +148,8 @@ Use routine config that matches the user's intent:
 - `execution_mode: dry_run`;
 - `risk_profile: meme_scout` for meme-pool screening;
 - `risk_profile: safe_conservative` or `default_cautious` for conservative broad screening;
+- `stats_windows: "24h,7d,30d"` when the user asks for monthly data; monthly means rolling 30d, not a calendar month;
+- `scan_sort_fields` should use Orca-style names such as `fees30d`, `volume30d`, `fees7d`, `volume7d`, `fees24h`, and `volume24h`;
 - explicit category, quote, or exclude filters only when the user asks for them; category filters must use exact valid category values.
 
 Valid Orca category values are exact strings only:
@@ -178,7 +181,9 @@ Report only fields present in routine output, such as:
 - pool address;
 - TVL/liquidity;
 - 24h volume;
+- 7d and rolling 30d volume if returned;
 - 24h fees or fee proxy if returned;
+- 7d and rolling 30d fees if returned;
 - fee APR/APY proxy if returned;
 - warnings, hard gates, and rejection reasons;
 - preset suggestion;

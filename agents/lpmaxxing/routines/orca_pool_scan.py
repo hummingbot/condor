@@ -3,6 +3,7 @@ import json
 import math
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -10,13 +11,76 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, Field, field_validator
 
+try:
+    from routines.base import RoutineResult
+except ModuleNotFoundError:
+    import sys
+
+    sys.path.append(str(Path(__file__).resolve().parents[3]))
+    from routines.base import RoutineResult
+
 
 CATEGORY = "Orca LP Agent"
 
 DEFAULT_SCAN_SORT_FIELDS = ["tvl", "volume24h", "fees24h", "yieldovertvl24h"]
 DEFAULT_ALLOWED_QUOTE_SYMBOLS = ["USDC", "SOL", "mSOL", "JitoSOL"]
 DEFAULT_PREFERRED_QUOTE_SYMBOLS = ["USDC", "SOL"]
+VALID_EXECUTION_MODES = {"dry_run", "run_once", "loop"}
 VALID_CATEGORIES = {"memecoin", "utility", "governance", "liquid_staking_token", "security", "stablecoin"}
+VALID_STATS_WINDOWS = {"24h", "7d", "30d"}
+VALID_SCAN_SORT_FIELDS = {
+    "tvl",
+    "volume24h",
+    "fees24h",
+    "yieldovertvl24h",
+    "volume7d",
+    "fees7d",
+    "yieldovertvl7d",
+    "volume30d",
+    "fees30d",
+    "yieldovertvl30d",
+}
+STATS_WINDOW_ALIASES = {
+    "day": "24h",
+    "daily": "24h",
+    "1d": "24h",
+    "week": "7d",
+    "weekly": "7d",
+    "1w": "7d",
+    "month": "30d",
+    "monthly": "30d",
+    "1m": "30d",
+}
+SCAN_SORT_FIELD_ALIASES = {
+    "tvl_usd": "tvl",
+    "volume_24h": "volume24h",
+    "volume_24h_usd": "volume24h",
+    "24h_volume": "volume24h",
+    "fees_24h": "fees24h",
+    "fees_24h_usd": "fees24h",
+    "24h_fees": "fees24h",
+    "yield_24h": "yieldovertvl24h",
+    "yieldovertvl_24h": "yieldovertvl24h",
+    "volume_7d": "volume7d",
+    "volume_7d_usd": "volume7d",
+    "7d_volume": "volume7d",
+    "fees_7d": "fees7d",
+    "fees_7d_usd": "fees7d",
+    "7d_fees": "fees7d",
+    "yield_7d": "yieldovertvl7d",
+    "yieldovertvl_7d": "yieldovertvl7d",
+    "volume_30d": "volume30d",
+    "volume_30d_usd": "volume30d",
+    "30d_volume": "volume30d",
+    "monthly_volume": "volume30d",
+    "fees_30d": "fees30d",
+    "fees_30d_usd": "fees30d",
+    "30d_fees": "fees30d",
+    "monthly_fees": "fees30d",
+    "yield_30d": "yieldovertvl30d",
+    "yieldovertvl_30d": "yieldovertvl30d",
+    "monthly_yield": "yieldovertvl30d",
+}
 VALID_RISK_PROFILES = {
     "default_cautious",
     "balanced_fee_capture",
@@ -162,6 +226,22 @@ def _normalized_name(value: Any, default: str = "") -> str:
     return text or default
 
 
+def _normalize_stats_window(value: Any) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "").replace("_", "")
+    return STATS_WINDOW_ALIASES.get(normalized, normalized)
+
+
+def _normalize_sort_field(value: Any) -> str:
+    raw = str(value or "").strip()
+    normalized = raw.lower().replace("-", "_").replace(" ", "_")
+    if normalized in SCAN_SORT_FIELD_ALIASES:
+        return SCAN_SORT_FIELD_ALIASES[normalized]
+    compact = normalized.replace("_", "")
+    if compact == "yieldovertvl":
+        return "yieldovertvl24h"
+    return compact
+
+
 def _normalized_categories(value: Any) -> list[str]:
     raw_items = _list_or_default(value, [])
     if not isinstance(raw_items, list):
@@ -238,7 +318,18 @@ class Config(BaseModel):
     @field_validator("scan_sort_fields", mode="before")
     @classmethod
     def _coerce_scan_sort_fields(cls, value: Any) -> list[str]:
-        return _list_or_default(value, DEFAULT_SCAN_SORT_FIELDS)
+        return [_normalize_sort_field(item) for item in _list_or_default(value, DEFAULT_SCAN_SORT_FIELDS)]
+
+    @field_validator("execution_mode", mode="before")
+    @classmethod
+    def _coerce_execution_mode(cls, value: Any) -> str:
+        return _normalized_name(value, "dry_run")
+
+    @field_validator("stats_windows", mode="before")
+    @classmethod
+    def _coerce_stats_windows(cls, value: Any) -> str:
+        windows = [_normalize_stats_window(item) for item in _list_or_default(value, ["24h", "7d"])]
+        return ",".join(dict.fromkeys(windows))
 
     @field_validator("risk_profile", mode="before")
     @classmethod
@@ -305,7 +396,7 @@ def _is_baseline_value(field: str, value: Any) -> bool:
 
 
 def _stats_window_items(value: str) -> list[str]:
-    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+    return [_normalize_stats_window(item) for item in str(value or "").split(",") if item.strip()]
 
 
 def _stats_windows_with_required_gates(config: Config) -> str:
@@ -332,8 +423,16 @@ def _apply_risk_profile(config: Config) -> Config:
 
 def _config_errors(config: Config) -> list[str]:
     errors: list[str] = []
+    if config.execution_mode not in VALID_EXECUTION_MODES:
+        errors.append(f"invalid execution_mode '{config.execution_mode}'; valid values: {', '.join(sorted(VALID_EXECUTION_MODES))}")
     if config.risk_profile not in VALID_RISK_PROFILES:
         errors.append(f"invalid risk_profile '{config.risk_profile}'; valid values: {', '.join(sorted(VALID_RISK_PROFILES))}")
+    invalid_windows = [window for window in _stats_window_items(config.stats_windows) if window not in VALID_STATS_WINDOWS]
+    if invalid_windows:
+        errors.append(f"invalid stats_windows {invalid_windows}; valid values: {', '.join(sorted(VALID_STATS_WINDOWS))}")
+    invalid_sort_fields = [field for field in config.scan_sort_fields if field not in VALID_SCAN_SORT_FIELDS]
+    if invalid_sort_fields:
+        errors.append(f"invalid scan_sort_fields {invalid_sort_fields}; valid values: {', '.join(sorted(VALID_SCAN_SORT_FIELDS))}")
     invalid_categories = [category for category in config.categories if category not in VALID_CATEGORIES]
     if invalid_categories:
         errors.append(
@@ -594,6 +693,21 @@ def _normalize(record: Any) -> dict[str, Any]:
                 ],
             )
         ),
+        "volume_30d_usd": _to_float(
+            _first(
+                wrapped,
+                [
+                    "stats.30d.volume",
+                    "stats.30d.volumeUsd",
+                    "stats.30d.volumeUsdc",
+                    "record.volume30d",
+                    "record.volume30dUsd",
+                    "record.volume30dUsdc",
+                    "record.volume_30d",
+                    "record.volume_30d_usd",
+                ],
+            )
+        ),
         "fees_24h_usd": _to_float(
             _first(
                 wrapped,
@@ -622,9 +736,25 @@ def _normalize(record: Any) -> dict[str, Any]:
                 ],
             )
         ),
+        "fees_30d_usd": _to_float(
+            _first(
+                wrapped,
+                [
+                    "stats.30d.fees",
+                    "stats.30d.feesUsd",
+                    "stats.30d.feesUsdc",
+                    "record.fees30d",
+                    "record.fees30dUsd",
+                    "record.fees_30d",
+                    "record.fees_30d_usd",
+                ],
+            )
+        ),
         "yield_24h": _pct_decimal(_first(wrapped, ["stats.24h.yieldOverTvl", "stats.24h.yield_over_tvl", "record.yieldOverTvl24h", "record.yieldovertvl24h", "record.yield_over_tvl_24h"])),
         "yield_7d": _pct_decimal(_first(wrapped, ["stats.7d.yieldOverTvl", "stats.7d.yield_over_tvl", "record.yieldOverTvl7d", "record.yieldovertvl7d", "record.yield_over_tvl_7d"])),
+        "yield_30d": _pct_decimal(_first(wrapped, ["stats.30d.yieldOverTvl", "stats.30d.yield_over_tvl", "record.yieldOverTvl30d", "record.yieldovertvl30d", "record.yield_over_tvl_30d"])),
         "price_delta_24h": _pct_decimal(_first(wrapped, ["stats.24h.priceDelta", "stats.24h.price_delta", "record.priceDelta24h", "record.price_delta_24h", "record.priceChange24h"])),
+        "price_delta_30d": _pct_decimal(_first(wrapped, ["stats.30d.priceDelta", "stats.30d.price_delta", "record.priceDelta30d", "record.price_delta_30d", "record.priceChange30d"])),
         "fee_rate": _to_float(_first(record, ["feeRate", "fee_rate", "feeTier", "fee_tier"])),
         "tick_spacing": _to_int(_first(record, ["tickSpacing", "tick_spacing"])),
         "has_warning": _to_bool(_first(record, ["hasWarning", "has_warning", "warning", "isWarning"])),
@@ -706,7 +836,7 @@ def _gate(candidate: dict[str, Any], config: Config) -> tuple[bool, str | None, 
     if not _choose_pair(candidate, config, warnings):
         return False, "disallowed_quote_symbol", warnings
 
-    live_mode = config.execution_mode in {"run_once", "loop", "live"}
+    live_mode = config.execution_mode in {"run_once", "loop"}
     require_delta = config.require_price_delta or (live_mode and config.require_price_delta_in_live)
     if candidate.get("current_price") is None or candidate.get("current_price") <= 0:
         return False, "missing_price", warnings
@@ -803,7 +933,7 @@ def _execution_simplicity_score(candidate: dict[str, Any], config: Config) -> fl
         if "UNKNOWN" in symbol or len(symbol) > 16:
             score -= 1.0
             break
-    if config.execution_mode in {"run_once", "loop", "live"} and config.require_gateway_pool_info:
+    if config.execution_mode in {"run_once", "loop"} and config.require_gateway_pool_info:
         score -= 1.0
     return max(0.0, min(5.0, score))
 
@@ -913,8 +1043,13 @@ def _candidate_row(candidate: dict[str, Any], include_range: bool = False) -> di
         "tvl_usd": round(candidate.get("tvl_usd") or 0, 2),
         "volume_24h_usd": round(candidate.get("volume_24h_usd") or 0, 2),
         "volume_7d_usd": round(candidate.get("volume_7d_usd") or 0, 2),
+        "volume_30d_usd": round(candidate.get("volume_30d_usd") or 0, 2),
         "fees_24h_usd": round(candidate.get("fees_24h_usd") or 0, 2),
+        "fees_7d_usd": round(candidate.get("fees_7d_usd") or 0, 2),
+        "fees_30d_usd": round(candidate.get("fees_30d_usd") or 0, 2),
+        "yield_30d": candidate.get("yield_30d"),
         "price_delta_24h": candidate.get("price_delta_24h"),
+        "price_delta_30d": candidate.get("price_delta_30d"),
         "criteria_scores": candidate["criteria_scores"],
         "source_lenses": candidate.get("source_lenses", []),
         "source_categories": candidate.get("source_categories", []),
@@ -946,7 +1081,10 @@ def _near_miss_row(
         "tvl_usd": _round_optional(candidate.get("tvl_usd")),
         "volume_24h_usd": _round_optional(candidate.get("volume_24h_usd")),
         "volume_7d_usd": _round_optional(candidate.get("volume_7d_usd")),
+        "volume_30d_usd": _round_optional(candidate.get("volume_30d_usd")),
         "fees_24h_usd": _round_optional(candidate.get("fees_24h_usd")),
+        "fees_7d_usd": _round_optional(candidate.get("fees_7d_usd")),
+        "fees_30d_usd": _round_optional(candidate.get("fees_30d_usd")),
         "price_delta_24h": candidate.get("price_delta_24h"),
         "source_categories": candidate.get("source_categories", []),
         "source_lenses": candidate.get("source_lenses", []),
@@ -982,10 +1120,43 @@ def _format_pct(value: Any) -> str:
     return "n/a" if parsed is None else f"{parsed * 100:+.2f}%"
 
 
+def _compact_pool(address: Any) -> str:
+    text = str(address or "n/a")
+    return text if len(text) <= 12 else f"{text[:6]}...{text[-4:]}"
+
+
+def _candidate_text_line(rank: int, candidate: dict[str, Any]) -> str:
+    return (
+        f"{rank}. {candidate.get('trading_pair', 'n/a')} "
+        f"({_compact_pool(candidate.get('pool_address'))}) "
+        f"score {_format_number(candidate.get('score'), 4)}, "
+        f"preset {candidate.get('preset_suggestion', 'n/a')}, "
+        f"TVL {_format_money(candidate.get('tvl_usd'))}, "
+        f"24h vol {_format_money(candidate.get('volume_24h_usd'))}, "
+        f"7d vol {_format_money(candidate.get('volume_7d_usd'))}, "
+        f"30d vol {_format_money(candidate.get('volume_30d_usd'))}, "
+        f"24h fees {_format_money(candidate.get('fees_24h_usd'))}, "
+        f"7d fees {_format_money(candidate.get('fees_7d_usd'))}, "
+        f"30d fees {_format_money(candidate.get('fees_30d_usd'))}, "
+        f"24h move {_format_pct(candidate.get('price_delta_24h'))}"
+    )
+
+
+def _monthly_ranking(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = [candidate for candidate in candidates if (candidate.get("fees_30d_usd") or candidate.get("volume_30d_usd"))]
+    return sorted(
+        rows,
+        key=lambda item: (item.get("fees_30d_usd") or 0, item.get("volume_30d_usd") or 0),
+        reverse=True,
+    )
+
+
 def _format_scan_text(payload: dict[str, Any]) -> str:
     selected = payload.get("selected_candidate") or {}
     warnings = payload.get("warnings") or []
     rejections = payload.get("rejection_summary") or {}
+    config_summary = payload.get("config_summary") or {}
+    stats_windows = _stats_window_items(config_summary.get("stats_windows", ""))
     lines = [f"Orca Pool Scan: {payload.get('scan_status', 'unknown')}"]
     if selected:
         range_suggestion = selected.get("range_suggestion") or {}
@@ -997,6 +1168,11 @@ def _format_scan_text(payload: dict[str, Any]) -> str:
                 f"Preset: {selected.get('preset_suggestion', 'n/a')}",
                 f"TVL: {_format_money(selected.get('tvl_usd'))}",
                 f"24h volume: {_format_money(selected.get('volume_24h_usd'))}",
+                f"7d volume: {_format_money(selected.get('volume_7d_usd'))}",
+                f"30d volume: {_format_money(selected.get('volume_30d_usd'))}",
+                f"24h fees: {_format_money(selected.get('fees_24h_usd'))}",
+                f"7d fees: {_format_money(selected.get('fees_7d_usd'))}",
+                f"30d fees: {_format_money(selected.get('fees_30d_usd'))}",
             ]
         )
         if range_suggestion:
@@ -1007,6 +1183,17 @@ def _format_scan_text(payload: dict[str, Any]) -> str:
             )
     else:
         lines.append("Selected: none")
+    top_candidates = payload.get("top_candidates") or []
+    if top_candidates:
+        lines.extend(["", "Top candidates:"])
+        lines.extend(_candidate_text_line(rank, candidate) for rank, candidate in enumerate(top_candidates, 1))
+        if "30d" in stats_windows:
+            monthly_rows = _monthly_ranking(top_candidates)
+            lines.extend(["", "30d ranking:"])
+            if monthly_rows:
+                lines.extend(_candidate_text_line(rank, candidate) for rank, candidate in enumerate(monthly_rows, 1))
+            else:
+                lines.append("30d ranking unavailable: Orca API response did not expose monthly volume/fees for returned records.")
     if rejections:
         lines.append(f"Rejected pools: {sum(rejections.values())}")
     near_misses = payload.get("near_miss_candidates") or {}
@@ -1036,7 +1223,11 @@ def _candidate_table_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "Quote": candidate.get("quote_symbol"),
                 "TVL": _format_money(candidate.get("tvl_usd")),
                 "24h Volume": _format_money(candidate.get("volume_24h_usd")),
+                "7d Volume": _format_money(candidate.get("volume_7d_usd")),
+                "30d Volume": _format_money(candidate.get("volume_30d_usd")),
                 "24h Fees": _format_money(candidate.get("fees_24h_usd")),
+                "7d Fees": _format_money(candidate.get("fees_7d_usd")),
+                "30d Fees": _format_money(candidate.get("fees_30d_usd")),
                 "24h Move": _format_pct(candidate.get("price_delta_24h")),
             }
         )
@@ -1053,11 +1244,22 @@ def _candidate_table_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "Quote": selected.get("quote_symbol"),
                 "TVL": _format_money(selected.get("tvl_usd")),
                 "24h Volume": _format_money(selected.get("volume_24h_usd")),
+                "7d Volume": _format_money(selected.get("volume_7d_usd")),
+                "30d Volume": _format_money(selected.get("volume_30d_usd")),
                 "24h Fees": _format_money(selected.get("fees_24h_usd")),
+                "7d Fees": _format_money(selected.get("fees_7d_usd")),
+                "30d Fees": _format_money(selected.get("fees_30d_usd")),
                 "24h Move": _format_pct(selected.get("price_delta_24h")),
             },
         )
     return rows
+
+
+def _routine_result(payload: dict[str, Any]) -> RoutineResult:
+    return RoutineResult(
+        text=_format_scan_text(payload),
+        table_data=_candidate_table_rows(payload),
+    )
 
 
 def _config_summary(config: Config, diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -1102,6 +1304,8 @@ async def _save_scan_report(payload: dict[str, Any]) -> None:
         builder.kpi("Preset", selected.get("preset_suggestion") or "n/a")
         builder.kpi("TVL", _format_money(selected.get("tvl_usd")))
         builder.kpi("24h Volume", _format_money(selected.get("volume_24h_usd")))
+        builder.kpi("7d Volume", _format_money(selected.get("volume_7d_usd")))
+        builder.kpi("30d Volume", _format_money(selected.get("volume_30d_usd")))
         builder.markdown(
             "## Agent Summary\n"
             f"{payload.get('agent_prompt_summary', 'No summary available.')}\n\n"
@@ -1145,7 +1349,10 @@ async def _save_scan_report(payload: dict[str, Any]) -> None:
                             "TVL": _format_money(candidate.get("tvl_usd")),
                             "24h Volume": _format_money(candidate.get("volume_24h_usd")),
                             "7d Volume": _format_money(candidate.get("volume_7d_usd")),
+                            "30d Volume": _format_money(candidate.get("volume_30d_usd")),
                             "24h Fees": _format_money(candidate.get("fees_24h_usd")),
+                            "7d Fees": _format_money(candidate.get("fees_7d_usd")),
+                            "30d Fees": _format_money(candidate.get("fees_30d_usd")),
                             "24h Move": _format_pct(candidate.get("price_delta_24h")),
                             "Categories": ",".join(candidate.get("source_categories") or []),
                         }
@@ -1166,16 +1373,16 @@ async def _save_scan_report(payload: dict[str, Any]) -> None:
         return
 
 
-async def run(config: Config, context: Any) -> str:
+async def run(config: Config, context: Any) -> RoutineResult:
     timestamp = _utc_now()
     try:
         config = _apply_risk_profile(config)
         config_errors = _config_errors(config)
         if config_errors:
             payload = _failure_payload("config-invalid", timestamp, config_errors, {"config_invalid": len(config_errors)})
-            payload["config_summary"] = {"risk_profile": config.risk_profile, "categories": config.categories}
+            payload["config_summary"] = {"risk_profile": config.risk_profile, "categories": config.categories, "stats_windows": config.stats_windows}
             await _save_scan_report(payload)
-            return _format_scan_text(payload)
+            return _routine_result(payload)
 
         records, api_errors, diagnostics = await _fetch_all(config)
         config_summary = _config_summary(config, diagnostics)
@@ -1183,12 +1390,12 @@ async def run(config: Config, context: Any) -> str:
             payload = _failure_payload("api-failed", timestamp, ["; ".join(api_errors)], {})
             payload["config_summary"] = config_summary
             await _save_scan_report(payload)
-            return _format_scan_text(payload)
+            return _routine_result(payload)
         if not records:
             payload = _failure_payload("no-trade", timestamp, ["Orca API returned no pool records"], {})
             payload["config_summary"] = config_summary
             await _save_scan_report(payload)
-            return _format_scan_text(payload)
+            return _routine_result(payload)
 
         rejection_counts: Counter[str] = Counter()
         warnings: list[str] = []
@@ -1242,7 +1449,7 @@ async def run(config: Config, context: Any) -> str:
                 "agent_prompt_summary": "No trade: no Orca pool survived hard gates and scoring thresholds.",
             }
             await _save_scan_report(payload)
-            return _format_scan_text(payload)
+            return _routine_result(payload)
 
         summary = (
             f"Selected {selected['trading_pair']} pool {selected['address']} with score "
@@ -1260,15 +1467,18 @@ async def run(config: Config, context: Any) -> str:
             "agent_prompt_summary": summary,
         }
         await _save_scan_report(payload)
-        return _format_scan_text(payload)
+        return _routine_result(payload)
     except Exception as exc:
         payload = _failure_payload("api-failed", timestamp, [f"unexpected scan failure: {type(exc).__name__}: {exc}"], {})
         await _save_scan_report(payload)
-        return _format_scan_text(payload)
+        return _routine_result(payload)
 
 
 def _self_check() -> None:
     assert _apply_risk_profile(Config(risk_profile="meme_scout", stats_windows="24h")).stats_windows == "24h,7d"
+    assert Config(stats_windows="24h,7d,monthly").stats_windows == "24h,7d,30d"
+    assert Config(scan_sort_fields="volume_24h,fees_7d,monthly_fees").scan_sort_fields == ["volume24h", "fees7d", "fees30d"]
+    assert _config_errors(Config(execution_mode="analysis_only"))[0].startswith("invalid execution_mode")
     assert _apply_risk_profile(Config(risk_profile="category_scout")).categories == [
         "utility",
         "governance",
@@ -1295,6 +1505,10 @@ def _self_check() -> None:
         "tvl_usd": 600000,
         "volume_24h_usd": 100000,
         "volume_7d_usd": 500000,
+        "volume_30d_usd": 2000000,
+        "fees_24h_usd": 250,
+        "fees_7d_usd": 1500,
+        "fees_30d_usd": 6000,
         "has_warning": False,
     }
     usdc_only = Config(
@@ -1306,6 +1520,18 @@ def _self_check() -> None:
         False,
         "disallowed_quote_symbol",
     )
+    row = _candidate_row(
+        {
+            **sol_quote_candidate,
+            "trading_pair": "FARTCOIN-SOL",
+            "quote_symbol": "SOL",
+            "weighted_score": 5.0,
+            "preset_suggestion": "balanced",
+            "criteria_scores": {},
+        }
+    )
+    assert row["volume_30d_usd"] == 2000000
+    assert row["fees_30d_usd"] == 6000
 
 
 if __name__ == "__main__":
@@ -1315,4 +1541,4 @@ if __name__ == "__main__":
         _self_check()
         print("self-check passed")
         raise SystemExit(0)
-    print(asyncio.run(run(Config(), None)))
+    print(asyncio.run(run(Config(), None)).text)
