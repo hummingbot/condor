@@ -251,6 +251,12 @@ class TickEngine:
 
         # 4. Get risk state (experiments pass None — returns clean state)
         risk_state = self.risk.get_state(self.journal or _NullTracker())
+        live_executors = self._last_skill_data.get("executors", [])
+        live_open_count = len(live_executors) if isinstance(live_executors, list) else 0
+        risk_state.executor_count = live_open_count
+        risk_state.total_exposure = float(
+            self._last_skill_data.get("total_exposure", 0.0) or 0.0
+        )
 
         if risk_state.is_blocked and not self.is_experiment:
             self.journal.append_action(
